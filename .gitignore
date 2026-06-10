@@ -1,0 +1,16 @@
+# Secrets — never commit environment files
+.env
+*.env
+!.env.example
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store
+
+# Local scratch (anything here stays out of the repo)
+local_dont_track/
+
+# Backups and exports
+*.sql.gz
+*.dump

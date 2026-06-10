@@ -1,0 +1,98 @@
+# Pattern B override — drops the mcp host port mapping so the raw mcp port
+# is unreachable from the host. Caddy (running under the `pattern-b` profile)
+# is then the only entry point, reaching mcp over the docker network.
+#
+# This file ALSO sets `PATTERN_B=true` on the mcp container — the mcp
+# server's `config.ts` refuses to start when AUTH0_* is set but
+# PATTERN_B isn't (Pattern B fail-fast). Don't remove the env block below
+# without also removing the matching guard in `server/config.ts`.
+#
+# Also brings up the log-ingester sidecar which tails Caddy's
+# JSON access logs and writes structured rows to Postgres. Only useful when
+# Caddy is running, so it's also profile-gated.
+#
+# Usage (with the profile flag):
+#   docker compose -f docker-compose.yml -f docker-compose.pattern-b.yml \
+#                  --profile pattern-b up -d
+#
+# Or set these in .env so a bare `docker compose up -d` does the right thing:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.pattern-b.yml
+#   COMPOSE_PROFILES=pattern-b
+#
+# Without this override, mcp's `127.0.0.1:8787:8787` host port stays published.
+# A stray `tailscale funnel http://127.0.0.1:8787` then bypasses the Caddy
+# header-strip boundary and turns a leaked x-brain-key into a public route.
+# That's the Caddy-bypass risk in network-layer terms.
+#
+# Requires docker compose v2.20+ for the `!reset` tag.
+
+services:
+  mcp:
+    ports: !reset null
+    # boot-time guard against the half-configured Pattern B
+    # invocation. mcp's config.ts refuses to start when ENABLE_OAUTH is
+    # true but PATTERN_B is not — proving the operator loaded THIS
+    # override file (which sets the env var) and not just the
+    # --profile pattern-b flag against the base compose. See the
+    # rationale in config.ts.
+    environment:
+      PATTERN_B: "true"
+
+  # Caddy access log ingester.
+  #
+  # Tails /var/log/caddy/{funnel,tailnet}-access.log (shared volume with
+  # caddy) and inserts structured rows into the `funnel_access_log` table.
+  # See server/log_ingester.ts and db/02-observability.sql.
+  #
+  # Profile-gated identically to caddy — Pattern A has no Caddy and so no
+  # logs to ingest. Pulls the same env vars as mcp so it shares the DB
+  # connection config (DB_HOST=postgres, DB_USER=openbrain_app, etc.).
+  log-ingester:
+    build:
+      context: ../../server
+      dockerfile: Dockerfile.ingester
+    restart: unless-stopped
+    profiles:
+      - pattern-b
+    # Same defense-in-depth hardening as the mcp container — non-root user
+    # comes from the Deno base image; no kernel caps needed for a pure
+    # tail-and-insert loop. /tmp tmpfs is defensive (matches mcp).
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=16M,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-openbrain}
+      # Observability-only role with INSERT-only on
+      # funnel_access_log. Compose will fail to start the ingester if
+      # OPENBRAIN_INGESTER_PASSWORD isn't set in .env (no `:-` default),
+      # which is the desired fail-fast for Pattern B operators who
+      # forgot the new env var. See db/00-roles.sh.
+      DB_USER: openbrain_ingester
+      DB_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD}
+      # Default 5s polling cadence is fine for personal traffic; bump via
+      # .env if the box ever gets slammed and the loop runs into the next
+      # poll window before finishing.
+      INGESTER_POLL_INTERVAL_MS: ${INGESTER_POLL_INTERVAL_MS:-5000}
+      CADDY_LOG_DIR: /var/log/caddy
+    volumes:
+      # Read the access log files from caddy_logs (RO so a compromised
+      # ingester can't tamper with the on-disk audit evidence)
+      # . Cursor companions live in a separate writable volume
+      # mounted at a non-nested path: nesting `caddy_cursors` inside
+      # the RO `caddy_logs` mount fails at container init because the
+      # ingester has `read_only: true` rootfs and Docker can't create
+      # the nested mountpoint dir on it. /var/lib/ingester is a fresh
+      # path that the ingester image pre-creates as part of the build.
+      - caddy_logs:/var/log/caddy:ro
+      - caddy_cursors:/var/lib/ingester/cursors
+
+# Reuse the volumes declared in the base file; nothing new to declare here.

@@ -1,0 +1,109 @@
+// Open Brain MCP server — Homelab + Tailscale variant.
+//
+// HTTP transport: Streamable HTTP at /mcp, gated by x-brain-key (tailnet door)
+// or Auth0 RS256 Bearer JWT (OAuth/Funnel door). The reverse proxy in front
+// is expected to strip the inapplicable header per socket; `requireAuth`
+// works in either case as defense in depth.
+// Storage: vanilla Postgres + pgvector (no @supabase/supabase-js, no auth.uid).
+// Embeddings: local Ollama (default model nomic-embed-text, 768 dim).
+//
+// Architecture is split into queries.ts (pure DB), embeddings.ts (Ollama),
+// metadata.ts (optional chat-LLM extraction), auth.ts (header / JWT
+// checks), mcp-server.ts (tool registration factory), and this file
+// (Hono app + Deno serve). A future REST gateway, CLI, or dashboard would
+// import queries.ts directly.
+
+import { StreamableHTTPTransport } from "@hono/mcp";
+import { type Context, Hono } from "hono";
+
+import { PORT } from "./config.ts";
+import { pool } from "./db.ts";
+import {
+  type AppVariables,
+  PROTECTED_RESOURCE_METADATA_PATH,
+  protectedResourceMetadata,
+  requireAuth,
+  requireBrainKey,
+} from "./auth.ts";
+import { createMcpServer } from "./mcp-server.ts";
+import { pingDb } from "./queries.ts";
+
+// Hono Variables typed so `c.set/c.get` on door/sub are checked
+// at the boundaries (requireAuth sets, /mcp + / handlers get). Without
+// this the handler-side `c.get("door")` would be `unknown` and the
+// defensive 500-guard's type-narrow would not compile.
+const app = new Hono<{ Variables: AppVariables }>();
+
+// Public health endpoint (no auth) — used by docker healthcheck and quick
+// curl-from-the-tailnet smoke tests. Does NOT touch the DB to keep it cheap.
+// Body is intentionally minimal; the public Funnel path can reach this and
+// we don't want to advertise the service identity to drive-by scanners.
+app.get("/health", (c) => c.json({ ok: true }));
+
+// Deeper health probe that confirms DB connectivity. Auth-gated because the
+// failure mode reveals whether the DB is reachable. `requireBrainKey` (not
+// `requireAuth`) — OAuth callers should not be able to probe internal DB
+// status; this is an insider-only smoke test.
+app.get("/ready", requireBrainKey, async (c) => {
+  try {
+    await pingDb(pool);
+    return c.json({ ok: true, db: "connected" });
+  } catch (e) {
+    return c.json({ ok: false, error: (e as Error).message }, 503);
+  }
+});
+
+// RFC 9728 Protected Resource Metadata. Wired only when OAuth is enabled —
+// no point advertising an authorization server when we don't accept its
+// tokens. Path is derived from AUTH0_AUDIENCE by inserting the well-known
+// component between host and resource path (see auth.ts), so a resource of
+// `https://host/mcp` is served at `/.well-known/oauth-protected-resource/mcp`.
+if (PROTECTED_RESOURCE_METADATA_PATH) {
+  app.get(PROTECTED_RESOURCE_METADATA_PATH, protectedResourceMetadata);
+}
+
+// MCP transport. requireAuth accepts either x-brain-key (tailnet) or
+// Authorization: Bearer with an Auth0 RS256 JWT (OAuth/Funnel). A new
+// McpServer is constructed per request — the SDK's connect() mutates an
+// instance-scoped transport reference and is not safe to share under
+// concurrent load.
+//
+// `requireAuth` populates door + sub on the request-scoped
+// Hono context; we read them here and pass to the per-request McpServer
+// factory so capture_thought can stamp them into thoughts.metadata.
+// The 500-guard is defense in depth: a future refactor that drops the
+// `c.set` calls in `requireAuth` would otherwise stuff `door: undefined`
+// into the JSONB and silently break the Phase 7 telemetry tile.
+function authContextOr500(c: Context<{ Variables: AppVariables }>):
+  | { door: "funnel" | "tailnet"; sub: string | null }
+  | Response {
+  const door = c.get("door");
+  const sub = c.get("sub") ?? null;
+  if (door !== "funnel" && door !== "tailnet") {
+    return c.json({ error: "auth_context_missing" }, 500);
+  }
+  return { door, sub };
+}
+
+app.all("/mcp", requireAuth, async (c) => {
+  const auth = authContextOr500(c);
+  if (auth instanceof Response) return auth;
+  const transport = new StreamableHTTPTransport();
+  const server = createMcpServer(auth);
+  await server.connect(transport);
+  return transport.handleRequest(c);
+});
+
+// Backward-compat: also serve the MCP transport at the root for clients
+// that don't add /mcp to the URL.
+app.all("/", requireAuth, async (c) => {
+  const auth = authContextOr500(c);
+  if (auth instanceof Response) return auth;
+  const transport = new StreamableHTTPTransport();
+  const server = createMcpServer(auth);
+  await server.connect(transport);
+  return transport.handleRequest(c);
+});
+
+console.log(`open-brain-homelab listening on :${PORT}`);
+Deno.serve({ port: PORT }, app.fetch);

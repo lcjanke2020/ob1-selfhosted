@@ -1,0 +1,74 @@
+# Design: ingress / app / db in three qubes
+
+**Status: design, partially implemented.** The dedicated DB qube is provisioned and tested; transport wiring and the compose-stack split are in progress. Published as a design doc because the reasoning is the transferable part.
+
+## Problem
+
+In the [current single-qube deployment](README.md), Tailscale Funnel, Caddy, the MCP server, and Postgres are co-resident. The loopback-only binds and container hardening narrow each component's network surface, but they share a kernel and a filesystem: **a compromise of the public-facing edge is one step from the memory store** — the highest-value asset on the box. docker-compose is the right tool for co-locating services that share a trust boundary; it's the wrong tool once the point is to put a VM boundary between two of them.
+
+## Target shape
+
+```
+                        public internet (Anthropic egress only)
+                                        │
+┌─ ingress qube ─────────────────────── ▼ ──────┐
+│  tailscaled (Funnel) + Caddy (Pattern Y)      │   terminal node: no app
+│  IP allowlist enforced here                   │   state, no DB, no secrets
+└───────────────┬───────────────────────────────┘   beyond the Caddyfile
+                │  MCP port only (scoped)
+┌─ app qube ──── ▼ ──────────────────────────────┐
+│  MCP server (+ Ollama, log-ingester)           │  reachable ONLY from the
+└───────────────┬────────────────────────────────┘  ingress qube
+                │  Postgres port only (scoped)
+┌─ db qube ───── ▼ ──────────────────────────────┐
+│  Postgres + pgvector, native install           │  no route from ingress
+│  loopback + one permitted peer                 │  at all
+└─────────────────────────────────────────────────┘
+```
+
+- **Ingress qube** — runs `tailscaled` (Funnel) and Caddy. No app state. A popped edge yields a proxy config and nothing else.
+- **App qube** — the MCP server. Reachable only from the ingress qube, only on the MCP port.
+- **DB qube** — Postgres + pgvector, **out of docker-compose**, run natively (or as a single container). Reachable only from the app qube. The ingress qube has no path to it at all.
+
+The minimum viable step, if the full split slips: get Postgres out of the Funnel-exposed qube. Edge compromise ≠ memory-store compromise is most of the value.
+
+## Decision: app→DB transport
+
+Two candidate mechanisms:
+
+1. **qrexec with a custom service policy** — no network listener on the DB qube at all; the app qube invokes a policy-gated channel and the Postgres socket is proxied over it. Maximum isolation, most plumbing, least standard to debug under time pressure.
+2. **Firewall-scoped network path** — the DB qube listens, but host firewall + Qubes firewall + (if the link rides the tailnet) ACL tags permit exactly one peer: the app qube. Default-deny everything else.
+
+**Decision: firewall-scoped (option 2).** It captures ~95% of the isolation benefit at a fraction of the qrexec complexity, composes with tag-based default-deny policy you likely already run, and fails debuggable. The residual delta — one TCP listener, locked to one peer — is acceptable for this asset class.
+
+## Decision: DB qube construction
+
+Postgres's data directory (`/var/lib/postgresql`) is **not** persisted by a stock AppVM. Two clean options:
+
+1. **AppVM + bind-dirs** *(chosen)* — bind PGDATA into `/rw` (the same pattern as `/var/lib/tailscale` in the [single-qube runbook](README.md)); root stays on a shared minimal template. Smallest backup footprint (private volume only), centralized template updates.
+2. **StandaloneVM** — simplest mental model, but full-root backups and independent patching forever.
+
+Supporting choices:
+
+- **Minimal template** (`debian-minimal` / `fedora-minimal`): install only Postgres, pgvector, and backup tooling. The DB qube's attack surface should be a database and nothing else.
+- **All durable state on the private volume**, verified by a reboot, so `qvm-backup` captures everything.
+- **Backup portability is a first-class requirement:** take a `qvm-backup` and *test-restore it* before trusting it. Restore onto another machine requires the same template installed there — document the template dependency next to the backup. If a future hardware migration reuses the disks, the qube persists in place and restore is just insurance; if it's a clean reinstall, the backup→restore path *is* the migration mechanism. Know which one you're planning for.
+- **Provisioning posture:** the qube needs network briefly for package install; steady state is loopback + the one permitted app-qube peer. Park it net-restricted until the transport wiring lands.
+
+## The trap: re-validate the edge after splitting
+
+Splitting adds a second proxy hop (Funnel → ingress Caddy → app). Two things that worked in the single-qube topology silently change meaning:
+
+- **XFF trust.** The app qube must trust *only the ingress qube* as an `X-Forwarded-For`-setting peer, or the real client IP is lost (or spoofable).
+- **The IP allowlist.** Decide where it's enforced — the ingress Caddy is the natural spot — and re-verify both directions end-to-end under the new topology: a request from a non-allowlisted IP still gets `403`, and an allowlisted client still completes a real tool call.
+
+This re-validation is the reason *not* to rush the split right before you depend on the endpoint: it touches the edge auth path, which deserves an unhurried test pass.
+
+## Acceptance criteria
+
+- Funnel + Caddy run in a dedicated ingress qube with no app state or DB present.
+- MCP + Postgres in separate qubes; the app qube reaches the DB on the chosen transport; nothing else can.
+- The ingress qube cannot reach any host other than the app qube's MCP port (ACL + firewall audit, not assumption).
+- Backup/restore works against the relocated DB.
+- The allowlist + XFF behavior re-verified under the two-hop topology.
+- Your network-topology diagram updated — an isolation model that exists only in qube configs and not in documentation will drift.

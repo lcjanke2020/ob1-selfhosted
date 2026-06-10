@@ -1,0 +1,15 @@
+{
+  "imports": {
+    "@hono/mcp": "npm:@hono/mcp@0.1.1",
+    "@modelcontextprotocol/sdk": "npm:@modelcontextprotocol/sdk@1.24.3",
+    "@std/toml": "jsr:@std/toml@1.0.4",
+    "hono": "npm:hono@4.9.2",
+    "jose": "npm:jose@5.9.6",
+    "zod": "npm:zod@4.1.13",
+    "postgres": "https://deno.land/x/postgres@v0.19.3/mod.ts"
+  },
+  "tasks": {
+    "test": "deno test --allow-env --allow-net=127.0.0.1 --allow-read --allow-write",
+    "check-allow-env": "deno run --allow-read scripts/check_allow_env.ts"
+  }
+}

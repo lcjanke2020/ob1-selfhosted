@@ -1,0 +1,75 @@
+# CI for the MCP server: the unit test suite plus the --allow-env drift
+# guard (check_allow_env.ts), so a new Deno.env.get key can't ship without
+# the matching Dockerfile --allow-env entry — that drift is a silent boot
+# failure in production (the container exits with "Requires env access"
+# only after deploy).
+#
+# Scoped via the paths: filter so this workflow only runs on PRs that
+# touch the server tree OR this workflow file itself. Self-triggering on
+# workflow edits means changes here (Deno version bump, ref-expression
+# tweak, etc.) get exercised on the PR that introduces them.
+#
+# Deno version pinned to match server/Dockerfile (FROM denoland/deno:2.3.3)
+# so the CI runtime matches what ships.
+
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - 'server/**'
+      - '.github/workflows/ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'server/**'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Server unit tests
+    runs-on: ubuntu-latest
+    steps:
+      # For PR events, use the GitHub-synced `refs/pull/<N>/head` mirror
+      # rather than the PR head SHA directly: fork-PR head SHAs aren't in
+      # the base repo and `actions/checkout` would fail to fetch them.
+      # Falls back to `github.sha` for push and workflow_dispatch.
+      - name: Checkout PR head safely
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          fetch-depth: 1
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.3.3
+
+      - name: Run unit tests
+        working-directory: server
+        run: deno task test
+
+  check-allow-env:
+    name: Dockerfile --allow-env drift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head safely
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          fetch-depth: 1
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.3.3
+
+      - name: Run check-allow-env
+        working-directory: server
+        run: deno task check-allow-env

@@ -1,0 +1,282 @@
+# Caddy reverse proxy in front of the Open Brain MCP server.
+#
+# Single listener on 127.0.0.1:9787 (loopback only — Tailscale on the host
+# fronts it via a single `tailscale funnel --https=443` rule). Tailnet vs
+# public discrimination is at the request layer via the
+# `Tailscale-Funnel-Request` header that Tailscale Funnel injects only on
+# funnel-originated traffic. The matcher partition is:
+#
+#   header present + IP in Anthropic range  → @anthropic_funnel → reverse_proxy
+#   header present + IP outside range       → @non_anthropic_funnel → 403
+#   header absent                           → @tailnet → reverse_proxy
+#
+# The header is a structural trust anchor — a tailnet client cannot forge
+# the funnel branch by adding the header alone, because @anthropic_funnel
+# also requires the IP allowlist  and the tailnet client's IP is
+# never in Anthropic's range. A funnel client cannot escape into the
+# tailnet branch by NOT sending the header, because Tailscale Funnel
+# injects the header inside the tailscaled proxy (the public client has
+# no control over it).
+#
+# `header Tailscale-Funnel-Request *` matcher semantics empirically
+# verified against caddy:2.11.3-alpine when the single-listener design landed: matches header
+# present with any value (including empty), correctly inverted by
+# `not header ...`, case-insensitive on the header name. Multi-value
+# headers join with commas and still match. See PR description for the
+# full test matrix.
+#
+# Per-branch credential strips and the request_body cap are scoped via
+# named-matcher directive form (e.g. `request_header @funnel -X-Brain-Key`)
+# so the tailnet branch is unaffected by the funnel-only DoS-amp cap and
+# vice-versa.
+#
+# Per-branch access logs are routed via Caddy's `log_name` directive
+# inside each handle — funnel-originated requests land in
+# funnel-access.log (both anthropic and non_anthropic, preserving
+# the scan-baseline) and tailnet requests land in
+# tailnet-access.log. log_ingester.ts tails both files unchanged.
+#
+# Wiring on the host (Pattern B, Pattern Y):
+#   sudo tailscale serve  --https=443 off                            # vacate :443
+#   sudo tailscale funnel --bg --https=443 http://127.0.0.1:9787    # single rule
+#
+# The earlier two-rule wiring (tailscale serve --https=443 → :9787 +
+# tailscale funnel --https=8443 → :9788) is gone — Anthropic's MCP HTTP
+# client refuses non-default-HTTPS ports, so the Funnel must be on :443,
+# and `tailscale serve` + `tailscale funnel` cannot both bind :443 for
+# the same hostname. The header-discriminated single-listener design is
+# what reconciles those constraints.
+{
+	# Caddy's admin API is unneeded in this deployment.
+	admin off
+
+	# All TLS is at the Tailscale layer; Caddy is plain HTTP internally.
+	auto_https off
+
+	# Trust X-Forwarded-For ONLY when the immediate peer is from
+	# a private/loopback range. Tailscale runs on the host (loopback peer
+	# from Caddy's view) and `tailscale funnel` injects XFF with the
+	# public origin's real IP. Without this block, Caddy's
+	# `request.client_ip` would record the loopback peer (always
+	# 127.0.0.1) and (a) `funnel_access_log.client_ip` would be useless
+	# for scan-source analysis, AND (b) the Anthropic IP allowlist
+	# (which uses the `client_ip` matcher) would compare 127.0.0.1
+	# against Anthropic's CIDR every request and 403 everyone.
+	#
+	# Critical guardrail #1 — trusted_proxies CIDR scope: `private_ranges`
+	# includes 127.0.0.0/8 and the RFC1918 ranges. Public clients are
+	# NOT in that set, so an attacker on the public internet cannot have
+	# their X-Forwarded-For honored — only the Tailscale local proxy
+	# can. This is what prevents XFF-spoof bypass of the Anthropic
+	# allowlist.
+	#
+	# Critical guardrail #2 — `trusted_proxies_strict` (per Codex review):
+	# enables right-to-left XFF parsing, skipping any trusted-proxy
+	# entries and using the first non-trusted IP as client_ip. If
+	# Tailscale ever changes from overwriting XFF to appending to it,
+	# strict mode preserves the correct extraction. Re-validated for
+	# Pattern Y during the single-listener refactor: a tailnet client sending `XFF:
+	# 160.79.104.5` (spoof attempt) without the funnel header still
+	# routes to @tailnet (header is the trust anchor, not the IP);
+	# the spoof can't escalate the tailnet client into the
+	# anthropic_funnel branch.
+	servers {
+		trusted_proxies static private_ranges
+		client_ip_headers X-Forwarded-For
+		trusted_proxies_strict
+	}
+
+	# Process-level error/info log (operational, not access).
+	log {
+		output stderr
+		format json
+		level INFO
+	}
+}
+
+:9787 {
+	# ----- Branch discriminators ---------------------------------------
+	# `Tailscale-Funnel-Request *` matches the header present with ANY
+	# value. Tailscale Funnel actually sets `Tailscale-Funnel-Request: ?1`
+	# (RFC 8941 structured-field "true") on every funnel-originated
+	# request, but using `*` instead of pinning to `?1` fails-closed
+	# against any future Tailscale value change. Empty value also
+	# matches `*` (verified empirically), so the only way to land on
+	# @tailnet is for the header to be entirely absent.
+	@anthropic_funnel {
+		header Tailscale-Funnel-Request *
+		client_ip 160.79.104.0/21
+	}
+	@non_anthropic_funnel {
+		header Tailscale-Funnel-Request *
+		not client_ip 160.79.104.0/21
+	}
+	@tailnet not header Tailscale-Funnel-Request *
+
+	# Helper matcher reused by the funnel-only directives below
+	# (request_header, request_body). Defined separately from
+	# @anthropic_funnel because the strip + body cap apply on the
+	# 403'd non-Anthropic branch too — IP doesn't matter for those
+	# defense-in-depth behaviors.
+	@funnel header Tailscale-Funnel-Request *
+
+	# ----- Defense-in-depth credential strips --------------------------
+	# Scoped via named-matcher form so each strip is branch-specific
+	# without putting the directive inside every handle.
+	#
+	# @funnel side strips x-brain-key: a leaked static key cannot be
+	# used over the public path. Applies on @non_anthropic_funnel too
+	# so the access log never captures the value to disk even if a
+	# scanner sends one.
+	request_header @funnel -X-Brain-Key
+
+	# @tailnet side strips Authorization: a misconfigured OAuth client
+	# that lands on the tailnet path gets the same 401 as a stranger.
+	request_header @tailnet -Authorization
+
+	# ----- Body cap (funnel only) --------------------------------------
+	# 1. Bogus-Bearer floods — RS256 verify is CPU-expensive; small body
+	#    cap means each request is cheap to discard at parse time.
+	# 2. Large-body POSTs to /mcp — Deno's HTTP server has no documented
+	#    default body cap.
+	# Applied to BOTH funnel branches via the @funnel matcher so an
+	# attacker DoS-amp'ing a 100MB POST from a non-Anthropic IP gets
+	# capped BEFORE we 403. Not applied to tailnet (preserves the
+	# earlier no-cap-on-tailnet behavior).
+	request_body @funnel {
+		max_size 1MB
+	}
+
+	# ----- Named loggers ------------------------------------------------
+	# Two log files preserved so log_ingester.ts contract is unchanged
+	# (it tails both paths and tags rows by socket). `log_name <name>`
+	# inside each handle selects which logger catches that request;
+	# verified against caddy:2.11.3-alpine when the single-listener design landed.
+	#
+	# `format filter` is the on-disk credential-redaction guarantee for
+	# REQUEST headers in the access log. Caddy's default `format json`
+	# auto-redacts Cookie/Set-Cookie/Authorization/Proxy-Authorization
+	# on the request side, but our `format filter { fields { ... } }`
+	# REPLACES that default, so we must re-declare every header we want
+	# scrubbed. Without an explicit `request>headers>X-Brain-Key delete`
+	# entry, every successful tailnet request would write MCP_ACCESS_KEY
+	# to disk; without `Authorization delete`, the funnel side would
+	# write the raw Bearer token. The Cookie/Proxy-Authorization entries
+	# mirror Caddy's default; Set-Cookie is included for completeness
+	# even though it is overwhelmingly a *response* header in normal HTTP
+	# usage (the request-side filter only catches the unusual case of a
+	# misconfigured/malicious client that supplies Set-Cookie as a
+	# request header — cheap defense-in-depth, surfaced by Copilot
+	# round-1 review of PR #26). Response headers are NOT logged by this
+	# `format filter` configuration, so no response-side Set-Cookie
+	# redaction is needed.
+	#
+	# Re-declaring the default-redaction headers here also serves a
+	# future-proofing role: if a Caddy version change silently shrinks
+	# the default redaction set, our explicit list keeps the on-disk
+	# guarantee stable.
+	log access_funnel {
+		output file /var/log/caddy/funnel-access.log {
+			roll_size 10mb
+			roll_keep 5
+			roll_keep_for 720h
+			mode 0644
+		}
+		format filter {
+			wrap json
+			fields {
+				request>headers>X-Brain-Key delete
+				request>headers>Authorization delete
+				request>headers>Cookie delete
+				request>headers>Set-Cookie delete
+				request>headers>Proxy-Authorization delete
+			}
+		}
+		level INFO
+	}
+	log access_tailnet {
+		output file /var/log/caddy/tailnet-access.log {
+			roll_size 10mb
+			roll_keep 5
+			roll_keep_for 720h
+			mode 0644
+		}
+		format filter {
+			wrap json
+			fields {
+				request>headers>X-Brain-Key delete
+				request>headers>Authorization delete
+				request>headers>Cookie delete
+				request>headers>Set-Cookie delete
+				request>headers>Proxy-Authorization delete
+			}
+		}
+		level INFO
+	}
+	log_skip /caddy-health
+
+	# ----- Liveness probe ----------------------------------------------
+	# Top-level path-handle so the docker healthcheck (loopback probe)
+	# bypasses the funnel/tailnet branch discrimination. Public scanners
+	# on the Funnel side can probe this for a minor "Caddy is up" info
+	# leak; acceptable trade-off for the operational simplicity.
+	handle /caddy-health {
+		respond "ok" 200
+	}
+
+	# ----- Anthropic funnel (Anthropic IP allowlist) -------------------------
+	# 160.79.104.0/21 is Anthropic's currently-published egress range.
+	# Re-confirm against Anthropic's docs at every deploy. If they
+	# announce additional ranges, extend the @anthropic_funnel matcher
+	# inline (e.g. `client_ip 160.79.104.0/21 192.0.2.0/24`).
+	#
+	# IMPORTANT matcher choice — `client_ip` not `remote_ip`. In Caddy
+	# 2.11.x, `remote_ip` evaluates against the direct connection peer
+	# (loopback in our topology). `client_ip` evaluates against the
+	# trusted_proxies-resolved IP from XFF. Empirically verified
+	# against caddy:2.11.3-alpine: `remote_ip 160.79.104.0/21` with
+	# `XFF: 160.79.104.5` from a loopback peer → 403; same with
+	# `client_ip` → 200. See PR #15 round-2 reviewer findings (Codex)
+	# and single-listener test matrix (entries B and C).
+	handle @anthropic_funnel {
+		log_name access_funnel
+
+		# CORS narrowed to Anthropic Claude origins. Server-to-server
+		# callers (Anthropic backend → Funnel) ignore CORS, so cost is
+		# zero for those. Browser-based callers from any other origin
+		# get a normal same-origin block instead of `*`.
+		@claude_origin header_regexp Origin ^https://claude\.(ai|com)$
+
+		@preflight {
+			method OPTIONS
+			header_regexp Origin ^https://claude\.(ai|com)$
+		}
+		handle @preflight {
+			header Access-Control-Allow-Origin "{http.request.header.Origin}"
+			header Access-Control-Allow-Methods "GET, POST, OPTIONS, DELETE"
+			header Access-Control-Allow-Headers "authorization, content-type, accept, mcp-session-id, mcp-protocol-version, last-event-id"
+			header Access-Control-Max-Age "86400"
+			respond 204
+		}
+
+		header @claude_origin Access-Control-Allow-Origin "{http.request.header.Origin}"
+		header @claude_origin Access-Control-Expose-Headers "WWW-Authenticate, mcp-session-id"
+
+		reverse_proxy mcp:8787
+	}
+
+	# ----- Non-Anthropic funnel → 403 -----------------------------------
+	# Body intentionally empty: minimal fingerprint, no useful signal to
+	# a scanner. The 403's still get logged via the access_funnel logger
+	# so the daily summary surfaces the scan volume baseline.
+	handle @non_anthropic_funnel {
+		log_name access_funnel
+		respond 403
+	}
+
+	# ----- Tailnet door -------------------------------------------------
+	handle @tailnet {
+		log_name access_tailnet
+		reverse_proxy mcp:8787
+	}
+}

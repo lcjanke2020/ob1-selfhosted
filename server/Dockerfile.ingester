@@ -1,0 +1,94 @@
+# Caddy access log → Postgres ingester sidecar.
+#
+# Same Deno base as the mcp server (server/Dockerfile) so we don't pull
+# a second image into the homelab. Different entrypoint (log_ingester.ts).
+#
+# This image only starts in Pattern B (gated by the `pattern-b` profile in
+# docker-compose.pattern-b.yml). Pattern A doesn't run Caddy, so the access
+# log files don't exist and there'd be nothing to ingest.
+
+FROM denoland/deno:2.3.3
+
+WORKDIR /app
+
+COPY deno.json ./
+RUN deno install
+
+# Copy ALL .ts files so cross-module imports resolve at build time.
+# Note: log_ingester.ts deliberately does NOT import ./config.ts (see
+# the comment at log_ingester.ts:33-37) — config.ts enforces the
+# tri-state AUTH0_* validation and other mcp-specific contracts the
+# ingester shouldn't be subject to. The ingester DOES import ./inet.ts
+# for the parseInetCandidate helper (shared with auth.ts/auth_audit.ts);
+# any future shared helpers added here are likewise free to be imported
+# without dragging config.ts in.
+COPY *.ts ./
+
+# Cache + type-check at build time.
+RUN deno cache log_ingester.ts
+
+# Pre-create the cursor mount-point directory while we still have root +
+# a writable rootfs. The container runs with `read_only: true` (per the pre-exposure host audit
+# hardening), so Docker can't `mkdirat` the mountpoint at container init
+# — it has to exist in the image. The chown lets the `deno` user
+# (UID 1000) own the directory so it can write cursor files into the
+# bind-mounted volume's empty contents on first start.
+USER root
+RUN mkdir -p /var/lib/ingester/cursors && chown -R deno:deno /var/lib/ingester
+
+USER deno
+
+# No HEALTHCHECK — the ingester is a polling loop with no HTTP surface.
+# `docker compose ps` will show it as "running" or restart-looping if it
+# can't connect to postgres.
+
+# Deno permissions:
+# --allow-net=postgres:5432  scoped to the postgres service inside the
+#                            docker network. The ingester never talks to
+#                            the outside world.
+# --allow-env  The 7 vars log_ingester.ts reads explicitly + the 7 PG*
+#              vars `deno-postgres@v0.19.3` reads internally at Pool
+#              construction time. log_ingester.ts:83 passes explicit
+#              hostname/port/database/user/password to `new Pool(...)`,
+#              but the driver still calls `Deno.env.get()` on the full
+#              PG* family at construction (see `getPgEnv()` in the
+#              driver's connection_params.ts). It catches the legacy
+#              `Deno.errors.PermissionDenied`, but Deno 2.3.x raises
+#              `Deno.errors.NotCapable` (the rename) — the catch
+#              doesn't match and the error re-throws, crashing the
+#              container at startup.
+#              Earlier versions of this Dockerfile enumerated the full
+#              mcp-container env list (~40 vars including MCP_ACCESS_KEY,
+#              AUTH0_*, CHAT_API_KEY, OLLAMA_URL); those are STILL
+#              excluded — log_ingester.ts deliberately does NOT import
+#              config.ts (see comment at log_ingester.ts:33-37) so it
+#              never touches those values. PG* values, even when read,
+#              are only used as fallbacks when explicit Pool params are
+#              undefined — which they aren't here — so allowing the
+#              reads just lets the driver's try/catch see expected-empty
+#              values without crashing.
+# --allow-read=/var/log/caddy,/app  the access log volume (mounted :ro
+#                                    at the compose layer) + the source
+#                                    tree. The ingester is read-only on
+#                                    the actual .log files — defense in
+#                                    depth so a compromise can't tamper
+#                                    with on-disk audit evidence.
+# --allow-write=/var/lib/ingester/cursors  cursor files (<basename>.cursor)
+#                                          live in a SEPARATE volume from
+#                                          the log files (caddy_cursors,
+#                                          mounted RW only here). Required
+#                                          because the ingester runs as
+#                                          the non-root `deno` user and
+#                                          caddy creates the root-owned
+#                                          log files in the caddy_logs
+#                                          volume; writing cursors there
+#                                          would fail with EACCES. Path
+#                                          is non-nested vs caddy_logs to
+#                                          avoid the read-only-rootfs +
+#                                          nested-mountpoint init failure.
+CMD ["deno", "run", \
+     "--allow-net=postgres:5432", \
+     "--allow-env=DB_HOST,DB_PORT,DB_NAME,DB_USER,DB_PASSWORD,CADDY_LOG_DIR,INGESTER_POLL_INTERVAL_MS,PGAPPNAME,PGDATABASE,PGHOST,PGOPTIONS,PGPASSWORD,PGPORT,PGUSER", \
+     "--allow-read=/var/log/caddy,/var/lib/ingester/cursors,/app", \
+     "--allow-write=/var/lib/ingester/cursors", \
+     "log_ingester.ts"]

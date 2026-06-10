@@ -1,0 +1,250 @@
+# Open Brain — Homelab + Tailscale stack.
+#
+# Four services (caddy is gated by the `pattern-b` compose profile):
+#   postgres  — Postgres 16 + pgvector, with init scripts that create the
+#               openbrain_app and openbrain_readonly roles + schema.
+#   mcp       — The Open Brain MCP server (Deno + Hono). Bound to 127.0.0.1
+#               only so the LAN can't reach it directly.
+#   caddy     — Reverse proxy in front of mcp. Single :9787 listener that
+#               discriminates tailnet vs Funnel via the
+#               Tailscale-Funnel-Request header (Pattern Y):
+#               tailnet branch strips Authorization + accepts x-brain-key;
+#               funnel branch strips x-brain-key + accepts OAuth Bearer
+#               and enforces the Anthropic IP allowlist.
+#               Only starts when the `pattern-b` profile is active.
+#   ollama    — Optional. If you already run Ollama on another tailnet box,
+#               comment this out and point OLLAMA_URL at it instead.
+#
+# Deployment patterns:
+#
+# A. Tailnet-only (x-brain-key, no OAuth — simplest):
+#      docker compose up -d
+#    mcp binds 127.0.0.1:8787 → physically unreachable from the LAN.
+#    `sudo tailscale serve --bg --https=443 http://127.0.0.1:8787`
+#    Caddy is not started (gated by the pattern-b profile).
+#
+# B. Tailnet + Funnel with OAuth (Auth0 RS256 — recommended for public access):
+#      docker compose -f docker-compose.yml -f docker-compose.pattern-b.yml \
+#                     --profile pattern-b up -d
+#    (or set COMPOSE_FILE / COMPOSE_PROFILES in .env — see .env.example).
+#    1. Set AUTH0_ISSUER / AUTH0_JWKS_URI / AUTH0_AUDIENCE in .env.
+#    2. The pattern-b.yml override REMOVES mcp's host port mapping. The raw
+#       mcp port is unreachable from the host; caddy is the only entry point
+#       and reaches mcp over the docker network. Prevents the Caddy-bypass
+#       footgun of a misconfigured `tailscale funnel` targeting 127.0.0.1:8787.
+#    3. caddy listens on 127.0.0.1:9787 (single listener, Pattern Y —
+#       header-discriminated tailnet vs Funnel branches).
+#    4. `sudo tailscale funnel --bg --https=443 http://127.0.0.1:9787`
+#       (only `tailscale funnel`, not also `tailscale serve` — Anthropic
+#       refuses non-default-HTTPS ports, and the two CLI rules can't
+#       both bind :443 for the same hostname).
+#       Funnel must also be enabled per-device in your Tailscale admin
+#       console (tag:funnel ACL).
+#
+# All secrets and config live in .env (copy .env.example).
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    # Light hardening only: postgres's entrypoint uses gosu to drop from
+    # root to the postgres user, which needs SETUID/SETGID; aggressive
+    # cap_drop breaks initdb. no-new-privileges is safe and prevents any
+    # later setuid escalation. Read-only rootfs is also risky here (init
+    # writes to /var/run/postgresql, /var/lock, etc.); deferred until we
+    # can test it carefully.
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-openbrain}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      OPENBRAIN_APP_PASSWORD: ${OPENBRAIN_APP_PASSWORD}
+      OPENBRAIN_READONLY_PASSWORD: ${OPENBRAIN_READONLY_PASSWORD}
+      # Optional Pattern B role for the log-ingester sidecar.
+      # Empty for Pattern A; 00-roles.sh skips role creation when unset.
+      OPENBRAIN_INGESTER_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD:-}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../../db:/docker-entrypoint-initdb.d:ro
+    # Bind to localhost only by default; expose to the tailnet only via the
+    # mcp service. If you want DBeaver/TablePlus to reach Postgres directly
+    # via the tailnet, change this to "0.0.0.0:5432:5432" — Tailscale ACLs
+    # are then your gate.
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-openbrain}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mcp:
+    build:
+      context: ../../server
+    restart: unless-stopped
+    # Defense-in-depth: mcp already runs as a non-root `deno` user (see
+    # server/Dockerfile). Dropping all kernel capabilities and the rootfs
+    # read-only trims the post-compromise blast radius. /tmp is writable
+    # via tmpfs for any transient OS tempfile use (deno-postgres pool,
+    # fetch keepalive, etc.). no-new-privileges:true prevents setuid
+    # escalation even if a hypothetical setuid binary slips into the image.
+    cap_drop:
+      - ALL
+    read_only: true
+    # Size-capped to prevent a compromised process from exhausting host RAM
+    # by writing to /tmp. 64M is generous for transient OS tempfile use; bump
+    # if the deno-postgres pool or any future tooling needs more headroom.
+    tmpfs:
+      - /tmp:size=64M,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-openbrain}
+      DB_USER: openbrain_app
+      DB_PASSWORD: ${OPENBRAIN_APP_PASSWORD}
+      DB_POOL_SIZE: "10"
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      EMBED_DIM: ${EMBED_DIM:-768}
+      CHAT_API_BASE: ${CHAT_API_BASE:-}
+      CHAT_API_KEY: ${CHAT_API_KEY:-}
+      CHAT_MODEL: ${CHAT_MODEL:-}
+      MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      CITATION_BASE_URL: ${CITATION_BASE_URL:-https://openbrain.local/thoughts}
+      # Auth0 OAuth resource-server config. Leave all three empty for pattern A
+      # (x-brain-key only). Set all three to enable the OAuth/Funnel path —
+      # caddy is then the required entry point for header-strip enforcement.
+      AUTH0_ISSUER: ${AUTH0_ISSUER:-}
+      AUTH0_JWKS_URI: ${AUTH0_JWKS_URI:-}
+      AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:-}
+      PORT: "8787"
+    # Loopback-only bind. The LAN cannot reach this port directly.
+    # Pattern A (tailnet-only) has tailscale serve point here directly.
+    # Pattern B REMOVES this mapping via docker-compose.pattern-b.yml so the
+    # raw mcp port is unreachable from the host — caddy is then the only
+    # entry point. Without that override a stray `tailscale funnel
+    # http://127.0.0.1:8787` would bypass the Caddy header-strip boundary.
+    ports:
+      - "127.0.0.1:8787:8787"
+
+  caddy:
+    # Derived from caddy:2-alpine — strips the cap_net_bind_service=ep file
+    # capability from /usr/bin/caddy so we can run with a truly empty
+    # capability bounding set. See ../compose-tailnet/caddy/Dockerfile for the full rationale.
+    # Without this strip, `cap_drop: [ALL]` causes exec to fail with EPERM
+    # because the kernel requires the fcap to be in the bounding set at
+    # execve() time even though we bind only the high port 9787.
+    build:
+      context: ../compose-tailnet/caddy
+      # Always pull the pinned base layer from the registry on build, so a
+      # stale local docker cache can't silently feed an older caddy:2.11.3-alpine
+      # into the perimeter image. `docker compose pull caddy` is a no-op for
+      # build-only services, so this is the only safety net for cache freshness.
+      pull: true
+    restart: unless-stopped
+    # Gated by the `pattern-b` profile — Pattern A deployments don't start
+    # caddy at all (saves one running container and removes the unused
+    # 9787 loopback listener).
+    profiles:
+      - pattern-b
+    # Defense-in-depth: caddy listens on the high port 9787 and the
+    # binary's file capability was stripped at image build, so a true
+    # zero-capability container is safe. Rootfs read-only with tmpfs for
+    # the writable paths the caddy:2-alpine image uses:
+    #   /config — caddy autosaves its parsed config here (small JSON)
+    #   /data   — TLS storage (auto_https is off here, so minimal use)
+    #   /tmp    — defensive
+    # All three are ephemeral — caddy reinitializes them at each start.
+    # Size-capped to prevent host RAM exhaustion by a compromised process.
+    # /var/log/caddy is a real volume (caddy_logs) shared with the
+    # log-ingester so JSON access logs survive container restarts.
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=16M,mode=1777
+      - /config:size=16M
+      - /data:size=16M
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - mcp
+    volumes:
+      # `:Z` asks docker to relabel the Caddyfile to `container_file_t` on
+      # SELinux hosts (Fedora, RHEL, Qubes) so the container can read it.
+      # No-op on non-SELinux hosts. Without it the container exits at start
+      # with `open /etc/caddy/Caddyfile: permission denied`.
+      - ../compose-tailnet/Caddyfile:/etc/caddy/Caddyfile:ro,Z
+      # Caddy writes JSON access logs here (see Caddyfile log directives).
+      # Shared with the log-ingester sidecar (Pattern B only). Rolling +
+      # retention managed by Caddy's `roll_*` directives — see Caddyfile.
+      - caddy_logs:/var/log/caddy
+    # Single loopback listener at :9787. Tailnet and Funnel traffic both
+    # land here; Caddy discriminates via the `Tailscale-Funnel-Request`
+    # header that Tailscale Funnel injects (Pattern Y). Wiring on
+    # the host: `tailscale funnel --bg --https=443 http://127.0.0.1:9787`
+    # only — `tailscale serve` and `tailscale funnel` cannot both bind
+    # :443 for the same hostname, and Anthropic's MCP client refuses
+    # non-default-HTTPS ports, so the single-listener design is what
+    # reconciles those constraints.
+    ports:
+      - "127.0.0.1:9787:9787"
+    # Liveness probe: hits Caddy's own /caddy-health (static "ok" 200, does
+    # not reach mcp) — proves the Caddy process is alive and the Caddyfile
+    # loaded. wget is in busybox in caddy:2-alpine.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9787/caddy-health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  ollama:
+    # Pinned to the version currently in production (0.24.0). Bump
+    # deliberately when you're ready to re-test embeddings/chat output —
+    # `:latest` is a supply-chain risk and a silent-upgrade footgun.
+    image: ollama/ollama:0.24.0
+    restart: unless-stopped
+    # Light hardening: no-new-privileges is safe across the board. Skipping
+    # cap_drop because the nvidia-container-runtime path has its own
+    # capability needs (varies by GPU driver). Skipping read_only because
+    # ollama writes model state into /root/.ollama (a volume) but may also
+    # write to /tmp at runtime. Re-evaluate together when we have time to
+    # exercise the GPU path with a tightened spec.
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    # GPU passthrough. Comment this out if you want CPU-only or are using
+    # an existing Ollama on another box (then also remove this service and
+    # set OLLAMA_URL in .env).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  postgres_data:
+  ollama_data:
+  # Caddy JSON access logs. Created at first start; only written
+  # to in Pattern B since caddy is profile-gated. Pattern A deployments
+  # never touch this volume.
+  caddy_logs:
+  # Ingester cursor files. Separated from caddy_logs so the
+  # ingester (non-root `deno` user) can write its `.cursor` companions
+  # without needing write access to the root-owned caddy_logs volume,
+  # AND so the ingester only has READ access to the actual access log
+  # files (defense-in-depth: a compromised ingester can't tamper with
+  # the on-disk audit evidence).
+  caddy_cursors:
