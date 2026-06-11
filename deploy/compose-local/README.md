@@ -111,6 +111,7 @@ After a client restart, the connector should list **eleven tools**: `capture_tho
 
 - **Embedding dimension mismatch.** If `EMBED_DIM` doesn't match what your model returns, every capture fails with a clear error. Fix `EMBED_DIM` (and `vector(N)` in `../../db/01-schema.sql` if the DB is already initialized).
 - **Schema didn't run.** Postgres only runs `/docker-entrypoint-initdb.d/*` when the data dir is empty. After a schema change, either apply it manually with `psql` or `docker compose down -v` to wipe the volume (destroys all thoughts).
+- **Host port already in use.** If the box already runs postgres (or anything else) on `5432`, the stack fails to start with `failed to bind host port 127.0.0.1:5432`. Change the host side of the mapping in `docker-compose.yml` (e.g. `"127.0.0.1:15432:5432"`) — the containers talk over the docker network, so only your direct-psql habits change. Same applies to `8787`/`11434`.
 - **No GPU detected for Ollama.** Install the NVIDIA Container Toolkit, or remove the `deploy: resources:` block from the `ollama` service.
 - **Metadata extraction silently degrading.** With `CHAT_API_BASE`/`CHAT_MODEL` unset (or unreachable), capture still works but every thought gets `{topics: [uncategorized], type: observation}`. Point them at a chat-capable Ollama model or any OpenAI-compatible endpoint to enable real extraction.
 
