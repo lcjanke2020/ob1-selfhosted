@@ -226,9 +226,17 @@ export function createMcpServer(auth: RequestAuth): McpServer {
         query: z.string().min(1).describe("What to search for"),
         limit: z.number().int().min(1).max(100).optional().default(10),
         threshold: z.number().min(0).max(1).optional().default(0.5),
+        recency_weight: z.number().min(0).max(1).optional().default(0)
+          .describe(
+            "0 = pure semantic ranking (default, unchanged behavior). >0 blends exponential recency decay into the score: similarity*(1-w) + exp(-age_days/half_life_days)*w. The threshold still applies to raw similarity. Try 0.2 for a gentle nudge toward recent thoughts.",
+          ),
+        half_life_days: z.number().positive().max(3650).optional().default(90)
+          .describe(
+            "Recency decay half-life in days (only consulted when recency_weight > 0)",
+          ),
       },
     },
-    async ({ query, limit, threshold }) => {
+    async ({ query, limit, threshold, recency_weight, half_life_days }) => {
       try {
         const embedding = await embed(query);
         const rows = await searchThoughts(pool, {
@@ -236,6 +244,8 @@ export function createMcpServer(auth: RequestAuth): McpServer {
           embedding,
           limit,
           threshold,
+          recencyWeight: recency_weight,
+          halfLifeDays: half_life_days,
         });
         if (!rows.length) return text(`No thoughts found matching "${query}".`);
         const lines = rows.map((t, i) => {

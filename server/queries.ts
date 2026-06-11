@@ -10,24 +10,70 @@ export type SearchOptions = {
   embedding: number[];
   limit?: number;
   threshold?: number;
+  // Recency boost, ported from upstream OB1's recency-boosted-match-thoughts
+  // schema (PR #231). 0 (the default) = pure similarity ranking, identical
+  // SQL to before the port. >0 blends an exponential recency decay into the
+  // returned similarity: score = sim*(1-w) + exp(-age_days/half_life)*w.
+  recencyWeight?: number;
+  halfLifeDays?: number;
 };
+
+// Clamp the recency knobs to sane ranges, mirroring upstream's in-function
+// clamping: weight into [0,1], half-life positive (else the 90-day default).
+// Exported for direct unit testing.
+export function clampRecency(
+  weight?: number,
+  halfLifeDays?: number,
+): { w: number; hl: number } {
+  let w = weight ?? 0;
+  if (!Number.isFinite(w) || w < 0) w = 0;
+  if (w > 1) w = 1;
+  let hl = halfLifeDays ?? 90;
+  if (!Number.isFinite(hl) || hl <= 0) hl = 90;
+  return { w, hl };
+}
 
 export async function searchThoughts(
   pool: Pool,
   opts: SearchOptions,
 ): Promise<ThoughtMatch[]> {
   const { embedding, limit = 10, threshold = 0.5 } = opts;
+  const { w, hl } = clampRecency(opts.recencyWeight, opts.halfLifeDays);
   const embStr = toVectorLiteral(embedding);
   const client = await pool.connect();
   try {
+    if (w === 0) {
+      // Pure-similarity path — kept byte-identical to the pre-recency SQL on
+      // purpose: `ORDER BY embedding <=> $1::vector` is the shape the HNSW
+      // index accelerates. The blended ORDER BY below cannot use the index
+      // (it's not a plain distance ordering), so the default path must not
+      // pay that seq-scan cost.
+      const result = await client.queryObject<ThoughtMatch>(
+        `SELECT id, content, metadata, created_at,
+                1 - (embedding <=> $1::vector) AS similarity
+         FROM thoughts
+         WHERE 1 - (embedding <=> $1::vector) >= $2
+         ORDER BY embedding <=> $1::vector
+         LIMIT $3`,
+        [embStr, threshold, limit],
+      );
+      return result.rows;
+    }
+    // Blended path. The threshold still gates on RAW cosine similarity
+    // (upstream semantics) so a high recency weight can't surface
+    // irrelevant-but-new thoughts. Keep the formula in sync with
+    // db/05-recency-search.sql — queries_recency_test.ts asserts the parity.
+    // Trade-off: this ordering seq-scans past the HNSW index; fine at
+    // personal-brain scale. If a large brain needs it fast, oversample via
+    // the index first and re-rank the candidates.
     const result = await client.queryObject<ThoughtMatch>(
       `SELECT id, content, metadata, created_at,
-              1 - (embedding <=> $1::vector) AS similarity
+              ((1 - (embedding <=> $1::vector)) * (1.0 - $4) + exp(-GREATEST(extract(epoch FROM (now() - created_at)) / 86400.0, 0.0) / $5) * $4)::float AS similarity
        FROM thoughts
        WHERE 1 - (embedding <=> $1::vector) >= $2
-       ORDER BY embedding <=> $1::vector
+       ORDER BY similarity DESC
        LIMIT $3`,
-      [embStr, threshold, limit],
+      [embStr, threshold, limit, w, hl],
     );
     return result.rows;
   } finally {
