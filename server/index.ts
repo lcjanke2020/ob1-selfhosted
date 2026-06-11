@@ -106,4 +106,21 @@ app.all("/", requireAuth, async (c) => {
 });
 
 console.log(`open-brain-homelab listening on :${PORT}`);
-Deno.serve({ port: PORT }, app.fetch);
+const httpServer = Deno.serve({ port: PORT }, app.fetch);
+
+// Graceful shutdown — stop accepting new connections, drain in-flight
+// requests, then release the DB pool. `docker stop` sends SIGTERM; without
+// this, in-flight requests are cut and postgres keeps the abandoned
+// connections until its own timeout. Mirrors log_ingester.ts.
+const shutdown = async () => {
+  console.log("[mcp] shutdown signal received; draining server + pool");
+  try {
+    await httpServer.shutdown();
+    await pool.end();
+  } catch (e) {
+    console.warn(`[mcp] shutdown cleanup failed: ${(e as Error).message}`);
+  }
+  Deno.exit(0);
+};
+Deno.addSignalListener("SIGTERM", shutdown);
+Deno.addSignalListener("SIGINT", shutdown);

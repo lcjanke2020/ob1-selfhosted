@@ -36,14 +36,15 @@ import {
 } from "./session_toml.ts";
 
 // Module-level shared TextEncoder so the byte-cap refine doesn't
-// allocate a fresh instance on every capture_thought call (per Copilot
-// round-4 micro-opt).
+// allocate a fresh instance on every capture_thought call.
 const UTF8_ENCODER = new TextEncoder();
 
 function thoughtTitle(content: string, createdAt?: string): string {
   const firstLine = content.replace(/\s+/g, " ").trim().slice(0, 80);
+  // ISO date (UTC) rather than toLocaleDateString() so the same thought
+  // renders identically regardless of host/container locale.
   const datePrefix = createdAt
-    ? new Date(createdAt).toLocaleDateString()
+    ? new Date(createdAt).toISOString().slice(0, 10)
     : "Open Brain";
   return firstLine ? `${datePrefix} - ${firstLine}` : `${datePrefix} thought`;
 }
@@ -144,8 +145,8 @@ export type RequestAuth = { door: "funnel" | "tailnet"; sub: string | null };
 export function createMcpServer(auth: RequestAuth): McpServer {
   const server = new McpServer({
     name: "open-brain-homelab",
-    // Keep in sync with metadata.json "version" so the serverInfo a client
-    // sees on initialize matches the published integration version.
+    // Bump on behavior changes — this is the serverInfo version a client
+    // sees on initialize.
     version: "1.1.0",
   });
 
@@ -370,8 +371,8 @@ export function createMcpServer(auth: RequestAuth): McpServer {
         // so the strict bound is measured in UTF-8 bytes, not JS UTF-16
         // code units.
         //
-        // `.max(100_000)` runs first as a fast-path pre-check (per
-        // Copilot round-2 on PR #18). Zod's `.max` on a string measures
+        // `.max(100_000)` runs first as a fast-path pre-check. Zod's
+        // `.max` on a string measures
         // UTF-16 code units (JS string length); UTF-8 encoding takes
         // ≥ 1 byte per UTF-16 code unit (the smallest UTF-8 encoding
         // of a BMP codepoint is 1 byte, and codepoints outside the BMP

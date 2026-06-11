@@ -26,10 +26,10 @@ const ENV_KEYS = [
 
 Deno.test("readNewLines: cursor uses raw byte count, not re-encoded string length", async () => {
   // Snapshot env BEFORE doing anything that could throw, and enter the
-  // outer try/finally before the dynamic import. (Per Copilot round-1
-  // review: if `await import("./log_ingester.ts")` had been outside the
-  // try, an import-time failure would have left DB_PASSWORD set into
-  // the test runner's env, polluting later tests.)
+  // outer try/finally before the dynamic import: if
+  // `await import("./log_ingester.ts")` were outside the try, an
+  // import-time failure would leave DB_PASSWORD set in the test runner's
+  // env, polluting later tests.
   const origEnv = new Map<string, string | undefined>(
     ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
   );

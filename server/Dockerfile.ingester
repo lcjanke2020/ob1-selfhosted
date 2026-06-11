@@ -11,8 +11,9 @@ FROM denoland/deno:2.3.3
 
 WORKDIR /app
 
-COPY deno.json ./
-RUN deno install
+# --frozen: see server/Dockerfile — ship exactly the lockfile-resolved graph.
+COPY deno.json deno.lock ./
+RUN deno install --frozen
 
 # Copy ALL .ts files so cross-module imports resolve at build time.
 # Note: log_ingester.ts deliberately does NOT import ./config.ts (see
@@ -25,7 +26,7 @@ RUN deno install
 COPY *.ts ./
 
 # Cache + type-check at build time.
-RUN deno cache log_ingester.ts
+RUN deno cache --frozen log_ingester.ts
 
 # Pre-create the cursor mount-point directory while we still have root +
 # a writable rootfs. The container runs with `read_only: true` (per the pre-exposure host audit

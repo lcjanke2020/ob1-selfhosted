@@ -66,7 +66,15 @@ services:
       OPENBRAIN_INGESTER_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD:-}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ../../db:/docker-entrypoint-initdb.d:ro
+      # Init files are mounted individually rather than the whole ../../db
+      # dir: the postgres entrypoint executes EVERY *.sql/*.sh it finds in
+      # lexical order, and db/ also holds ops scripts (summarize_funnel.sql)
+      # that must not silently become init code.
+      - ../../db/00-roles.sh:/docker-entrypoint-initdb.d/00-roles.sh:ro
+      - ../../db/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ../../db/02-observability.sql:/docker-entrypoint-initdb.d/02-observability.sql:ro
+      - ../../db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/03-grants-assertion.sql:ro
+      - ../../db/04-sessions.sql:/docker-entrypoint-initdb.d/04-sessions.sql:ro
     # Bind to localhost only by default; expose to the tailnet only via the
     # mcp service. If you want DBeaver/TablePlus to reach Postgres directly
     # via the tailnet, change this to "0.0.0.0:5432:5432" — Tailscale ACLs
@@ -115,6 +123,7 @@ services:
       CHAT_API_BASE: ${CHAT_API_BASE:-}
       CHAT_API_KEY: ${CHAT_API_KEY:-}
       CHAT_MODEL: ${CHAT_MODEL:-}
+      CHAT_TIMEOUT_MS: ${CHAT_TIMEOUT_MS:-60000}
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       CITATION_BASE_URL: ${CITATION_BASE_URL:-https://openbrain.local/thoughts}
       # Auth0 OAuth resource-server config. Leave all three empty for pattern A
@@ -123,6 +132,13 @@ services:
       AUTH0_ISSUER: ${AUTH0_ISSUER:-}
       AUTH0_JWKS_URI: ${AUTH0_JWKS_URI:-}
       AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:-}
+      # Operator tunables documented in .env.example. Compose only forwards
+      # enumerated variables, so each knob must be listed here — otherwise
+      # setting it in .env is a silent no-op. Defaults mirror the code.
+      JWKS_FETCH_TIMEOUT_MS: ${JWKS_FETCH_TIMEOUT_MS:-10000}
+      OBS_AUTH_EVENTS_ENABLED: ${OBS_AUTH_EVENTS_ENABLED:-true}
+      OBS_AUTH_EVENTS_MAX_IN_FLIGHT: ${OBS_AUTH_EVENTS_MAX_IN_FLIGHT:-500}
+      AUTH_BODY_READ_TIMEOUT_MS: ${AUTH_BODY_READ_TIMEOUT_MS:-2000}
       PORT: "8787"
     # Loopback-only bind. The LAN cannot reach this port directly.
     # Pattern A (tailnet-only) has tailscale serve point here directly.

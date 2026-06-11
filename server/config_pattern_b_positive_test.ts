@@ -4,8 +4,7 @@
 // cleanly), so this fail-fast coverage doesn't depend on auth_oauth_test.ts's
 // happy-path import. If someone refactors that file later — e.g., factors
 // out the env setup or removes the PATTERN_B=true line — the regression
-// would still land here instead of vanishing silently. (Opus-4.7 PR #15
-// round-1 observation #5.)
+// would still land here instead of vanishing silently.
 //
 // Why a separate file: Deno caches dynamic imports per module URL within
 // a single test worker. config_pattern_b_test.ts loads config.ts in a

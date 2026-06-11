@@ -63,6 +63,7 @@ Four roles, least privilege, with drift detection:
 ## Known limitations
 
 - **No per-user RLS.** Both doors grant full read/write; `sub` attributes but doesn't partition. Fine for a personal memory store; wrong for multi-tenant.
+- **Door attribution is last-writer-wins on dedupe.** Re-capturing byte-identical content through the other door updates the stored `door`/`sub` (metadata merges on conflict) — attribution reflects the most recent capture, not the first.
 - **`/caddy-health` is reachable from any source** — required for the docker healthcheck; a public scanner can learn "Caddy is up" from it. Accepted as a minor info leak.
 - **Funnel availability caveats** — see the limitations table in [`funnel-mcp-perimeter.md`](funnel-mcp-perimeter.md).
 - **Single-qube co-residency** (Qubes path) — the edge and the database currently share a VM; the [three-qube design](../deploy/qubes/three-qube-design.md) is the planned fix.

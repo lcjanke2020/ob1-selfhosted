@@ -2,8 +2,8 @@ import {
   CHAT_API_BASE,
   CHAT_API_KEY,
   CHAT_MODEL,
+  CHAT_TIMEOUT_MS,
   ENABLE_METADATA_EXTRACTION,
-  FETCH_TIMEOUT_MS,
 } from "./config.ts";
 
 const SYSTEM_PROMPT =
@@ -38,7 +38,7 @@ export async function extractMetadata(
   if (!ENABLE_METADATA_EXTRACTION) return { ...FALLBACK };
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), CHAT_TIMEOUT_MS);
 
   try {
     const headers: Record<string, string> = {

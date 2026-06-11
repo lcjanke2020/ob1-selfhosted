@@ -49,6 +49,15 @@ export async function embed(text: string): Promise<number[]> {
         `column in db/01-schema.sql to match.`,
     );
   }
+  // pgvector's behavior on non-finite floats is undefined — a NaN/Infinity
+  // slipping into the index can corrupt distance results silently. Refuse
+  // loudly instead.
+  if (!vec.every((v) => typeof v === "number" && Number.isFinite(v))) {
+    throw new Error(
+      `Embedding from model "${EMBED_MODEL}" contains non-finite values ` +
+        `(NaN/Infinity); refusing to store.`,
+    );
+  }
   return vec;
 }
 

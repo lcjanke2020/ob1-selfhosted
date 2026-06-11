@@ -177,10 +177,17 @@ if (ENABLE_OAUTH) {
 export const CITATION_BASE_URL = optionalTrimmed("CITATION_BASE_URL") ||
   "https://openbrain.local/thoughts";
 
-// Outbound fetch timeout for Ollama embeddings and the optional chat API.
-// 15 seconds is long enough for a slow first-load embed model warm-up and
-// short enough that a hung backend can't tie up an MCP request indefinitely.
+// Outbound fetch timeout for Ollama embeddings. 15 seconds is long enough
+// for a slow first-load embed model warm-up and short enough that a hung
+// backend can't tie up an MCP request indefinitely. (The chat-LLM metadata
+// call has its own knob — CHAT_TIMEOUT_MS below.)
 export const FETCH_TIMEOUT_MS = requiredInt("FETCH_TIMEOUT_MS", 15_000);
+
+// Separate, longer cap for the optional chat-LLM metadata extraction call.
+// A chat completion over a large captured thought can legitimately take far
+// longer than an embedding — gating both on FETCH_TIMEOUT_MS silently
+// truncated extraction on slow local models.
+export const CHAT_TIMEOUT_MS = requiredInt("CHAT_TIMEOUT_MS", 60_000);
 
 // Wall-clock cap on JWKS fetches. Two surfaces:
 //   1. Passed to jose's `createRemoteJWKSet` as `timeoutDuration`, bounding

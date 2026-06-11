@@ -70,7 +70,7 @@
 	# can. This is what prevents XFF-spoof bypass of the Anthropic
 	# allowlist.
 	#
-	# Critical guardrail #2 — `trusted_proxies_strict` (per Codex review):
+	# Critical guardrail #2 — `trusted_proxies_strict`:
 	# enables right-to-left XFF parsing, skipping any trusted-proxy
 	# entries and using the first non-trusted IP as client_ip. If
 	# Tailscale ever changes from overwriting XFF to appending to it,
@@ -166,8 +166,8 @@
 	# even though it is overwhelmingly a *response* header in normal HTTP
 	# usage (the request-side filter only catches the unusual case of a
 	# misconfigured/malicious client that supplies Set-Cookie as a
-	# request header — cheap defense-in-depth, surfaced by Copilot
-	# round-1 review of PR #26). Response headers are NOT logged by this
+	# request header — cheap defense-in-depth). Response headers are NOT
+	# logged by this
 	# `format filter` configuration, so no response-side Set-Cookie
 	# redaction is needed.
 	#
@@ -236,8 +236,8 @@
 	# trusted_proxies-resolved IP from XFF. Empirically verified
 	# against caddy:2.11.3-alpine: `remote_ip 160.79.104.0/21` with
 	# `XFF: 160.79.104.5` from a loopback peer → 403; same with
-	# `client_ip` → 200. See PR #15 round-2 reviewer findings (Codex)
-	# and single-listener test matrix (entries B and C).
+	# `client_ip` → 200. Pinned by the single-listener test matrix
+	# (entries B and C).
 	handle @anthropic_funnel {
 		log_name access_funnel
 

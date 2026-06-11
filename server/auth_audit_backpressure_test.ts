@@ -21,7 +21,7 @@
 // hanging on DNS resolution for the default "postgres" hostname. On
 // CI hosts or developer machines where "postgres" doesn't resolve
 // quickly, the default would have introduced multi-second DNS
-// timeouts on every queued microtask. (Per Copilot round-1 review.)
+// timeouts on every queued microtask.
 
 import { assertEquals, assertStrictEquals } from "jsr:@std/assert@1";
 
@@ -38,7 +38,7 @@ const ENV_KEYS = [
 Deno.test("auth_audit backpressure (synchronous)", async (t) => {
   // Snapshot env BEFORE setting anything that could throw at import, and
   // enter the try/finally before the dynamic import so an import-time
-  // failure still restores the env. (Per Copilot round-1 review.)
+  // failure still restores the env.
   const origEnv = new Map<string, string | undefined>(
     ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
   );
@@ -68,7 +68,7 @@ Deno.test("auth_audit backpressure (synchronous)", async (t) => {
       "burst beyond cap admits up to cap and drops the rest; cumulative across bursts",
       () => {
         // The burst-of-10 and the cumulative-drop check MUST live in the
-        // same sync turn (one t.step body) — see Copilot round-4 finding.
+        // same sync turn (one t.step body).
         // `t.step` returns an awaited promise; between two steps the event
         // loop yields and the microtasks queued by the first burst run,
         // letting pool.connect() to 127.0.0.1:1 fast-fail and decrement

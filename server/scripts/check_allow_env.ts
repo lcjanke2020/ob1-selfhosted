@@ -28,8 +28,7 @@
 // withholding them.
 //
 // Run locally: `deno task check-allow-env` (from server/).
-// CI: wired in a follow-up PR (follow-up) via a path-scoped GitHub
-// workflow; until that lands this check is local-only.
+// CI: runs as the check-allow-env job in .github/workflows/ci.yml.
 
 import {
   dirname,

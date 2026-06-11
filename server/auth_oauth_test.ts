@@ -1,6 +1,6 @@
 // Tests for the `requireAuth` middleware in Pattern B (OAuth enabled).
-// Covers the full (brain-key × Bearer × OAuth-on) matrix Codex's PR #3
-// review asked to bottle, plus the JWT failure modes (expired, wrong
+// Covers the full (brain-key × Bearer × OAuth-on) matrix an early review
+// asked to bottle, plus the JWT failure modes (expired, wrong
 // issuer/audience, malformed). Run with `deno task test`.
 //
 // auth failure shape depends on whether a credential
@@ -266,9 +266,8 @@ Deno.test("requireAuth (Pattern B — OAuth enabled)", async (t) => {
     await t.step(
       "dual: invalid brain-key + valid Bearer → 200 (fall-through honors Bearer)",
       async () => {
-        // This is the case Copilot flagged in PR #3 review (commit 4f50bbb fixed
-        // it): an invalid x-brain-key alongside a valid Bearer should NOT
-        // unauthorize.
+        // Regression-pinned: an invalid x-brain-key alongside a valid
+        // Bearer should NOT unauthorize.
         const token = await signToken({});
         const res = await app.request("/", {
           headers: {
@@ -311,8 +310,8 @@ Deno.test("requireAuth (Pattern B — OAuth enabled)", async (t) => {
         // jose's jwtVerify validates `exp` only when the claim is present
         // unless `requiredClaims` is set. Without that option, an attacker
         // who mints (or steals + replays) a never-expiring token bypasses
-        // the only time-based defense at the resource server. Codex
-        // verified this gap with a one-off Deno check before the fix —
+        // the only time-based defense at the resource server. The gap
+        // was verified with a one-off Deno check before the fix —
         // pre-fix this exact request would have returned 200.
         //
         // SignJWT here intentionally skips `.setExpirationTime()`.

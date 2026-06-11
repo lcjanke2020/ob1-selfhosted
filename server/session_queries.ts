@@ -236,8 +236,7 @@ export async function upsertSession(
 
     // Reconcile artifact children: a qualified (WHERE session_id) delete then
     // re-insert. The WHERE is for correctness; it is kept on one physical line
-    // only as a habit mirroring the SQL files (ob1-gate.yml Rule 5's
-    // DELETE-needs-WHERE scan covers `*.sql` only, not this `.ts`).
+    // only as a habit mirroring the SQL files' qualified-DELETE style.
     await client.queryArray(
       `DELETE FROM sessions.artifact WHERE session_id = $1`,
       [row.session_id],

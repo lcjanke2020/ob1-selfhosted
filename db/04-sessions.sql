@@ -124,7 +124,7 @@ CREATE TABLE IF NOT EXISTS sessions.artifact (
 -- NOT NULL on the renamed-from `ref`, so `title` lands NOT NULL as declared.
 -- Each rename also requires the TARGET column to be absent, so re-applying
 -- against a hand-edited DB that already has both columns is a no-op instead of
--- erroring 42701 (round-2 review: Copilot + Claude).
+-- erroring 42701.
 DO $$
 BEGIN
   IF EXISTS (

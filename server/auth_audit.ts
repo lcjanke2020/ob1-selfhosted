@@ -24,7 +24,9 @@ import { Pool, type PoolClient } from "postgres";
 
 // Read env locally rather than importing config.ts so this module can be
 // loaded by tests that haven't set the full mcp env (e.g., AUTH0_*).
-const DB_HOST = Deno.env.get("DB_HOST")?.trim() || "postgres";
+// Default matches config.ts ("127.0.0.1") so a bare dev run gets a
+// consistent target for both the main pool and the audit pool.
+const DB_HOST = Deno.env.get("DB_HOST")?.trim() || "127.0.0.1";
 // Defensive DB_PORT parse: an empty / malformed value would otherwise yield
 // NaN here and cause confusing failures later when the pool tries to
 // connect ("dial: invalid port"). Fall back to the well-known port if the
@@ -70,8 +72,7 @@ function readMaxInFlight(): number {
 // Gate the parse behind the same condition as the pool construction
 // below — a typo'd OBS_AUTH_EVENTS_MAX_IN_FLIGHT shouldn't take the
 // whole server down if audit emission is disabled or DB_PASSWORD is
-// missing (i.e. the audit insert path is dead anyway). Per Copilot
-// round-2 review on PR #18.
+// missing (i.e. the audit insert path is dead anyway).
 const MAX_IN_FLIGHT = (!FORCE_DISABLED && DB_PASSWORD)
   ? readMaxInFlight()
   : 500;

@@ -303,8 +303,7 @@ export async function readNewLines(
 //            tick re-reads these bytes and tries again. This is the
 //            failure mode that previously silently dropped audit rows
 //            (cursor advanced before the insert, so a transient DB
-//            outage left holes in the access-log evidence — Codex
-//            GPT-5.5 review of PR #19).
+//            outage left holes in the access-log evidence).
 type InsertResult = "ok" | "skip" | "retry";
 
 // Parse one Caddy JSON line and insert it. See `InsertResult` for semantics.
@@ -342,18 +341,17 @@ async function insertLine(
     }
   }
 
-  // Copilot PR #21 round-3 inline — the field-extraction block below
+  // The field-extraction block below
   // sits OUTSIDE the DB try/catch and can throw on malformed input
   // (e.g. `new Date(NaN).toISOString()` if `row.ts` is non-finite).
   // Such a throw would escape `insertLine`, abort `tickOnce` without
   // advancing the cursor, and put the ingester into an infinite
-  // reprocess loop on the same bad batch — the same class of bug as
-  // the same cursor-integrity concern, in a non-DB code path. Wrapping in a try
+  // reprocess loop on the same bad batch — the cursor-integrity bug
+  // class again, in a non-DB code path. Wrapping in a try
   // here that returns "skip" on any extraction failure keeps the
   // batch progressing past permanently malformed rows. The explicit
-  // `Number.isFinite(tsMs)` guard covers the specific row.ts case
-  // Copilot called out; the surrounding catch is the belt to that
-  // suspenders.
+  // `Number.isFinite(tsMs)` guard covers the specific row.ts case;
+  // the surrounding catch is the belt to those suspenders.
   let ts: string;
   // `path` matches pathFromUri's return type (string | undefined). The SQL
   // bind below coalesces with `?? null` so the wire-level value is still
@@ -404,7 +402,7 @@ async function insertLine(
     return "skip";
   }
 
-  // Copilot PR #21 inline — pool.connect() must be inside the try so that
+  // pool.connect() must be inside the try so that
   // a pool exhaustion / Postgres-down failure returns "retry" through the
   // documented InsertResult contract rather than throwing out of insertLine
   // and unwinding tickOnce as a generic error. Audit fidelity happens to
@@ -445,12 +443,12 @@ async function insertLine(
   } catch (e) {
     // Treat as transient — caller will retry next tick rather than
     // silently dropping the row. Covers both query-time failures (the
-    // original catch) and connect-time failures (per the Copilot fix
-    // above). If the failure is actually permanent (schema drift, bad
+    // original catch) and connect-time failures. If the failure is
+    // actually permanent (schema drift, bad
     // data slipping past parseInetCandidate, etc.) it'll keep failing
     // every tick until investigated, which is the intended loud-failure
     // mode for audit-log fidelity.
-    // Copilot PR #21 round-3 inline — `(e as Error).message` is
+    // `(e as Error).message` is
     // `undefined` for non-Error throws (e.g. `throw "string"`); the
     // instanceof guard keeps the log line meaningful for any thrown
     // value the pg driver might surface.
@@ -486,7 +484,7 @@ async function tickOnce(): Promise<void> {
     // Case 2: we have lines. advance the cursor ONLY after
     // all inserts complete without a transient failure. Previously the
     // cursor was persisted before any insert ran, so a DB outage
-    // silently dropped audit rows (Codex GPT-5.5 review of PR #19).
+    // silently dropped audit rows.
     //
     // On "retry": stop the batch, leave cursor at the original value,
     // re-read the same bytes next tick. May re-insert lines that
@@ -508,7 +506,7 @@ async function tickOnce(): Promise<void> {
     }
 
     if (mustRetry) {
-      // Opus PR #21 review — include `skipped` so a "0 ok / 2 skipped /
+      // Include `skipped` so a "0 ok / 2 skipped /
       // 1 retry" batch isn't misread as "nothing happened."
       console.warn(
         `[ingester] ${socket}: transient insert failure after ${inserted}/${lines.length} rows (${skipped} skipped); cursor=${cursor} retained for retry next tick`,

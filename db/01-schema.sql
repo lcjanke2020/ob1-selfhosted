@@ -95,7 +95,7 @@ $$;
 -- ---------- Grants ---------------------------------------------------------
 -- Tightened from "full DML on the whole public schema" to the
 -- minimum the application actually uses: SELECT/INSERT/UPDATE on
--- `public.thoughts`. Codex confirmed zero DELETE statements in queries.ts,
+-- `public.thoughts`. An audit confirmed zero DELETE statements in queries.ts,
 -- so DELETE is dropped too. Sequence USAGE and function EXECUTE on the
 -- whole schema are also revoked; `thoughts.id` is UUID (no sequence) and
 -- pgcrypto/pgvector built-ins are PUBLIC-executable by default, so the
@@ -136,4 +136,4 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 -- runs after both 01-schema.sql AND 02-observability.sql, AND can be
 -- invoked standalone against a deployed DB to check for drift without
 -- the REVOKE+GRANT block above wiping that drift first. See that file's
--- doc-comment for the rationale (round-2 Opus review on PR #18).
+-- doc-comment for the rationale.
