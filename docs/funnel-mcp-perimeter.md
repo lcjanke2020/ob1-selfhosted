@@ -35,6 +35,10 @@ In dependency order — each step is independently testable:
 
 Observed in production, with diagnosis paths — the hours these cost are the reason this section exists.
 
+### "Couldn't register with …'s sign-in service" before any consent screen
+
+claude.ai (web and desktop) now attempts OAuth **Dynamic Client Registration** (RFC 7591) when a custom connector is added without explicit client credentials — first reported upstream as [NateBJones-Projects/OB1#340](https://github.com/NateBJones-Projects/OB1/issues/340). This stack uses a pre-registered confidential client and publishes no `registration_endpoint` in its RFC 9728 metadata, so the registration attempt fails **entirely client-side**: nothing in `mcp_auth_events` beyond the usual `missing_credentials` discovery probe, and no `Failed Exchange` in Auth0's logs — distinguishing it from the secret-mismatch failure below, which at least shows the exchange attempt. Fix: always fill in client_id **and** client_secret in the connector's Advanced settings (pattern step 3) so claude.ai skips registration. Watch item: if Anthropic ever makes DCR mandatory, Auth0 supports OIDC Dynamic Client Registration but it must be explicitly enabled on the tenant (see Auth0's "Dynamic Client Registration" docs) — revisit this section then.
+
 ### "Authorization with the MCP server failed" right after a successful consent screen
 
 The token exchange between claude.ai and your OAuth provider is failing — the user-facing consent succeeded, then the backchannel `client_secret` check didn't. In Auth0's logs this shows as a `Failed Exchange` with `description: Unauthorized` and `client_name: null` a few hundred ms after a `Success Login`. Cause is almost always a copy-paste mismatch in the secret stored at claude.ai. **Your server sees nothing** — the failure happens before any Bearer reaches it; the audit table shows only the initial `missing_credentials` probe. Fix: re-paste the secret (or rotate it to eliminate ambiguity). False leads: changing the application type, grant types, or callback URLs.

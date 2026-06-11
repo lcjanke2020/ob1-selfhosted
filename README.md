@@ -109,7 +109,12 @@ Anyone who can present your `x-brain-key` from inside the perimeter (loopback, o
 
 - All three install paths describe deployments that are running today; the test suite (`cd server && deno task test`) is hermetic and runs in CI.
 - The Qubes install currently co-locates the whole stack in one qube. The next step — Postgres pulled out of compose into its own qube, with ingress / app / db separated by VM boundaries — is designed and in progress: [`deploy/qubes/three-qube-design.md`](deploy/qubes/three-qube-design.md).
+- Tracked upstream, not (yet) ported — re-evaluate as upstream stabilizes:
+  - enhanced-thoughts status/lifecycle columns ([upstream PR #305](https://github.com/NateBJones-Projects/OB1/pull/305), commit `14c39d2`) — would promote `type`/`importance`/`status` out of the metadata JSONB into real columns;
+  - a REST gateway in the spirit of upstream's `integrations/open-brain-rest` — the `queries.ts` split was designed for exactly this, and it would unlock upstream's import recipes (Obsidian, ChatGPT exports, Readwise, Gmail);
+  - the governance/audit schema pack: `thought_audit` (upstream PR #230), provenance-chains (PR #207), typed-reasoning-edges (plus its PR #227 SQL fix), per-agent-identity (PR #321);
+  - upstream PRs #354–#357 (recall-quality eval harness, recall quarantine, degrade-loud recall, UPGRADING.md) — still open at the time of writing; re-check once merged.
 
 ## License & attribution
 
-This project is a self-hosted derivative of [Open Brain](https://github.com/NateBJones-Projects/OB1) by Nate B. Jones, developed against the [OB1-homelab](https://github.com/openbrain-build/OB1-homelab) line. It is licensed under the same **FSL-1.1-MIT** terms (see [LICENSE.md](LICENSE.md)) — free for any non-competing use, converting to MIT two years after release. The `thoughts` table layout stays compatible with upstream OB1 so schema extensions from that community work here too.
+This project is a self-hosted derivative of [Open Brain](https://github.com/NateBJones-Projects/OB1) by Nate B. Jones. It was developed against the community **OB1-homelab** line, which is no longer publicly available; the closest upstream analog today is the [`local-brain-no-mcp`](https://github.com/NateBJones-Projects/OB1/tree/main/recipes/local-brain-no-mcp) recipe (which independently settled on the same 768-dim `nomic-embed-text` local embeddings used here). It is licensed under the same **FSL-1.1-MIT** terms (see [LICENSE.md](LICENSE.md)) — free for any non-competing use, converting to MIT two years after release. The `thoughts` table layout stays compatible with upstream OB1 so schema extensions from that community work here too.
