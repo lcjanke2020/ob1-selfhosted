@@ -8,6 +8,8 @@ FSL-1.1-MIT
 
 Copyright 2026 Nate B. Jones
 
+Portions Copyright 2026 Leonard Janke
+
 ## Terms and Conditions
 
 ### Licensor ("We")
