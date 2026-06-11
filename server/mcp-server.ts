@@ -295,11 +295,18 @@ export function createMcpServer(auth: RequestAuth): McpServer {
         person: z.string().optional().describe("Filter by person mentioned"),
         days: z.number().int().min(1).max(3650).optional()
           .describe("Only thoughts from the last N days"),
+        content_contains: z.string().min(1).max(200).optional()
+          .describe(
+            "Case-insensitive substring match on thought content — lexical fallback for exact tokens (IDs, names, code fragments) that semantic search can miss. Matched literally; combines with the other filters.",
+          ),
       },
     },
-    async (opts) => {
+    async ({ content_contains, ...opts }) => {
       try {
-        const rows = await listThoughts(pool, opts);
+        const rows = await listThoughts(pool, {
+          ...opts,
+          contentContains: content_contains,
+        });
         if (!rows.length) return text("No thoughts found.");
         const lines = rows.map((t, i) => {
           const m = t.metadata || {};

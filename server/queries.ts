@@ -87,13 +87,26 @@ export type ListOptions = {
   topic?: string;
   person?: string;
   days?: number;
+  // Case-insensitive literal substring match on content — the lexical
+  // fallback (ported from upstream OB1's text-search-trgm idea, PR #206)
+  // for exact tokens that semantic search misses. Accelerated by the
+  // trigram GIN index in db/06-text-search.sql; without that index it
+  // still works, just as a seq scan.
+  contentContains?: string;
 };
+
+// Escape ILIKE wildcards so caller input matches as a literal substring,
+// not a pattern. Backslash first (it's the ESCAPE character), then % and _.
+// Exported for direct unit testing.
+export function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
 
 export async function listThoughts(
   pool: Pool,
   opts: ListOptions,
 ): Promise<ThoughtRecord[]> {
-  const { limit = 10, type, topic, person, days } = opts;
+  const { limit = 10, type, topic, person, days, contentContains } = opts;
   const conditions: string[] = [];
   const params: unknown[] = [];
   let p = 1;
@@ -112,6 +125,12 @@ export async function listThoughts(
   if (days && Number.isFinite(days)) {
     conditions.push(`created_at >= NOW() - ($${p++}::int * INTERVAL '1 day')`);
     params.push(Math.floor(days));
+  }
+  if (contentContains) {
+    // The wildcards are concatenated server-side so the parameter stays a
+    // plain literal; ESCAPE makes the escapeLike() contract explicit.
+    conditions.push(`content ILIKE '%' || $${p++} || '%' ESCAPE '\\'`);
+    params.push(escapeLike(contentContains));
   }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 

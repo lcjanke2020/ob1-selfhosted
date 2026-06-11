@@ -76,6 +76,7 @@ services:
       - ../../db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/03-grants-assertion.sql:ro
       - ../../db/04-sessions.sql:/docker-entrypoint-initdb.d/04-sessions.sql:ro
       - ../../db/05-recency-search.sql:/docker-entrypoint-initdb.d/05-recency-search.sql:ro
+      - ../../db/06-text-search.sql:/docker-entrypoint-initdb.d/06-text-search.sql:ro
     # Bind to localhost only by default; expose to the tailnet only via the
     # mcp service. If you want DBeaver/TablePlus to reach Postgres directly
     # via the tailnet, change this to "0.0.0.0:5432:5432" — Tailscale ACLs
