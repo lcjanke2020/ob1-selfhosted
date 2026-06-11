@@ -96,7 +96,7 @@ cp .env.example .env       # then fill in the four secrets (openssl rand -hex 24
 docker compose up -d ollama
 docker compose exec ollama ollama pull nomic-embed-text
 docker compose up -d
-curl http://127.0.0.1:8787/health
+bash ../../scripts/smoke_test.sh   # end-to-end: health → capture → search → fetch → update → cleanup
 ```
 
 Then point any MCP client at `http://127.0.0.1:8787/mcp` with your `x-brain-key`.
