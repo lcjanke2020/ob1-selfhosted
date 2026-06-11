@@ -108,8 +108,16 @@ export type CaptureInput = {
   metadata: Record<string, unknown>;
 };
 
-// Upsert by content fingerprint. The fingerprint is a SHA256 of the
-// trimmed/lowercased/whitespace-collapsed content, computed inline so dedupe
+// SHA256 of the trimmed/lowercased/whitespace-collapsed content — the dedupe
+// key behind the partial unique index on content_fingerprint. Single
+// definition shared by captureThought and updateThought so the two write
+// paths cannot drift apart (queries_update_thought_test.ts asserts parity).
+// `param` is the SQL placeholder holding the content text (e.g. "$1").
+export function fingerprintSqlExpr(param: string): string {
+  return `encode(sha256(convert_to(lower(trim(regexp_replace(${param}, '\\s+', ' ', 'g'))), 'UTF8')), 'hex')`;
+}
+
+// Upsert by content fingerprint. The fingerprint is computed inline so dedupe
 // happens via the partial unique index on content_fingerprint. On conflict
 // we refresh the embedding (in case the model changed) and merge any new
 // metadata fields into the existing row's metadata.
@@ -126,12 +134,7 @@ export async function captureThought(
          $1,
          $2::vector,
          $3::jsonb,
-         encode(
-           sha256(
-             convert_to(lower(trim(regexp_replace($1, '\\s+', ' ', 'g'))), 'UTF8')
-           ),
-           'hex'
-         )
+         ${fingerprintSqlExpr("$1")}
        )
        ON CONFLICT (content_fingerprint) WHERE content_fingerprint IS NOT NULL
        DO UPDATE SET
@@ -142,6 +145,105 @@ export async function captureThought(
       [input.content, embStr, JSON.stringify(input.metadata)],
     );
     return result.rows[0];
+  } finally {
+    client.release();
+  }
+}
+
+export type UpdateThoughtInput = {
+  id: string;
+  // content and embedding travel together: the caller re-embeds whenever it
+  // replaces the text (mcp-server.ts enforces this pairing).
+  content?: string;
+  embedding?: number[];
+  // Shallow top-level merge into the existing metadata JSONB — upstream
+  // update-thought-mcp's spread-merge semantics, done in SQL via `||`.
+  metadataPatch: Record<string, unknown>;
+  // ISO timestamptz from the caller's last read. Undefined = last-write-wins.
+  ifUnchangedSince?: string;
+};
+
+export type UpdateThoughtOutcome =
+  | { kind: "updated"; id: string; updated_at: string }
+  | { kind: "not_found" }
+  | { kind: "stale"; current_updated_at: string }
+  | { kind: "fingerprint_conflict"; existing_id: string };
+
+// deno-postgres surfaces server errors as PostgresError with the SQLSTATE in
+// `fields.code`. Duck-typed (rather than instanceof) so a stubbed pool in
+// tests can raise the same shape without importing driver internals.
+function isUniqueViolation(e: unknown): boolean {
+  return typeof e === "object" && e !== null &&
+    (e as { fields?: { code?: string } }).fields?.code === "23505";
+}
+
+// Ported from upstream OB1's update-thought-mcp (PR #228), tightened into a
+// single atomic compare-and-set UPDATE instead of upstream's read-then-write
+// (which can lose a concurrent writer's update between the SELECT and the
+// UPDATE). Semantics match upstream: a stored updated_at strictly newer than
+// ifUnchangedSince rejects as stale; equal-or-older passes.
+//
+// Both sides of the comparison are truncated to milliseconds: the reference
+// value usually round-tripped through a JS Date (ms precision) on the
+// caller's prior read, while postgres stores microseconds — without the
+// truncation every honest read-modify-write would false-positive as stale.
+export async function updateThought(
+  pool: Pool,
+  input: UpdateThoughtInput,
+): Promise<UpdateThoughtOutcome> {
+  const embStr = input.embedding ? toVectorLiteral(input.embedding) : null;
+  const client = await pool.connect();
+  try {
+    let result;
+    try {
+      result = await client.queryObject<{ id: string; updated_at: string }>(
+        `UPDATE thoughts SET
+           content = COALESCE($2, content),
+           embedding = COALESCE($3::vector, embedding),
+           content_fingerprint = CASE WHEN $2 IS NULL THEN content_fingerprint
+             ELSE ${fingerprintSqlExpr("$2")} END,
+           metadata = metadata || $4::jsonb
+         WHERE id = $1
+           AND ($5::timestamptz IS NULL
+                OR date_trunc('milliseconds', updated_at)
+                   <= date_trunc('milliseconds', $5::timestamptz))
+         RETURNING id, updated_at`,
+        [
+          input.id,
+          input.content ?? null,
+          embStr,
+          JSON.stringify(input.metadataPatch),
+          input.ifUnchangedSince ?? null,
+        ],
+      );
+    } catch (e) {
+      // New content collided with another row's dedupe fingerprint (the
+      // partial unique index). Recover the surviving row's id so the caller
+      // can point at the duplicate instead of guessing.
+      if (!isUniqueViolation(e)) throw e;
+      const dupe = await client.queryObject<{ id: string }>(
+        `SELECT id FROM thoughts
+         WHERE content_fingerprint = ${fingerprintSqlExpr("$1")}
+         LIMIT 1`,
+        [input.content ?? ""],
+      );
+      return {
+        kind: "fingerprint_conflict",
+        existing_id: dupe.rows[0]?.id ?? "unknown",
+      };
+    }
+    if (result.rows.length) {
+      return { kind: "updated", ...result.rows[0] };
+    }
+    // Zero rows: either the id doesn't exist or the CAS guard rejected it.
+    // One follow-up read disambiguates (and supplies current_updated_at for
+    // the STALE_READ error the way upstream does).
+    const probe = await client.queryObject<{ updated_at: string }>(
+      `SELECT updated_at FROM thoughts WHERE id = $1 LIMIT 1`,
+      [input.id],
+    );
+    if (!probe.rows.length) return { kind: "not_found" };
+    return { kind: "stale", current_updated_at: probe.rows[0].updated_at };
   } finally {
     client.release();
   }

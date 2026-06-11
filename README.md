@@ -69,7 +69,7 @@ sequenceDiagram
 
 ```
 .
-├── server/                    Deno + Hono MCP server (11 tools), unit tests,
+├── server/                    Deno + Hono MCP server (12 tools), unit tests,
 │                              Dockerfiles for mcp and the log-ingester sidecar
 ├── db/                        Postgres init: roles, pgvector schema, observability,
 │                              grants-drift assertion, sessions schema, daily rollup
