@@ -1,0 +1,43 @@
+# External-DB override — Postgres out of compose, into a dedicated DB qube.
+#
+# This is the compose-side of the three-qube split (see three-qube-design.md and
+# issue #4): the `postgres` service is removed from the running stack and the mcp
+# server + log-ingester are pointed at an external Postgres reached over a
+# firewall-scoped tailnet link (default-deny except the app qube).
+#
+# What it does:
+#   1. Parks the bundled `postgres` service under a profile that is never
+#      activated, so `docker compose up` does not start it. (DB_HOST in .env
+#      points mcp/log-ingester at the real database instead.)
+#   2. Clears the `depends_on: postgres` health-gate on mcp and log-ingester —
+#      there is no local postgres to wait on. Uses the `!reset` tag (compose
+#      v2.20+), same mechanism as docker-compose.pattern-b.yml's `ports: !reset`.
+#
+# Usage (with the Pattern B + Funnel stack):
+#   In .env:
+#     DB_HOST=<db-qube-tailnet-ip>           # the DB qube's tailnet address
+#     COMPOSE_FILE=../compose-local/docker-compose.yml:../compose-tailnet/docker-compose.pattern-b.yml:docker-compose.external-db.yml
+#     COMPOSE_PROFILES=pattern-b
+#   then: docker compose up -d
+#
+# Verify the bundled postgres is excluded before bringing the stack up:
+#   docker compose config --services        # must NOT list `postgres`
+#
+# The app role (openbrain_app) and the log-ingester role (openbrain_ingester)
+# must exist on the external DB with the passwords in .env, and the external
+# Postgres must permit the app qube's IP (pg_hba scram). See deploy/qubes/README.md.
+
+services:
+  # Never started: assigned a profile that the deploy never activates. The base
+  # file declares `postgres` with no profile (always-on); naming a profile here
+  # replaces that, gating it out of `docker compose up`.
+  postgres:
+    profiles:
+      - bundled-db-disabled
+
+  mcp:
+    # No local postgres to gate on; DB_HOST points elsewhere.
+    depends_on: !reset null
+
+  log-ingester:
+    depends_on: !reset null

@@ -68,8 +68,11 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DB_HOST: postgres
-      DB_PORT: "5432"
+      # Defaults to the in-compose `postgres` service; override DB_HOST in .env
+      # to point at an external Postgres (e.g. a dedicated DB qube). The
+      # log-ingester shares the mcp DB connection config.
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
       DB_NAME: ${POSTGRES_DB:-openbrain}
       # Observability-only role with INSERT-only on
       # funnel_access_log. Compose will fail to start the ingester if

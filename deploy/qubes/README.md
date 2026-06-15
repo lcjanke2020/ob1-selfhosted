@@ -69,6 +69,17 @@ For **user** timers, two extra Qubes-isms: idle app qubes get suspended (timers 
 
 This shape — Fedora app qube, bind-dirs as above, Pattern A with CPU-only Ollama — passed the full [verification checklist](../compose-local/README.md#verification-checklist) end-to-end, including first-try semantic recall from a Claude client on another tailnet machine. The snags documented above are the complete list encountered; everything else worked as on a plain Linux host.
 
-## Where this is going
+## Pulling the database into its own qube
 
-A single qube running edge + app + database means a compromise of the public edge is a compromise of the memory store. The designed next step separates those into **ingress / app / db qubes** with the database pulled out of compose entirely — see [`three-qube-design.md`](three-qube-design.md).
+A single qube running edge + app + database means a compromise of the public edge is a compromise of the memory store. The first separation — **Postgres out of compose into a dedicated DB qube** — is implemented: run the stack with [`docker-compose.external-db.yml`](docker-compose.external-db.yml) layered on, set `DB_HOST` in `.env` to the DB qube's tailnet IP, and the bundled `postgres` service no longer starts. The DB qube accepts connections only from the app qube (Tailscale ACL + nft `tailscale0:5432` + `pg_hba` scram). Full reasoning, the three trust layers, and the reboot-persistence requirements are in [`three-qube-design.md`](three-qube-design.md).
+
+A Qubes app qube has no GPU passthrough, so also layer on [`docker-compose.cpu-ollama.yml`](docker-compose.cpu-ollama.yml) (strips the base ollama nvidia reservation; CPU `nomic-embed-text` is sub-second). The full external-DB + CPU invocation, run from `deploy/qubes`:
+
+```sh
+DB_HOST=<db-qube-tailnet-ip> \
+COMPOSE_FILE=../compose-local/docker-compose.yml:../compose-tailnet/docker-compose.pattern-b.yml:docker-compose.external-db.yml:docker-compose.cpu-ollama.yml \
+COMPOSE_PROFILES=pattern-b \
+docker compose up -d
+```
+
+The remaining step is moving **Funnel + Caddy into their own ingress qube** so the edge and the app are also separated — still a design (see `three-qube-design.md`).
