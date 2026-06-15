@@ -44,9 +44,13 @@ USER deno
 # can't connect to postgres.
 
 # Deno permissions:
-# --allow-net=postgres:5432  scoped to the postgres service inside the
-#                            docker network. The ingester never talks to
-#                            the outside world.
+# --allow-net  built from DB_HOST:DB_PORT at container start (see the `sh -c`
+#              wrapper in CMD — exec-form CMD does not expand env). The ingester
+#              only ever talks to the configured database: the bundled
+#              `postgres:5432` by default, or the external DB address when
+#              DB_HOST is set (e.g. a dedicated DB qube). Kept SCOPED rather than
+#              dropped to unrestricted `--allow-net` like mcp, so a compromised
+#              ingester still can't reach the outside world.
 # --allow-env  The 7 vars log_ingester.ts reads explicitly + the 7 PG*
 #              vars `deno-postgres@v0.19.3` reads internally at Pool
 #              construction time. log_ingester.ts:83 passes explicit
@@ -87,9 +91,7 @@ USER deno
 #                                          is non-nested vs caddy_logs to
 #                                          avoid the read-only-rootfs +
 #                                          nested-mountpoint init failure.
-CMD ["deno", "run", \
-     "--allow-net=postgres:5432", \
-     "--allow-env=DB_HOST,DB_PORT,DB_NAME,DB_USER,DB_PASSWORD,CADDY_LOG_DIR,INGESTER_POLL_INTERVAL_MS,PGAPPNAME,PGDATABASE,PGHOST,PGOPTIONS,PGPASSWORD,PGPORT,PGUSER", \
-     "--allow-read=/var/log/caddy,/var/lib/ingester/cursors,/app", \
-     "--allow-write=/var/lib/ingester/cursors", \
-     "log_ingester.ts"]
+# `sh -c` so ${DB_HOST}/${DB_PORT} expand into the --allow-net target at start
+# (defaults preserve the old bundled-postgres behavior). `exec` keeps deno as
+# PID 1 for clean signal handling.
+CMD ["sh", "-c", "exec deno run --allow-net=${DB_HOST:-postgres}:${DB_PORT:-5432} --allow-env=DB_HOST,DB_PORT,DB_NAME,DB_USER,DB_PASSWORD,CADDY_LOG_DIR,INGESTER_POLL_INTERVAL_MS,PGAPPNAME,PGDATABASE,PGHOST,PGOPTIONS,PGPASSWORD,PGPORT,PGUSER --allow-read=/var/log/caddy,/var/lib/ingester/cursors,/app --allow-write=/var/lib/ingester/cursors log_ingester.ts"]

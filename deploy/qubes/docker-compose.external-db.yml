@@ -11,12 +11,17 @@
 #      points mcp/log-ingester at the real database instead.)
 #   2. Clears the `depends_on: postgres` health-gate on mcp and log-ingester —
 #      there is no local postgres to wait on. Uses the `!reset` tag (compose
-#      v2.20+), same mechanism as docker-compose.pattern-b.yml's `ports: !reset`.
+#      v2.24.4+, where `!reset`/`!override` landed), same mechanism as
+#      docker-compose.pattern-b.yml's `ports: !reset`.
+#   3. Makes DB_HOST mandatory under this override (fail-fast at `docker compose
+#      config` time, not at connect time), and gates the log-ingester entry
+#      behind the `pattern-b` profile so this file is safe to load even without
+#      docker-compose.pattern-b.yml.
 #
 # Usage (with the Pattern B + Funnel stack):
 #   In .env:
 #     DB_HOST=<db-qube-tailnet-ip>           # the DB qube's tailnet address
-#     COMPOSE_FILE=../compose-local/docker-compose.yml:../compose-tailnet/docker-compose.pattern-b.yml:docker-compose.external-db.yml
+#     COMPOSE_FILE=../compose-local/docker-compose.yml:../compose-tailnet/docker-compose.pattern-b.yml:docker-compose.external-db.yml:docker-compose.cpu-ollama.yml
 #     COMPOSE_PROFILES=pattern-b
 #   then: docker compose up -d
 #
@@ -38,6 +43,18 @@ services:
   mcp:
     # No local postgres to gate on; DB_HOST points elsewhere.
     depends_on: !reset null
+    environment:
+      # Fail-fast: with the bundled `postgres` parked, an unset DB_HOST would
+      # default to the now-nonexistent `postgres` name and fail only at connect
+      # time. `:?` makes compose error at config time with this message instead.
+      DB_HOST: ${DB_HOST:?set DB_HOST to the external Postgres address (e.g. the DB qube) when layering the external-db override}
 
+  # Gated behind `pattern-b` (where the service is actually defined) so loading
+  # this override WITHOUT docker-compose.pattern-b.yml doesn't leave a bodyless
+  # `log-ingester` with no image/build.
   log-ingester:
+    profiles:
+      - pattern-b
     depends_on: !reset null
+    environment:
+      DB_HOST: ${DB_HOST:?set DB_HOST to the external Postgres address (e.g. the DB qube) when layering the external-db override}

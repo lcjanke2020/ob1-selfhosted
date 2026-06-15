@@ -24,7 +24,7 @@
 # header-strip boundary and turns a leaked x-brain-key into a public route.
 # That's the Caddy-bypass risk in network-layer terms.
 #
-# Requires docker compose v2.20+ for the `!reset` tag.
+# Requires docker compose v2.24.4+ for the `!reset` tag (where `!reset`/`!override` landed).
 
 services:
   mcp:
