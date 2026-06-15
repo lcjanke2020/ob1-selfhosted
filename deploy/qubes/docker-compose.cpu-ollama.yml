@@ -2,7 +2,7 @@
 # which has no GPU passthrough). The base compose reserves an nvidia device for
 # the ollama service; on a GPU-less host that reservation makes the container
 # fail to start. This clears just the GPU device reservation via `!reset`
-# (compose v2.24.4+, where `!reset`/`!override` landed). CPU-only
+# (needs a Compose v2 that supports `!reset`; v2.24.4 documents it). CPU-only
 # nomic-embed-text embedding is sub-second per request, fine for personal recall.
 #
 # Layer it after the other compose files, e.g.:

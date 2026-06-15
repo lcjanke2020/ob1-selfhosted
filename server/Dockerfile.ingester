@@ -96,6 +96,8 @@ USER deno
 # wrapper is the ENTRYPOINT and the entrypoint .ts is the CMD (forwarded as
 # "$@"): keeps it overridable, and the --allow-env drift check
 # (scripts/check_allow_env.ts) finds the quoted .ts in CMD. Defaults preserve
-# the bundled-postgres behavior.
-ENTRYPOINT ["sh", "-c", "exec deno run --allow-net=${DB_HOST:-postgres}:${DB_PORT:-5432} --allow-env=DB_HOST,DB_PORT,DB_NAME,DB_USER,DB_PASSWORD,CADDY_LOG_DIR,INGESTER_POLL_INTERVAL_MS,PGAPPNAME,PGDATABASE,PGHOST,PGOPTIONS,PGPASSWORD,PGPORT,PGUSER --allow-read=/var/log/caddy,/var/lib/ingester/cursors,/app --allow-write=/var/lib/ingester/cursors \"$@\"", "sh"]
+# the bundled-postgres behavior. IPv6 hosts (a tailnet DB qube may be addressed
+# by its IPv6) are bracketed — Deno requires `--allow-net=[::1]:5432` form — by
+# testing the host for a colon.
+ENTRYPOINT ["sh", "-c", "H=${DB_HOST:-postgres}; case \"$H\" in *:*) NET=\"[$H]:${DB_PORT:-5432}\" ;; *) NET=\"$H:${DB_PORT:-5432}\" ;; esac; exec deno run --allow-net=\"$NET\" --allow-env=DB_HOST,DB_PORT,DB_NAME,DB_USER,DB_PASSWORD,CADDY_LOG_DIR,INGESTER_POLL_INTERVAL_MS,PGAPPNAME,PGDATABASE,PGHOST,PGOPTIONS,PGPASSWORD,PGPORT,PGUSER --allow-read=/var/log/caddy,/var/lib/ingester/cursors,/app --allow-write=/var/lib/ingester/cursors \"$@\"", "sh"]
 CMD ["log_ingester.ts"]

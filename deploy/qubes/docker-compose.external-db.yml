@@ -11,7 +11,7 @@
 #      points mcp/log-ingester at the real database instead.)
 #   2. Clears the `depends_on: postgres` health-gate on mcp and log-ingester —
 #      there is no local postgres to wait on. Uses the `!reset` tag (compose
-#      v2.24.4+, where `!reset`/`!override` landed), same mechanism as
+#      needs a Compose v2 that supports `!reset`; v2.24.4 documents it), same mechanism as
 #      docker-compose.pattern-b.yml's `ports: !reset`.
 #   3. Makes DB_HOST mandatory under this override (fail-fast at `docker compose
 #      config` time, not at connect time), and gates the log-ingester entry
