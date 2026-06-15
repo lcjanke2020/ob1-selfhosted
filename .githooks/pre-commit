@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Pre-commit leak guard — blocks commits that introduce home-network specifics
+# or internal references into tracked content. A best-effort local mirror of the
+# CI "Credential & identifier scan"; NOT a security boundary (this project does
+# not rely on obscurity), just a courtesy so a clone doesn't accidentally ship a
+# tailnet IP or an internal ticket id.
+#
+# Enable (once per clone):     git config core.hooksPath .githooks
+# Bypass a specific commit:    git commit --no-verify
+#
+# Built-in checks (always on):
+#   * Tailscale CGNAT IPs  (the 100.64/10 range) — your tailnet addresses
+#   * Internal ticket refs (LEO-<number>)  — reference a GitHub issue instead
+#
+# Extra patterns (your real hostnames etc.) go in a LOCAL, gitignored file at
+# the repo root: .leak-denylist  (one extended-regex per line; '#' comments).
+# See .leak-denylist.example. The denylist itself is never committed, so the
+# sensitive strings stay on your machine.
+set -uo pipefail
+
+# Added lines in the staged diff, minus this hook dir (so its own example
+# patterns don't self-trip). -U0 = no context; keep only '+' additions.
+added="$(git diff --cached --unified=0 --no-color -- . ':(exclude).githooks/**' \
+         | grep -E '^\+[^+]' | sed 's/^\+//')"
+[ -z "$added" ] && exit 0
+
+fail=0
+flag() { printf '  \033[31m✗ %s\033[0m\n' "$1"; fail=1; }
+show() { echo "$added" | grep -nEi "$1" | sed 's/^/      /' | head -8; }
+
+# 1) Tailscale CGNAT range (100.64/10).
+ts='\b100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}\b'
+if echo "$added" | grep -qE "$ts"; then
+  flag "tailnet IP (100.64/10 range) — use a placeholder like <tailnet-ip>"; show "$ts"
+fi
+
+# 2) Internal ticket references (LEO-<number>).
+tk='\bLEO-[0-9]+\b'
+if echo "$added" | grep -qEi "$tk"; then
+  flag "internal ticket ref — link a GitHub issue instead"; show "$tk"
+fi
+
+# 3) Custom patterns from the local, gitignored denylist.
+deny="$(git rev-parse --show-toplevel)/.leak-denylist"
+if [ -f "$deny" ]; then
+  pat="$(grep -vE '^[[:space:]]*(#|$)' "$deny" | paste -sd '|' -)"
+  if [ -n "$pat" ] && echo "$added" | grep -qEi "$pat"; then
+    flag "denylisted string (from .leak-denylist)"; show "$pat"
+  fi
+else
+  printf '  · no .leak-denylist found — hostname check skipped (see .leak-denylist.example)\n'
+fi
+
+if [ "$fail" -ne 0 ]; then
+  printf '\n\033[31mpre-commit leak guard blocked this commit.\033[0m Fix the lines above, or bypass with: git commit --no-verify\n'
+  exit 1
+fi
+exit 0

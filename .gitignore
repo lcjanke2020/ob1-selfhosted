@@ -14,3 +14,7 @@ local_dont_track/
 # Backups and exports
 *.sql.gz
 *.dump
+
+# Pre-commit leak guard: real hostname/string denylist stays local.
+# The .example template is tracked; the live list is not.
+.leak-denylist
