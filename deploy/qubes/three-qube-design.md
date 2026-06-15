@@ -1,6 +1,16 @@
 # Design: ingress / app / db in three qubes
 
-**Status: design, partially implemented.** The dedicated DB qube is provisioned and tested; transport wiring and the compose-stack split are in progress. Published as a design doc because the reasoning is the transferable part.
+**Status: DB split implemented; ingress split still a design.** The dedicated DB qube is provisioned, the app→DB transport is wired (firewall-scoped tailnet — see below), and the compose stack pulls Postgres out via [`docker-compose.external-db.yml`](docker-compose.external-db.yml). The remaining *design* part is moving Funnel + Caddy into their own ingress qube. Published as a design doc because the reasoning is the transferable part.
+
+## Implemented: app→DB transport (firewall-scoped tailnet)
+
+The DB qube runs Postgres natively and is reachable **only** from the app qube, enforced in three independent layers:
+
+1. **Tailscale ACL** — a grant permits exactly `app-qube → db-qube:5432`; every other tailnet peer is default-denied at the wire. The DB qube carries its own tag (e.g. `tag:ob1-db`) and nothing else routes to it.
+2. **Qubes nftables** — the DB qube accepts inbound `tcp/5432` on `tailscale0` only (a `custom-input` rule reapplied after `tailscaled` by a one-shot unit, since `qubes-firewall.service` runs before the interface exists). No `:22` — there is no sshd; all admin is dom0 `qvm-run`.
+3. **`pg_hba.conf`** — `scram-sha-256` host lines for the app roles from the app qube's IP only; the superuser stays off the network.
+
+PGDATA, `/etc/postgresql`, and `/var/lib/tailscale` are bind-dir'd into `/rw` so the cluster, its hardened config, and the node identity survive reboots; the cluster is started on boot (after `tailscale0` is up) from `rc.local`. The more-isolated qrexec / `qubes.ConnectTCP` transport (no listener at all) remains a tracked follow-up.
 
 ## Problem
 

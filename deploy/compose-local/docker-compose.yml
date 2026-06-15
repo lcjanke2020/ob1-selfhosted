@@ -111,8 +111,11 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DB_HOST: postgres
-      DB_PORT: "5432"
+      # Defaults to the in-compose `postgres` service. Override DB_HOST (e.g. in
+      # .env) to point at an external Postgres — e.g. a dedicated DB qube on the
+      # tailnet. See deploy/qubes/docker-compose.external-db.yml.
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
       DB_NAME: ${POSTGRES_DB:-openbrain}
       DB_USER: openbrain_app
       DB_PASSWORD: ${OPENBRAIN_APP_PASSWORD}
