@@ -1,0 +1,19 @@
+#!/bin/sh
+# DB qube host firewall — open inbound Postgres on the tailnet interface ONLY.
+#
+# Install at: /rw/config/qubes-firewall-user-script   (chmod +x)
+#
+# The Qubes `ip qubes` input chain drops non-uplink traffic by default, so an
+# inbound rule on tailscale0 needs an explicit accept. We deliberately do NOT
+# open tcp/22 — there is no sshd on this qube; all admin is dom0 `qvm-run`.
+# Source-peer restriction is the Tailscale ACL's job; pg_hba adds the PG-level
+# source-IP + scram gate on top (see pg_hba.snippet.conf).
+#
+# NOTE: qubes-firewall.service runs BEFORE tailscaled, so tailscale0 does not
+# exist yet at first apply. The ob1-db-firewall.service one-shot re-runs this
+# script After=tailscaled so the rule actually lands (see ob1-db-firewall.service
+# and rc.local).
+
+# OB1 DB qube: allow inbound Postgres on the tailnet interface only.
+nft add rule ip  qubes custom-input iifname "tailscale0" tcp dport 5432 ct state new accept 2>/dev/null || true
+nft add rule ip6 qubes custom-input iifname "tailscale0" tcp dport 5432 ct state new accept 2>/dev/null || true
