@@ -26,7 +26,8 @@ What this stack trusts, what it doesn't, and what each layer is allowed to do af
 - A boot-time JWKS reachability probe (with an explicit wall-clock timeout that also caps every later refresh) surfaces a typo'd JWKS URI at startup rather than at the first attacker request.
 - The server fail-fasts when OAuth is configured but the Pattern B override wasn't loaded (`ENABLE_OAUTH && !PATTERN_B`), catching the half-configured invocation that would leave the backend port published.
 - Auth-failure responses are deliberately shaped: **missing** credentials get HTTP 401 + `WWW-Authenticate` (RFC 6750 — what OAuth discovery needs), while **invalid** credentials get an HTTP 200 JSON-RPC error envelope so MCP clients don't tear down an established transport. Operator-facing messages are collapsed to a single "unauthorized" — the granular reason goes to the audit table, not to the caller, closing a credential-status side-channel.
-- Captured content is hard-capped (100,000 UTF-8 bytes) on both `capture_thought` and `session_capture`.
+- Captured content is hard-capped (100,000 UTF-8 bytes) on `capture_thought`, `update_thought` (replacement text), and `session_capture`.
+- The thoughts write surface is INSERT/UPDATE-only: there is no delete tool, and `openbrain_app` holds no DELETE privilege. `update_thought` edits in place, supports `if_unchanged_since` optimistic concurrency against lost updates, and stamps the updating door/`sub` into metadata exactly like a capture.
 - Session provenance (`source`, `source_node`) is stamped server-side from the transport; caller-supplied values are ignored.
 
 ### Database layer
@@ -63,7 +64,7 @@ Four roles, least privilege, with drift detection:
 ## Known limitations
 
 - **No per-user RLS.** Both doors grant full read/write; `sub` attributes but doesn't partition. Fine for a personal memory store; wrong for multi-tenant.
-- **Door attribution is last-writer-wins on dedupe.** Re-capturing byte-identical content through the other door updates the stored `door`/`sub` (metadata merges on conflict) — attribution reflects the most recent capture, not the first.
+- **Door attribution is last-writer-wins on dedupe.** Re-capturing byte-identical content through the other door updates the stored `door`/`sub` (metadata merges on conflict) — attribution reflects the most recent capture, not the first. `update_thought` behaves the same way: an edit restamps `door`/`sub` to the editor.
 - **`/caddy-health` is reachable from any source** — required for the docker healthcheck; a public scanner can learn "Caddy is up" from it. Accepted as a minor info leak.
 - **Funnel availability caveats** — see the limitations table in [`funnel-mcp-perimeter.md`](funnel-mcp-perimeter.md).
 - **Single-qube co-residency** (Qubes path) — the edge and the database currently share a VM; the [three-qube design](../deploy/qubes/three-qube-design.md) is the planned fix.

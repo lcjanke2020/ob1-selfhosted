@@ -93,7 +93,7 @@ The server is gated by an `x-brain-key` header, and is deliberately header-only 
 
 > **Windows gotcha.** Claude Desktop spawns subprocesses without a shell, so PATH entries from a node-version manager (`fnm`, `nvm-windows`) often aren't visible — you'll see `spawn npx ENOENT` in the connector log. If you have Bun, `"command": "bun", "args": ["x", "mcp-remote", ...]` usually works out of the box; otherwise hard-code the full path to `npx.cmd`.
 
-After a client restart, the connector should list **eleven tools**: `capture_thought`, `search_thoughts`, `list_thoughts`, `thought_stats`, `search`, `fetch`, plus `session_capture`, `session_resume`, `session_search`, `session_list`, `session_update_status`. Test by saying *"remember that I set up Open Brain today."*
+After a client restart, the connector should list **twelve tools**: `capture_thought`, `update_thought`, `search_thoughts`, `list_thoughts`, `thought_stats`, `search`, `fetch`, plus `session_capture`, `session_resume`, `session_search`, `session_list`, `session_update_status`. Test by saying *"remember that I set up Open Brain today."*
 
 ## Verification checklist
 

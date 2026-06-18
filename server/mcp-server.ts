@@ -17,6 +17,7 @@ import {
   getStats,
   listThoughts,
   searchThoughts,
+  updateThought,
 } from "./queries.ts";
 import {
   getSessionContentHash,
@@ -147,7 +148,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
     name: "open-brain-homelab",
     // Bump on behavior changes — this is the serverInfo version a client
     // sees on initialize.
-    version: "1.1.0",
+    version: "1.2.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -225,9 +226,17 @@ export function createMcpServer(auth: RequestAuth): McpServer {
         query: z.string().min(1).describe("What to search for"),
         limit: z.number().int().min(1).max(100).optional().default(10),
         threshold: z.number().min(0).max(1).optional().default(0.5),
+        recency_weight: z.number().min(0).max(1).optional().default(0)
+          .describe(
+            "0 = pure semantic ranking (default, unchanged behavior). >0 blends exponential recency decay into the score: similarity*(1-w) + exp(-age_days/half_life_days)*w. The threshold still applies to raw similarity. Try 0.2 for a gentle nudge toward recent thoughts.",
+          ),
+        half_life_days: z.number().positive().max(3650).optional().default(90)
+          .describe(
+            "Recency decay half-life in days (only consulted when recency_weight > 0)",
+          ),
       },
     },
-    async ({ query, limit, threshold }) => {
+    async ({ query, limit, threshold, recency_weight, half_life_days }) => {
       try {
         const embedding = await embed(query);
         const rows = await searchThoughts(pool, {
@@ -235,6 +244,8 @@ export function createMcpServer(auth: RequestAuth): McpServer {
           embedding,
           limit,
           threshold,
+          recencyWeight: recency_weight,
+          halfLifeDays: half_life_days,
         });
         if (!rows.length) return text(`No thoughts found matching "${query}".`);
         const lines = rows.map((t, i) => {
@@ -284,11 +295,18 @@ export function createMcpServer(auth: RequestAuth): McpServer {
         person: z.string().optional().describe("Filter by person mentioned"),
         days: z.number().int().min(1).max(3650).optional()
           .describe("Only thoughts from the last N days"),
+        content_contains: z.string().min(1).max(200).optional()
+          .describe(
+            "Case-insensitive substring match on thought content — lexical fallback for exact tokens (IDs, names, code fragments) that semantic search can miss. Matched literally; combines with the other filters.",
+          ),
       },
     },
-    async (opts) => {
+    async ({ content_contains, ...opts }) => {
       try {
-        const rows = await listThoughts(pool, opts);
+        const rows = await listThoughts(pool, {
+          ...opts,
+          contentContains: content_contains,
+        });
         if (!rows.length) return text("No thoughts found.");
         const lines = rows.map((t, i) => {
           const m = t.metadata || {};
@@ -436,6 +454,137 @@ export function createMcpServer(auth: RequestAuth): McpServer {
         }
         parts.push(`(id: ${id})`);
         return text(parts.join(" "));
+      } catch (e) {
+        return err((e as Error).message);
+      }
+    },
+  );
+
+  // Ported from upstream OB1's update-thought-mcp integration (PR #228),
+  // which ships this as a standalone Edge Function because upstream's core
+  // server is curated. Our server is the only surface, so it lives here as a
+  // twelfth tool. The optimistic-concurrency CAS itself is in
+  // queries.ts/updateThought.
+  server.registerTool(
+    "update_thought",
+    {
+      title: "Update Thought",
+      description:
+        "Update an existing thought by ID. Provide `content` to overwrite the text and regenerate its embedding, `metadata_patch` to shallow-merge changes into the existing metadata, or both. Keys not mentioned in `metadata_patch` are left unchanged. Pass `if_unchanged_since` (the updated_at from your most recent read) for optimistic concurrency — the update is rejected with STALE_READ if another writer has touched the row since then. Omit it for last-write-wins.",
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+        // The one tool that can lose prior state: it overwrites content /
+        // metadata keys in place (capture_thought only ever adds or merges).
+        destructiveHint: true,
+        idempotentHint: false,
+      },
+      inputSchema: {
+        id: z.string().uuid().describe("UUID of the thought to update"),
+        // Same UTF-8 byte cap as capture_thought (see the rationale comment
+        // there): replacement text flows through the same embed + INSERT
+        // cost paths.
+        content: z
+          .string()
+          .min(1)
+          .max(100_000)
+          .refine(
+            (s) => UTF8_ENCODER.encode(s).length <= 100_000,
+            { message: "content must be at most 100000 UTF-8 bytes" },
+          )
+          .optional()
+          .describe(
+            "New text content — replaces the thought and triggers re-embedding when provided",
+          ),
+        metadata_patch: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe(
+            "Partial metadata to shallow-merge into the existing metadata JSONB. New keys are added; existing keys are overwritten; keys not mentioned are left alone.",
+          ),
+        if_unchanged_since: z
+          .iso
+          .datetime({ offset: true })
+          .optional()
+          .describe(
+            "Optional ISO 8601 timestamp (with timezone). When provided, the update is rejected with STALE_READ if the stored updated_at has advanced past this reference. Pass the updated_at value from your most recent read to guard against lost-update conflicts. Omit to keep last-write-wins behavior.",
+          ),
+      },
+    },
+    async ({ id, content, metadata_patch, if_unchanged_since }) => {
+      try {
+        if (content === undefined && metadata_patch === undefined) {
+          // Mirror upstream: a no-op call is answered, not errored — but
+          // only after confirming the id exists.
+          const existing = await fetchThought(pool, id);
+          if (!existing) return err(`Thought not found: ${id}`);
+          return text(`No changes supplied; thought ${id} unchanged.`);
+        }
+        const embedding = content !== undefined
+          ? await embed(content)
+          : undefined;
+        // Same door/sub stamping as capture_thought so the update's
+        // provenance lands in metadata (last-writer-wins, like re-captures).
+        // `source` is deliberately NOT touched — import provenance survives
+        // edits.
+        const patch: Record<string, unknown> = {
+          ...(metadata_patch ?? {}),
+          door: auth.door,
+          sub: auth.sub,
+        };
+        const outcome = await updateThought(pool, {
+          id,
+          content,
+          embedding,
+          metadataPatch: patch,
+          ifUnchangedSince: if_unchanged_since,
+        });
+        switch (outcome.kind) {
+          case "not_found":
+            return err(`Thought not found: ${id}`);
+          case "stale":
+            // Structured body, but keep upstream's STALE_READ token so
+            // clients written against upstream's tool keep working.
+            return {
+              content: [{
+                type: "text" as const,
+                text: JSON.stringify({
+                  error: "STALE_READ",
+                  current_updated_at: new Date(outcome.current_updated_at)
+                    .toISOString(),
+                  message:
+                    `thought has been modified since ${if_unchanged_since}. Re-fetch and retry.`,
+                }),
+              }],
+              isError: true,
+            };
+          case "fingerprint_conflict":
+            return {
+              content: [{
+                type: "text" as const,
+                text: JSON.stringify({
+                  error: "DUPLICATE_CONTENT",
+                  existing_id: outcome.existing_id,
+                  message:
+                    "another thought already holds identical (normalized) content; updating would violate the dedupe fingerprint",
+                }),
+              }],
+              isError: true,
+            };
+          case "updated": {
+            const parts = [`Updated thought ${outcome.id}`];
+            if (content !== undefined) {
+              parts.push("  · content replaced and re-embedded");
+            }
+            if (metadata_patch !== undefined) parts.push("  · metadata merged");
+            parts.push(
+              `  · updated_at: ${
+                new Date(outcome.updated_at).toISOString()
+              }`,
+            );
+            return text(parts.join("\n"));
+          }
+        }
       } catch (e) {
         return err((e as Error).message);
       }
