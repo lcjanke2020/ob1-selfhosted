@@ -39,12 +39,15 @@ TMP="$(mktemp "$OUT_DIR/.db-$TS.XXXXXX")"; trap 'rm -f "$TMP"' EXIT
 
 # pipefail makes the whole chain fail if pg_dump (e.g. lost connection), gzip, or the
 # gpg encrypt step errors — so a partial/failed dump is never published.
-# gpg -z 0 disables gpg's own compression so we don't compress twice; gzip --rsyncable
-# keeps small daily diffs localized so Syncthing/rsync don't re-ship the whole file.
+# gpg -z 0 disables gpg's own compression so the already-gzipped stream isn't compressed
+# twice. (Don't expect rsync/Syncthing to ship only daily *diffs* of these artifacts:
+# gpg uses a fresh random session key + CFB prefix per run, so the ciphertext changes
+# pervasively even for identical input — the whole file re-replicates each day. See Notes
+# for the incremental-encrypted-backup option.)
 PGPASSWORD="$READONLY_PASSWORD" pg_dump \
   -h "$DB_HOST" -p "$DB_PORT" -U "$READONLY_ROLE" -d "$POSTGRES_DB" \
   --no-owner --no-privileges \
-  | gzip --rsyncable \
+  | gzip \
   | gpg --batch --no-tty --yes -z 0 --recipient-file "$PUBKEY" --encrypt --output "$TMP"
 
 # Encrypt-only host can't decrypt to verify; just ensure a non-empty artifact
@@ -72,15 +75,22 @@ A backup you haven't restored is not a backup. With the encrypted dumps on the o
 store and the private key on a separate machine that can reach it:
 
 ```bash
-# Pipe straight into a throwaway Postgres + pgvector so the decrypted plaintext never
-# lands on disk (avoids a predictable-path window, and `shred -u` is unreliable on
-# journaling/CoW filesystems and SSDs anyway). If you must stage a file, `mktemp` it 0600.
+#!/bin/bash
+# Without pipefail, the pipeline takes psql's exit status — an upstream ssh/gpg/gunzip
+# failure mid-pipe could feed psql a truncated dump and still exit 0, i.e. a silently
+# partial restore (the exact failure this section warns against).
+set -euo pipefail
+DSN="postgresql://restore:restore@localhost:5432/restore_test"   # throwaway DB + pgvector
+
+# Pipe straight into the throwaway DB so the decrypted plaintext never lands on disk
+# (avoids a predictable-path window, and `shred -u` is unreliable on journaling/CoW
+# filesystems and SSDs anyway). If you must stage a file, `mktemp` it 0600.
 ssh <offbox-host> "cat '/path/db-YYYYMMDD.sql.gz.gpg'" \
-  | gpg --decrypt | gunzip | psql "<throwaway-dsn>"
+  | gpg --decrypt | gunzip | psql "$DSN"
 
 # Then spot-check the restore — a backup that restores but is empty is still no backup:
-psql "<throwaway-dsn>" -c '\dt'
-psql "<throwaway-dsn>" -c "SELECT count(*) FROM thoughts;"
+psql "$DSN" -c '\dt'
+psql "$DSN" -c "SELECT count(*) FROM thoughts;"
 ```
 
 ## Notes
@@ -90,3 +100,6 @@ psql "<throwaway-dsn>" -c "SELECT count(*) FROM thoughts;"
 - **Back up the private key itself.** Data encrypted to a key you can lose is data you can lose.
 - Move the public key with a **binary-safe transport** (file copy / sync), not email or chat
   paste, which reflow armored text and corrupt the key block.
+- **Want incremental off-box backups?** Plain `gpg` output can't be diffed — each run re-ships
+  the whole artifact. If daily bandwidth matters, reach for a tool that dedups at the block
+  level *under* its own encryption (e.g. `borg`, `restic`) instead of `pg_dump | gpg`.
