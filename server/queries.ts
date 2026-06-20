@@ -231,11 +231,9 @@ export async function getStats(pool: Pool): Promise<Stats> {
 }
 
 export async function pingDb(pool: Pool): Promise<boolean> {
+  // getClient() validates the borrow with its own SELECT 1, so a successful
+  // borrow already proves liveness — no second round-trip needed.
   const client = await getClient(pool);
-  try {
-    await client.queryObject("SELECT 1");
-    return true;
-  } finally {
-    client.release();
-  }
+  client.release();
+  return true;
 }

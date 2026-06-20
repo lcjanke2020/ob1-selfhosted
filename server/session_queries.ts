@@ -1,6 +1,6 @@
 // pure SQL business logic for the sessions schema. No HTTP concerns,
 // mirroring queries.ts so a future REST gateway / CLI could reuse these.
-// pool.connect() -> client.queryObject<T>(sql, params) -> client.release().
+// getClient(pool) -> client.queryObject<T>(sql, params) -> client.release().
 
 import { Pool } from "postgres";
 import { getClient } from "./db_pool.ts";

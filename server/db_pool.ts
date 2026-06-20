@@ -21,8 +21,11 @@
 // the client — which flips the driver's internal `connected` flag to false —
 // and releases it, so the pool's own borrow path (`DeferredAccessStack.pop`)
 // re-establishes the connection on the next attempt and clears the terminated
-// flag. A short bounded retry loop covers the window where the database is
-// still finishing its restart.
+// flag. A short bounded retry loop gives the *same* call a chance to ride out
+// a brief blip, but its total backoff is small (~450 ms at the defaults) and
+// won't bridge a multi-second restart — the durable guarantee is across
+// requests: every failed attempt evicts the dead client, so the pool is left
+// clean and the next borrow reconnects.
 //
 // Validate-on-borrow (rather than retry-the-caller's-query) is deliberate:
 // the recovery happens on a throwaway probe, so callers never risk a
@@ -43,6 +46,10 @@ const delay = (ms: number): Promise<void> =>
  * SQL error such as a constraint violation, which must propagate unchanged).
  * Matches both the driver's typed `ConnectionError` and the raw OS-level
  * socket errors the driver sometimes surfaces verbatim.
+ *
+ * The string matches are empirical — observed from `deno-postgres@v0.19.3`
+ * and the Deno runtime, not a stable API. Prefer *widening* this list over
+ * tightening it into a brittle `instanceof`-only check.
  */
 export function isConnectionError(e: unknown): boolean {
   if (e instanceof ConnectionError) return true;
@@ -78,8 +85,11 @@ export async function getClient(
   pool: Pool,
   attempts: number = DEFAULT_ATTEMPTS,
 ): Promise<PoolClient> {
+  // Clamp so an explicit `getClient(pool, 0)` (or negative) still makes one
+  // honest attempt instead of skipping the loop and throwing `undefined`.
+  const maxAttempts = Math.max(1, attempts);
   let lastErr: unknown;
-  for (let i = 0; i < attempts; i++) {
+  for (let i = 0; i < maxAttempts; i++) {
     let client: PoolClient | undefined;
     try {
       client = await pool.connect();
@@ -100,7 +110,7 @@ export async function getClient(
         } catch { /* already closed — ignore */ }
         client.release();
       }
-      if (i < attempts - 1) await delay(BASE_BACKOFF_MS * (i + 1));
+      if (i < maxAttempts - 1) await delay(BASE_BACKOFF_MS * (i + 1));
     }
   }
   throw lastErr;

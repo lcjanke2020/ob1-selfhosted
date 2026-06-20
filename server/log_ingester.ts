@@ -403,7 +403,7 @@ async function insertLine(
     return "skip";
   }
 
-  // pool.connect() must be inside the try so that
+  // getClient(pool) must be inside the try so that
   // a pool exhaustion / Postgres-down failure returns "retry" through the
   // documented InsertResult contract rather than throwing out of insertLine
   // and unwinding tickOnce as a generic error. Audit fidelity happens to
