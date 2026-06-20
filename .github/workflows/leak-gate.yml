@@ -38,27 +38,46 @@ jobs:
         run: |
           set -u
           PAT_FILE=.github/leak-patterns.txt
-          # One ERE: drop comment/blank lines, join the rest with '|'.
-          JOINED=$(grep -vE '^[[:space:]]*(#|$)' "$PAT_FILE" | paste -sd '|' -)
+          # GitHub runs this under `bash -eo pipefail`, so guard the steps that
+          # legitimately exit non-zero, or they abort before the clear message.
+          if [ ! -f "$PAT_FILE" ]; then
+            echo "::error::missing pattern file $PAT_FILE"
+            exit 1
+          fi
+          # One ERE: drop comment/blank lines, join the rest with '|'. `|| true`
+          # so an all-comments file (grep -v exits 1) reaches the check below
+          # instead of tripping pipefail.
+          JOINED=$(grep -vE '^[[:space:]]*(#|$)' "$PAT_FILE" | paste -sd '|' -) || true
           if [ -z "$JOINED" ]; then
             echo "::error::no patterns loaded from $PAT_FILE"
             exit 1
           fi
           # Fail CLOSED on a malformed ERE: grep exits 2 on a bad pattern, which
-          # the scan's `if` would otherwise read as "no hits" and pass green with
-          # the gate silently off. Compile-check against empty input first.
-          # `|| rc=$?` keeps the expected rc=1 (no match) from tripping `bash -e`.
+          # the scan would otherwise read as "no hits" and pass green with the
+          # gate silently off. Compile-check against empty input first; `|| rc=$?`
+          # keeps the expected rc=1 (no match) from tripping `set -e`.
           rc=0
           printf '' | grep -Eq -- "$JOINED" 2>/dev/null || rc=$?
           if [ "$rc" -ge 2 ]; then
             echo "::error::invalid regex in $PAT_FILE (grep exit $rc)"
             exit 1
           fi
-          if hits=$(grep -rInE "$JOINED" . \
+          # Scan. Capture grep's status so a real error (rc>=2: unreadable file,
+          # etc.) fails closed instead of reading as "no hits"; rc=1 means clean.
+          # `-e "$JOINED"` so a pattern that ever starts with '-' isn't taken as
+          # an option.
+          rc=0
+          hits=$(grep -rInE \
                 --exclude-dir=.git \
                 --exclude='leak-gate.yml' \
                 --exclude='leak-patterns.txt' \
-                --exclude='test-pre-commit.sh'); then
+                --exclude='test-pre-commit.sh' \
+                -e "$JOINED" .) || rc=$?
+          if [ "$rc" -ge 2 ]; then
+            echo "::error::leak scan failed (grep exit $rc)"
+            exit 1
+          fi
+          if [ -n "$hits" ]; then
             echo "::error::Leak gate found suspicious content:"
             echo "$hits"
             exit 1
