@@ -1,0 +1,18 @@
+# .leak-denylist.example — template for the pre-commit leak guard (.githooks/pre-commit).
+#
+# Copy to .leak-denylist (which is gitignored) and add the strings you never want
+# to commit — typically your internal hostnames. One extended-regex per line;
+# blank lines and full-line '#' comments are ignored (a '#' mid-line is part of
+# the pattern). Matching is case-insensitive. A malformed regex here blocks the
+# commit with a clear message rather than silently disabling the check.
+#
+# The built-in checks (the shared CI pattern set in .github/leak-patterns.txt —
+# credentials, private/tailnet IPs, LEO-<number> and tracker-link refs) always
+# run; these are EXTRA patterns on top.
+#
+# Replace the placeholders below with your own (do NOT commit the real file):
+# myproj-db
+# myproj-app
+# myproj-edge
+# internal-vm-[0-9]+
+# \.my-tailnet-name\.ts\.net

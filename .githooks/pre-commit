@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Pre-commit leak guard — blocks commits that introduce home-network specifics,
+# credentials, or internal references into tracked content. A best-effort LOCAL
+# mirror of the CI "Credential & identifier scan": this hook and the CI gate
+# (.github/workflows/leak-gate.yml) read the SAME pattern set from
+# .github/leak-patterns.txt, so the local check and CI can't drift. On top of
+# that shared set, this hook also applies your LOCAL, gitignored .leak-denylist
+# (real hostnames etc.) which — by design — never lands in the repo.
+#
+# NOT a security boundary (this project does not rely on obscurity); a courtesy
+# so a clone doesn't accidentally ship a secret, a tailnet IP, or a ticket id.
+#
+# Enable (once per clone):     git config core.hooksPath .githooks
+# Bypass a specific commit:    git commit --no-verify
+#
+# Verify the hook itself:      .githooks/test-pre-commit.sh
+set -uo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+pat_file="$root/.github/leak-patterns.txt"
+deny="$root/.leak-denylist"
+strip='^[[:space:]]*(#|$)'   # comment / blank lines in a pattern file
+
+fail=0
+flag() { printf '  \033[31m✗ %s\033[0m\n' "$1"; fail=1; }
+
+# --- pattern sets ----------------------------------------------------------
+# Built-ins: the CI-shared generic set (credentials, private/tailnet IPs,
+# internal refs), joined into one ERE.
+builtin=""
+if [ -f "$pat_file" ]; then
+  builtin="$(grep -vE "$strip" "$pat_file" | paste -sd '|' -)"
+  # Fail CLOSED if the shared set itself is a malformed ERE: a bad pattern makes
+  # grep exit 2, which the scan below would otherwise read as "no hits" and
+  # silently disable the built-ins — the same trap fixed for the denylist.
+  if [ -n "$builtin" ]; then
+    printf '' | grep -Eq -- "$builtin" 2>/dev/null
+    [ "$?" -ge 2 ] && flag "invalid regex in .github/leak-patterns.txt — fix it (commit blocked)"
+  fi
+else
+  printf '  · %s missing — built-in (CI-shared) checks skipped\n' '.github/leak-patterns.txt'
+fi
+
+# Local denylist: your real hostnames etc. Fail CLOSED on a malformed regex
+# rather than silently passing (a bad ERE makes grep exit 2, which a naive
+# `&&` would treat as "no match" and disable the check).
+denypat=""
+if [ -f "$deny" ]; then
+  denypat="$(grep -vE "$strip" "$deny" | paste -sd '|' -)"
+  if [ -n "$denypat" ]; then
+    printf '' | grep -Eiq -- "$denypat" 2>/dev/null
+    [ "$?" -ge 2 ] && flag "invalid regex in .leak-denylist — fix it (commit blocked)"
+  fi
+else
+  printf '  · no .leak-denylist found — local hostname check skipped (see .leak-denylist.example)\n'
+fi
+
+# --- scan staged additions, per file so we can report which file -----------
+# Exclude the two files that must contain pattern/probe strings by design (the
+# shared pattern file and the hook's own test fixture); the rest of the tree —
+# including .githooks/ — is scanned, so a secret pasted into a hook or doc is
+# still caught.
+scan_file() {
+  f="$1"
+  # Keep every '+' added line; drop only the '+++ ' file header (trailing space,
+  # so an added line whose content starts with '++' — rendered '+++…' with no
+  # space — is still scanned); strip the one leading diff '+'.
+  added="$(git diff --cached --no-color --unified=0 -- "$f" \
+            | grep -E '^\+' | grep -vE '^\+\+\+ ' | sed 's/^.//')"
+  [ -n "$added" ] || return 0
+
+  if [ -n "$builtin" ]; then
+    m="$(printf '%s\n' "$added" | grep -Ei -- "$builtin" 2>/dev/null)"
+    if [ -n "$m" ]; then
+      flag "$f — matches a shared leak-gate pattern (credential / private IP / internal ref):"
+      printf '%s\n' "$m" | sed 's/^/        /' | head -8
+    fi
+  fi
+
+  if [ -n "$denypat" ]; then
+    m="$(printf '%s\n' "$added" | grep -Ei -- "$denypat" 2>/dev/null)"
+    if [ -n "$m" ]; then
+      flag "$f — matches a .leak-denylist entry:"
+      printf '%s\n' "$m" | sed 's/^/        /' | head -8
+    fi
+  fi
+}
+
+while IFS= read -r -d '' f; do
+  scan_file "$f"
+done < <(git diff --cached -z --name-only --diff-filter=ACMR \
+           -- . ':(exclude).github/leak-patterns.txt' ':(exclude).githooks/test-pre-commit.sh')
+
+if [ "$fail" -ne 0 ]; then
+  printf '\n\033[31mpre-commit leak guard blocked this commit.\033[0m Fix the lines above, or bypass with: git commit --no-verify\n'
+  exit 1
+fi
+exit 0
