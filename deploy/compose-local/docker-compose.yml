@@ -167,6 +167,13 @@ services:
       # build-only services, so this is the only safety net for cache freshness.
       pull: true
     restart: unless-stopped
+    environment:
+      # Reverse-proxy upstream. Defaults to the in-compose `mcp` service
+      # (single-qube deployments). For the ingress/app split, set MCP_UPSTREAM
+      # in .env to the app qube's tailnet address (host:8787) so Caddy proxies
+      # over the tailnet. Kept in .env — never the committed Caddyfile — so no
+      # tailnet address is committed. The Caddyfile reads it as `{$MCP_UPSTREAM}`.
+      MCP_UPSTREAM: "${MCP_UPSTREAM:-mcp:8787}"
     # Gated by the `pattern-b` profile — Pattern A deployments don't start
     # caddy at all (saves one running container and removes the unused
     # 9787 loopback listener).
