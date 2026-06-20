@@ -3,6 +3,7 @@
 // pool.connect() -> client.queryObject<T>(sql, params) -> client.release().
 
 import { Pool } from "postgres";
+import { getClient } from "./db_pool.ts";
 import { toVectorLiteral } from "./embeddings.ts";
 import {
   normalizeOrderBy,
@@ -118,7 +119,7 @@ export async function getSessionContentHash(
   sessionId: string | null,
 ): Promise<string | null> {
   if (!sessionId) return null;
-  const client = await pool.connect();
+  const client = await getClient(pool);
   try {
     const r = await client.queryObject<{ content_hash: string | null }>(
       `SELECT content_hash FROM sessions.session WHERE session_id = $1`,
@@ -228,7 +229,7 @@ export async function upsertSession(
     embParam,
   ];
 
-  const client = await pool.connect();
+  const client = await getClient(pool);
   try {
     await client.queryArray("BEGIN");
     const up = await client.queryObject<UpsertOutcome>(sql, params);
@@ -265,7 +266,7 @@ export async function getSession(
   pool: Pool,
   sessionId: string,
 ): Promise<SessionRecord | null> {
-  const client = await pool.connect();
+  const client = await getClient(pool);
   try {
     const sess = await client.queryObject<SessionRow>(
       `SELECT ${SESSION_COLUMNS} FROM sessions.session WHERE session_id = $1`,
@@ -292,7 +293,7 @@ export async function resumeSession(
   if (opts.sessionId) return getSession(pool, opts.sessionId);
   if (!opts.branch) return null;
 
-  const client = await pool.connect();
+  const client = await getClient(pool);
   let chosenId: string | null;
   try {
     // Branch ties broken deterministically: newest last_update, then the
@@ -338,7 +339,7 @@ export async function searchSessions(
     cond.push(`tags @> ARRAY[$${p++}]::text[]`);
     params.push(tag);
   }
-  const client = await pool.connect();
+  const client = await getClient(pool);
   try {
     const r = await client.queryObject<SessionSearchRow>(
       `SELECT session_id, title, status, last_update,
@@ -411,7 +412,7 @@ export async function listSessions(
   const orderBy = normalizeOrderBy(opts.order_by);
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
 
-  const client = await pool.connect();
+  const client = await getClient(pool);
   try {
     const r = await client.queryObject<SessionListRow>(
       `SELECT session_id, title, status, repo_url, branch, last_update, needs_file_sync
@@ -434,7 +435,7 @@ export async function updateSessionStatus(
 ): Promise<
   { session_id: string; status: string; needs_file_sync: boolean } | null
 > {
-  const client = await pool.connect();
+  const client = await getClient(pool);
   try {
     const r = await client.queryObject<
       { session_id: string; status: string; needs_file_sync: boolean }

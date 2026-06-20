@@ -2,6 +2,7 @@
 // scheduled job can call these same functions without touching the MCP layer.
 
 import { Pool } from "postgres";
+import { getClient } from "./db_pool.ts";
 import type { ThoughtMatch, ThoughtRecord } from "./db.ts";
 import { toVectorLiteral } from "./embeddings.ts";
 
@@ -18,7 +19,7 @@ export async function searchThoughts(
 ): Promise<ThoughtMatch[]> {
   const { embedding, limit = 10, threshold = 0.5 } = opts;
   const embStr = toVectorLiteral(embedding);
-  const client = await pool.connect();
+  const client = await getClient(pool);
   try {
     const result = await client.queryObject<ThoughtMatch>(
       `SELECT id, content, metadata, created_at,
@@ -69,7 +70,7 @@ export async function listThoughts(
   }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
-  const client = await pool.connect();
+  const client = await getClient(pool);
   try {
     const result = await client.queryObject<ThoughtRecord>(
       `SELECT id, content, metadata, created_at, updated_at
@@ -89,7 +90,7 @@ export async function fetchThought(
   pool: Pool,
   id: string,
 ): Promise<ThoughtRecord | null> {
-  const client = await pool.connect();
+  const client = await getClient(pool);
   try {
     const result = await client.queryObject<ThoughtRecord>(
       `SELECT id, content, metadata, created_at, updated_at
@@ -118,7 +119,7 @@ export async function captureThought(
   input: CaptureInput,
 ): Promise<{ id: string }> {
   const embStr = toVectorLiteral(input.embedding);
-  const client = await pool.connect();
+  const client = await getClient(pool);
   try {
     const result = await client.queryObject<{ id: string }>(
       `INSERT INTO thoughts (content, embedding, metadata, content_fingerprint)
@@ -159,7 +160,7 @@ export type Stats = {
 // Aggregation runs entirely in Postgres so memory cost stays constant as the
 // thoughts table grows — previously this pulled every row to JS.
 export async function getStats(pool: Pool): Promise<Stats> {
-  const client = await pool.connect();
+  const client = await getClient(pool);
   try {
     const summaryRes = await client.queryObject<{
       count: number;
@@ -230,7 +231,7 @@ export async function getStats(pool: Pool): Promise<Stats> {
 }
 
 export async function pingDb(pool: Pool): Promise<boolean> {
-  const client = await pool.connect();
+  const client = await getClient(pool);
   try {
     await client.queryObject("SELECT 1");
     return true;
