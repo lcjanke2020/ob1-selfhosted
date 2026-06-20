@@ -29,6 +29,7 @@
 //   stripping. See the `scrub*` helpers.
 
 import { Pool } from "postgres";
+import { getClient } from "./db_pool.ts";
 import { parseInetCandidate } from "./inet.ts";
 
 // Local env reads only — intentionally NOT importing from ./config.ts so
@@ -402,7 +403,7 @@ async function insertLine(
     return "skip";
   }
 
-  // pool.connect() must be inside the try so that
+  // getClient(pool) must be inside the try so that
   // a pool exhaustion / Postgres-down failure returns "retry" through the
   // documented InsertResult contract rather than throwing out of insertLine
   // and unwinding tickOnce as a generic error. Audit fidelity happens to
@@ -412,7 +413,7 @@ async function insertLine(
   // "transient failure after N/M rows" message.
   let client: Awaited<ReturnType<typeof pool.connect>> | undefined;
   try {
-    client = await pool.connect();
+    client = await getClient(pool);
     // Positional params match the rest of queries.ts. inet/timestamptz are
     // cast in-SQL so plain JS strings are accepted.
     await client.queryArray(

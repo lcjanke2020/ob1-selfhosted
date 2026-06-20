@@ -385,7 +385,11 @@ Deno.test("requireAuth + requireBrainKey (Pattern A — OAuth disabled)", async 
         // pending) after the test step returns, which deno's leak
         // sanitizer flags as a leak — failing the whole Pattern A suite
         // even when the body-read check itself passed.
-        let timerHandle: number | undefined;
+        // ReturnType<typeof setTimeout> (not `number`): on newer Deno
+        // releases setTimeout is typed to return a `Timeout`, so a bare
+        // `number` annotation fails type-check. clearTimeout below accepts
+        // either, so this stays correct across Deno versions.
+        let timerHandle: ReturnType<typeof setTimeout> | undefined;
         const timeoutPromise = new Promise<never>((_, reject) => {
           timerHandle = setTimeout(
             () =>

@@ -21,6 +21,7 @@
 // header values beyond the IP itself.
 
 import { Pool, type PoolClient } from "postgres";
+import { getClient } from "./db_pool.ts";
 
 // Read env locally rather than importing config.ts so this module can be
 // loaded by tests that haven't set the full mcp env (e.g., AUTH0_*).
@@ -151,7 +152,14 @@ async function doInsert(rec: AuthFailureRecord): Promise<void> {
   if (!pool) return;
   let client: PoolClient | null = null;
   try {
-    client = await pool.connect();
+    // attempts=1: this is the best-effort, fire-and-forget audit path, so it
+    // must fast-fail rather than retry. getClient's default backoff would
+    // schedule setTimeout timers inside this queued microtask that outlive the
+    // call (Deno's leak sanitizer flags them) and, under a sustained 401
+    // flood, would keep `inFlight` elevated and undermine the backpressure
+    // cap. With a single attempt a stale pooled client is still evicted on
+    // borrow, so the pool self-heals on the *next* audit insert.
+    client = await getClient(pool, 1);
     await client.queryArray(
       `INSERT INTO mcp_auth_events (reason, middleware, client_ip, path)
        VALUES ($1, $2, $3::inet, $4)`,
