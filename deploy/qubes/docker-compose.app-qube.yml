@@ -31,7 +31,12 @@ services:
     # Re-publish mcp on the tailnet. The single-qube Pattern B unpublished this
     # port because Caddy shared the host; here Caddy is on a different qube, so
     # the port must be reachable over the tailnet. See the 3-layer scoping above.
-    ports:
+    #
+    # `!override` REPLACES the base `127.0.0.1:8787:8787` mapping. Compose merges
+    # list-valued fields (like `ports`) across files by default, so without this
+    # the container would inherit BOTH binds and fail at start with
+    # "address already in use" (0.0.0.0:8787 already covers 127.0.0.1:8787).
+    ports: !override
       - "0.0.0.0:8787:8787"
     environment:
       # mcp/config.ts fail-fast: with AUTH0_* set, PATTERN_B must be "true".
