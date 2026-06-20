@@ -28,7 +28,7 @@ LOG=/var/log/ob1-db-firewall.log
 add_rule() {
 	fam=$1
 	if nft list chain "$fam" qubes custom-input 2>/dev/null \
-		| grep -q 'iifname "tailscale0".*dport 5432'; then
+		| grep -q 'iifname "tailscale0".*dport 5432 ct state new accept'; then
 		echo "$(date -Is) [$fam] tailscale0:5432 accept already present; skipping" >>"$LOG"
 		return 0
 	fi

@@ -87,7 +87,11 @@ These artifacts configure the cluster's *plumbing*; they don't create the
 database, roles, or extension. On a fresh DB qube, once the cluster is up, run
 the same SQL the compose path runs from `docker-entrypoint-initdb.d` — the
 canonical definitions live in [`db/`](../../../db/) (`00-roles.sh`,
-`01-schema.sql`, …). In broad strokes, once per cluster:
+`01-schema.sql`, …). Note `00-roles.sh` is shaped as a container init-entrypoint:
+it runs under the postgres Docker entrypoint and reads the `OPENBRAIN_*_PASSWORD`
+env vars, so on a native cluster don't run it as-is — export those vars first and
+pick Pattern A vs B, or apply the equivalent statements by hand. In broad strokes,
+once per cluster:
 
 ```bash
 # as the postgres superuser, over the loopback socket:

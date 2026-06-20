@@ -32,10 +32,12 @@ systemctl start tailscaled
 
 # --- OB1 DB qube: post-tailscale firewall rules (tcp/5432 on tailscale0) ---
 # The unit's ExecStartPre waits for tailscale0 to appear before applying the rule.
+# --no-block so rc.local doesn't stall on that (up to 60s) wait — the rule apply
+# is independent of the Postgres start below, which does its own interface wait.
 cp /rw/config/ob1-db-firewall.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable ob1-db-firewall.service
-systemctl start ob1-db-firewall.service
+systemctl start --no-block ob1-db-firewall.service
 
 # --- OB1 DB qube: start Postgres after tailscale0 has an IP (binds the tailnet IP) ---
 # Backgrounded so rc.local returns promptly; the wait is an explicit
