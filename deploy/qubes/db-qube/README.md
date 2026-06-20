@@ -38,10 +38,15 @@ misconfiguration exposes the database:
    other tailnet peer is default-denied at the wire. (Configured in your tailnet
    admin console, not in this repo.)
 2. **Qubes nftables** — `qubes-firewall-user-script` accepts inbound `tcp/5432`
-   on `tailscale0` only. Because `qubes-firewall.service` runs *before*
-   `tailscaled` (the interface does not exist yet), `ob1-db-firewall.service`
-   re-applies the rule `After=tailscaled`, and `rc.local` (re)installs and
-   enables that unit each boot.
+   on `tailscale0` only. The rule loads even before the interface exists
+   (`iifname` matches by name, not index) and simply doesn't match traffic until
+   `tailscale0` appears; `ob1-db-firewall.service` re-applies it `After=tailscaled`
+   (waiting for the interface) to cover paths where `qubes-firewall` didn't run
+   the user script in this leaf AppVM, and `rc.local` (re)installs and enables
+   that unit each boot. The script is idempotent and logs to
+   `/var/log/ob1-db-firewall.log`. Confirm the chain name matches your Qubes
+   version with a pre-flight `nft list ruleset | grep custom-input` — if it
+   differs, the accept won't land and the log will say so.
 3. **`pg_hba.conf`** — `scram-sha-256` host lines for the app roles from the app
    qube's IP only; the superuser stays off the network.
 
@@ -54,7 +59,47 @@ done from dom0 with `qvm-run`.
 have its IP **before** Postgres starts, or the cluster cannot bind the tailnet
 address. It starts `tailscaled`, re-applies the firewall rule on the new
 interface, then waits for `tailscale0` to gain an `inet` address before starting
-the cluster.
+the cluster. If the interface never comes up it logs an error and does **not**
+start Postgres rather than failing quietly; boot output (and the
+`pg_ctlcluster` exit status) lands in `/var/log/ob1-db-boot.log`.
+
+### Disable the cluster's boot auto-start (required)
+
+The "start Postgres only after `tailscale0` is up" guarantee holds **only** if
+Debian's own boot-time auto-start is off. By default `postgresql@17-main.service`
+starts the cluster early at boot — before `tailscale0` exists — so it fails to
+bind `<db-qube-tailnet-ip>`, lands in `failed`, and can leave a stale
+`postmaster.pid` that the `rc.local` start then contends with. Set the cluster to
+manual once:
+
+```
+# /etc/postgresql/17/main/start.conf
+manual
+```
+
+`manual` still allows `pg_ctlcluster 17 main start` (what `rc.local` runs); it
+only suppresses the boot auto-start. It lives under `/etc/postgresql`, so the
+bind-dir persists it across reboots.
+
+## First boot / provisioning
+
+These artifacts configure the cluster's *plumbing*; they don't create the
+database, roles, or extension. On a fresh DB qube, once the cluster is up, run
+the same SQL the compose path runs from `docker-entrypoint-initdb.d` — the
+canonical definitions live in [`db/`](../../../db/) (`00-roles.sh`,
+`01-schema.sql`, …). In broad strokes, once per cluster:
+
+```bash
+# as the postgres superuser, over the loopback socket:
+sudo -u postgres psql -c "CREATE DATABASE openbrain;"
+sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
+# then create the openbrain_app / openbrain_ingester / openbrain_readonly roles
+# and load the schema — see db/00-roles.sh and db/01-schema.sql for the exact,
+# up-to-date statements (Pattern A vs B, passwords, grants).
+```
+
+Apply `pg_hba.snippet.conf` and `postgresql.local.conf` after the roles exist,
+then reload/restart so the network listener and host lines take effect.
 
 ## Template note
 
@@ -65,6 +110,13 @@ IPv6-only at that stage and the proxy resolves `EAI_ADDRFAMILY`. The AppVM start
 reboot the DB qube, bounce the app-side connection pools afterward — clients
 holding a pooled socket to the DB qube will see a stale-connection error
 (`Broken pipe`) on first reuse until the pool is rebuilt.
+
+**Pin the Postgres major version.** PGDATA lives in the bind-dir, but the
+`postgresql-NN` package comes from the shared template. A template update that
+crosses a major version (e.g. 17 → 18) gives you a newer server that **will not
+start** against a PGDATA initialized by the old major. Verify the major version
+the template ships before rebooting, and `pg_upgrade` (or dump/restore) across a
+major bump deliberately rather than discovering it on a failed boot.
 
 See [`../three-qube-design.md`](../three-qube-design.md) for the full reasoning
 and the still-open ingress-split design.

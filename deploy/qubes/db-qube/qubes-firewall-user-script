@@ -9,11 +9,36 @@
 # Source-peer restriction is the Tailscale ACL's job; pg_hba adds the PG-level
 # source-IP + scram gate on top (see pg_hba.snippet.conf).
 #
-# NOTE: qubes-firewall.service runs BEFORE tailscaled, so tailscale0 does not
-# exist yet at first apply. The ob1-db-firewall.service one-shot re-runs this
-# script After=tailscaled so the rule actually lands (see ob1-db-firewall.service
-# and rc.local).
+# `iifname` matches by interface *name*, so the rule loads fine even before
+# tailscale0 exists (unlike `iif`, which resolves to an index at load time and
+# would fail) — it simply doesn't match traffic until the interface appears.
+# ob1-db-firewall.service re-runs this After=tailscaled (with a wait-for-interface
+# ExecStartPre) as belt-and-suspenders for paths where qubes-firewall didn't run
+# the user script in this leaf AppVM. See ob1-db-firewall.service and rc.local.
+#
+# Idempotent: re-running (a qubes-firewall reload, the post-tailscaled one-shot,
+# a manual run) won't stack duplicate accepts. Outcomes go to $LOG instead of
+# /dev/null, so a missing chain/table (nft layout can drift across Qubes
+# versions) is visible rather than silently dropping layer 2. Pre-flight check:
+#   nft list ruleset | grep custom-input
+
+LOG=/var/log/ob1-db-firewall.log
 
 # OB1 DB qube: allow inbound Postgres on the tailnet interface only.
-nft add rule ip  qubes custom-input iifname "tailscale0" tcp dport 5432 ct state new accept 2>/dev/null || true
-nft add rule ip6 qubes custom-input iifname "tailscale0" tcp dport 5432 ct state new accept 2>/dev/null || true
+add_rule() {
+	fam=$1
+	if nft list chain "$fam" qubes custom-input 2>/dev/null \
+		| grep -q 'iifname "tailscale0".*dport 5432'; then
+		echo "$(date -Is) [$fam] tailscale0:5432 accept already present; skipping" >>"$LOG"
+		return 0
+	fi
+	if nft add rule "$fam" qubes custom-input \
+		iifname "tailscale0" tcp dport 5432 ct state new accept 2>>"$LOG"; then
+		echo "$(date -Is) [$fam] added tailscale0:5432 accept" >>"$LOG"
+	else
+		echo "$(date -Is) [$fam] FAILED to add tailscale0:5432 accept — chain/table missing? check: nft list ruleset | grep custom-input" >>"$LOG"
+	fi
+}
+
+add_rule ip
+add_rule ip6
