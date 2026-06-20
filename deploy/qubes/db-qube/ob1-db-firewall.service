@@ -1,0 +1,25 @@
+[Unit]
+# Re-applies the tailscale0:5432 nft accept AFTER tailscaled brings the interface
+# up. The rule itself loads even before tailscale0 exists (iifname matches by
+# name, not index), but re-applying once the interface is really up covers paths
+# where qubes-firewall did not run the user script in this leaf AppVM.
+#
+# Stash at: /rw/config/ob1-db-firewall.service
+# rc.local copies it to /etc/systemd/system/ and enables it each boot (/etc is
+# wiped on every AppVM reboot, so it cannot be enabled persistently in place).
+Description=OB1 DB qube post-tailscale firewall (tcp/5432 on tailscale0)
+After=tailscaled.service
+Wants=tailscaled.service
+
+[Service]
+Type=oneshot
+# After=tailscaled only waits for the *unit*, not for tailscale0 to exist. Block
+# (up to 60s) until the interface appears so the accept is applied against a real
+# interface; exit 0 on timeout so the unit doesn't wedge — the user script logs
+# the missing-chain/interface case to /var/log/ob1-db-firewall.log either way.
+ExecStartPre=/bin/sh -c 'i=0; while [ "$i" -lt 60 ]; do ip link show tailscale0 >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 1; done; echo "tailscale0 not present after 60s" >&2; exit 0'
+ExecStart=/rw/config/qubes-firewall-user-script
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

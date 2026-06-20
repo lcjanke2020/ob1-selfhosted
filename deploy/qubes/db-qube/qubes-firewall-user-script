@@ -1,0 +1,44 @@
+#!/bin/sh
+# DB qube host firewall — open inbound Postgres on the tailnet interface ONLY.
+#
+# Install at: /rw/config/qubes-firewall-user-script   (chmod +x)
+#
+# The Qubes `ip qubes` input chain drops non-uplink traffic by default, so an
+# inbound rule on tailscale0 needs an explicit accept. We deliberately do NOT
+# open tcp/22 — there is no sshd on this qube; all admin is dom0 `qvm-run`.
+# Source-peer restriction is the Tailscale ACL's job; pg_hba adds the PG-level
+# source-IP + scram gate on top (see pg_hba.snippet.conf).
+#
+# `iifname` matches by interface *name*, so the rule loads fine even before
+# tailscale0 exists (unlike `iif`, which resolves to an index at load time and
+# would fail) — it simply doesn't match traffic until the interface appears.
+# ob1-db-firewall.service re-runs this After=tailscaled (with a wait-for-interface
+# ExecStartPre) as belt-and-suspenders for paths where qubes-firewall didn't run
+# the user script in this leaf AppVM. See ob1-db-firewall.service and rc.local.
+#
+# Idempotent: re-running (a qubes-firewall reload, the post-tailscaled one-shot,
+# a manual run) won't stack duplicate accepts. Outcomes go to $LOG instead of
+# /dev/null, so a missing chain/table (nft layout can drift across Qubes
+# versions) is visible rather than silently dropping layer 2. Pre-flight check:
+#   nft list ruleset | grep custom-input
+
+LOG=/var/log/ob1-db-firewall.log
+
+# OB1 DB qube: allow inbound Postgres on the tailnet interface only.
+add_rule() {
+	fam=$1
+	if nft list chain "$fam" qubes custom-input 2>/dev/null \
+		| grep -q 'iifname "tailscale0".*dport 5432 ct state new accept'; then
+		echo "$(date -Is) [$fam] tailscale0:5432 accept already present; skipping" >>"$LOG"
+		return 0
+	fi
+	if nft add rule "$fam" qubes custom-input \
+		iifname "tailscale0" tcp dport 5432 ct state new accept 2>>"$LOG"; then
+		echo "$(date -Is) [$fam] added tailscale0:5432 accept" >>"$LOG"
+	else
+		echo "$(date -Is) [$fam] FAILED to add tailscale0:5432 accept — chain/table missing? check: nft list ruleset | grep custom-input" >>"$LOG"
+	fi
+}
+
+add_rule ip
+add_rule ip6

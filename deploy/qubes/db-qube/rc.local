@@ -1,0 +1,57 @@
+#!/bin/sh
+# DB qube boot tasks.
+#
+# Install at: /rw/config/rc.local   (chmod +x)
+#
+# /etc/systemd/system is wiped on every AppVM reboot, so units that must persist
+# are stashed under /rw/config and (re)installed + enabled here at each boot.
+# Ordering matters: bring tailscale0 up, re-apply the firewall rule on it, then
+# start Postgres once the interface has an IP (so the cluster binds the tailnet
+# address without a race).
+#
+# This manual start only wins that race if Debian's boot-time auto-start is OFF.
+# Set /etc/postgresql/17/main/start.conf to `manual` (persisted by the
+# /etc/postgresql bind-dir) — otherwise postgresql@17-main.service auto-starts
+# the cluster before tailscale0 exists, fails to bind the tailnet IP, and can
+# leave a stale postmaster.pid that this start then contends with. See the
+# README "Disable the cluster's boot auto-start" section.
+
+# All boot output goes to one per-boot log (ephemeral; /var/log is not bind-dir'd
+# — fine for a boot probe). This replaces the old `2>/dev/null` that hid exactly
+# the failures worth seeing.
+LOG=/var/log/ob1-db-boot.log
+exec >>"$LOG" 2>&1
+echo "=== rc.local $(date -Is) ==="
+
+# --- Tailscale ---
+# The shared template keeps tailscaled DISABLED on purpose: when enabled in the
+# template it broke the template's apt updates-proxy (tailscale0 is IPv6-only at
+# that stage -> EAI_ADDRFAMILY). The AppVM starts it explicitly here instead;
+# ob1-db-firewall.service also Wants=tailscaled.
+systemctl start tailscaled
+
+# --- OB1 DB qube: post-tailscale firewall rules (tcp/5432 on tailscale0) ---
+# The unit's ExecStartPre waits for tailscale0 to appear before applying the rule.
+# --no-block so rc.local doesn't stall on that (up to 60s) wait — the rule apply
+# is independent of the Postgres start below, which does its own interface wait.
+cp /rw/config/ob1-db-firewall.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable ob1-db-firewall.service
+systemctl start --no-block ob1-db-firewall.service
+
+# --- OB1 DB qube: start Postgres after tailscale0 has an IP (binds the tailnet IP) ---
+# Backgrounded so rc.local returns promptly; the wait is an explicit
+# success/failure branch so a Tailscale startup/auth failure is logged loudly
+# instead of leaving the DB quietly down.
+( i=0
+  while [ "$i" -lt 60 ]; do
+    ip -4 addr show tailscale0 2>/dev/null | grep -q 'inet ' && break
+    i=$((i + 1)); sleep 1
+  done
+  if ip -4 addr show tailscale0 2>/dev/null | grep -q 'inet '; then
+    echo "tailscale0 has an IPv4 address; starting cluster"
+    pg_ctlcluster 17 main start
+    echo "pg_ctlcluster exit=$?"
+  else
+    echo "ERROR: tailscale0 never got an IPv4 address after 60s — NOT starting Postgres" >&2
+  fi ) &
