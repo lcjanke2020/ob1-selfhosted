@@ -113,5 +113,8 @@ export async function getClient(
       if (i < maxAttempts - 1) await delay(BASE_BACKOFF_MS * (i + 1));
     }
   }
-  throw lastErr;
+  // Normalize to an Error so call sites that read `.message` never see
+  // `undefined` on a stray non-Error throw. A genuine Error (including the
+  // driver's ConnectionError) is rethrown as-is to preserve its type/stack.
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
