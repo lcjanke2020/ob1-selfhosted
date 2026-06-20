@@ -30,6 +30,13 @@ flag() { printf '  \033[31m✗ %s\033[0m\n' "$1"; fail=1; }
 builtin=""
 if [ -f "$pat_file" ]; then
   builtin="$(grep -vE "$strip" "$pat_file" | paste -sd '|' -)"
+  # Fail CLOSED if the shared set itself is a malformed ERE: a bad pattern makes
+  # grep exit 2, which the scan below would otherwise read as "no hits" and
+  # silently disable the built-ins — the same trap fixed for the denylist.
+  if [ -n "$builtin" ]; then
+    printf '' | grep -Eq -- "$builtin" 2>/dev/null
+    [ "$?" -ge 2 ] && flag "invalid regex in .github/leak-patterns.txt — fix it (commit blocked)"
+  fi
 else
   printf '  · %s missing — built-in (CI-shared) checks skipped\n' '.github/leak-patterns.txt'
 fi
@@ -55,9 +62,11 @@ fi
 # still caught.
 scan_file() {
   f="$1"
-  # Keep every '+' added line; drop only the '+++' file header; strip one '+'.
+  # Keep every '+' added line; drop only the '+++ ' file header (trailing space,
+  # so an added line whose content starts with '++' — rendered '+++…' with no
+  # space — is still scanned); strip the one leading diff '+'.
   added="$(git diff --cached --no-color --unified=0 -- "$f" \
-            | grep -E '^\+' | grep -vE '^\+\+\+' | sed 's/^.//')"
+            | grep -E '^\+' | grep -vE '^\+\+\+ ' | sed 's/^.//')"
   [ -n "$added" ] || return 0
 
   if [ -n "$builtin" ]; then

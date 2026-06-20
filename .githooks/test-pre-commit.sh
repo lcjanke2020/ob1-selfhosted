@@ -32,12 +32,13 @@ run_case() {
     printf '%s\n' "$content" > "$file"
     git add "$file" >/dev/null 2>&1 )
 
-  if ( cd "$work" && ./.githooks/pre-commit >/dev/null 2>&1 ); then got=allow; else got=block; fi
+  out="$( cd "$work" && ./.githooks/pre-commit 2>&1 )" && got=allow || got=block
 
   if [ "$got" = "$expect" ]; then
     printf '  ok   %-48s (%s)\n' "$desc" "$got"; pass=$((pass + 1))
   else
     printf '  FAIL %-48s expected %s, got %s\n' "$desc" "$expect" "$got"; failcnt=$((failcnt + 1))
+    printf '%s\n' "$out" | sed 's/^/        > /'   # show hook output to debug the mismatch
   fi
 }
 
@@ -54,6 +55,23 @@ run_case "placeholder passes"            allow notes.md "use <tailnet-ip> and ta
 run_case "denylist hit"                  block notes.md "host myhost-db online"  "myhost-db"
 run_case "denylist clean"                allow notes.md "nothing to see"          "myhost-db"
 run_case "invalid denylist regex"        block notes.md "anything"               "foo[bar"
+
+# Invalid SHARED pattern file must also fail closed (it's the single source of
+# truth for both scanners). Corrupt a copy, run, then restore.
+( cd "$work"
+  git reset -q >/dev/null 2>&1 || true
+  rm -f notes.md .leak-denylist
+  printf 'just text\n' > notes.md
+  printf 'foo[bar\n' >> .github/leak-patterns.txt
+  git add notes.md >/dev/null 2>&1 )
+out="$( cd "$work" && ./.githooks/pre-commit 2>&1 )" && got=allow || got=block
+cp "$patterns" "$work/.github/leak-patterns.txt"   # restore for any later use
+if [ "$got" = block ]; then
+  printf '  ok   %-48s (%s)\n' "invalid shared pattern file" "$got"; pass=$((pass + 1))
+else
+  printf '  FAIL %-48s expected block, got %s\n' "invalid shared pattern file" "$got"; failcnt=$((failcnt + 1))
+  printf '%s\n' "$out" | sed 's/^/        > /'
+fi
 
 echo
 if [ "$failcnt" -eq 0 ]; then
