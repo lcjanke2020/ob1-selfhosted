@@ -47,8 +47,9 @@ jobs:
           # Fail CLOSED on a malformed ERE: grep exits 2 on a bad pattern, which
           # the scan's `if` would otherwise read as "no hits" and pass green with
           # the gate silently off. Compile-check against empty input first.
-          printf '' | grep -Eq -- "$JOINED" 2>/dev/null
-          rc=$?
+          # `|| rc=$?` keeps the expected rc=1 (no match) from tripping `bash -e`.
+          rc=0
+          printf '' | grep -Eq -- "$JOINED" 2>/dev/null || rc=$?
           if [ "$rc" -ge 2 ]; then
             echo "::error::invalid regex in $PAT_FILE (grep exit $rc)"
             exit 1
