@@ -23,30 +23,48 @@ edge/app host*.
 ```bash
 #!/bin/bash
 set -euo pipefail
-# Pull DB_HOST / DB_PORT / POSTGRES_DB and a read-only role's password from your deploy env.
-set -a; . /path/to/deploy/.env; set +a
+# Source only the few vars this job needs from your deploy env. Sourcing the whole
+# .env exports *every* variable to child processes (and a value with spaces / # / $
+# can misparse) — a dedicated backup env file, or a PGPASSFILE/.pgpass entry for the
+# password, keeps the surface small.
+set -a; . /path/to/deploy/backup.env; set +a   # DB_HOST DB_PORT POSTGRES_DB READONLY_ROLE READONLY_PASSWORD
 OUT_DIR=/path/to/offbox-synced-dir
 PUBKEY=/path/to/backup-pubkey.asc            # PUBLIC key only
 TS=$(date +%Y%m%d)
-TMP="$(mktemp)"; trap 'rm -f "$TMP"' EXIT
+# Stage the temp file *inside* OUT_DIR so the final publish is a same-filesystem
+# rename (a cross-FS mv from /tmp is copy-then-unlink, not atomic — a watcher could
+# replicate a half-written *.sql.gz.gpg). The leading dot keeps it clear of the
+# prune glob below; add it to .stignore (see note) so peers never sync the partial.
+TMP="$(mktemp "$OUT_DIR/.db-$TS.XXXXXX")"; trap 'rm -f "$TMP"' EXIT
 
 # pipefail makes the whole chain fail if pg_dump (e.g. lost connection), gzip, or the
 # gpg encrypt step errors — so a partial/failed dump is never published.
+# gpg -z 0 disables gpg's own compression so we don't compress twice; gzip --rsyncable
+# keeps small daily diffs localized so Syncthing/rsync don't re-ship the whole file.
 PGPASSWORD="$READONLY_PASSWORD" pg_dump \
-  -h "$DB_HOST" -p "$DB_PORT" -U <readonly_role> -d "$POSTGRES_DB" \
+  -h "$DB_HOST" -p "$DB_PORT" -U "$READONLY_ROLE" -d "$POSTGRES_DB" \
   --no-owner --no-privileges \
-  | gzip \
-  | gpg --batch --no-tty --yes --recipient-file "$PUBKEY" --encrypt --output "$TMP"
+  | gzip --rsyncable \
+  | gpg --batch --no-tty --yes -z 0 --recipient-file "$PUBKEY" --encrypt --output "$TMP"
 
 # Encrypt-only host can't decrypt to verify; just ensure a non-empty artifact
 # (the pipeline above already guaranteed each stage exited 0).
 [ -s "$TMP" ]
-mv -f "$TMP" "$OUT_DIR/db-$TS.sql.gz.gpg"    # atomic publish into the off-box folder
-find "$OUT_DIR" -maxdepth 1 -name 'db-*.sql.gz.gpg' -mtime +14 -delete
+mv -f "$TMP" "$OUT_DIR/db-$TS.sql.gz.gpg"    # same-FS atomic rename; publish first…
+find "$OUT_DIR" -maxdepth 1 -name 'db-*.sql.gz.gpg' -mtime +14 -delete   # …then prune
 ```
 
 Drive it with a systemd `oneshot` service + a daily `timer` (or cron). `--recipient-file`
 needs no keyring or ownertrust — the public key in the file is used directly.
+
+A daily job that fails silently becomes an incident the day you need a restore. Wire the
+unit with `OnFailure=` (or a cron wrapper that mails/logs) so a broken pipeline is noticed.
+If `OUT_DIR` is a Syncthing folder, add the staging temp to `.stignore` so peers never see
+a partial:
+
+```
+/.db-*
+```
 
 ## Verify (on the machine that holds the private key)
 
@@ -54,9 +72,15 @@ A backup you haven't restored is not a backup. With the encrypted dumps on the o
 store and the private key on a separate machine that can reach it:
 
 ```bash
+# Pipe straight into a throwaway Postgres + pgvector so the decrypted plaintext never
+# lands on disk (avoids a predictable-path window, and `shred -u` is unreliable on
+# journaling/CoW filesystems and SSDs anyway). If you must stage a file, `mktemp` it 0600.
 ssh <offbox-host> "cat '/path/db-YYYYMMDD.sql.gz.gpg'" \
-  | gpg --decrypt | gunzip > /tmp/restore.sql
-# restore into a throwaway Postgres + pgvector, compare row counts, then `shred -u` the plaintext
+  | gpg --decrypt | gunzip | psql "<throwaway-dsn>"
+
+# Then spot-check the restore — a backup that restores but is empty is still no backup:
+psql "<throwaway-dsn>" -c '\dt'
+psql "<throwaway-dsn>" -c "SELECT count(*) FROM thoughts;"
 ```
 
 ## Notes
