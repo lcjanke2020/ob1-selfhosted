@@ -23,42 +23,53 @@ This repo is one codebase with **three install paths**, from "docker on a laptop
 
 Pattern A (tailnet-only) runs postgres + mcp + ollama and fronts the MCP server directly with `tailscale serve`. Pattern B adds Caddy and Tailscale Funnel for public access. Both patterns converge on the same backend; Caddy's single `:9787` listener discriminates tailnet vs Funnel traffic via the `Tailscale-Funnel-Request` header that Tailscale injects only on funnel-originated requests (we call this single-listener design **Pattern Y** throughout the repo).
 
+On the [Qubes install path](deploy/qubes/README.md) these roles are split across **three qubes** — a Funnel + Caddy **ingress** qube, an **app** qube (mcp + Ollama), and a **db** qube (Postgres) — reached over a firewall-scoped tailnet ([three-qube-design.md](deploy/qubes/three-qube-design.md)) so that a compromised public edge need not expose the memory store, which lives in its own db qube. The sequence below shows that topology; on a single host the same flow runs over the local docker network.
+
 ```mermaid
 sequenceDiagram
     autonumber
     participant CD as Claude Desktop<br/>(mcp-remote)
     participant CL as claude.ai / mobile<br/>(Anthropic egress)
-    participant TS as Tailscale<br/>funnel --https=443
-    participant CA as Caddy<br/>(:9787, header-discriminated)
-    participant OB as OB1 mcp<br/>(Hono + requireAuth)
-    participant A0 as OAuth JWKS
-    participant DB as Postgres<br/>+ Ollama
+    box rgba(215,119,87,0.10) ingress qube (Funnel + Caddy)
+        participant TS as Tailscale<br/>funnel --https=443
+        participant CA as Caddy<br/>(:9787, header-discriminated)
+    end
+    box rgba(60,200,120,0.10) app qube (mcp + Ollama)
+        participant OB as OB1 mcp<br/>(Hono + requireAuth)
+        participant OL as Ollama<br/>(embeddings)
+    end
+    participant A0 as OAuth JWKS<br/>(Auth0, public)
+    box rgba(80,130,240,0.10) db qube
+        participant DB as Postgres<br/>+ pgvector
+    end
 
     rect rgba(60, 200, 120, 0.15)
-        Note over CD,DB: Tailnet branch — x-brain-key path (no funnel header)
+        Note over CD,DB: Tailnet branch (x-brain-key, no funnel header)
         CD->>TS: HTTPS :443, x-brain-key header
         TS->>CA: HTTP 127.0.0.1:9787 (no Tailscale-Funnel-Request)
-        Note right of CA: @tailnet matcher fires<br/>strip Authorization header
-        CA->>OB: HTTP mcp:8787, x-brain-key only
-        OB->>OB: requireAuth — safeEqual vs MCP_ACCESS_KEY
-        OB->>DB: tool exec (capture / search / list / ...)
-        DB-->>OB: rows or embedding
+        Note right of CA: at @tailnet, strip Authorization
+        CA->>OB: HTTP :8787 over tailnet (ingress to app), x-brain-key
+        OB->>OB: requireAuth (safeEqual vs MCP_ACCESS_KEY)
+        OB->>OL: embed (capture / search)
+        OB->>DB: tool exec over tailnet (app to db)
+        DB-->>OB: rows / embedding
         OB-->>CA: 200 + JSON
         CA-->>TS: 200
         TS-->>CD: 200
     end
 
     rect rgba(80, 130, 240, 0.15)
-        Note over CL,DB: Funnel branch — OAuth path (with funnel header)
+        Note over CL,DB: Funnel branch (OAuth Bearer, with funnel header)
         CL->>TS: HTTPS :443, Authorization Bearer JWT
-        TS->>CA: HTTP 127.0.0.1:9787<br/>(Tailscale-Funnel-Request: ?1 injected)
-        Note right of CA: @anthropic_funnel matcher fires<br/>(header + IP allowlist)<br/>strip x-brain-key header
-        CA->>OB: HTTP mcp:8787, Bearer only
-        OB->>A0: fetch JWKS (first request only, then cached)
+        TS->>CA: HTTP 127.0.0.1:9787 (Tailscale-Funnel-Request injected)
+        Note right of CA: at @anthropic_funnel needs funnel header AND Anthropic IP 160.79.104.0/21, else 403, strip x-brain-key
+        CA->>OB: HTTP :8787 over tailnet (ingress to app), Bearer
+        OB->>A0: fetch JWKS (first request, then cached)
         A0-->>OB: keyset
-        OB->>OB: jose.jwtVerify — RS256 sig, iss, aud, exp
-        OB->>DB: tool exec
-        DB-->>OB: rows or embedding
+        OB->>OB: jwtVerify (RS256 sig, iss, aud, exp)
+        OB->>OL: embed
+        OB->>DB: tool exec over tailnet (app to db)
+        DB-->>OB: rows / embedding
         OB-->>CA: 200 + JSON
         CA-->>TS: 200
         TS-->>CL: 200
@@ -108,7 +119,7 @@ Anyone who can present your `x-brain-key` from inside the perimeter (loopback, o
 ## Status & roadmap
 
 - All three install paths describe deployments that are running today; the test suite (`cd server && deno task test`) is hermetic and runs in CI.
-- The Qubes install currently co-locates the whole stack in one qube. The next step — Postgres pulled out of compose into its own qube, with ingress / app / db separated by VM boundaries — is designed and in progress: [`deploy/qubes/three-qube-design.md`](deploy/qubes/three-qube-design.md).
+- The Qubes install path runs as the **three-qube split**: Postgres in its own db qube, the app (mcp + Ollama) in an app qube, and Funnel + Caddy in an ingress qube that reverse-proxies to the app qube across a firewall-scoped tailnet ([`deploy/qubes/three-qube-design.md`](deploy/qubes/three-qube-design.md)). Two edge-hardening cleanups remain tracked: parking the ingress qube's unused app containers ([#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13)) and finalizing log-ingester placement ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)).
 
 ## License & attribution
 
