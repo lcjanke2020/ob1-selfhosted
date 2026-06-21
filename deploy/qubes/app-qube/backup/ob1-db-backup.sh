@@ -17,7 +17,7 @@ set -euo pipefail
 # Source only the few vars this job needs. `set -a` so they reach pg_dump's env.
 ENV_FILE="${BACKUP_ENV_FILE:-/rw/config/openbrain-units/backup.env}"
 # shellcheck disable=SC1090
-set -a; . "$ENV_FILE"; set +a   # DB_HOST DB_PORT POSTGRES_DB READONLY_ROLE READONLY_PASSWORD PUBKEY OUT_DIR
+set -a; . "$ENV_FILE"; set +a   # DB_HOST DB_PORT POSTGRES_DB READONLY_ROLE READONLY_PASSWORD PUBKEY OUT_DIR RETAIN_DAYS
 
 : "${DB_HOST:?set DB_HOST in $ENV_FILE (the db qube tailnet address)}"
 : "${DB_PORT:=5432}"
@@ -28,6 +28,9 @@ set -a; . "$ENV_FILE"; set +a   # DB_HOST DB_PORT POSTGRES_DB READONLY_ROLE READ
 : "${OUT_DIR:?set OUT_DIR in $ENV_FILE (off-box-replicated directory)}"
 RETAIN_DAYS="${RETAIN_DAYS:-14}"
 
+# Date-only stamp: the daily timer produces one artifact per day. A MANUAL re-run
+# the same day overwrites that day's file (intended — keeps the prune glob and
+# retention math simple); add %H%M%S if you want same-day runs kept separately.
 TS=$(date +%Y%m%d)
 # Stage the temp file INSIDE OUT_DIR so the final publish is a same-filesystem
 # rename (a cross-FS mv from /tmp is copy-then-unlink, not atomic — a watcher
@@ -41,7 +44,8 @@ trap 'rm -f "$TMP"' EXIT
 # the gpg encrypt step errors — so a partial/failed dump is never published.
 # gpg -z 0 disables gpg's own compression so the already-gzipped stream isn't
 # compressed twice. --recipient-file needs no keyring/ownertrust — the public
-# key in the file is used directly.
+# key in the file is used directly (requires GnuPG >= 2.2.28; Debian 12+/recent
+# Fedora are fine — on an older template, import the key and use --recipient KEYID).
 PGPASSWORD="$READONLY_PASSWORD" pg_dump \
 	-h "$DB_HOST" -p "$DB_PORT" -U "$READONLY_ROLE" -d "$POSTGRES_DB" \
 	--no-owner --no-privileges \

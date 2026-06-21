@@ -27,18 +27,28 @@ INGRESS_IP="<ingress-qube-tailnet-ip>"
 PORT=8787
 LOG=/var/log/ob1-app-firewall.log
 
-# Idempotent helper: append $1.. as a DOCKER-USER rule for $fam unless an
-# identical rule already exists. $fam is the iptables binary (iptables / ip6tables).
-add_rule() {
+# Docker SEEDS DOCKER-USER with a trailing `-j RETURN`, so the chain is NOT
+# empty: rules must be INSERTED (-I) to sit ABOVE that RETURN. An APPENDED (-A)
+# rule lands below the RETURN and never executes — traversal returns to FORWARD
+# first (this is the bug this script must not have: it would log "added" while
+# leaving :8787 wide open). See Docker's "Docker and iptables" docs.
+#
+# Idempotent rebuild: delete any existing copy of the exact rule first (so a
+# re-run can't stack duplicates and the final order is guaranteed), then insert
+# at the top. Because each call re-inserts at the top, the LAST call wins the top
+# slot — so we insert the DROP(s) first and the ingress ACCEPT last, leaving:
+#   ACCEPT (ingress peer)  ──┐ top
+#   DROP   (catch-all :8787) │  both ABOVE docker's RETURN
+#   RETURN (docker's)      ──┘
+ensure_top() {
 	fam=$1; shift
-	if "$fam" -C DOCKER-USER "$@" 2>/dev/null; then
-		echo "$(date -Is) [$fam] rule already present; skipping: $*" >>"$LOG"
-		return 0
-	fi
-	if "$fam" -A DOCKER-USER "$@" 2>>"$LOG"; then
-		echo "$(date -Is) [$fam] added: $*" >>"$LOG"
+	while "$fam" -C DOCKER-USER "$@" 2>/dev/null; do
+		"$fam" -D DOCKER-USER "$@" 2>>"$LOG" || break
+	done
+	if "$fam" -I DOCKER-USER "$@" 2>>"$LOG"; then
+		echo "$(date -Is) [$fam] inserted: $*" >>"$LOG"
 	else
-		echo "$(date -Is) [$fam] FAILED to add (DOCKER-USER missing? is docker up?): $*" >>"$LOG"
+		echo "$(date -Is) [$fam] FAILED to insert (DOCKER-USER missing? is docker up?): $*" >>"$LOG"
 	fi
 }
 
@@ -49,11 +59,22 @@ case "$INGRESS_IP" in
 	*)   ALLOW_FAM=iptables ;;
 esac
 
-# Rule order in DOCKER-USER (default policy is RETURN, chain is otherwise empty):
-# the ACCEPT for the ingress peer must sit ABOVE the catch-all DROP. We append
-# ACCEPT first, then DROP, so traversal hits ACCEPT before DROP.
-add_rule "$ALLOW_FAM" -i tailscale0 -s "$INGRESS_IP" -p tcp --dport "$PORT" -j ACCEPT
+# DROP(s) first so the ACCEPT inserted afterwards lands ABOVE them. The DROP is
+# intentionally NOT conntrack-qualified: unlike the db-qube's nft rule (which
+# rides a chain that already has a general established-accept), DOCKER-USER has
+# none — so the ACCEPT must cover the whole allowed flow and the DROP must catch
+# every non-ingress packet to :8787 regardless of ct state.
+ensure_top iptables  -p tcp --dport "$PORT" -j DROP
+ensure_top ip6tables -p tcp --dport "$PORT" -j DROP
 
-# Catch-all: drop every other source (any interface, incl. eth0/LAN) to :8787.
-add_rule iptables  -p tcp --dport "$PORT" -j DROP
-add_rule ip6tables -p tcp --dport "$PORT" -j DROP
+# ...then the ingress-peer ACCEPT, which ends up on top (above the DROP).
+# NOTE: rotating INGRESS_IP leaves the OLD address's ACCEPT behind (a different
+# spec, so the delete above never matches it). After changing INGRESS_IP, flush
+# the chain and re-run — `iptables -F DOCKER-USER && /rw/config/qubes-firewall-user-script`
+# (docker re-adds its own RETURN) — or just reboot.
+ensure_top "$ALLOW_FAM" -i tailscale0 -s "$INGRESS_IP" -p tcp --dport "$PORT" -j ACCEPT
+
+# Always succeed: this script also runs as a docker.service ExecStartPost (see
+# docker-ob1-firewall.conf), and a non-zero exit there would fail docker's start.
+# Rule-add failures are logged above, not propagated.
+exit 0

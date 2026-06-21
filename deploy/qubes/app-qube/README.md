@@ -23,6 +23,11 @@ it across qubes (set `MCP_UPSTREAM=<this-qube-tailnet-ip>:8787` in the *ingress*
 `.env`). Ollama runs CPU-only (no GPU passthrough in a Qubes app qube); point `OLLAMA_URL`
 at an external GPU box to offload it.
 
+The compose project is **not** auto-started on reboot (`restart: unless-stopped` only
+resurrects containers while the daemon is up, not the project after an AppVM reboot). To
+bring it back automatically, add `docker compose -f /path/to/app-qube/docker-compose.yml up -d`
+to `rc.local` after the docker start, or run it by hand after a reboot.
+
 ## Credentials (per-qube split)
 
 This qube's `.env` carries the **admin/superuser** `POSTGRES_PASSWORD` (it is the DB
@@ -41,14 +46,20 @@ Install the firewall artifacts (counterpart to the db qube's):
 | File | Install at | Purpose |
 |------|-----------|---------|
 | [`qubes-firewall-user-script`](qubes-firewall-user-script) | `/rw/config/qubes-firewall-user-script` (chmod +x) | `DOCKER-USER` rule: accept `:8787` only from the ingress qube's tailnet IP, drop it on every other source/interface |
-| [`ob1-app-firewall.service`](ob1-app-firewall.service) | `/rw/config/ob1-app-firewall.service` | one-shot that re-applies the rule `After=tailscaled` |
-| [`rc.local`](rc.local) | `/rw/config/rc.local` (chmod +x) | boot order: tailscaled → firewall unit → backup timer |
+| [`docker-ob1-firewall.conf`](docker-ob1-firewall.conf) | `/etc/systemd/system/docker.service.d/ob1-firewall.conf` | docker drop-in: re-runs the script `ExecStartPost` so a daemon restart can't leave `:8787` open |
+| [`ob1-app-firewall.service`](ob1-app-firewall.service) | `/rw/config/ob1-app-firewall.service` | boot one-shot that applies the rule once `After=tailscaled` + docker |
+| [`rc.local`](rc.local) | `/rw/config/rc.local` (chmod +x) | boot order: tailscaled → install docker drop-in → docker → firewall one-shot → backup timer |
 
 The rule lives in `DOCKER-USER`, **not** the Qubes `custom-input` chain, because docker's
 DNAT bypasses the qubes `INPUT` path — a `custom-input` accept/drop never sees the
-published-port traffic. Replace `<ingress-qube-tailnet-ip>` in the script with the ingress
-qube's address. (This host-firewall layer also closes the LAN-reachable-`0.0.0.0`-bind gap,
-since it drops `:8787` on all interfaces, not just `tailscale0`.)
+published-port traffic. The script **inserts** (`-I`) above docker's seeded `RETURN` rule
+(an appended rule would land below it and never run) and rebuilds idempotently. Replace
+`<ingress-qube-tailnet-ip>` in the script with the ingress qube's address; if you later
+**rotate** that address, flush the chain and re-run (`sudo iptables -F DOCKER-USER && sudo
+/rw/config/qubes-firewall-user-script`) so the old ACCEPT doesn't linger. Two triggers keep
+the rule live: the boot one-shot applies it at startup, and the docker drop-in re-applies it
+on every daemon restart. (This layer also closes the LAN-reachable-`0.0.0.0`-bind gap — it
+drops `:8787` on all interfaces, not just `tailscale0`.)
 
 ## Encrypted DB backup
 

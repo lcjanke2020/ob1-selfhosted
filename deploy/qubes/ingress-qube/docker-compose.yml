@@ -93,10 +93,10 @@ services:
       DB_PORT: ${DB_PORT:-5432}
       DB_NAME: ${POSTGRES_DB:-openbrain}
       # INSERT-only observability role — the only DB credential this qube holds.
-      # No `:-` default: compose fails to start if OPENBRAIN_INGESTER_PASSWORD is
-      # unset (desired fail-fast).
+      # `:?` (not plain ${VAR}) so a blank value after `cp .env.example .env`
+      # fails at `docker compose config` time, not as a runtime DB-auth error.
       DB_USER: openbrain_ingester
-      DB_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD}
+      DB_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD:?set OPENBRAIN_INGESTER_PASSWORD (the log-ingester INSERT-only role)}
       INGESTER_POLL_INTERVAL_MS: ${INGESTER_POLL_INTERVAL_MS:-5000}
       CADDY_LOG_DIR: /var/log/caddy
     volumes:

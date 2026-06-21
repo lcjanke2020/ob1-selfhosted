@@ -61,7 +61,9 @@ services:
       DB_PORT: ${DB_PORT:-5432}
       DB_NAME: ${POSTGRES_DB:-openbrain}
       DB_USER: openbrain_app
-      DB_PASSWORD: ${OPENBRAIN_APP_PASSWORD}
+      # `:?` (not plain ${VAR}) so a blank value after `cp .env.example .env`
+      # fails at `docker compose config` time, not as a runtime DB-auth error.
+      DB_PASSWORD: ${OPENBRAIN_APP_PASSWORD:?set OPENBRAIN_APP_PASSWORD (the app role mcp connects as)}
       DB_POOL_SIZE: "10"
       OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}

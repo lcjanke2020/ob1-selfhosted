@@ -27,6 +27,10 @@ sudo tailscale funnel --bg --https=443 http://127.0.0.1:9787   # single rule
 plus a **parked** local `postgres` (profile `logs-future`) kept on disk for a future local
 logs store but never started. Do **not** set `COMPOSE_PROFILES` on this qube.
 
+The compose project is **not** auto-started on reboot. To bring it back automatically, add
+`docker compose -f /path/to/ingress-qube/docker-compose.yml up -d` to `rc.local`, or run it
+by hand after a reboot (and re-assert the Funnel rule below).
+
 ## Credentials (per-qube split)
 
 This qube's `.env` holds **only** `OPENBRAIN_INGESTER_PASSWORD` (INSERT-only on
