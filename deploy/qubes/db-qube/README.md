@@ -124,4 +124,5 @@ the template ships before rebooting, and `pg_upgrade` (or dump/restore) across a
 major bump deliberately rather than discovering it on a failed boot.
 
 See [`../three-qube-design.md`](../three-qube-design.md) for the full reasoning
-and the still-open ingress-split design.
+and the implemented three-qube split (with the tracked edge-hardening cleanups,
+[#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12) / [#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13)).
