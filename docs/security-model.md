@@ -35,7 +35,7 @@ Four roles, least privilege, with drift detection:
 
 | Role | Privileges | Used by |
 |---|---|---|
-| `postgres` | superuser | init + DB admin (role provisioning / migrations) — never the app runtime. In the three-qube split it's reachable from the app qube's IP only for remote admin (a deliberate trade-off; see [deploy/qubes/db-qube/README.md](../deploy/qubes/db-qube/README.md)) |
+| `postgres` | superuser | init + DB admin (role provisioning / migrations) — never the app runtime. In the three-qube split it's reachable from the app qube's IP only for remote admin — a deliberate trade-off (a compromised app qube then has full DB admin, including an app→db OS pivot via `COPY … TO/FROM PROGRAM`); see [db-qube/README.md](../deploy/qubes/db-qube/README.md) and [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15) |
 | `openbrain_app` | SELECT/INSERT/UPDATE on `thoughts` (+ scoped observability/sessions grants); **no DELETE**, no schema-wide DML | MCP server, daily summary |
 | `openbrain_ingester` | INSERT-only on `funnel_access_log` | log-ingester sidecar — it parses attacker-influenced log lines, so its blast radius is one table |
 | `openbrain_readonly` | SELECT on everything | humans with psql/DBeaver |

@@ -59,14 +59,22 @@ misconfiguration exposes the database:
 **Superuser remote-admin trade-off.** The superuser (`postgres`) is reachable
 from the **app qube's IP only**, so role provisioning + schema migrations can be
 driven from the app qube over the tailnet (in addition to running them locally on
-this qube). That means a compromised app qube has full DB admin, not just the app
-role — accepted for now because the app role already reads/writes every thought,
-so the marginal exposure is small. Future hardening scopes this down to a
-non-superuser migration role (tracked in Linear). To revert to loopback-only
-admin, drop the `host all postgres …` line from `pg_hba.snippet.conf`.
+this qube). This is **more than a data-access delta**: a network-reachable
+superuser can `COPY … TO/FROM PROGRAM` (run commands **as the `postgres` OS user
+on this qube**), `DROP`/alter structures, and read password hashes from
+`pg_authid` — so a compromised app qube could **pivot into this qube's OS**, the
+very VM boundary the three-qube split exists to enforce. Accepted for now because
+(a) the app role already reads/writes every thought, and (b) this db qube is
+deliberately contained — a minimal template, no sshd, loopback + scoped peers,
+nothing of value beyond the store it already holds. Hardening to a non-superuser
+migration role — which closes the *pivot*, not just the data delta — is tracked in
+[#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15). To revert to
+loopback-only admin, drop the `host all postgres …` line from `pg_hba.snippet.conf`.
 
-No `tcp/22` is opened: there is no sshd on the DB qube. All administration is
-done from dom0 with `qvm-run`.
+No `tcp/22` is opened: there is no sshd on the DB qube. OS-level administration is
+done from dom0 with `qvm-run`; DB-level administration is done either there (over
+the loopback socket) or remotely from the app qube over the tailnet (the superuser
+remote-admin line below).
 
 ## Boot ordering
 

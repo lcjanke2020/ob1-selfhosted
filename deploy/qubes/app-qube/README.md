@@ -34,11 +34,13 @@ This qube holds the **admin/superuser** `POSTGRES_PASSWORD` (the trusted compart
 it, never the internet-adjacent ingress qube) and uses it to **administer the db qube
 remotely** over the tailnet — role provisioning + schema/migrations. The db qube's `pg_hba`
 grants the superuser a host line from **this qube's IP only** — a deliberate trade-off (a
-compromised app qube then has full DB admin, not just the app role; accepted for now since
-the app role already reads/writes every thought — see [`../db-qube/README.md`](../db-qube/README.md)
-and the Linear hardening ticket). At runtime the app qube also connects as `openbrain_app`
-(mcp writes thoughts) and `openbrain_readonly` (the backup job). It does **not** carry the
-log-ingester credential — that lives only on the ingress qube.
+compromised app qube then has full DB admin — including `COPY … TO/FROM PROGRAM`, i.e. an
+app→db OS pivot — not just the app role; accepted for now since the app role already
+reads/writes every thought and the db qube is highly contained — see
+[`../db-qube/README.md`](../db-qube/README.md) and [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15)).
+At runtime the app qube also connects as `openbrain_app` (mcp writes thoughts) and
+`openbrain_readonly` (the backup job). It does **not** carry the log-ingester credential —
+that lives only on the ingress qube.
 
 ## Host firewall (scope the `0.0.0.0:8787` bind)
 

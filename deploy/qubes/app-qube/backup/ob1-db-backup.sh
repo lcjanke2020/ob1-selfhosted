@@ -28,6 +28,17 @@ set -a; . "$ENV_FILE"; set +a   # DB_HOST DB_PORT POSTGRES_DB READONLY_ROLE READ
 : "${OUT_DIR:?set OUT_DIR in $ENV_FILE (off-box-replicated directory)}"
 RETAIN_DAYS="${RETAIN_DAYS:-14}"
 
+# Create OUT_DIR if missing so the mktemp below fails with a clear message rather
+# than an indirect mktemp error (a one-time miss otherwise becomes a silent gap).
+mkdir -p "$OUT_DIR" || { echo "cannot create OUT_DIR=$OUT_DIR" >&2; exit 2; }
+
+# gpg writes/locks state under ~/.gnupg by default, which the unit's
+# ProtectHome=read-only sandbox blocks. Point GNUPGHOME at a private temp dir
+# (0700) — --recipient-file reads the public key directly, so no keyring is
+# needed, but gpg still wants a home for its random_seed/trustdb. Cleaned up with
+# the temp dump file on exit.
+GNUPGHOME="$(mktemp -d)"; export GNUPGHOME
+
 # Date-only stamp: the daily timer produces one artifact per day. A MANUAL re-run
 # the same day overwrites that day's file (intended — keeps the prune glob and
 # retention math simple); add %H%M%S if you want same-day runs kept separately.
@@ -38,7 +49,7 @@ TS=$(date +%Y%m%d)
 # of the prune glob below; add `/.db-*` to the Syncthing folder's .stignore so
 # peers never sync the partial.
 TMP="$(mktemp "$OUT_DIR/.db-$TS.XXXXXX")"
-trap 'rm -f "$TMP"' EXIT
+trap 'rm -f "$TMP"; rm -rf "$GNUPGHOME"' EXIT
 
 # pipefail makes the whole chain fail if pg_dump (e.g. lost connection), gzip, or
 # the gpg encrypt step errors — so a partial/failed dump is never published.
