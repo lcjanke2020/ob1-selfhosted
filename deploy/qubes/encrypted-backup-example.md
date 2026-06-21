@@ -2,6 +2,11 @@
 
 > One possible approach, provided **for reference** — not a turnkey component.
 > Adapt the paths, role names, transport, and scheduler to your environment.
+>
+> A concrete instantiation of this approach — the script, the systemd
+> service + timer, and a scoped env file — is shipped for the app qube under
+> [`app-qube/backup/`](app-qube/backup/). This page is the rationale + the
+> restore/verify procedure behind it.
 
 When Postgres runs in a dedicated qube (see [`three-qube-design.md`](three-qube-design.md)
 and [`docker-compose.external-db.yml`](docker-compose.external-db.yml)), a small daily

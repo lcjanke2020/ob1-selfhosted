@@ -35,7 +35,7 @@ Four roles, least privilege, with drift detection:
 
 | Role | Privileges | Used by |
 |---|---|---|
-| `postgres` | superuser | container init only — never the app |
+| `postgres` | superuser | init + DB admin (role provisioning / migrations) — never the app runtime. In the three-qube split it's reachable from the app qube's IP only for remote admin — a deliberate trade-off (a compromised app qube then has full DB admin, including an app→db OS pivot via `COPY … TO/FROM PROGRAM`); see [db-qube/README.md](../deploy/qubes/db-qube/README.md) and [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15) |
 | `openbrain_app` | SELECT/INSERT/UPDATE on `thoughts` (+ scoped observability/sessions grants); **no DELETE**, no schema-wide DML | MCP server, daily summary |
 | `openbrain_ingester` | INSERT-only on `funnel_access_log` | log-ingester sidecar — it parses attacker-influenced log lines, so its blast radius is one table |
 | `openbrain_readonly` | SELECT on everything | humans with psql/DBeaver |
@@ -66,4 +66,4 @@ Four roles, least privilege, with drift detection:
 - **Door attribution is last-writer-wins on dedupe.** Re-capturing byte-identical content through the other door updates the stored `door`/`sub` (metadata merges on conflict) — attribution reflects the most recent capture, not the first.
 - **`/caddy-health` is reachable from any source** — required for the docker healthcheck; a public scanner can learn "Caddy is up" from it. Accepted as a minor info leak.
 - **Funnel availability caveats** — see the limitations table in [`funnel-mcp-perimeter.md`](funnel-mcp-perimeter.md).
-- **Single-qube co-residency** (Qubes path) — the edge and the database currently share a VM; the [three-qube design](../deploy/qubes/three-qube-design.md) is the planned fix.
+- **Edge↔store isolation (Qubes path)** — resolved by the [three-qube split](../deploy/qubes/three-qube-design.md): Funnel + Caddy (ingress qube), mcp + Ollama (app qube), and Postgres (db qube) run in separate VMs over a firewall-scoped tailnet, so a compromised public edge holds no memory store and no app credential. The single-host install paths still co-locate these by design (one trust boundary).

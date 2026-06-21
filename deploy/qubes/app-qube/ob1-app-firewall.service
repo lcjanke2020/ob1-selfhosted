@@ -1,0 +1,26 @@
+[Unit]
+# Re-applies the DOCKER-USER :8787 scoping rule AFTER both tailscaled (so
+# tailscale0 exists) and docker (so the DOCKER-USER chain exists). docker
+# re-creates DOCKER-USER on daemon start and can flush it on a `compose up`
+# that rebuilds the network, so re-applying once both are up is the reliable
+# path — the qubes-firewall hook alone fires too early (before docker).
+#
+# Stash at: /rw/config/ob1-app-firewall.service
+# rc.local copies it to /etc/systemd/system/ and enables it each boot (/etc is
+# wiped on every AppVM reboot, so it cannot be enabled persistently in place).
+Description=OB1 app qube host firewall (scope mcp :8787 to the ingress qube)
+After=tailscaled.service docker.service
+Wants=tailscaled.service docker.service
+
+[Service]
+Type=oneshot
+# After= only orders against the units, not against tailscale0 existing or the
+# DOCKER-USER chain being created. Block (up to 60s) until BOTH are present so
+# the rule applies cleanly; exit 0 on timeout so the unit doesn't wedge — the
+# script logs the missing-chain case to /var/log/ob1-app-firewall.log either way.
+ExecStartPre=/bin/sh -c 'i=0; while [ "$i" -lt 60 ]; do ip link show tailscale0 >/dev/null 2>&1 && iptables -n -L DOCKER-USER >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 1; done; echo "tailscale0 or DOCKER-USER not present after 60s" >&2; exit 0'
+ExecStart=/rw/config/qubes-firewall-user-script
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

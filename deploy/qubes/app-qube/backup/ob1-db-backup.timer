@@ -1,0 +1,13 @@
+[Unit]
+Description=OB1 encrypted off-box DB backup (daily)
+
+[Timer]
+# Daily, early morning, with jitter so it doesn't stampede other timers. An idle
+# Qubes app qube gets suspended; Persistent=true runs a missed backup on wake so
+# a suspended-overnight qube still produces a daily artifact.
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -262,7 +262,7 @@
 		header @claude_origin Access-Control-Allow-Origin "{http.request.header.Origin}"
 		header @claude_origin Access-Control-Expose-Headers "WWW-Authenticate, mcp-session-id"
 
-		reverse_proxy {$MCP_UPSTREAM}
+		reverse_proxy {$MCP_UPSTREAM:mcp:8787}
 	}
 
 	# ----- Non-Anthropic funnel → 403 -----------------------------------
@@ -277,6 +277,6 @@
 	# ----- Tailnet door -------------------------------------------------
 	handle @tailnet {
 		log_name access_tailnet
-		reverse_proxy {$MCP_UPSTREAM}
+		reverse_proxy {$MCP_UPSTREAM:mcp:8787}
 	}
 }

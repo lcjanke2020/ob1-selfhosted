@@ -1,6 +1,12 @@
 # External-DB override — Postgres out of compose, into a dedicated DB qube.
 #
-# This is the compose-side of the three-qube split (see three-qube-design.md and
+# NOTE: the canonical three-qube split now uses the SELF-CONTAINED per-qube
+# compose files in app-qube/ and ingress-qube/ (just `docker compose up -d` in
+# each), which don't need this override. This file is retained for the simpler
+# on-ramp of a SINGLE app qube running the whole base stack against an external
+# Postgres — layer it on ../compose-local/docker-compose.yml as shown below.
+#
+# This is the compose-side of pulling Postgres out (see three-qube-design.md and
 # issue #4): the `postgres` service is removed from the running stack and the mcp
 # server + log-ingester are pointed at an external Postgres reached over a
 # firewall-scoped tailnet link (default-deny except the app qube).

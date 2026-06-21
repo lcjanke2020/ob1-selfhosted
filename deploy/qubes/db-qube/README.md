@@ -21,13 +21,14 @@ and most of `/etc` on every reboot), and is re-installed at boot by `rc.local`.
 | `qubes-firewall-user-script` | `/rw/config/qubes-firewall-user-script` (chmod +x) | nft accept for inbound `tcp/5432` on `tailscale0` only |
 | `ob1-db-firewall.service` | `/rw/config/ob1-db-firewall.service` | One-shot that re-applies the firewall rule *after* `tailscaled` is up |
 | `rc.local` | `/rw/config/rc.local` (chmod +x) | Boot order: start tailscaled → install/enable the firewall unit → start Postgres once `tailscale0` has an IP |
-| `pg_hba.snippet.conf` | append to `/etc/postgresql/<ver>/main/pg_hba.conf` | scram host lines for the app roles, from the app qube's IP only |
+| `pg_hba.snippet.conf` | append to `/etc/postgresql/<ver>/main/pg_hba.conf` | scram host lines: superuser (remote admin) + app + readonly from the app qube, ingester from the ingress qube |
 | `postgresql.local.conf` | `conf.d/` drop-in or `ALTER SYSTEM` | `listen_addresses` (loopback + tailnet IP) and `ssl = off` |
 
 ## Placeholders to fill
 
 - `<db-qube-tailnet-ip>` — this qube's own tailnet address (in `postgresql.local.conf`).
-- `<app-qube-tailnet-ip>` — the app qube's tailnet address (in `pg_hba.snippet.conf`).
+- `<app-qube-tailnet-ip>` — the app qube's tailnet address: the superuser (remote admin), app, and readonly host lines in `pg_hba.snippet.conf`.
+- `<ingress-qube-tailnet-ip>` — the ingress qube's tailnet address: the `openbrain_ingester` host line in `pg_hba.snippet.conf` (the log-ingester runs on the ingress qube).
 - Postgres major version (`17` in the paths/commands) — match your template.
 
 ## The three trust layers (why this is shaped the way it is)
@@ -35,9 +36,10 @@ and most of `/etc` on every reboot), and is re-installed at boot by `rc.local`.
 Reachability is enforced in three independent layers, so no single
 misconfiguration exposes the database:
 
-1. **Tailscale ACL** — a grant permits exactly `app-qube → db-qube:5432`; every
-   other tailnet peer is default-denied at the wire. (Configured in your tailnet
-   admin console, not in this repo.)
+1. **Tailscale ACL** — grants permit exactly `app-qube → db-qube:5432` (and, for
+   the log-ingester, `ingress-qube → db-qube:5432`); every other tailnet peer is
+   default-denied at the wire. (Configured in your tailnet admin console, not in
+   this repo.)
 2. **Qubes nftables** — `qubes-firewall-user-script` accepts inbound `tcp/5432`
    on `tailscale0` only. The rule loads even before the interface exists
    (`iifname` matches by name, not index) and simply doesn't match traffic until
@@ -48,11 +50,31 @@ misconfiguration exposes the database:
    `/var/log/ob1-db-firewall.log`. Confirm the chain name matches your Qubes
    version with a pre-flight `nft list ruleset | grep custom-input` — if it
    differs, the accept won't land and the log will say so.
-3. **`pg_hba.conf`** — `scram-sha-256` host lines for the app roles from the app
-   qube's IP only; the superuser stays off the network.
+3. **`pg_hba.conf`** — `scram-sha-256` host lines scoped per peer: the app and
+   readonly roles from the app qube's IP, the INSERT-only `openbrain_ingester`
+   role from the ingress qube's IP, and the **superuser from the app qube's IP
+   only** (for remote DB admin — see the trade-off note below). No role gets a
+   line from any other peer.
 
-No `tcp/22` is opened: there is no sshd on the DB qube. All administration is
-done from dom0 with `qvm-run`.
+**Superuser remote-admin trade-off.** The superuser (`postgres`) is reachable
+from the **app qube's IP only**, so role provisioning + schema migrations can be
+driven from the app qube over the tailnet (in addition to running them locally on
+this qube). This is **more than a data-access delta**: a network-reachable
+superuser can `COPY … TO/FROM PROGRAM` (run commands **as the `postgres` OS user
+on this qube**), `DROP`/alter structures, and read password hashes from
+`pg_authid` — so a compromised app qube could **pivot into this qube's OS**, the
+very VM boundary the three-qube split exists to enforce. Accepted for now because
+(a) the app role already reads/writes every thought, and (b) this db qube is
+deliberately contained — a minimal template, no sshd, loopback + scoped peers,
+nothing of value beyond the store it already holds. Hardening to a non-superuser
+migration role — which closes the *pivot*, not just the data delta — is tracked in
+[#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15). To revert to
+loopback-only admin, drop the `host all postgres …` line from `pg_hba.snippet.conf`.
+
+No `tcp/22` is opened: there is no sshd on the DB qube. OS-level administration is
+done from dom0 with `qvm-run`; DB-level administration is done either there (over
+the loopback socket) or remotely from the app qube over the tailnet (the superuser
+remote-admin line below).
 
 ## Boot ordering
 
@@ -106,6 +128,11 @@ sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
 Apply `pg_hba.snippet.conf` and `postgresql.local.conf` after the roles exist,
 then reload/restart so the network listener and host lines take effect.
 
+Once the superuser host line is in place, you can also run this provisioning (and
+later migrations) **remotely from the app qube** over the tailnet instead of on
+this qube — e.g. `PGPASSWORD=… psql -h <db-qube-tailnet-ip> -U postgres -d postgres`
+— which is the point of the superuser remote-admin line above.
+
 ## Template note
 
 The shared Debian template keeps `tailscaled` **disabled**: enabling it in the
@@ -124,5 +151,6 @@ the template ships before rebooting, and `pg_upgrade` (or dump/restore) across a
 major bump deliberately rather than discovering it on a failed boot.
 
 See [`../three-qube-design.md`](../three-qube-design.md) for the full reasoning
-and the implemented three-qube split (with the tracked edge-hardening cleanups,
-[#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12) / [#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13)).
+and the implemented three-qube split (the edge now runs only Caddy + the
+log-ingester, [#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13) resolved;
+log-ingester placement decided for now, [#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)).
