@@ -1,0 +1,155 @@
+# Open Brain — ingress qube (three-qube split).
+#
+# Self-contained compose for the INGRESS (public-edge) qube — the qube that
+# terminates the Tailscale Funnel. It runs:
+#
+#   caddy         — Reverse proxy / header-discriminated perimeter (Pattern Y).
+#                   Single :9787 listener; reverse-proxies to the app qube's mcp
+#                   over the tailnet (MCP_UPSTREAM = app-qube address:8787).
+#   log-ingester  — Tails Caddy's JSON access logs and writes funnel_access_log
+#                   rows ACROSS to the db qube (DB_HOST), as the INSERT-only
+#                   openbrain_ingester role. This is the qube's ONLY DB path and
+#                   its only DB credential.
+#   postgres      — PARKED (profile `logs-future`, never activated). Kept on disk
+#                   for a FUTURE local logs store; not started today. See note.
+#
+# What this qube does NOT run: mcp and ollama. They live on the app qube; this
+# file simply doesn't define them, so the internet-adjacent edge never carries
+# the app-role DB credential. (This is the clean end state of GH #13.)
+#
+# Credentials: this qube holds ONLY the INSERT-only ingester credential
+# (OPENBRAIN_INGESTER_PASSWORD). It must NOT carry the superuser
+# (POSTGRES_PASSWORD) or app (OPENBRAIN_APP_PASSWORD) password — those live on
+# the app qube. The parked postgres references them as plain ${VAR}; left unset
+# in this qube's .env they interpolate to empty and, since the service never
+# starts, are never used.
+#
+# Run (from this directory, after copying .env.example to .env):
+#   docker compose up -d
+# Do NOT set COMPOSE_PROFILES on this qube — `logs-future` must stay inactive.
+# Confirm the parked DB is excluded:  docker compose config --services
+#   → must list exactly: caddy, log-ingester  (NOT postgres)
+
+services:
+  caddy:
+    build:
+      context: ../../compose-tailnet/caddy
+      # Always pull the pinned base layer so a stale local cache can't feed an
+      # older caddy into the perimeter image.
+      pull: true
+    restart: unless-stopped
+    environment:
+      # Reverse-proxy upstream. MANDATORY on this qube: there is no local `mcp`
+      # service to fall back to, so an unset value would make Caddy proxy to a
+      # nonexistent host and 502 every request. `:?` fails at `config` time with
+      # this message. Set it to the app qube's tailnet address:8787. Kept in
+      # .env, never the committed Caddyfile, so no tailnet address is committed.
+      MCP_UPSTREAM: ${MCP_UPSTREAM:?set MCP_UPSTREAM to the app qube tailnet address:8787 (the ingress qube proxies to the app qube's mcp)}
+    # No `profiles` and no `depends_on: mcp`: on this qube Caddy is the always-on
+    # entry point, and mcp is on a different qube (not a local service to gate on).
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=16M,mode=1777
+      - /config:size=16M
+      - /data:size=16M
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      # `:Z` relabels the Caddyfile to container_file_t on SELinux hosts
+      # (Fedora/Qubes); no-op elsewhere.
+      - ../../compose-tailnet/Caddyfile:/etc/caddy/Caddyfile:ro,Z
+      # JSON access logs, shared (read-only) with the log-ingester.
+      - caddy_logs:/var/log/caddy
+    ports:
+      - "127.0.0.1:9787:9787"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9787/caddy-health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # Caddy access-log ingester → writes funnel_access_log rows to the db qube.
+  log-ingester:
+    build:
+      context: ../../../server
+      dockerfile: Dockerfile.ingester
+    restart: unless-stopped
+    # Always-on here (no profile gate): this is the qube with Caddy logs to tail.
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=16M,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    # No `depends_on`: Postgres is on the db qube, not in this compose project.
+    environment:
+      # MANDATORY: the ingester writes ACROSS to the db qube. `:?` fails at
+      # config time rather than connecting to a nonexistent local `postgres`.
+      DB_HOST: ${DB_HOST:?set DB_HOST to the db qube tailnet address (the ingester writes funnel_access_log across to the db qube)}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${POSTGRES_DB:-openbrain}
+      # INSERT-only observability role — the only DB credential this qube holds.
+      # No `:-` default: compose fails to start if OPENBRAIN_INGESTER_PASSWORD is
+      # unset (desired fail-fast).
+      DB_USER: openbrain_ingester
+      DB_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD}
+      INGESTER_POLL_INTERVAL_MS: ${INGESTER_POLL_INTERVAL_MS:-5000}
+      CADDY_LOG_DIR: /var/log/caddy
+    volumes:
+      # Read access logs RO so a compromised ingester can't tamper with the
+      # on-disk audit evidence; cursors in a separate writable volume.
+      - caddy_logs:/var/log/caddy:ro
+      - caddy_cursors:/var/lib/ingester/cursors
+
+  # PARKED — kept on disk for a FUTURE local logs store, never started today.
+  #
+  # `profiles: [logs-future]` is a profile the deploy never activates, so a bare
+  # `docker compose up` excludes it (same mechanism as external-db.yml's
+  # `bundled-db-disabled`). To one day move log storage local to this qube,
+  # activate the profile, point the log-ingester's DB_HOST at 127.0.0.1, and
+  # provision the roles/schema here.
+  #
+  # Its passwords are referenced as PLAIN ${VAR} (NOT `:?`): a parked service is
+  # still interpolated at `config` time, so `:?` would error even though the
+  # service never starts. Left unset in this qube's .env they resolve empty and
+  # are never used — which is exactly what keeps this qube free of the superuser
+  # and app credentials.
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    profiles:
+      - logs-future
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-openbrain}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      OPENBRAIN_APP_PASSWORD: ${OPENBRAIN_APP_PASSWORD}
+      OPENBRAIN_READONLY_PASSWORD: ${OPENBRAIN_READONLY_PASSWORD}
+      OPENBRAIN_INGESTER_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD:-}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../../../db/00-roles.sh:/docker-entrypoint-initdb.d/00-roles.sh:ro
+      - ../../../db/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ../../../db/02-observability.sql:/docker-entrypoint-initdb.d/02-observability.sql:ro
+      - ../../../db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/03-grants-assertion.sql:ro
+      - ../../../db/04-sessions.sql:/docker-entrypoint-initdb.d/04-sessions.sql:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-openbrain}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  caddy_logs:
+  caddy_cursors:
+  # Declared for the parked postgres; unused until the logs-future profile is
+  # activated.
+  postgres_data:

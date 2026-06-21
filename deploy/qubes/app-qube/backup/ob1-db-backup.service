@@ -1,0 +1,28 @@
+[Unit]
+# Daily encrypted off-box DB backup (app qube → db qube dump → GPG → off-box).
+# A backup job that fails silently becomes an incident the day you need a
+# restore. Wire a visible failure signal: provide a `notify-failure@.service`
+# (journal mail, ntfy, etc.) and uncomment the OnFailure line below, or rely on
+# your monitoring scraping `systemctl --failed`.
+Description=OB1 encrypted off-box DB backup
+After=network-online.target tailscaled.service
+Wants=network-online.target
+# OnFailure=notify-failure@%n.service
+
+[Service]
+Type=oneshot
+# Run as an unprivileged user that owns OUT_DIR and can read the pubkey + the
+# backup env. Replace `openbrain` with the backup user on your app qube.
+User=openbrain
+ExecStart=/rw/config/openbrain-units/ob1-db-backup.sh
+# Defensive sandboxing for a job that only reads a key + writes one dir.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+# Allow writes only to the off-box-replicated output directory. Override with a
+# drop-in if OUT_DIR lives elsewhere (e.g. ReadWritePaths=/home/openbrain/sync).
+ReadWritePaths=/home/openbrain
+
+[Install]
+WantedBy=multi-user.target

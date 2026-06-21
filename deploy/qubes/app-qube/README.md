@@ -1,0 +1,67 @@
+# app qube — mcp + Ollama
+
+The **app** qube of the [three-qube split](../three-qube-design.md): it runs the
+application half (the MCP server + Ollama embeddings) and nothing else. The public edge
+(Funnel + Caddy + log-ingester) lives on the [ingress qube](../ingress-qube/); the
+canonical Postgres lives on the [db qube](../db-qube/). This qube is the **trusted
+compartment** — it holds the DB admin credential and writes thoughts — reachable only from
+the ingress qube.
+
+Build this qube with the shared bind-dirs / SELinux / systemd-persistence mechanics from
+the [Qubes README](../README.md) first; this directory is the app-qube-specific overlay.
+
+## Run
+
+```sh
+cp .env.example .env && $EDITOR .env     # fill DB_HOST + the three passwords
+docker compose up -d
+```
+
+[`docker-compose.yml`](docker-compose.yml) is self-contained — `mcp` + `ollama` only, no
+override stack. `mcp` is published on `0.0.0.0:8787` so the ingress qube's Caddy can reach
+it across qubes (set `MCP_UPSTREAM=<this-qube-tailnet-ip>:8787` in the *ingress* qube's
+`.env`). Ollama runs CPU-only (no GPU passthrough in a Qubes app qube); point `OLLAMA_URL`
+at an external GPU box to offload it.
+
+## Credentials (per-qube split)
+
+This qube's `.env` carries the **admin/superuser** `POSTGRES_PASSWORD` (it is the DB
+control-plane — schema/role provisioning + migrations run from here against the db qube),
+the **app** role password (mcp writes thoughts), and the **readonly** password (the backup
+job). It does **not** carry the log-ingester credential — that lives only on the ingress
+qube. The db qube's superuser is never given a network host line; the app qube reaches it
+as `openbrain_app` (and `openbrain_readonly` for backups).
+
+## Host firewall (scope the `0.0.0.0:8787` bind)
+
+The `0.0.0.0` bind is reachable on every interface (tailnet **and** LAN). Three independent
+layers narrow it to the ingress qube — Tailscale ACL, this host firewall, and mcp app auth.
+Install the firewall artifacts (counterpart to the db qube's):
+
+| File | Install at | Purpose |
+|------|-----------|---------|
+| [`qubes-firewall-user-script`](qubes-firewall-user-script) | `/rw/config/qubes-firewall-user-script` (chmod +x) | `DOCKER-USER` rule: accept `:8787` only from the ingress qube's tailnet IP, drop it on every other source/interface |
+| [`ob1-app-firewall.service`](ob1-app-firewall.service) | `/rw/config/ob1-app-firewall.service` | one-shot that re-applies the rule `After=tailscaled` |
+| [`rc.local`](rc.local) | `/rw/config/rc.local` (chmod +x) | boot order: tailscaled → firewall unit → backup timer |
+
+The rule lives in `DOCKER-USER`, **not** the Qubes `custom-input` chain, because docker's
+DNAT bypasses the qubes `INPUT` path — a `custom-input` accept/drop never sees the
+published-port traffic. Replace `<ingress-qube-tailnet-ip>` in the script with the ingress
+qube's address. (This host-firewall layer also closes the LAN-reachable-`0.0.0.0`-bind gap,
+since it drops `:8787` on all interfaces, not just `tailscale0`.)
+
+## Encrypted DB backup
+
+A daily job dumps the db qube (read-only role), GPG-encrypts to a public key (this host
+holds **no** private key), and drops the artifact into an off-box-replicated directory
+(Syncthing, rsync, …). Artifacts + units are in [`backup/`](backup/); the design rationale
+is in [`../encrypted-backup-example.md`](../encrypted-backup-example.md).
+
+## Verify
+
+```sh
+docker compose config --services      # exactly: mcp, ollama
+docker compose up -d
+# from the ingress qube, a Caddy request to MCP_UPSTREAM should reach mcp;
+# from any OTHER tailnet peer, :8787 should be dropped by the host firewall.
+```

@@ -1,0 +1,59 @@
+#!/bin/sh
+# App qube host firewall — scope the published mcp port (:8787) to the ingress
+# qube ONLY.
+#
+# Install at: /rw/config/qubes-firewall-user-script   (chmod +x)
+#
+# WHY DOCKER-USER, not the Qubes custom-input chain:
+# docker-compose.yml publishes mcp on 0.0.0.0:8787, i.e. ALL interfaces
+# (tailnet AND the LAN-facing eth0). docker installs DNAT rules in the nat table
+# that redirect that traffic to the container BEFORE the Qubes `ip qubes
+# custom-input` chain sees it — so a `custom-input` accept/drop never matches
+# the published-port traffic. The user-facing hook docker leaves for exactly
+# this is the DOCKER-USER chain (traversed in FORWARD for container-bound
+# traffic). That is where the scoping rule must live.
+#
+# This is the host-firewall layer — one of the three independent layers that
+# scope the wide bind (Tailscale ACL + this rule + mcp app auth). It also closes
+# the LAN-reachable-bind gap: because we DROP :8787 on every source except the
+# one ingress IP (not just on tailscale0), an eth0/LAN client cannot reach the
+# port either.
+#
+# >>> EDIT THIS: the ingress qube's tailnet IP (the only peer allowed to reach
+#     mcp). IPv4 (Tailscale CGNAT, 100.64/10) or IPv6 (fd7a:…) — set whichever
+#     address the ingress qube's Caddy uses as MCP_UPSTREAM. Leave the other
+#     family fully dropped (the default below).
+INGRESS_IP="<ingress-qube-tailnet-ip>"
+PORT=8787
+LOG=/var/log/ob1-app-firewall.log
+
+# Idempotent helper: append $1.. as a DOCKER-USER rule for $fam unless an
+# identical rule already exists. $fam is the iptables binary (iptables / ip6tables).
+add_rule() {
+	fam=$1; shift
+	if "$fam" -C DOCKER-USER "$@" 2>/dev/null; then
+		echo "$(date -Is) [$fam] rule already present; skipping: $*" >>"$LOG"
+		return 0
+	fi
+	if "$fam" -A DOCKER-USER "$@" 2>>"$LOG"; then
+		echo "$(date -Is) [$fam] added: $*" >>"$LOG"
+	else
+		echo "$(date -Is) [$fam] FAILED to add (DOCKER-USER missing? is docker up?): $*" >>"$LOG"
+	fi
+}
+
+# Pick the iptables family for the allow rule from the configured IP. The DROP
+# is applied on BOTH families so the unconfigured family is fully closed.
+case "$INGRESS_IP" in
+	*:*) ALLOW_FAM=ip6tables ;;
+	*)   ALLOW_FAM=iptables ;;
+esac
+
+# Rule order in DOCKER-USER (default policy is RETURN, chain is otherwise empty):
+# the ACCEPT for the ingress peer must sit ABOVE the catch-all DROP. We append
+# ACCEPT first, then DROP, so traversal hits ACCEPT before DROP.
+add_rule "$ALLOW_FAM" -i tailscale0 -s "$INGRESS_IP" -p tcp --dport "$PORT" -j ACCEPT
+
+# Catch-all: drop every other source (any interface, incl. eth0/LAN) to :8787.
+add_rule iptables  -p tcp --dport "$PORT" -j DROP
+add_rule ip6tables -p tcp --dport "$PORT" -j DROP

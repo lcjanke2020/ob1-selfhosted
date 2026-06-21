@@ -1,7 +1,13 @@
-# CPU-only Ollama override — for hosts without a GPU (e.g. a Qubes app qube,
-# which has no GPU passthrough). The base compose reserves an nvidia device for
-# the ollama service; on a GPU-less host that reservation makes the container
-# fail to start. This clears just the GPU device reservation via `!reset`
+# CPU-only Ollama override — for hosts without a GPU.
+#
+# NOTE: the per-qube app-qube/docker-compose.yml already runs Ollama CPU-only
+# (it omits the GPU reservation outright), so it does NOT need this override.
+# This file is retained for the single-app-qube on-ramp (base stack on a GPU-less
+# host) layered alongside docker-compose.external-db.yml.
+#
+# The base compose reserves an nvidia device for the ollama service; on a
+# GPU-less host that reservation makes the container fail to start. This clears
+# just the GPU device reservation via `!reset`
 # (needs a Compose v2 that supports `!reset`; v2.24.4 documents it). CPU-only
 # nomic-embed-text embedding is sub-second per request, fine for personal recall.
 #
