@@ -91,7 +91,7 @@ docker compose up -d                     # services: mcp, ollama
 
 ### ingress qube — Funnel + Caddy (+ log-ingester)
 
-The ingress qube terminates the Tailscale Funnel and runs Caddy + the log-ingester, with **no** memory store and **no** app credential — it carries only the INSERT-only ingester credential. Caddy reverse-proxies to the app qube (`MCP_UPSTREAM=<app-qube-tailnet-ip>:8787`); the log-ingester writes its `funnel_access_log` rows *across* to the db qube (`DB_HOST`), the one INSERT-only path this qube keeps to `:5432` (the documented exception — see [three-qube-design.md](three-qube-design.md#log-ingester-placement-open) and #12). A **parked** local `postgres` is kept on disk for a future local logs store but never started. Full recipe in [`ingress-qube/README.md`](ingress-qube/README.md):
+The ingress qube terminates the Tailscale Funnel and runs Caddy + the log-ingester, with **no** memory store and **no** app credential — it carries only the INSERT-only ingester credential. Caddy reverse-proxies to the app qube (`MCP_UPSTREAM=<app-qube-tailnet-ip>:8787`); the log-ingester writes its `funnel_access_log` rows *across* to the db qube (`DB_HOST`), the one INSERT-only path this qube keeps to `:5432` (the documented exception — see [three-qube-design.md](three-qube-design.md#log-ingester-placement-decided-for-now) and #12). A **parked** local `postgres` is kept on disk for a future local logs store but never started. Full recipe in [`ingress-qube/README.md`](ingress-qube/README.md):
 
 ```sh
 cd ingress-qube

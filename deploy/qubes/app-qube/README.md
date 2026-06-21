@@ -30,12 +30,15 @@ to `rc.local` after the docker start, or run it by hand after a reboot.
 
 ## Credentials (per-qube split)
 
-This qube's `.env` carries the **admin/superuser** `POSTGRES_PASSWORD` (it is the DB
-control-plane — schema/role provisioning + migrations run from here against the db qube),
-the **app** role password (mcp writes thoughts), and the **readonly** password (the backup
-job). It does **not** carry the log-ingester credential — that lives only on the ingress
-qube. The db qube's superuser is never given a network host line; the app qube reaches it
-as `openbrain_app` (and `openbrain_readonly` for backups).
+This qube **custodies** the **admin/superuser** `POSTGRES_PASSWORD` (the trusted compartment
+holds it, never the internet-adjacent ingress qube) for administering the headless db qube —
+role provisioning + schema/migrations. Those are applied **on the db qube over its loopback
+socket** (see [`../db-qube/README.md`](../db-qube/README.md)); the db qube's superuser is
+**never given a network host line**, so the app qube does not connect as superuser remotely
+(driving migrations from here instead would be an opt-in that needs a scoped superuser
+`pg_hba` line added on the db qube). For normal operation the app qube reaches the db qube as
+`openbrain_app` (mcp writes thoughts) and `openbrain_readonly` (the backup job). It does
+**not** carry the log-ingester credential — that lives only on the ingress qube.
 
 ## Host firewall (scope the `0.0.0.0:8787` bind)
 
@@ -46,7 +49,7 @@ Install the firewall artifacts (counterpart to the db qube's):
 | File | Install at | Purpose |
 |------|-----------|---------|
 | [`qubes-firewall-user-script`](qubes-firewall-user-script) | `/rw/config/qubes-firewall-user-script` (chmod +x) | `DOCKER-USER` rule: accept `:8787` only from the ingress qube's tailnet IP, drop it on every other source/interface |
-| [`docker-ob1-firewall.conf`](docker-ob1-firewall.conf) | `/etc/systemd/system/docker.service.d/ob1-firewall.conf` | docker drop-in: re-runs the script `ExecStartPost` so a daemon restart can't leave `:8787` open |
+| [`docker-ob1-firewall.conf`](docker-ob1-firewall.conf) | `/rw/config/docker-ob1-firewall.conf` (rc.local copies it to `/etc/systemd/system/docker.service.d/ob1-firewall.conf` each boot) | docker drop-in: re-runs the script `ExecStartPost` so a daemon restart can't leave `:8787` open |
 | [`ob1-app-firewall.service`](ob1-app-firewall.service) | `/rw/config/ob1-app-firewall.service` | boot one-shot that applies the rule once `After=tailscaled` + docker |
 | [`rc.local`](rc.local) | `/rw/config/rc.local` (chmod +x) | boot order: tailscaled → install docker drop-in → docker → firewall one-shot → backup timer |
 
