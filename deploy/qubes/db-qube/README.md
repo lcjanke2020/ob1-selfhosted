@@ -2,8 +2,9 @@
 
 The [three-qube design](../three-qube-design.md) pulls Postgres out of compose into
 a dedicated **database qube**: a minimal Debian-templated AppVM running Postgres +
-pgvector natively, reachable only from the app qube over a firewall-scoped tailnet
-link. This directory holds the on-disk config that makes that qube reproducible —
+pgvector natively, reachable over a firewall-scoped tailnet only by its scoped peers
+— the app qube (full app role) and the ingress qube's log-ingester (INSERT-only); see
+the [design doc](../three-qube-design.md). This directory holds the on-disk config that makes that qube reproducible —
 the counterpart to the compose files for the other install paths.
 
 These are **placeholders**, not drop-in secrets. Fill in the two addresses and

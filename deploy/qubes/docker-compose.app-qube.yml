@@ -16,15 +16,17 @@
 #   COMPOSE_FILE=../compose-local/docker-compose.yml:docker-compose.external-db.yml:docker-compose.cpu-ollama.yml:docker-compose.app-qube.yml \
 #   docker compose up -d
 #
-# Network exposure: mcp is published on the tailnet so the ingress Caddy can
-# reach it. That port is scoped by THREE independent layers, none of which is
-# this compose file:
+# Network exposure: mcp's port is published on 0.0.0.0:8787 — ALL of this qube's
+# host interfaces, not just tailscale0. The bind grants no protection on its own;
+# reachability is restricted to the ingress qube by THREE independent layers
+# below, none of which is the bind address or this compose file:
 #   1. Tailscale ACL  — only the ingress qube → this qube:8787 (enforced at this
 #      node's tailscaled packet filter; other peers are dropped at the wire).
 #   2. Host firewall  — a DOCKER-USER rule dropping tailscale0:8787 from anything
 #      but the ingress qube (docker DNAT bypasses the qubes INPUT chain, so the
 #      rule must live in DOCKER-USER, not the standard custom-input).
-#   3. mcp JWT auth   — unchanged application-layer boundary (server/auth.ts).
+#   3. mcp app auth   — unchanged application-layer boundary (server/auth.ts):
+#      x-brain-key for tailnet requests, OAuth Bearer JWT for funnel requests.
 
 services:
   mcp:
@@ -43,7 +45,7 @@ services:
     ports: !override
       - "0.0.0.0:8787:8787"
     environment:
-      # mcp/config.ts fail-fast: with AUTH0_* set, PATTERN_B must be "true".
+      # server/config.ts fail-fast: with AUTH0_* set, PATTERN_B must be "true".
       # OAuth is still enforced here; the header-strip boundary that PATTERN_B
       # also guards is enforced by Caddy on the ingress qube.
       PATTERN_B: "true"

@@ -4,11 +4,11 @@
 
 ## Implemented: app→DB transport (firewall-scoped tailnet)
 
-The DB qube runs Postgres natively and is reachable **only** from the app qube, enforced in three independent layers:
+The DB qube runs Postgres natively and is reachable by just two scoped peers — the app qube on the full app role, and (while the log-ingester runs on the edge) the ingress qube on an INSERT-only observability role; see [Log-ingester placement](#log-ingester-placement-open). The app→DB transport — the primary, full-role path — is enforced in three independent layers (the ingester path reuses the same layers with one extra grant/host line):
 
-1. **Tailscale ACL** — a grant permits exactly `app-qube → db-qube:5432`; every other tailnet peer is default-denied at the wire. The DB qube carries its own tag (e.g. `tag:ob1-db`) and nothing else routes to it.
+1. **Tailscale ACL** — grants permit exactly `app-qube → db-qube:5432` (and, for the ingester, `ingress-qube → db-qube:5432`); every other tailnet peer is default-denied at the wire. The DB qube carries its own tag (e.g. `tag:ob1-db`) and nothing else routes to it.
 2. **Qubes nftables** — the DB qube accepts inbound `tcp/5432` on `tailscale0` only (a `custom-input` rule reapplied after `tailscaled` by a one-shot unit, since `qubes-firewall.service` runs before the interface exists). No `:22` — there is no sshd; all admin is dom0 `qvm-run`.
-3. **`pg_hba.conf`** — `scram-sha-256` host lines for the app roles from the app qube's IP only; the superuser stays off the network.
+3. **`pg_hba.conf`** — `scram-sha-256` host lines scoped per peer: the app role from the app qube's IP, the INSERT-only ingester role from the ingress qube's IP; the superuser stays off the network.
 
 PGDATA, `/etc/postgresql`, and `/var/lib/tailscale` are bind-dir'd into `/rw` so the cluster, its hardened config, and the node identity survive reboots; the cluster is started on boot (after `tailscale0` is up) from `rc.local`. The more-isolated qrexec / `qubes.ConnectTCP` transport (no listener at all) remains a tracked follow-up.
 
@@ -87,7 +87,7 @@ The cleaner end state moves the ingester to the **app** qube, leaving the ingres
 ## Acceptance criteria
 
 - Funnel + Caddy run in a dedicated ingress qube with no DB present (achieved: `external-db.yml` parks Postgres) and no app state — the latter pending parking the edge's unused `mcp`/`ollama` ([#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13)).
-- MCP + Postgres in separate qubes; the app qube reaches the DB on the chosen transport; nothing else can.
+- MCP + Postgres in separate qubes; the app qube reaches the DB on the chosen transport (full app role), and — while the log-ingester runs on the edge — the ingress qube reaches it on the INSERT-only observability role; nothing else can.
 - The ingress qube cannot reach any host other than the app qube's MCP port — **plus**, while the log-ingester runs there, the INSERT-only observability role on the db qube's `:5432` (the documented exception above — see [Log-ingester placement](#log-ingester-placement-open) / [#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)). Verified by ACL + firewall audit, not assumption.
 - Backup/restore works against the relocated DB.
 - The allowlist + XFF behavior re-verified under the two-hop topology.

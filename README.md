@@ -119,7 +119,7 @@ Anyone who can present your `x-brain-key` from inside the perimeter (loopback, o
 ## Status & roadmap
 
 - All three install paths describe deployments that are running today; the test suite (`cd server && deno task test`) is hermetic and runs in CI.
-- The Qubes install currently co-locates the whole stack in one qube. The next step — Postgres pulled out of compose into its own qube, with ingress / app / db separated by VM boundaries — is designed and in progress: [`deploy/qubes/three-qube-design.md`](deploy/qubes/three-qube-design.md).
+- The Qubes install path runs as the **three-qube split**: Postgres in its own db qube, the app (mcp + Ollama) in an app qube, and Funnel + Caddy in an ingress qube that reverse-proxies to the app qube across a firewall-scoped tailnet ([`deploy/qubes/three-qube-design.md`](deploy/qubes/three-qube-design.md)). Two edge-hardening cleanups remain tracked: parking the ingress qube's unused app containers ([#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13)) and finalizing log-ingester placement ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)).
 
 ## License & attribution
 
