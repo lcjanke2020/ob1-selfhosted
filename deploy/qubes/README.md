@@ -2,7 +2,7 @@
 
 Running the stack inside a [Qubes OS](https://www.qubes-os.org/) app qube gets you VM-level compartmentalization around your memory store: the qube that talks to the internet is not the qube that holds your keys, and (with the [three-qube design](three-qube-design.md)) the qube that holds the public edge is not the qube that holds the database.
 
-This page documents the **current, deployed shape**: one Fedora-templated app qube running the whole compose stack ([Pattern A or B](../compose-tailnet/README.md)), with Docker, Tailscale, and sshd. Everything from the other two install paths applies; this page only covers what Qubes changes.
+The **deployed shape** splits the stack across three qubes — a Funnel + Caddy **ingress** qube, an **app** qube (mcp + Ollama), and a **db** qube (Postgres) — connected over a firewall-scoped tailnet; see [`three-qube-design.md`](three-qube-design.md) for the threat model and trust layers. The setup mechanics in the sections below (bind-dirs, SELinux relabels, systemd persistence, networking) are written for a single Fedora-templated app qube because they apply to **each** qube you build; [Splitting the stack across qubes](#splitting-the-stack-across-qubes) at the bottom layers the split on top via per-role compose overrides. (A single app qube running the whole compose stack is still a valid starting point — just stop before the split.) Everything from the other two install paths applies; this page only covers what Qubes changes.
 
 ## Qube setup
 
@@ -61,7 +61,7 @@ For **user** timers, two extra Qubes-isms: idle app qubes get suspended (timers 
 
 ## Networking posture
 
-- All compose services bind loopback; tailnet exposure goes through `tailscale serve`/`funnel` exactly as in the [tailnet install](../compose-tailnet/README.md).
+- All compose services bind loopback; tailnet exposure goes through `tailscale serve`/`funnel` exactly as in the [tailnet install](../compose-tailnet/README.md). **Split-deployment exception:** the app qube's `mcp` is deliberately published on the tailnet (`0.0.0.0:8787`) so the ingress qube's Caddy can reach it across qubes. That port is *not* left open to the tailnet at large — it is scoped by Tailscale ACL (only the ingress qube may reach it) + the app qube's host firewall (a `DOCKER-USER` rule, since docker DNAT bypasses the Qubes `INPUT` chain) + mcp's JWT auth. See the header of [`docker-compose.app-qube.yml`](docker-compose.app-qube.yml) for the three layers.
 - Gate reachability with Tailscale ACL tags (e.g. a tag for "may reach the memory store on :443" and the standard ssh-target tag if you administer over the tailnet). Remember the qube's own firewall script (`/rw/config/qubes-firewall-user-script`) only opens what you add — `:22` is not open by default.
 - Funnel (Pattern B) additionally needs the `funnel` node attribute on this device in the Tailscale admin console.
 
@@ -69,19 +69,28 @@ For **user** timers, two extra Qubes-isms: idle app qubes get suspended (timers 
 
 This shape — Fedora app qube, bind-dirs as above, Pattern A with CPU-only Ollama — passed the full [verification checklist](../compose-local/README.md#verification-checklist) end-to-end, including first-try semantic recall from a Claude client on another tailnet machine. The snags documented above are the complete list encountered; everything else worked as on a plain Linux host.
 
-## Pulling the database into its own qube
+## Splitting the stack across qubes
 
-A single qube running edge + app + database means a compromise of the public edge is a compromise of the memory store. The first separation — **Postgres out of compose into a dedicated DB qube** — is implemented: run the stack with [`docker-compose.external-db.yml`](docker-compose.external-db.yml) layered on, set `DB_HOST` in `.env` to the DB qube's tailnet IP, and the bundled `postgres` service no longer starts. The DB qube accepts connections only from the app qube (Tailscale ACL + nft `tailscale0:5432` + `pg_hba` scram). Full reasoning, the three trust layers, and the reboot-persistence requirements are in [`three-qube-design.md`](three-qube-design.md).
+A single qube running edge + app + database means a compromise of the public edge is a compromise of the memory store. The deployed Qubes shape therefore puts those three roles in three qubes, each reachable only by the next over a firewall-scoped tailnet. The full threat model, the three trust layers, and the reboot-persistence requirements are in [`three-qube-design.md`](three-qube-design.md); this section is the operator recipe. Build each qube with the bind-dirs / SELinux / persistence mechanics above, then layer the role-specific compose overrides below.
 
-The DB qube's own on-disk config — bind-dirs, the `tailscale0:5432` firewall unit, the boot ordering in `rc.local`, and the `pg_hba` / `listen_addresses` snippets — is provided as reproducible placeholders in [`db-qube/`](db-qube/) (see its [README](db-qube/README.md)).
+### db qube — Postgres only
 
-A Qubes app qube has no GPU passthrough, so also layer on [`docker-compose.cpu-ollama.yml`](docker-compose.cpu-ollama.yml) (strips the base ollama nvidia reservation; CPU `nomic-embed-text` is sub-second). The full external-DB + CPU invocation, run from `deploy/qubes`:
+Postgres runs natively, out of compose. The app qube reaches it with [`docker-compose.external-db.yml`](docker-compose.external-db.yml) layered on and `DB_HOST` set to the db qube's tailnet address; the bundled `postgres` service then no longer starts. The db qube accepts connections only from the app qube (Tailscale ACL + nft `tailscale0:5432` + `pg_hba` scram). Its own on-disk config — bind-dirs, the `tailscale0:5432` firewall unit, the boot ordering in `rc.local`, and the `pg_hba` / `listen_addresses` snippets — is provided as reproducible placeholders in [`db-qube/`](db-qube/) (see its [README](db-qube/README.md)).
+
+### app qube — mcp + Ollama
+
+The app qube runs the application half only, via [`docker-compose.app-qube.yml`](docker-compose.app-qube.yml): mcp + Ollama, no Caddy and no log-ingester. Its `mcp` is re-published on the tailnet (`0.0.0.0:8787`) so the ingress qube's Caddy can reach it — scoped by Tailscale ACL + the app qube's host firewall + mcp's JWT (the override file's header documents the three layers). A Qubes app qube has no GPU passthrough, so [`docker-compose.cpu-ollama.yml`](docker-compose.cpu-ollama.yml) strips the base ollama nvidia reservation (CPU `nomic-embed-text` is sub-second). Run from `deploy/qubes`:
 
 ```sh
 DB_HOST=<db-qube-tailnet-ip> \
-COMPOSE_FILE=../compose-local/docker-compose.yml:../compose-tailnet/docker-compose.pattern-b.yml:docker-compose.external-db.yml:docker-compose.cpu-ollama.yml \
-COMPOSE_PROFILES=pattern-b \
+COMPOSE_FILE=../compose-local/docker-compose.yml:docker-compose.external-db.yml:docker-compose.cpu-ollama.yml:docker-compose.app-qube.yml \
 docker compose up -d
 ```
 
-The remaining step is moving **Funnel + Caddy into their own ingress qube** so the edge and the app are also separated — still a design (see `three-qube-design.md`).
+Note there is **no** `docker-compose.pattern-b.yml` and **no** `COMPOSE_PROFILES=pattern-b` in that invocation — that is exactly what keeps Caddy (base file, `pattern-b` profile) and the log-ingester (in the pattern-b override) off the app qube.
+
+### ingress qube — Funnel + Caddy (+ log-ingester)
+
+The ingress qube terminates the Tailscale Funnel and runs Caddy with the standard [Pattern B invocation](../compose-tailnet/README.md). Point Caddy at the app qube by setting `MCP_UPSTREAM=<app-qube-tailnet-ip>:8787` in its `.env`; the Caddyfile reads it as `reverse_proxy {$MCP_UPSTREAM}` (default `mcp:8787`, i.e. single-host behavior, when unset). The flip — and its rollback — is that one `.env` line plus a Caddy reload.
+
+The log-ingester currently runs here, next to Caddy, because it tails Caddy's access-log files. It writes funnel-access rows to Postgres, so the ingress qube keeps **one** scoped path to the db qube (`:5432`, the INSERT-only observability role) — a deliberate exception to the "ingress reaches only the app qube" target. The trade-off and the open decision on relocating it are in [three-qube-design.md](three-qube-design.md#log-ingester-placement-open). The ingress qube's own `mcp`/`ollama` containers go unused once `MCP_UPSTREAM` points at the app qube; formally parking them is a tracked follow-up.

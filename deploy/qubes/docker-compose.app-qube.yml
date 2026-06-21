@@ -36,6 +36,10 @@ services:
     # list-valued fields (like `ports`) across files by default, so without this
     # the container would inherit BOTH binds and fail at start with
     # "address already in use" (0.0.0.0:8787 already covers 127.0.0.1:8787).
+    #
+    # Needs a Compose v2 that supports the `!override` tag — v2.24.4, the same
+    # release that documents the `!reset` tag the other override files here rely
+    # on. Older Compose fails with a YAML parse error on the unknown tag.
     ports: !override
       - "0.0.0.0:8787:8787"
     environment:

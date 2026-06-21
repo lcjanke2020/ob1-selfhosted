@@ -1,6 +1,6 @@
 # Design: ingress / app / db in three qubes
 
-**Status: DB split implemented; ingress split still a design.** The dedicated DB qube is provisioned, the app→DB transport is wired (firewall-scoped tailnet — see below), and the compose stack pulls Postgres out via [`docker-compose.external-db.yml`](docker-compose.external-db.yml). The remaining *design* part is moving Funnel + Caddy into their own ingress qube. Published as a design doc because the reasoning is the transferable part.
+**Status: implemented — ingress, app, and db now run in three qubes.** The dedicated DB qube is provisioned, the app→DB transport is wired (firewall-scoped tailnet — see below), the compose stack pulls Postgres out via [`docker-compose.external-db.yml`](docker-compose.external-db.yml), and the public edge (Funnel + Caddy) now runs in its own ingress qube reverse-proxying to the app qube's mcp over the tailnet — the parameterized `MCP_UPSTREAM` upstream plus [`docker-compose.app-qube.yml`](docker-compose.app-qube.yml) (operator recipe in the [Qubes README](README.md#splitting-the-stack-across-qubes)). Kept as a design doc because the reasoning — the threat model and the trust layers — is the transferable part. One placement question remains open: [the log-ingester](#log-ingester-placement-open).
 
 ## Implemented: app→DB transport (firewall-scoped tailnet)
 
@@ -74,11 +74,17 @@ Splitting adds a second proxy hop (Funnel → ingress Caddy → app). Two things
 
 This re-validation is the reason *not* to rush the split right before you depend on the endpoint: it touches the edge auth path, which deserves an unhurried test pass.
 
+## Log-ingester placement (open)
+
+The Pattern B **log-ingester** tails Caddy's access-log files and writes `funnel_access_log` rows to Postgres. Caddy lives on the ingress qube; Postgres lives on the db qube — so wherever the ingester runs, it bridges to one of them. The current deployment runs it on the **ingress** qube, next to Caddy, which means the ingress qube keeps exactly **one** path to the db qube: the INSERT-only observability role on `:5432`, locked to the db qube by ACL + host firewall + `pg_hba`. This is a deliberate, scoped exception to the "ingress reaches only the app qube" target below — not an oversight. `funnel_access_log` is request metadata only (timestamp, path, status, client IP; no thought content, no credentials), so a popped ingress writing to that one table is low-value.
+
+The cleaner end state moves the ingester to the **app** qube, leaving the ingress qube with no DB path at all — but that needs Caddy's access logs to cross from the ingress qube to the app qube (a shared/forwarded log path, or Caddy emitting to a destination the app qube reads). A third option is a perimeter logs-only Postgres on the ingress qube (loopback-only), which fully severs ingress→db at the cost of fragmenting logs across two databases. Picking the end state is tracked in [#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12).
+
 ## Acceptance criteria
 
 - Funnel + Caddy run in a dedicated ingress qube with no app state or DB present.
 - MCP + Postgres in separate qubes; the app qube reaches the DB on the chosen transport; nothing else can.
-- The ingress qube cannot reach any host other than the app qube's MCP port (ACL + firewall audit, not assumption).
+- The ingress qube cannot reach any host other than the app qube's MCP port — **plus**, while the log-ingester runs there, the INSERT-only observability role on the db qube's `:5432` (the documented exception above — see [Log-ingester placement](#log-ingester-placement-open) / [#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)). Verified by ACL + firewall audit, not assumption.
 - Backup/restore works against the relocated DB.
 - The allowlist + XFF behavior re-verified under the two-hop topology.
 - Your network-topology diagram updated — an isolation model that exists only in qube configs and not in documentation will drift.
