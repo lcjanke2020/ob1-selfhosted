@@ -23,7 +23,7 @@ This repo is one codebase with **three install paths**, from "docker on a laptop
 
 Pattern A (tailnet-only) runs postgres + mcp + ollama and fronts the MCP server directly with `tailscale serve`. Pattern B adds Caddy and Tailscale Funnel for public access. Both patterns converge on the same backend; Caddy's single `:9787` listener discriminates tailnet vs Funnel traffic via the `Tailscale-Funnel-Request` header that Tailscale injects only on funnel-originated requests (we call this single-listener design **Pattern Y** throughout the repo).
 
-On the [Qubes install path](deploy/qubes/README.md) these roles are split across **three qubes** — a Funnel + Caddy **ingress** qube, an **app** qube (mcp + Ollama), and a **db** qube (Postgres) — reached over a firewall-scoped tailnet ([three-qube-design.md](deploy/qubes/three-qube-design.md)) so that a compromise of the public edge is not a compromise of the memory store. The sequence below shows that topology; on a single host the same flow runs over the local docker network.
+On the [Qubes install path](deploy/qubes/README.md) these roles are split across **three qubes** — a Funnel + Caddy **ingress** qube, an **app** qube (mcp + Ollama), and a **db** qube (Postgres) — reached over a firewall-scoped tailnet ([three-qube-design.md](deploy/qubes/three-qube-design.md)) so that a compromised public edge need not expose the memory store, which lives in its own db qube. The sequence below shows that topology; on a single host the same flow runs over the local docker network.
 
 ```mermaid
 sequenceDiagram

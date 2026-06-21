@@ -91,6 +91,16 @@ Note there is **no** `docker-compose.pattern-b.yml` and **no** `COMPOSE_PROFILES
 
 ### ingress qube — Funnel + Caddy (+ log-ingester)
 
-The ingress qube terminates the Tailscale Funnel and runs Caddy with the standard [Pattern B invocation](../compose-tailnet/README.md). Point Caddy at the app qube by setting `MCP_UPSTREAM=<app-qube-tailnet-ip>:8787` in its `.env`; the Caddyfile reads it as `reverse_proxy {$MCP_UPSTREAM}` (default `mcp:8787`, i.e. single-host behavior, when unset). The flip — and its rollback — is that one `.env` line plus a Caddy reload.
+The ingress qube terminates the Tailscale Funnel and runs Caddy. It layers the **same `external-db.yml`** as the app qube, so it has no local Postgres of its own and `DB_HOST` points the log-ingester at the db qube. Point Caddy at the app qube by setting `MCP_UPSTREAM=<app-qube-tailnet-ip>:8787`; the Caddyfile reads `reverse_proxy {$MCP_UPSTREAM}` (default `mcp:8787` when unset, i.e. single-host). Run from `deploy/qubes`:
 
-The log-ingester currently runs here, next to Caddy, because it tails Caddy's access-log files. It writes funnel-access rows to Postgres, so the ingress qube keeps **one** scoped path to the db qube (`:5432`, the INSERT-only observability role) — a deliberate exception to the "ingress reaches only the app qube" target. The trade-off and the open decision on relocating it are in [three-qube-design.md](three-qube-design.md#log-ingester-placement-open). The ingress qube's own `mcp`/`ollama` containers go unused once `MCP_UPSTREAM` points at the app qube; formally parking them is a tracked follow-up.
+```sh
+DB_HOST=<db-qube-tailnet-ip> \
+MCP_UPSTREAM=<app-qube-tailnet-ip>:8787 \
+COMPOSE_FILE=../compose-local/docker-compose.yml:../compose-tailnet/docker-compose.pattern-b.yml:docker-compose.external-db.yml:docker-compose.cpu-ollama.yml \
+COMPOSE_PROFILES=pattern-b \
+docker compose up -d
+```
+
+`external-db.yml` parks the bundled `postgres`, so the edge holds **no** memory store. The log-ingester (started by the `pattern-b` profile here) tails Caddy's access logs and writes its `funnel_access_log` rows *across* to the db qube over the same scoped link — which is why the ingress qube keeps one INSERT-only path to `:5432` (the documented exception — see [three-qube-design.md](three-qube-design.md#log-ingester-placement-open) and #12). The flip between local-mcp and the app qube — and its rollback — is the one `MCP_UPSTREAM` line plus a Caddy reload.
+
+What this recipe does **not** yet do is park the now-unused `mcp` + `ollama` that the Pattern B stack still starts on the edge (Caddy proxies past them to the app qube). That matters for isolation: the idle `mcp` still carries the app-role DB credential and an app-role path to the db qube, so the edge isn't fully severed from the store until it's parked (or its credential dropped, as the live deployment does). Doing it cleanly needs an ingress-only override that also resets `caddy`'s `depends_on`; it is tracked in #13.

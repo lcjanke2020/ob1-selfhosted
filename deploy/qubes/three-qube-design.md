@@ -1,6 +1,6 @@
 # Design: ingress / app / db in three qubes
 
-**Status: implemented — ingress, app, and db now run in three qubes.** The dedicated DB qube is provisioned, the app→DB transport is wired (firewall-scoped tailnet — see below), the compose stack pulls Postgres out via [`docker-compose.external-db.yml`](docker-compose.external-db.yml), and the public edge (Funnel + Caddy) now runs in its own ingress qube reverse-proxying to the app qube's mcp over the tailnet — the parameterized `MCP_UPSTREAM` upstream plus [`docker-compose.app-qube.yml`](docker-compose.app-qube.yml) (operator recipe in the [Qubes README](README.md#splitting-the-stack-across-qubes)). Kept as a design doc because the reasoning — the threat model and the trust layers — is the transferable part. One placement question remains open: [the log-ingester](#log-ingester-placement-open).
+**Status: implemented — ingress, app, and db now run in three qubes.** The dedicated DB qube is provisioned, the app→DB transport is wired (firewall-scoped tailnet — see below), the compose stack pulls Postgres out via [`docker-compose.external-db.yml`](docker-compose.external-db.yml), and the public edge (Funnel + Caddy) now runs in its own ingress qube reverse-proxying to the app qube's mcp over the tailnet — the parameterized `MCP_UPSTREAM` upstream plus [`docker-compose.app-qube.yml`](docker-compose.app-qube.yml) (operator recipe in the [Qubes README](README.md#splitting-the-stack-across-qubes)). Kept as a design doc because the reasoning — the threat model and the trust layers — is the transferable part. Two cleanups remain before the edge is literally app-stateless: the committed ingress recipe layers `external-db.yml` (so the edge holds **no** Postgres), but it still starts the edge's now-unused `mcp` + `ollama` — parking those is tracked in [#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13) — and the [log-ingester](#log-ingester-placement-open)'s final placement is open ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)).
 
 ## Implemented: app→DB transport (firewall-scoped tailnet)
 
@@ -14,7 +14,7 @@ PGDATA, `/etc/postgresql`, and `/var/lib/tailscale` are bind-dir'd into `/rw` so
 
 ## Problem
 
-In the [current single-qube deployment](README.md), Tailscale Funnel, Caddy, the MCP server, and Postgres are co-resident. The loopback-only binds and container hardening narrow each component's network surface, but they share a kernel and a filesystem: **a compromise of the public-facing edge is one step from the memory store** — the highest-value asset on the box. docker-compose is the right tool for co-locating services that share a trust boundary; it's the wrong tool once the point is to put a VM boundary between two of them.
+In the [baseline single-qube deployment](README.md), Tailscale Funnel, Caddy, the MCP server, and Postgres are co-resident. The loopback-only binds and container hardening narrow each component's network surface, but they share a kernel and a filesystem: **a compromise of the public-facing edge is one step from the memory store** — the highest-value asset on the box. docker-compose is the right tool for co-locating services that share a trust boundary; it's the wrong tool once the point is to put a VM boundary between two of them.
 
 ## Target shape
 
@@ -22,23 +22,27 @@ In the [current single-qube deployment](README.md), Tailscale Funnel, Caddy, the
                         public internet (Anthropic egress only)
                                         │
 ┌─ ingress qube ─────────────────────── ▼ ──────┐
-│  tailscaled (Funnel) + Caddy (Pattern Y)      │   terminal node: no app
-│  IP allowlist enforced here                   │   state, no DB, no secrets
-└───────────────┬───────────────────────────────┘   beyond the Caddyfile
+│  tailscaled (Funnel) + Caddy + log-ingester   │   no memory store: postgres
+│  IP allowlist enforced here                   │   parked via external-db, but
+└───────────────┬───────────────────────────────┘   one INSERT-only db path *
                 │  MCP port only (scoped)
 ┌─ app qube ──── ▼ ──────────────────────────────┐
-│  MCP server (+ Ollama, log-ingester)           │  reachable ONLY from the
+│  MCP server (+ Ollama)                         │  reachable ONLY from the
 └───────────────┬────────────────────────────────┘  ingress qube
                 │  Postgres port only (scoped)
 ┌─ db qube ───── ▼ ──────────────────────────────┐
-│  Postgres + pgvector, native install           │  no route from ingress
-│  loopback + one permitted peer                 │  at all
+│  Postgres + pgvector, native install           │  the memory store; reached
+│  loopback + scoped peers (app + ingester)      │  by app qube + ingester *
 └─────────────────────────────────────────────────┘
 ```
 
-- **Ingress qube** — runs `tailscaled` (Funnel) and Caddy. No app state. A popped edge yields a proxy config and nothing else.
-- **App qube** — the MCP server. Reachable only from the ingress qube, only on the MCP port.
-- **DB qube** — Postgres + pgvector, **out of docker-compose**, run natively (or as a single container). Reachable only from the app qube. The ingress qube has no path to it at all.
+\* Log-ingester placement is the one open question — it currently runs on the
+ingress qube, which is why both the edge and the db qube carry that extra
+INSERT-only path; final placement is tracked in [#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12).
+
+- **Ingress qube** — runs `tailscaled` (Funnel), Caddy, and (currently) the log-ingester, with `external-db.yml` layered so it holds **no** Postgres. Its intended steady state leaves only the ingester's INSERT-only path to the db qube — but the committed recipe still starts an unused `mcp` here that carries the app-role credential and an app-role DB path, so full edge↔store isolation lands only when that container is parked ([#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13)) or its credential dropped (as the live deployment does). The store itself is never on the edge; it lives in the db qube.
+- **App qube** — the MCP server (+ Ollama). Reachable only from the ingress qube, only on the MCP port.
+- **DB qube** — Postgres + pgvector, **out of docker-compose**, run natively (or as a single container). Reached by the app qube (the full app role) and — while the log-ingester lives on the edge — by the ingress qube on one INSERT-only observability role; nothing else routes to it.
 
 The minimum viable step, if the full split slips: get Postgres out of the Funnel-exposed qube. Edge compromise ≠ memory-store compromise is most of the value.
 
@@ -76,13 +80,13 @@ This re-validation is the reason *not* to rush the split right before you depend
 
 ## Log-ingester placement (open)
 
-The Pattern B **log-ingester** tails Caddy's access-log files and writes `funnel_access_log` rows to Postgres. Caddy lives on the ingress qube; Postgres lives on the db qube — so wherever the ingester runs, it bridges to one of them. The current deployment runs it on the **ingress** qube, next to Caddy, which means the ingress qube keeps exactly **one** path to the db qube: the INSERT-only observability role on `:5432`, locked to the db qube by ACL + host firewall + `pg_hba`. This is a deliberate, scoped exception to the "ingress reaches only the app qube" target below — not an oversight. `funnel_access_log` is request metadata only (timestamp, path, status, client IP; no thought content, no credentials), so a popped ingress writing to that one table is low-value.
+The Pattern B **log-ingester** tails Caddy's access-log files and writes `funnel_access_log` rows to Postgres. Caddy lives on the ingress qube; Postgres lives on the db qube — so wherever the ingester runs, it bridges to one of them. The current deployment runs it on the **ingress** qube, next to Caddy, which means the ingress qube keeps exactly **one** path to the db qube: the INSERT-only observability role on `:5432`, locked to the db qube by ACL + host firewall + `pg_hba`. (Because the ingress qube layers `external-db.yml` with `DB_HOST` set to the db qube, the ingester writes *across* to the db qube — not to a co-resident local Postgres; without that override a bare Pattern B stack would instead write to a local edge DB, which is the inconsistency this section exists to rule out.) This is a deliberate, scoped exception to the "ingress reaches only the app qube" target below — not an oversight. `funnel_access_log` is request metadata only (timestamp, path, status, client IP; no thought content, no credentials), so a popped ingress writing to that one table is low-value.
 
 The cleaner end state moves the ingester to the **app** qube, leaving the ingress qube with no DB path at all — but that needs Caddy's access logs to cross from the ingress qube to the app qube (a shared/forwarded log path, or Caddy emitting to a destination the app qube reads). A third option is a perimeter logs-only Postgres on the ingress qube (loopback-only), which fully severs ingress→db at the cost of fragmenting logs across two databases. Picking the end state is tracked in [#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12).
 
 ## Acceptance criteria
 
-- Funnel + Caddy run in a dedicated ingress qube with no app state or DB present.
+- Funnel + Caddy run in a dedicated ingress qube with no DB present (achieved: `external-db.yml` parks Postgres) and no app state — the latter pending parking the edge's unused `mcp`/`ollama` ([#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13)).
 - MCP + Postgres in separate qubes; the app qube reaches the DB on the chosen transport; nothing else can.
 - The ingress qube cannot reach any host other than the app qube's MCP port — **plus**, while the log-ingester runs there, the INSERT-only observability role on the db qube's `:5432` (the documented exception above — see [Log-ingester placement](#log-ingester-placement-open) / [#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)). Verified by ACL + firewall audit, not assumption.
 - Backup/restore works against the relocated DB.
