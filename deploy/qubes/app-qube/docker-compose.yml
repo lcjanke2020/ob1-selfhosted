@@ -16,11 +16,11 @@
 # live on the ingress and db qubes respectively. This is a deliberate split:
 # the file simply doesn't define them, so the app qube cannot start them.
 #
-# Credentials: this is the trusted compartment, so its .env CUSTODIES the
-# admin/superuser POSTGRES_PASSWORD (for administering the headless db qube —
-# role provisioning + schema/migrations; those run ON the db qube over its
-# loopback socket, since the db-qube pg_hba keeps the superuser OFF the network),
-# the openbrain_app password (mcp writes thoughts), and the openbrain_readonly
+# Credentials: this is the trusted compartment, so its .env holds the
+# admin/superuser POSTGRES_PASSWORD — used to administer the db qube REMOTELY over
+# the tailnet (role provisioning + schema/migrations), which the db-qube pg_hba
+# allows from THIS qube's IP only (a deliberate trade-off; see ../db-qube/README.md)
+# — plus the openbrain_app password (mcp writes thoughts) and the openbrain_readonly
 # password (the encrypted backup job — see backup/). It never holds the
 # log-ingester credential; that lives only on the ingress qube.
 #

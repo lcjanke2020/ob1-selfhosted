@@ -30,15 +30,15 @@ to `rc.local` after the docker start, or run it by hand after a reboot.
 
 ## Credentials (per-qube split)
 
-This qube **custodies** the **admin/superuser** `POSTGRES_PASSWORD` (the trusted compartment
-holds it, never the internet-adjacent ingress qube) for administering the headless db qube —
-role provisioning + schema/migrations. Those are applied **on the db qube over its loopback
-socket** (see [`../db-qube/README.md`](../db-qube/README.md)); the db qube's superuser is
-**never given a network host line**, so the app qube does not connect as superuser remotely
-(driving migrations from here instead would be an opt-in that needs a scoped superuser
-`pg_hba` line added on the db qube). For normal operation the app qube reaches the db qube as
-`openbrain_app` (mcp writes thoughts) and `openbrain_readonly` (the backup job). It does
-**not** carry the log-ingester credential — that lives only on the ingress qube.
+This qube holds the **admin/superuser** `POSTGRES_PASSWORD` (the trusted compartment holds
+it, never the internet-adjacent ingress qube) and uses it to **administer the db qube
+remotely** over the tailnet — role provisioning + schema/migrations. The db qube's `pg_hba`
+grants the superuser a host line from **this qube's IP only** — a deliberate trade-off (a
+compromised app qube then has full DB admin, not just the app role; accepted for now since
+the app role already reads/writes every thought — see [`../db-qube/README.md`](../db-qube/README.md)
+and the Linear hardening ticket). At runtime the app qube also connects as `openbrain_app`
+(mcp writes thoughts) and `openbrain_readonly` (the backup job). It does **not** carry the
+log-ingester credential — that lives only on the ingress qube.
 
 ## Host firewall (scope the `0.0.0.0:8787` bind)
 

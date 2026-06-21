@@ -21,13 +21,13 @@ and most of `/etc` on every reboot), and is re-installed at boot by `rc.local`.
 | `qubes-firewall-user-script` | `/rw/config/qubes-firewall-user-script` (chmod +x) | nft accept for inbound `tcp/5432` on `tailscale0` only |
 | `ob1-db-firewall.service` | `/rw/config/ob1-db-firewall.service` | One-shot that re-applies the firewall rule *after* `tailscaled` is up |
 | `rc.local` | `/rw/config/rc.local` (chmod +x) | Boot order: start tailscaled → install/enable the firewall unit → start Postgres once `tailscale0` has an IP |
-| `pg_hba.snippet.conf` | append to `/etc/postgresql/<ver>/main/pg_hba.conf` | scram host lines: app + readonly from the app qube, ingester from the ingress qube |
+| `pg_hba.snippet.conf` | append to `/etc/postgresql/<ver>/main/pg_hba.conf` | scram host lines: superuser (remote admin) + app + readonly from the app qube, ingester from the ingress qube |
 | `postgresql.local.conf` | `conf.d/` drop-in or `ALTER SYSTEM` | `listen_addresses` (loopback + tailnet IP) and `ssl = off` |
 
 ## Placeholders to fill
 
 - `<db-qube-tailnet-ip>` — this qube's own tailnet address (in `postgresql.local.conf`).
-- `<app-qube-tailnet-ip>` — the app qube's tailnet address: the app + readonly host lines in `pg_hba.snippet.conf`.
+- `<app-qube-tailnet-ip>` — the app qube's tailnet address: the superuser (remote admin), app, and readonly host lines in `pg_hba.snippet.conf`.
 - `<ingress-qube-tailnet-ip>` — the ingress qube's tailnet address: the `openbrain_ingester` host line in `pg_hba.snippet.conf` (the log-ingester runs on the ingress qube).
 - Postgres major version (`17` in the paths/commands) — match your template.
 
@@ -52,7 +52,18 @@ misconfiguration exposes the database:
    differs, the accept won't land and the log will say so.
 3. **`pg_hba.conf`** — `scram-sha-256` host lines scoped per peer: the app and
    readonly roles from the app qube's IP, the INSERT-only `openbrain_ingester`
-   role from the ingress qube's IP; the superuser stays off the network.
+   role from the ingress qube's IP, and the **superuser from the app qube's IP
+   only** (for remote DB admin — see the trade-off note below). No role gets a
+   line from any other peer.
+
+**Superuser remote-admin trade-off.** The superuser (`postgres`) is reachable
+from the **app qube's IP only**, so role provisioning + schema migrations can be
+driven from the app qube over the tailnet (in addition to running them locally on
+this qube). That means a compromised app qube has full DB admin, not just the app
+role — accepted for now because the app role already reads/writes every thought,
+so the marginal exposure is small. Future hardening scopes this down to a
+non-superuser migration role (tracked in Linear). To revert to loopback-only
+admin, drop the `host all postgres …` line from `pg_hba.snippet.conf`.
 
 No `tcp/22` is opened: there is no sshd on the DB qube. All administration is
 done from dom0 with `qvm-run`.
@@ -108,6 +119,11 @@ sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
 Apply `pg_hba.snippet.conf` and `postgresql.local.conf` after the roles exist,
 then reload/restart so the network listener and host lines take effect.
+
+Once the superuser host line is in place, you can also run this provisioning (and
+later migrations) **remotely from the app qube** over the tailnet instead of on
+this qube — e.g. `PGPASSWORD=… psql -h <db-qube-tailnet-ip> -U postgres -d postgres`
+— which is the point of the superuser remote-admin line above.
 
 ## Template note
 

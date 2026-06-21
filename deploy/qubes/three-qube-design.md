@@ -10,7 +10,7 @@ The DB qube runs Postgres natively and is reachable by just two scoped peers —
 
 1. **Tailscale ACL** — grants permit exactly `app-qube → db-qube:5432` (and, for the ingester, `ingress-qube → db-qube:5432`); every other tailnet peer is default-denied at the wire. The DB qube carries its own tag (e.g. `tag:ob1-db`) and nothing else routes to it.
 2. **Qubes nftables** — the DB qube accepts inbound `tcp/5432` on `tailscale0` only (a `custom-input` rule reapplied after `tailscaled` by a one-shot unit, since `qubes-firewall.service` runs before the interface exists). No `:22` — there is no sshd; all admin is dom0 `qvm-run`.
-3. **`pg_hba.conf`** — `scram-sha-256` host lines scoped per peer: the app role from the app qube's IP, the INSERT-only ingester role from the ingress qube's IP; the superuser stays off the network.
+3. **`pg_hba.conf`** — `scram-sha-256` host lines scoped per peer: the app + readonly roles and the **superuser** (for remote DB admin — a deliberate trade-off, see [db-qube/README.md](db-qube/README.md)) from the app qube's IP, the INSERT-only ingester role from the ingress qube's IP. Every role is locked to exactly one peer IP.
 
 PGDATA, `/etc/postgresql`, and `/var/lib/tailscale` are bind-dir'd into `/rw` so the cluster, its hardened config, and the node identity survive reboots; the cluster is started on boot (after `tailscale0` is up) from `rc.local`. The more-isolated qrexec / `qubes.ConnectTCP` transport (no listener at all) remains a tracked follow-up.
 
