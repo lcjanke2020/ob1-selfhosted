@@ -5,6 +5,7 @@ import {
   CHAT_TIMEOUT_MS,
   ENABLE_FALLBACK_EXTRACTION,
   ENABLE_METADATA_EXTRACTION,
+  ENABLE_PRIMARY_EXTRACTION,
   FALLBACK_CHAT_API_BASE,
   FALLBACK_CHAT_API_KEY,
   FALLBACK_CHAT_MODEL,
@@ -131,12 +132,17 @@ export async function extractMetadata(
 ): Promise<Record<string, unknown>> {
   if (!ENABLE_METADATA_EXTRACTION) return { ...FALLBACK };
 
-  const primary = await classifyOnce(text, {
-    base: CHAT_API_BASE,
-    key: CHAT_API_KEY,
-    model: CHAT_MODEL,
-  });
-  if (primary) return primary;
+  // Primary is opt-in (ENABLE_PRIMARY_EXTRACTION). Off by default so a
+  // misconfigured/dangerous primary transport can't fire on the capture path;
+  // when off we skip straight to the fallback.
+  if (ENABLE_PRIMARY_EXTRACTION) {
+    const primary = await classifyOnce(text, {
+      base: CHAT_API_BASE,
+      key: CHAT_API_KEY,
+      model: CHAT_MODEL,
+    });
+    if (primary) return primary;
+  }
 
   if (ENABLE_FALLBACK_EXTRACTION) {
     const fallback = await classifyOnce(text, {

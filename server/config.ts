@@ -61,6 +61,15 @@ export const ENABLE_FALLBACK_EXTRACTION = Boolean(
   FALLBACK_CHAT_API_BASE && FALLBACK_CHAT_MODEL,
 );
 
+// Safety gate for the PRIMARY extractor call. Default OFF: when not exactly
+// "true", extractMetadata SKIPS the primary endpoint entirely and goes straight
+// to the fallback (then the stub). This is an explicit opt-in so a primary that
+// is misconfigured or fronted by a dangerous transport can't fire on the hot
+// capture path — e.g. a qrexec forwarder whose call would auto-start a downed
+// GPU qube. Set to "true" only once the primary endpoint is known-good.
+export const ENABLE_PRIMARY_EXTRACTION =
+  optionalTrimmed("ENABLE_PRIMARY_EXTRACTION").toLowerCase() === "true";
+
 // MCP_ACCESS_KEY is the only credential between any tailnet member
 // (and, once Funnel is on, the public internet) and full read/write to every
 // captured thought. `.env.example` documents `openssl rand -hex 32` (64 hex

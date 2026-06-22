@@ -24,6 +24,7 @@ const ENV_KEYS = [
   "FALLBACK_CHAT_API_BASE",
   "FALLBACK_CHAT_API_KEY",
   "FALLBACK_CHAT_MODEL",
+  "ENABLE_PRIMARY_EXTRACTION",
 ];
 
 interface Captured {
@@ -65,6 +66,7 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
   Deno.env.set("FALLBACK_CHAT_API_BASE", FALLBACK_BASE);
   Deno.env.set("FALLBACK_CHAT_MODEL", "hosted-model");
   Deno.env.set("FALLBACK_CHAT_API_KEY", "test-fallback-key");
+  Deno.env.set("ENABLE_PRIMARY_EXTRACTION", "true"); // exercise the primary path
 
   const calls: Captured[] = [];
   // Reassigned per step to choose what each endpoint returns.
