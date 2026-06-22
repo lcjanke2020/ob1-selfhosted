@@ -127,6 +127,12 @@ services:
       CHAT_API_KEY: ${CHAT_API_KEY:-}
       CHAT_MODEL: ${CHAT_MODEL:-}
       CHAT_TIMEOUT_MS: ${CHAT_TIMEOUT_MS:-60000}
+      # Fallback chat endpoint — tried only when the primary CHAT_* call above
+      # fails (unreachable/error/timeout/unparseable), before the minimal stub.
+      # Blank = disabled. NOTE: the fallback path CAN send content off-box.
+      FALLBACK_CHAT_API_BASE: ${FALLBACK_CHAT_API_BASE:-}
+      FALLBACK_CHAT_API_KEY: ${FALLBACK_CHAT_API_KEY:-}
+      FALLBACK_CHAT_MODEL: ${FALLBACK_CHAT_MODEL:-}
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       CITATION_BASE_URL: ${CITATION_BASE_URL:-https://openbrain.local/thoughts}
       # Auth0 OAuth resource-server config. Leave all three empty for pattern A

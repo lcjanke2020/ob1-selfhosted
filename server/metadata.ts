@@ -3,7 +3,11 @@ import {
   CHAT_API_KEY,
   CHAT_MODEL,
   CHAT_TIMEOUT_MS,
+  ENABLE_FALLBACK_EXTRACTION,
   ENABLE_METADATA_EXTRACTION,
+  FALLBACK_CHAT_API_BASE,
+  FALLBACK_CHAT_API_KEY,
+  FALLBACK_CHAT_MODEL,
 } from "./config.ts";
 
 const SYSTEM_PROMPT =
@@ -32,11 +36,50 @@ Extract only what is explicitly present. Do not invent.`;
 
 const FALLBACK = { topics: ["uncategorized"], type: "observation" } as const;
 
-export async function extractMetadata(
-  text: string,
-): Promise<Record<string, unknown>> {
-  if (!ENABLE_METADATA_EXTRACTION) return { ...FALLBACK };
+// Strict JSON-schema for structured output. Constrains the model to a valid
+// object on every capture, so parsing can't fail on a runaway or partial
+// generation the way prompt-only `json_object` mode could. The shape is the
+// OpenAI `response_format: { type: "json_schema", json_schema }` envelope,
+// which the local ollama `/v1` endpoint accepts identically.
+const THOUGHT_METADATA_SCHEMA = {
+  name: "thought_metadata",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["type", "topics", "people", "action_items", "dates_mentioned"],
+    properties: {
+      type: {
+        type: "string",
+        enum: ["observation", "task", "idea", "reference", "person_note"],
+      },
+      topics: {
+        type: "array",
+        items: { type: "string" },
+        minItems: 1,
+        maxItems: 3,
+      },
+      people: { type: "array", items: { type: "string" } },
+      action_items: { type: "array", items: { type: "string" } },
+      dates_mentioned: { type: "array", items: { type: "string" } },
+    },
+  },
+} as const;
 
+interface ChatEndpoint {
+  base: string;
+  key: string;
+  model: string;
+}
+
+// One classification attempt against a single OpenAI-compatible endpoint.
+// Returns the parsed metadata object, or `null` on ANY failure (non-2xx,
+// timeout/abort, missing/non-string content, unparseable or non-object JSON)
+// so the caller can move on to the next endpoint or the stub. Never throws.
+async function classifyOnce(
+  text: string,
+  { base, key, model }: ChatEndpoint,
+): Promise<Record<string, unknown> | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), CHAT_TIMEOUT_MS);
 
@@ -44,15 +87,18 @@ export async function extractMetadata(
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
-    if (CHAT_API_KEY) headers.Authorization = `Bearer ${CHAT_API_KEY}`;
+    if (key) headers.Authorization = `Bearer ${key}`;
 
-    const r = await fetch(`${CHAT_API_BASE}/chat/completions`, {
+    const r = await fetch(`${base}/chat/completions`, {
       method: "POST",
       headers,
       body: JSON.stringify({
-        model: CHAT_MODEL,
+        model,
         temperature: 0,
-        response_format: { type: "json_object" },
+        response_format: {
+          type: "json_schema",
+          json_schema: THOUGHT_METADATA_SCHEMA,
+        },
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: text },
@@ -61,18 +107,45 @@ export async function extractMetadata(
       signal: controller.signal,
     });
 
-    if (!r.ok) return { ...FALLBACK };
+    if (!r.ok) return null;
     const d = await r.json();
     const content = d?.choices?.[0]?.message?.content;
-    if (typeof content !== "string") return { ...FALLBACK };
+    if (typeof content !== "string") return null;
     const parsed = JSON.parse(content);
-    if (typeof parsed !== "object" || parsed === null) return { ...FALLBACK };
+    if (typeof parsed !== "object" || parsed === null) return null;
     return parsed as Record<string, unknown>;
   } catch {
-    // Includes AbortError on timeout — silently fall back so capture
-    // continues even when the metadata endpoint is slow or unreachable.
-    return { ...FALLBACK };
+    // Includes AbortError on timeout — treat as a failed attempt.
+    return null;
   } finally {
     clearTimeout(timer);
   }
+}
+
+// Extract structured metadata for one captured thought. Tries the primary chat
+// endpoint first (e.g. a local GPU-served model — zero marginal cost, content
+// stays on your network), then an optional fallback endpoint (e.g. a hosted
+// model) if the primary fails, then a minimal stub so capture never breaks.
+export async function extractMetadata(
+  text: string,
+): Promise<Record<string, unknown>> {
+  if (!ENABLE_METADATA_EXTRACTION) return { ...FALLBACK };
+
+  const primary = await classifyOnce(text, {
+    base: CHAT_API_BASE,
+    key: CHAT_API_KEY,
+    model: CHAT_MODEL,
+  });
+  if (primary) return primary;
+
+  if (ENABLE_FALLBACK_EXTRACTION) {
+    const fallback = await classifyOnce(text, {
+      base: FALLBACK_CHAT_API_BASE,
+      key: FALLBACK_CHAT_API_KEY,
+      model: FALLBACK_CHAT_MODEL,
+    });
+    if (fallback) return fallback;
+  }
+
+  return { ...FALLBACK };
 }

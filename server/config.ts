@@ -47,6 +47,20 @@ export const CHAT_API_KEY = optionalTrimmed("CHAT_API_KEY");
 export const CHAT_MODEL = optionalTrimmed("CHAT_MODEL");
 export const ENABLE_METADATA_EXTRACTION = Boolean(CHAT_API_BASE && CHAT_MODEL);
 
+// Optional FALLBACK chat endpoint, tried only when the primary CHAT_* call
+// above fails (unreachable, non-2xx, timeout, or unparseable output) before
+// giving up to the minimal stub. This lets a local-first primary (e.g. a
+// GPU box that keeps thought content on your network) degrade to a hosted
+// OpenAI-compatible model instead of losing metadata when that box is down.
+// Disabled unless BOTH base and model are set; gated behind a configured
+// primary (ENABLE_METADATA_EXTRACTION) — a fallback alone is just a primary.
+export const FALLBACK_CHAT_API_BASE = optionalTrimmed("FALLBACK_CHAT_API_BASE");
+export const FALLBACK_CHAT_API_KEY = optionalTrimmed("FALLBACK_CHAT_API_KEY");
+export const FALLBACK_CHAT_MODEL = optionalTrimmed("FALLBACK_CHAT_MODEL");
+export const ENABLE_FALLBACK_EXTRACTION = Boolean(
+  FALLBACK_CHAT_API_BASE && FALLBACK_CHAT_MODEL,
+);
+
 // MCP_ACCESS_KEY is the only credential between any tailnet member
 // (and, once Funnel is on, the public internet) and full read/write to every
 // captured thought. `.env.example` documents `openssl rand -hex 32` (64 hex
