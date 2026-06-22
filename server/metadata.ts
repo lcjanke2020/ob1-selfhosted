@@ -148,10 +148,12 @@ async function classifyOnce(
 // never breaks. Either endpoint may be omitted: with both off it stamps the
 // stub; with only the fallback configured it is a fallback-only deployment.
 //
-// Each outcome logs one line (no thought content) so the two otherwise-silent
-// degradations are visible in the logs: every capture quietly stamping the stub
-// (no working endpoint), and every capture quietly going off-box via the
-// fallback (primary disabled/down while a hosted fallback is configured).
+// Each step logs its outcome (no thought content) — including a line whenever
+// an endpoint fails, so a single capture may log more than one line — making
+// the two otherwise-silent degradations visible: every capture quietly stamping
+// the stub (no working endpoint), and every capture quietly classifying via the
+// fallback (which, depending on FALLBACK_CHAT_API_BASE, may send content
+// off-box).
 export async function extractMetadata(
   text: string,
 ): Promise<Record<string, unknown>> {
@@ -183,7 +185,7 @@ export async function extractMetadata(
     });
     if (fallback) {
       console.warn(
-        "[metadata] classified via FALLBACK endpoint — thought content left the local network",
+        "[metadata] classified via FALLBACK endpoint — thought content may have left your local network (depends on the configured fallback base URL)",
       );
       return fallback;
     }

@@ -134,7 +134,8 @@ services:
       FALLBACK_CHAT_API_KEY: ${FALLBACK_CHAT_API_KEY:-}
       FALLBACK_CHAT_MODEL: ${FALLBACK_CHAT_MODEL:-}
       # Opt-in safety gate for the PRIMARY (CHAT_*) call. Off unless "true": when
-      # off, extraction skips the primary and uses the fallback.
+      # off, extraction skips the primary and uses the fallback (or the
+      # uncategorized stub if no fallback is configured).
       ENABLE_PRIMARY_EXTRACTION: ${ENABLE_PRIMARY_EXTRACTION:-}
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       CITATION_BASE_URL: ${CITATION_BASE_URL:-https://openbrain.local/thoughts}
