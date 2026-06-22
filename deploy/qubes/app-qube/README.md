@@ -28,6 +28,16 @@ resurrects containers while the daemon is up, not the project after an AppVM reb
 bring it back automatically, add `docker compose -f /path/to/app-qube/docker-compose.yml up -d`
 to `rc.local` after the docker start, or run it by hand after a reboot.
 
+## Offloading metadata classification (`CHAT_*`) to a GPU qube
+
+The `mcp` server's optional metadata extractor (`CHAT_API_BASE`) calls any
+OpenAI-compatible `/chat/completions` endpoint — an external GPU box over the tailnet works
+directly. To instead keep thought content on a **GPU qube on this same Qubes host** whose
+model server is bound to loopback only, see
+[`../gpu-offload-transport.md`](../gpu-offload-transport.md): a host-side `socat` forwarder +
+qrexec `ConnectTCP` transport, with the firewall/`custom-input`, persistence, and
+`autostart=no` safety notes. None of that is needed for a network-reachable endpoint.
+
 ## Credentials (per-qube split)
 
 This qube holds the **admin/superuser** `POSTGRES_PASSWORD` (the trusted compartment holds
