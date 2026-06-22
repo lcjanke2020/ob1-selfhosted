@@ -107,16 +107,13 @@ services:
     #   3. mcp app auth   — x-brain-key for tailnet, OAuth Bearer JWT for funnel.
     ports:
       - "0.0.0.0:8787:8787"
-    # Reach a service on the QUBE HOST (not this container's loopback) by name.
-    # Used to offload metadata classification to an external GPU box whose
-    # OpenAI-compatible endpoint is exposed on the app qube host (e.g. a
-    # qrexec/loopback forwarder on :11434): set
-    #   CHAT_API_BASE=http://host.docker.internal:11434/v1
-    # `host-gateway` resolves to the host as seen from this bridge network, so
-    # the host-side forwarder is reachable even though the container's own
-    # 127.0.0.1 is not the host's. No effect if unused.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    # To offload metadata classification to an external GPU box, reach a
+    # host-side forwarder on :11434 via THIS compose network's gateway — NOT
+    # host.docker.internal / docker0, which a container on a user-defined bridge
+    # can't reach (inter-bridge isolation). Find the gateway with:
+    #   docker network inspect app-qube_default -f '{{(index .IPAM.Config 0).Gateway}}'
+    # and set CHAT_API_BASE=http://<that-gateway-ip>:11434/v1. For a STABLE
+    # gateway, pin it in a local (uncommitted) docker-compose.override.yml.
 
   ollama:
     # Pinned to the version currently in production (0.24.0). Bump deliberately
@@ -137,3 +134,14 @@ services:
 
 volumes:
   ollama_data:
+
+# Reaching a host-side GPU forwarder (see the CHAT_API_BASE note on the mcp
+# service) needs a stable gateway IP for THIS bridge. Pin it in a LOCAL,
+# uncommitted docker-compose.override.yml (keeps your private subnet out of
+# git) — compose auto-merges it:
+#   networks:
+#     default:
+#       ipam:
+#         config:
+#           - subnet: <your-private-/24>
+#             gateway: <your-gateway-ip>   # bind the forwarder + CHAT_API_BASE here
