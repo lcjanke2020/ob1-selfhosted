@@ -84,9 +84,11 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
     return Promise.resolve(responder(captured));
   }) as typeof fetch;
 
-  const { extractMetadata } = await import("./metadata.ts");
-
   try {
+    // Import inside the try so the finally below always restores fetch + env,
+    // even if module-load (config.ts validation) were to throw.
+    const { extractMetadata } = await import("./metadata.ts");
+
     await t.step(
       "primary success returns its result, no fallback call",
       async () => {

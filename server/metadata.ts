@@ -115,7 +115,12 @@ async function classifyOnce(
       signal: controller.signal,
     });
 
-    if (!r.ok) return null;
+    if (!r.ok) {
+      // Cancel the unconsumed error body so Deno doesn't leak the response
+      // stream / hold the connection open longer than necessary.
+      await r.body?.cancel();
+      return null;
+    }
     const d = await r.json();
     const content = d?.choices?.[0]?.message?.content;
     if (typeof content !== "string") return null;
