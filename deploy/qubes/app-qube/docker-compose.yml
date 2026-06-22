@@ -73,6 +73,19 @@ services:
       CHAT_API_KEY: ${CHAT_API_KEY:-}
       CHAT_MODEL: ${CHAT_MODEL:-}
       CHAT_TIMEOUT_MS: ${CHAT_TIMEOUT_MS:-60000}
+      # Fallback chat endpoint — tried only when the primary CHAT_* call above
+      # fails (unreachable/error/timeout/unparseable). Lets a local-first
+      # primary (e.g. a GPU box reached via the forwarder below) degrade to a
+      # hosted model instead of dropping metadata when that box is down. Blank
+      # = disabled. NOTE: the fallback path CAN send thought content off-box.
+      FALLBACK_CHAT_API_BASE: ${FALLBACK_CHAT_API_BASE:-}
+      FALLBACK_CHAT_API_KEY: ${FALLBACK_CHAT_API_KEY:-}
+      FALLBACK_CHAT_MODEL: ${FALLBACK_CHAT_MODEL:-}
+      # Opt-in safety gate for the PRIMARY (CHAT_*) call. Off unless "true": when
+      # off, extraction skips the primary and uses the fallback (or the
+      # uncategorized stub if no fallback is configured). Leave off until the
+      # primary endpoint is verified reachable + safe.
+      ENABLE_PRIMARY_EXTRACTION: ${ENABLE_PRIMARY_EXTRACTION:-}
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       CITATION_BASE_URL: ${CITATION_BASE_URL:-https://openbrain.local/thoughts}
       AUTH0_ISSUER: ${AUTH0_ISSUER:-}
@@ -99,6 +112,13 @@ services:
     #   3. mcp app auth   — x-brain-key for tailnet, OAuth Bearer JWT for funnel.
     ports:
       - "0.0.0.0:8787:8787"
+    # To offload metadata classification to an external GPU box, reach a
+    # host-side forwarder on :11434 via THIS compose network's gateway — NOT
+    # host.docker.internal / docker0, which a container on a user-defined bridge
+    # can't reach (inter-bridge isolation). Find the gateway with:
+    #   docker network inspect app-qube_default -f '{{(index .IPAM.Config 0).Gateway}}'
+    # and set CHAT_API_BASE=http://<that-gateway-ip>:11434/v1. For a STABLE
+    # gateway, pin it in a local (uncommitted) docker-compose.override.yml.
 
   ollama:
     # Pinned to the version currently in production (0.24.0). Bump deliberately
@@ -119,3 +139,14 @@ services:
 
 volumes:
   ollama_data:
+
+# Reaching a host-side GPU forwarder (see the CHAT_API_BASE note on the mcp
+# service) needs a stable gateway IP for THIS bridge. Pin it in a LOCAL,
+# uncommitted docker-compose.override.yml (keeps your private subnet out of
+# git) — compose auto-merges it:
+#   networks:
+#     default:
+#       ipam:
+#         config:
+#           - subnet: <your-private-/24>
+#             gateway: <your-gateway-ip>   # bind the forwarder + CHAT_API_BASE here
