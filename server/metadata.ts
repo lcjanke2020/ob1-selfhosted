@@ -4,7 +4,6 @@ import {
   CHAT_MODEL,
   CHAT_TIMEOUT_MS,
   ENABLE_FALLBACK_EXTRACTION,
-  ENABLE_METADATA_EXTRACTION,
   ENABLE_PRIMARY_EXTRACTION,
   FALLBACK_CHAT_API_BASE,
   FALLBACK_CHAT_API_KEY,
@@ -35,13 +34,20 @@ Examples:
 
 Extract only what is explicitly present. Do not invent.`;
 
-const FALLBACK = { topics: ["uncategorized"], type: "observation" } as const;
+// Minimal metadata stamped when no chat endpoint produces a result (extraction
+// disabled, or every configured endpoint failed). Named *_STUB to keep it
+// distinct from the fallback *endpoint* concept below.
+const METADATA_STUB = {
+  topics: ["uncategorized"],
+  type: "observation",
+} as const;
 
-// Strict JSON-schema for structured output. Constrains the model to a valid
-// object on every capture, so parsing can't fail on a runaway or partial
-// generation the way prompt-only `json_object` mode could. The shape is the
-// OpenAI `response_format: { type: "json_schema", json_schema }` envelope,
-// which the local ollama `/v1` endpoint accepts identically.
+// Strict JSON-schema for structured output. A schema-constrained model returns
+// a valid object far more reliably than prompt-only `json_object` mode, which
+// could emit a runaway or partial generation. Enforcement is serving-stack
+// dependent, so the JSON.parse + shape guards in classifyOnce stay load-bearing.
+// The shape is the OpenAI `response_format: { type: "json_schema", json_schema }`
+// envelope, which local ollama / LM Studio `/v1` endpoints accept identically.
 const THOUGHT_METADATA_SCHEMA = {
   name: "thought_metadata",
   strict: true,
@@ -75,8 +81,9 @@ interface ChatEndpoint {
 
 // One classification attempt against a single OpenAI-compatible endpoint.
 // Returns the parsed metadata object, or `null` on ANY failure (non-2xx,
-// timeout/abort, missing/non-string content, unparseable or non-object JSON)
-// so the caller can move on to the next endpoint or the stub. Never throws.
+// timeout/abort, missing/non-string content, unparseable or non-object JSON —
+// including a JSON array) so the caller can move on to the next endpoint or the
+// stub. Never throws.
 async function classifyOnce(
   text: string,
   { base, key, model }: ChatEndpoint,
@@ -113,7 +120,13 @@ async function classifyOnce(
     const content = d?.choices?.[0]?.message?.content;
     if (typeof content !== "string") return null;
     const parsed = JSON.parse(content);
-    if (typeof parsed !== "object" || parsed === null) return null;
+    // typeof [] === "object", so arrays would otherwise slip through and flow
+    // downstream as metadata; reject them along with null/non-objects.
+    if (
+      typeof parsed !== "object" || parsed === null || Array.isArray(parsed)
+    ) {
+      return null;
+    }
     return parsed as Record<string, unknown>;
   } catch {
     // Includes AbortError on timeout — treat as a failed attempt.
@@ -126,32 +139,54 @@ async function classifyOnce(
 // Extract structured metadata for one captured thought. Tries the primary chat
 // endpoint first (e.g. a local GPU-served model — zero marginal cost, content
 // stays on your network), then an optional fallback endpoint (e.g. a hosted
-// model) if the primary fails, then a minimal stub so capture never breaks.
+// model) if the primary is disabled or fails, then a minimal stub so capture
+// never breaks. Either endpoint may be omitted: with both off it stamps the
+// stub; with only the fallback configured it is a fallback-only deployment.
+//
+// Each outcome logs one line (no thought content) so the two otherwise-silent
+// degradations are visible in the logs: every capture quietly stamping the stub
+// (no working endpoint), and every capture quietly going off-box via the
+// fallback (primary disabled/down while a hosted fallback is configured).
 export async function extractMetadata(
   text: string,
 ): Promise<Record<string, unknown>> {
-  if (!ENABLE_METADATA_EXTRACTION) return { ...FALLBACK };
-
-  // Primary is opt-in (ENABLE_PRIMARY_EXTRACTION). Off by default so a
-  // misconfigured/dangerous primary transport can't fire on the capture path;
-  // when off we skip straight to the fallback.
+  // Primary is opt-in (ENABLE_PRIMARY_EXTRACTION, which also requires the
+  // CHAT_* endpoint to be configured). Off by default so a misconfigured or
+  // dangerous primary transport can't fire on the capture path; when off we
+  // skip straight to the fallback.
   if (ENABLE_PRIMARY_EXTRACTION) {
     const primary = await classifyOnce(text, {
       base: CHAT_API_BASE,
       key: CHAT_API_KEY,
       model: CHAT_MODEL,
     });
-    if (primary) return primary;
+    if (primary) {
+      console.log("[metadata] classified via primary endpoint");
+      return primary;
+    }
+    console.warn("[metadata] primary endpoint failed");
   }
 
+  // Fallback runs whenever it is configured — after a primary failure OR as the
+  // sole extractor in a fallback-only deployment. NB this path can send thought
+  // content off-box (the privacy trade-off documented in .env.example).
   if (ENABLE_FALLBACK_EXTRACTION) {
     const fallback = await classifyOnce(text, {
       base: FALLBACK_CHAT_API_BASE,
       key: FALLBACK_CHAT_API_KEY,
       model: FALLBACK_CHAT_MODEL,
     });
-    if (fallback) return fallback;
+    if (fallback) {
+      console.warn(
+        "[metadata] classified via FALLBACK endpoint — thought content left the local network",
+      );
+      return fallback;
+    }
+    console.warn("[metadata] fallback endpoint failed");
   }
 
-  return { ...FALLBACK };
+  console.warn(
+    "[metadata] no endpoint produced metadata; stamping uncategorized stub",
+  );
+  return { ...METADATA_STUB };
 }

@@ -37,23 +37,35 @@ export const OLLAMA_URL = optionalTrimmed("OLLAMA_URL") ||
 export const EMBED_MODEL = optionalTrimmed("EMBED_MODEL") || "nomic-embed-text";
 export const EMBED_DIM = requiredInt("EMBED_DIM", 768);
 
-// Optional chat-completion endpoint for metadata extraction (topics, people,
-// type, etc.). If unset, capture still works — falls back to minimal default
-// metadata. Any OpenAI-compatible /chat/completions endpoint will do, including
-// a local Ollama with `OLLAMA_URL/v1` set as CHAT_API_BASE and a chat model
-// like `llama3.1:8b` set as CHAT_MODEL.
+// Optional PRIMARY chat-completion endpoint for metadata extraction (topics,
+// people, type, etc.). Any OpenAI-compatible /chat/completions endpoint will do,
+// including a local Ollama / LM Studio with `<base>/v1` set as CHAT_API_BASE and
+// a chat model like `llama3.1:8b` set as CHAT_MODEL. The primary only fires when
+// opted in via ENABLE_PRIMARY_EXTRACTION below.
 export const CHAT_API_BASE = optionalTrimmed("CHAT_API_BASE");
 export const CHAT_API_KEY = optionalTrimmed("CHAT_API_KEY");
 export const CHAT_MODEL = optionalTrimmed("CHAT_MODEL");
-export const ENABLE_METADATA_EXTRACTION = Boolean(CHAT_API_BASE && CHAT_MODEL);
 
-// Optional FALLBACK chat endpoint, tried only when the primary CHAT_* call
-// above fails (unreachable, non-2xx, timeout, or unparseable output) before
-// giving up to the minimal stub. This lets a local-first primary (e.g. a
-// GPU box that keeps thought content on your network) degrade to a hosted
-// OpenAI-compatible model instead of losing metadata when that box is down.
-// Disabled unless BOTH base and model are set; gated behind a configured
-// primary (ENABLE_METADATA_EXTRACTION) — a fallback alone is just a primary.
+// Safety gate for the PRIMARY (CHAT_*) extractor call. Default OFF: the primary
+// is attempted ONLY when ENABLE_PRIMARY_EXTRACTION is set EXACTLY to "true" AND
+// the primary endpoint is configured. The opt-in exists so a primary that is
+// misconfigured or fronted by a dangerous transport can't fire on the hot
+// capture path — e.g. a qrexec forwarder whose call would auto-start a downed
+// GPU qube. Set to "true" only once the primary endpoint is known-good.
+const PRIMARY_EXTRACTION_OPT_IN =
+  optionalTrimmed("ENABLE_PRIMARY_EXTRACTION").toLowerCase() === "true";
+export const ENABLE_PRIMARY_EXTRACTION = Boolean(
+  PRIMARY_EXTRACTION_OPT_IN && CHAT_API_BASE && CHAT_MODEL,
+);
+
+// Optional FALLBACK chat endpoint, tried when the primary is disabled or fails
+// (unreachable, non-2xx, timeout, or unparseable output) before giving up to
+// the minimal stub. This lets a local-first primary (e.g. a GPU box that keeps
+// thought content on your network) degrade to a hosted OpenAI-compatible model
+// instead of losing metadata when that box is down. It is also valid on its
+// own: a fallback-only deployment (CHAT_* blank, primary off) classifies via
+// this endpoint. Disabled unless BOTH base and model are set. NOT gated by
+// ENABLE_PRIMARY_EXTRACTION — that is what makes a fallback-only deployment work.
 export const FALLBACK_CHAT_API_BASE = optionalTrimmed("FALLBACK_CHAT_API_BASE");
 export const FALLBACK_CHAT_API_KEY = optionalTrimmed("FALLBACK_CHAT_API_KEY");
 export const FALLBACK_CHAT_MODEL = optionalTrimmed("FALLBACK_CHAT_MODEL");
@@ -61,14 +73,11 @@ export const ENABLE_FALLBACK_EXTRACTION = Boolean(
   FALLBACK_CHAT_API_BASE && FALLBACK_CHAT_MODEL,
 );
 
-// Safety gate for the PRIMARY extractor call. Default OFF: when not exactly
-// "true", extractMetadata SKIPS the primary endpoint entirely and goes straight
-// to the fallback (then the stub). This is an explicit opt-in so a primary that
-// is misconfigured or fronted by a dangerous transport can't fire on the hot
-// capture path — e.g. a qrexec forwarder whose call would auto-start a downed
-// GPU qube. Set to "true" only once the primary endpoint is known-good.
-export const ENABLE_PRIMARY_EXTRACTION =
-  optionalTrimmed("ENABLE_PRIMARY_EXTRACTION").toLowerCase() === "true";
+// Metadata extraction runs when EITHER path is active; with neither configured,
+// capture skips classification and stamps the minimal {topics:[uncategorized]}
+// stub.
+export const ENABLE_METADATA_EXTRACTION = ENABLE_PRIMARY_EXTRACTION ||
+  ENABLE_FALLBACK_EXTRACTION;
 
 // MCP_ACCESS_KEY is the only credential between any tailnet member
 // (and, once Funnel is on, the public internet) and full read/write to every

@@ -16,7 +16,12 @@
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { type Context, Hono } from "hono";
 
-import { PORT } from "./config.ts";
+import {
+  ENABLE_FALLBACK_EXTRACTION,
+  ENABLE_METADATA_EXTRACTION,
+  ENABLE_PRIMARY_EXTRACTION,
+  PORT,
+} from "./config.ts";
 import { pool } from "./db.ts";
 import {
   type AppVariables,
@@ -106,6 +111,26 @@ app.all("/", requireAuth, async (c) => {
 });
 
 console.log(`open-brain-homelab listening on :${PORT}`);
+
+// Announce the metadata-extraction mode at boot so the two silent degradations
+// (every capture stamping the stub; every capture going off-box via fallback)
+// are obvious from the startup log, not just per-capture lines. No secrets.
+if (!ENABLE_METADATA_EXTRACTION) {
+  console.warn(
+    "[metadata] extraction disabled (no primary or fallback configured) — captures stamp the uncategorized stub",
+  );
+} else if (ENABLE_PRIMARY_EXTRACTION && ENABLE_FALLBACK_EXTRACTION) {
+  console.log(
+    "[metadata] extraction on: primary endpoint, fallback on failure (fallback path is off-box)",
+  );
+} else if (ENABLE_PRIMARY_EXTRACTION) {
+  console.log("[metadata] extraction on: primary endpoint only, no fallback");
+} else {
+  console.warn(
+    "[metadata] extraction on: FALLBACK endpoint only — every capture classifies off-box",
+  );
+}
+
 const httpServer = Deno.serve({ port: PORT }, app.fetch);
 
 // Graceful shutdown — stop accepting new connections, drain in-flight

@@ -1,9 +1,10 @@
 // Tests for extractMetadata's primary → fallback → stub orchestration and the
 // json_schema structured-output request shape. Run with `deno task test`.
 //
-// Hermetic: snapshots/restores the env keys config.ts reads at module load
-// (DB_PASSWORD / MCP_ACCESS_KEY / the CHAT_* + FALLBACK_CHAT_* knobs) and the
-// global fetch. Both the primary and fallback endpoints are configured so a
+// Hermetic: snapshots/restores the env keys THIS TEST mutates (DB_PASSWORD /
+// MCP_ACCESS_KEY / the CHAT_* + FALLBACK_CHAT_* knobs config.ts reads at module
+// load) and the global fetch. config.ts reads other env vars too, but they are
+// not touched here. Both the primary and fallback endpoints are configured so a
 // single module-load (Deno caches dynamic imports per worker) can exercise
 // every path — the path taken is driven entirely by the swappable fetch stub,
 // keyed on which endpoint's URL was called. No real network: fetch is stubbed.
@@ -172,6 +173,30 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
       const r = await extractMetadata("save this link");
       assertEquals(r.type, "reference");
       assertEquals(calls.length, 2);
+    });
+
+    await t.step("primary array output is rejected, falls back", async () => {
+      calls.length = 0;
+      responder = (c) =>
+        c.url.startsWith(PRIMARY_BASE)
+          // 200 but content is a JSON array — typeof [] === "object", so this
+          // guards that arrays aren't mistaken for a metadata object.
+          ? chatOk([])
+          : chatOk({
+            type: "person_note",
+            topics: ["dana"],
+            people: ["Dana"],
+            action_items: [],
+            dates_mentioned: [],
+          });
+
+      const r = await extractMetadata("note about Dana");
+      assertEquals(r.type, "person_note");
+      assertEquals(
+        calls.length,
+        2,
+        "an array from the primary must not count as success",
+      );
     });
 
     await t.step(
