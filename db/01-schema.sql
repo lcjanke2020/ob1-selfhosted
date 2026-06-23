@@ -137,7 +137,7 @@ GRANT SELECT, INSERT, UPDATE ON thoughts TO openbrain_app;
 -- BIGSERIAL) and any future ones; the one-shot ALL SEQUENCES grant covers a
 -- re-apply against a live DB that already has them.
 GRANT USAGE ON SCHEMA public TO openbrain_readonly;
-GRANT SELECT ON ALL TABLES    IN SCHEMA public TO openbrain_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO openbrain_readonly;
 GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO openbrain_readonly;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
   GRANT SELECT ON TABLES TO openbrain_readonly;
