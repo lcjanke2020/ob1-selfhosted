@@ -127,10 +127,22 @@ GRANT SELECT, INSERT, UPDATE ON thoughts TO openbrain_app;
 -- ad-hoc DBeaver/psql exploration ("what does funnel_access_summary look
 -- like today") is exactly the point. Default privileges preserved so
 -- future tables remain inspectable.
+--
+-- SELECT on sequences too, for the same reason backups need it on sessions.*:
+-- the off-box backup runs `pg_dump -U openbrain_readonly`, and pg_dump reads
+-- each sequence's state via `SELECT last_value, is_called FROM <seq>`. Without
+-- it a read-only dump aborts with "permission denied for sequence" on the
+-- first serial/identity sequence. The default privilege covers sequences
+-- created later in 02-observability.sql (funnel_access_log / mcp_auth_events
+-- BIGSERIAL) and any future ones; the one-shot ALL SEQUENCES grant covers a
+-- re-apply against a live DB that already has them.
 GRANT USAGE ON SCHEMA public TO openbrain_readonly;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO openbrain_readonly;
+GRANT SELECT ON ALL TABLES    IN SCHEMA public TO openbrain_readonly;
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO openbrain_readonly;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
   GRANT SELECT ON TABLES TO openbrain_readonly;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT ON SEQUENCES TO openbrain_readonly;
 
 -- The grants-invariant assertion lives in 03-grants-assertion.sql so it
 -- runs after both 01-schema.sql AND 02-observability.sql, AND can be

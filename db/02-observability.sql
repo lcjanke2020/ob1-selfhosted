@@ -144,10 +144,15 @@ GRANT USAGE ON SEQUENCE funnel_access_log_id_seq TO openbrain_app;
 GRANT USAGE ON SEQUENCE mcp_auth_events_id_seq   TO openbrain_app;
 
 -- openbrain_readonly: SELECT for ad-hoc psql / DBeaver poking around at
--- "what's hitting the funnel today".
+-- "what's hitting the funnel today". The sequence SELECTs let
+-- `pg_dump -U openbrain_readonly` (the off-box backup) read these BIGSERIAL
+-- sequences' state — the explicit per-object mirror of the table grants here,
+-- belt-and-suspenders with 01-schema.sql's schema-wide default privilege.
 GRANT SELECT ON funnel_access_log     TO openbrain_readonly;
 GRANT SELECT ON mcp_auth_events       TO openbrain_readonly;
 GRANT SELECT ON funnel_access_summary TO openbrain_readonly;
+GRANT SELECT ON SEQUENCE funnel_access_log_id_seq TO openbrain_readonly;
+GRANT SELECT ON SEQUENCE mcp_auth_events_id_seq   TO openbrain_readonly;
 
 -- openbrain_ingester: INSERT-only on funnel_access_log so the
 -- log-ingester sidecar (which parses attacker-controlled Caddy JSON) has
