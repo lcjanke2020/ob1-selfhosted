@@ -15,8 +15,9 @@
 # full `pg_dump -U openbrain_readonly`. If the read-only role can't dump any
 # object, the job fails. This catches this class of regression generically.
 #
-# Scoped to db/** (and this file) so it only runs when the schema/grants or
-# the test itself change.
+# Scoped to db/**, deploy/compose-local/docker-compose.yml (the Postgres image
+# pin it reads — see "Derive Postgres image" below), and this file — so it runs
+# when the schema/grants, the pinned image, or the test itself change.
 
 name: DB init smoke test
 
@@ -26,11 +27,13 @@ on:
     branches: [main]
     paths:
       - 'db/**'
+      - 'deploy/compose-local/docker-compose.yml'
       - '.github/workflows/db-init.yml'
   push:
     branches: [main]
     paths:
       - 'db/**'
+      - 'deploy/compose-local/docker-compose.yml'
       - '.github/workflows/db-init.yml'
   workflow_dispatch:
 
@@ -42,8 +45,8 @@ jobs:
     name: readonly role can pg_dump
     runs-on: ubuntu-latest
     env:
-      # Pinned to match deploy/compose-local/docker-compose.yml.
-      PG_IMAGE: pgvector/pgvector:pg16
+      # PG_IMAGE is derived from compose at runtime (see the step below) so it
+      # can't drift from the deployed stack's Postgres pin.
       POSTGRES_DB: openbrain
       POSTGRES_USER: postgres
       # CI-only throwaway credentials for an ephemeral container — not secrets.
@@ -60,6 +63,16 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
           fetch-depth: 1
+
+      - name: Derive Postgres image from compose-local (single source of truth)
+        run: |
+          # Read the pinned pgvector image from compose so this test always
+          # exercises the same Postgres version the deployed stack uses — no
+          # second pin to drift. Fail loudly if it can't be found.
+          img=$(grep -oE 'pgvector/pgvector:[A-Za-z0-9._-]+' deploy/compose-local/docker-compose.yml | head -1)
+          test -n "$img" || { echo "::error::no pgvector image found in deploy/compose-local/docker-compose.yml"; exit 1; }
+          echo "PG_IMAGE=$img" >> "$GITHUB_ENV"
+          echo "Using $img (from deploy/compose-local/docker-compose.yml)"
 
       - name: Start Postgres + pgvector with the repo init scripts
         run: |
