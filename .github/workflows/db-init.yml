@@ -1,0 +1,132 @@
+# Backup-recoverability smoke test for the database init scripts.
+#
+# The off-box backup runs `pg_dump` as the unprivileged `openbrain_readonly`
+# role. pg_dump reads every sequence's state (`SELECT last_value, is_called
+# FROM <seq>`), so the role needs SELECT on all sequences, not just tables —
+# a privilege that's easy to forget when a new serial/identity column lands.
+# That is exactly what silently broke the nightly backup once the sessions PK
+# became an identity column.
+#
+# Rather than enumerate privileges in a static assertion (which lags the next
+# new object type, and can't see an object created later by a different
+# superuser), this job exercises the REAL init path on a throwaway pgvector
+# container — the same db/*.sql files, in the order the postgres entrypoint
+# runs them — and then performs the actual operation the backup performs: a
+# full `pg_dump -U openbrain_readonly`. If the read-only role can't dump any
+# object, the job fails. This catches this class of regression generically.
+#
+# Scoped to db/**, deploy/compose-local/docker-compose.yml (the Postgres image
+# pin it reads — see "Derive Postgres image" below), and this file — so it runs
+# when the schema/grants, the pinned image, or the test itself change.
+
+name: DB init smoke test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - 'db/**'
+      - 'deploy/compose-local/docker-compose.yml'
+      - '.github/workflows/db-init.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'db/**'
+      - 'deploy/compose-local/docker-compose.yml'
+      - '.github/workflows/db-init.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  readonly-pg-dump:
+    name: readonly role can pg_dump
+    runs-on: ubuntu-latest
+    env:
+      # PG_IMAGE is derived from compose at runtime (see the step below) so it
+      # can't drift from the deployed stack's Postgres pin.
+      POSTGRES_DB: openbrain
+      POSTGRES_USER: postgres
+      # CI-only throwaway credentials for an ephemeral container — not secrets.
+      POSTGRES_PASSWORD: ci_superuser_pw
+      OPENBRAIN_APP_PASSWORD: ci_app_pw
+      OPENBRAIN_READONLY_PASSWORD: ci_readonly_pw
+      # Set so the Pattern B ingester role + its conditional grants in
+      # 02-observability.sql are exercised too (the fuller init path).
+      OPENBRAIN_INGESTER_PASSWORD: ci_ingester_pw
+    steps:
+      # Same fork-safe ref pattern as ci.yml.
+      - name: Checkout PR head safely
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          fetch-depth: 1
+
+      - name: Derive Postgres image from compose-local (single source of truth)
+        run: |
+          # Read the pinned pgvector image from compose so this test always
+          # exercises the same Postgres version the deployed stack uses — no
+          # second pin to drift. `-m1` returns the first match (no `head`, so no
+          # SIGPIPE), and `|| true` keeps a no-match from tripping
+          # `set -eo pipefail` before the guard below can emit a clear error.
+          img=$(grep -m1 -oE 'pgvector/pgvector:[A-Za-z0-9._-]+' deploy/compose-local/docker-compose.yml || true)
+          test -n "$img" || { echo "::error::no pgvector image found in deploy/compose-local/docker-compose.yml"; exit 1; }
+          echo "PG_IMAGE=$img" >> "$GITHUB_ENV"
+          echo "Using $img (from deploy/compose-local/docker-compose.yml)"
+
+      - name: Start Postgres + pgvector with the repo init scripts
+        run: |
+          # Mount the init files individually (not the whole db/ dir) so the
+          # ops-only summarize_funnel.sql never runs as init — mirrors compose.
+          docker run -d --name pgci \
+            -e POSTGRES_DB -e POSTGRES_USER -e POSTGRES_PASSWORD \
+            -e OPENBRAIN_APP_PASSWORD -e OPENBRAIN_READONLY_PASSWORD \
+            -e OPENBRAIN_INGESTER_PASSWORD \
+            -v "$GITHUB_WORKSPACE/db/00-roles.sh:/docker-entrypoint-initdb.d/00-roles.sh:ro" \
+            -v "$GITHUB_WORKSPACE/db/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro" \
+            -v "$GITHUB_WORKSPACE/db/02-observability.sql:/docker-entrypoint-initdb.d/02-observability.sql:ro" \
+            -v "$GITHUB_WORKSPACE/db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/03-grants-assertion.sql:ro" \
+            -v "$GITHUB_WORKSPACE/db/04-sessions.sql:/docker-entrypoint-initdb.d/04-sessions.sql:ro" \
+            "$PG_IMAGE"
+
+      - name: Wait for init to finish (TCP ready == initdb.d complete)
+        run: |
+          # The entrypoint runs initdb.d against a local socket and only opens
+          # TCP after every script succeeds, so TCP-ready doubles as "init
+          # done". If an init script errors, the container exits — surface its
+          # logs and fail loudly instead of timing out silently.
+          for i in $(seq 1 60); do
+            if docker exec pgci pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; then
+              echo "postgres ready after ${i}s"; ready=1; break
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' pgci 2>/dev/null)" != "true" ]; then
+              echo "::error::postgres container exited during init"; docker logs pgci; exit 1
+            fi
+            sleep 1
+          done
+          if [ "${ready:-}" != "1" ]; then
+            echo "::error::timed out waiting for postgres init"; docker logs pgci; exit 1
+          fi
+
+      - name: Sanity-check init applied (sessions schema present)
+        run: |
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT 1 FROM information_schema.schemata WHERE schema_name='sessions'" | grep -q 1
+
+      - name: Smoke test — openbrain_readonly can run a full pg_dump
+        run: |
+          # The exact operation the off-box backup performs. Exits non-zero
+          # with "permission denied for sequence/relation" if the read-only
+          # role is missing SELECT on any dumped object. Run inside the
+          # container so pg_dump's version matches the server's.
+          docker exec -e PGPASSWORD="$OPENBRAIN_READONLY_PASSWORD" pgci \
+            pg_dump -h 127.0.0.1 -U openbrain_readonly -d "$POSTGRES_DB" \
+            --no-owner --no-privileges > /dev/null
+          echo "pg_dump as openbrain_readonly succeeded"
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs pgci || true
