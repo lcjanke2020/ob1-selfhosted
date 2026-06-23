@@ -60,6 +60,9 @@ fields with `#` comments for readability; they round-trip.
 
 `tags`, `linked_issues`, `related_sessions`, `next_actions`, and `blockers` are
 **array-valued** (`key = [ ... ]`) — write the bare key, never `key[]`.
+`related_sessions` is a **free-form** list (point at other sessions by their
+integer `id`) — the server stores it verbatim and never validates or joins on
+it; it is not a foreign-key reference.
 
 - **`status` enum:** `active | awaiting_review | blocked | done | abandoned`.
 - **Timestamps** are ISO-8601. Date-only (`"2026-06-08"`) is accepted and expanded to
@@ -123,7 +126,8 @@ session_date = "2026-06-08"
 goal = "Add per-client rate limiting at the gateway, backed by Redis, behind a feature flag."
 tags = ["api-gateway", "rate-limiting", "redis"]
 linked_issues = ["ACME-1487", "ACME-1490"]
-related_sessions = ["c1d2e3f4-5a6b-7c8d-9e0f-1a2b3c4d5e6f"]
+# free-form, unvalidated — reference other sessions by their integer id
+related_sessions = ["42", "57"]
 
 summary = """
 Implemented a sliding-window limiter in middleware/ratelimit.go, wired it into the

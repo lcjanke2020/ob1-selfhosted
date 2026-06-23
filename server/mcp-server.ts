@@ -151,8 +151,9 @@ export function createMcpServer(auth: RequestAuth): McpServer {
   const server = new McpServer({
     name: "open-brain-homelab",
     // Bump on behavior changes — this is the serverInfo version a client
-    // sees on initialize.
-    version: "1.1.0",
+    // sees on initialize. 1.2.0: breaking session-tool contract change
+    // (session_resume → session_lookup; tools key on integer `id`).
+    version: "1.2.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
