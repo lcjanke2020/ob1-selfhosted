@@ -35,9 +35,9 @@ session data into `thoughts`, and don't log free-form memories as sessions.
   Never hand-edit the DB; edit the file and re-`capture`.
 - Keep session files in one directory that your machines share (a synced folder, a git
   repo — anything). One TOML file per session; name it stably for humans (e.g.
-  `2026-06-08-rate-limit-gateway.toml`). The DB keys on the in-file `session_id` (see
+  `2026-06-08-rate-limit-gateway.toml`). The DB keys on the in-file `id` (see
   Capturing), **not** the filename, so renaming a file is harmless as long as its
-  `session_id` line is kept. If the session directory isn't present on this machine,
+  `id` line is kept. If the session directory isn't present on this machine,
   **stop and ask the user** — don't invent a path.
 
 ## Front-matter schema (authoring reference)
@@ -55,7 +55,8 @@ fields with `#` comments for readability; they round-trip.
 | What | `title`, `goal`, `status` (enum), `tags`, `linked_issues`, `related_sessions`, `next_actions`, `blockers` |
 | Prose | `summary`, `resume_context` (TOML `"""…"""` multiline) |
 | Artifacts | `[[artifacts]]` array-of-tables — `kind` + `title` required, `detail` optional (see below) |
-| Upsert key | `session_id` — **only ever the value the server returned** (see Capturing) |
+| Upsert key | `id` (integer) — **only ever the value the server returned** (see Capturing) |
+| Resumable handle | `session_id` — optional, free-form; the resumable id your surface exposes (if any), else omit. **NOT** the key. |
 
 `tags`, `linked_issues`, `related_sessions`, `next_actions`, and `blockers` are
 **array-valued** (`key = [ ... ]`) — write the bare key, never `key[]`.
@@ -165,26 +166,28 @@ title = "Benchmark: sliding-window vs token-bucket"
    `branch`, `head` from the actual checkout (`git rev-parse`, `git branch --show-current`),
    not from memory.
 2. Write the TOML file into the session directory.
-3. Call `session_capture(toml_text)`. It returns `{session_id, status, created, reembedded}`.
-4. **First capture only:** the front matter has no `session_id`, so the server **mints
-   one** and returns it (`created: true`). **Write that `session_id` back into the file's
-   front matter.** On every later capture the `session_id` line makes the call *update*
+3. Call `session_capture(toml_text)`. It returns `{id, session_id, status, created, reembedded}`.
+4. **First capture only:** the front matter has no `id`, so the server **mints
+   one** and returns it (`created: true`). **Write that `id` back into the file's
+   front matter.** On every later capture the `id` line makes the call *update*
    the same record (`created: false`); re-embedding happens only if `title`/`goal`/
    `summary`/`resume_context` changed.
 
-   > ⚠️ **Omitting `session_id` on a re-capture creates a duplicate session, not an
-   > update** (verified). The "never author `session_id`" rule means *never invent one* —
-   > only ever write back the exact value the server handed you.
+   > ⚠️ **Omitting `id` on a re-capture creates a duplicate session, not an
+   > update.** The "never author `id`" rule means *never invent one* — only ever
+   > write back the exact value the server handed you. (`session_id` is a separate,
+   > optional resumable handle — not the upsert key; omitting it never duplicates.)
 
 5. Don't author provenance — the server stamps `source` / `source_node`.
 
 ## Resuming a session
 
 - On a resume cue, locate the session first:
-  - by branch → `session_resume(branch="<branch>")` (on a branch tie, newest-updated wins);
-  - by id → `session_resume(session_id="<uuid>")`;
+  - by branch → `session_lookup(branch="<branch>")` (on a branch tie, newest-updated wins);
+  - by id → `session_lookup(id=<id>)`;
   - fuzzy ("the session where I chased the flaky invoice test") → `session_search(query=…)`,
-    then `session_resume` the best hit.
+    then `session_lookup` the best hit.
+- `session_lookup` *fetches* the stored record; it does not resume execution.
 - **Read `resume_context` + `next_actions` + `blockers` before acting.** Reconstruct the
   working state from `repo_url` / `branch` / `head` rather than guessing.
 
@@ -199,11 +202,11 @@ title = "Benchmark: sliding-window vs token-bucket"
 ## Lifecycle
 
 - Quick transitions (e.g. mark `done` after a PR merges, or `blocked` when stuck) →
-  `session_update_status(session_id, status)`. Usable from mobile with no checkout.
+  `session_update_status(id, status)`. Usable from mobile with no checkout.
 - A status flip sets **`needs_file_sync=true`** and the DB record's `status` now **leads
-  the file** (the file's `status` is stale until reconciled — verified). Next time the
+  the file** (the file's `status` is stale until reconciled). Next time the
   repo/file is in front of you, update the file's `status` + `last_update` and re-`capture`
-  (carrying the `session_id`) to reconcile.
+  (carrying the `id`) to reconcile.
 
 ## Honesty guardrails
 
@@ -212,14 +215,14 @@ These directly counter the "agent asserts success about its own state" failure p
 - **Never claim a session was captured/updated unless the tool returned success.** Surface
   the actual return (`created`, `reembedded`, `status`).
 - If a write fails or provenance can't be stamped, **say so plainly** — don't paper over it.
-- **Don't fabricate** `session_id`s, statuses, or artifact refs — report only what the
+- **Don't fabricate** `id`s, statuses, or artifact refs — report only what the
   tools return (don't claim an artifact landed unless the capture succeeded).
 
 ## Anti-patterns
 
 - Don't shove session data into `thoughts` (or free-form memories into sessions).
 - Don't hand-edit the DB — edit the **file** and re-`capture`.
-- Don't omit `session_id` when re-capturing (you'll mint a duplicate).
+- Don't omit `id` when re-capturing (you'll mint a duplicate).
 - Don't author nested `[identity]` / `[where]` / `[state_for_resuming]` blocks —
   the schema is flat.
 - Don't author server-stamped fields (`source`, `content_hash`, …).

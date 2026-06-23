@@ -30,7 +30,12 @@ export type SessionUpsertInput = {
 };
 
 export type UpsertOutcome = {
-  session_id: string;
+  // The canonical key. deno-postgres decodes BIGINT as a JS BigInt that
+  // JSON.stringify cannot serialize, so every projection of `id` is narrowed to
+  // a JS number here (counts are tiny — single-operator store — far under
+  // Number.MAX_SAFE_INTEGER, so lossless).
+  id: number;
+  session_id: string | null;
   status: string;
   created: boolean;
 };
@@ -45,7 +50,8 @@ export type ArtifactRow = {
 };
 
 export type SessionRow = {
-  session_id: string;
+  id: number;
+  session_id: string | null;
   title: string;
   session_date: string | null;
   goal: string | null;
@@ -82,7 +88,8 @@ export type SessionRow = {
 export type SessionRecord = SessionRow & { artifacts: ArtifactRow[] };
 
 export type SessionListRow = {
-  session_id: string;
+  id: number;
+  session_id: string | null;
   title: string;
   status: string;
   repo_url: string | null;
@@ -92,7 +99,8 @@ export type SessionListRow = {
 };
 
 export type SessionSearchRow = {
-  session_id: string;
+  id: number;
+  session_id: string | null;
   title: string;
   status: string;
   last_update: string | null;
@@ -102,7 +110,7 @@ export type SessionSearchRow = {
 // Projection used everywhere a full record is returned. Deliberately excludes
 // `embedding` (a 768-float vector) so resume/get don't ship it over the wire.
 const SESSION_COLUMNS = `
-  session_id, title, session_date, goal,
+  id, session_id, title, session_date, goal,
   agent, agent_version, harness,
   machine, working_dir, repo_url, branch, head, worktree,
   started_at, last_update, ended_at, status,
@@ -112,18 +120,18 @@ const SESSION_COLUMNS = `
   raw_toml, content_hash, created_at, updated_at`;
 
 // Read just the change-detection hash so the tool layer can decide whether to
-// pay for an Ollama embed before calling upsertSession. Returns null when the
-// session does not exist yet (or no id was supplied).
+// pay for an Ollama embed before calling upsertSession. Keyed on the canonical
+// `id`; returns null on a fresh capture (no id yet) or an unknown id → embed.
 export async function getSessionContentHash(
   pool: Pool,
-  sessionId: string | null,
+  id: number | null,
 ): Promise<string | null> {
-  if (!sessionId) return null;
+  if (id == null) return null;
   const client = await getClient(pool);
   try {
     const r = await client.queryObject<{ content_hash: string | null }>(
-      `SELECT content_hash FROM sessions.session WHERE session_id = $1`,
-      [sessionId],
+      `SELECT content_hash FROM sessions.session WHERE id = $1`,
+      [id],
     );
     return r.rows[0]?.content_hash ?? null;
   } finally {
@@ -138,10 +146,51 @@ export async function upsertSession(
   const s = input.session;
   const embParam = input.embedding ? toVectorLiteral(input.embedding) : null;
 
-  // Status and embedding reference the raw nullable params ($17 / $30) directly
-  // in the DO UPDATE (not EXCLUDED) so an omitted status preserves a mobile-set
-  // value and an unchanged-content capture keeps the existing embedding.
-  const sql = `
+  // Capture is TWO-PATH because the canonical key `id` is GENERATED ALWAYS
+  // (never client-assigned, so no INSERT ... ON CONFLICT (id)):
+  //   - id present -> UPDATE that row (refresh). 0 rows => the caller sent a
+  //     stale/unknown id; surfaced as an error rather than silently minting a
+  //     new row under a different id.
+  //   - id absent  -> INSERT a fresh row; the server assigns id.
+  // status / embedding / session_id are COALESCE-preserved on UPDATE so an
+  // omitted value keeps what's stored: a mobile-set status, an unchanged
+  // embedding, or a resumable handle set by an earlier capture from a surface
+  // that exposed one. The $-positions are shared by both statements; the UPDATE
+  // appends the key as $31.
+  const cols = [
+    s.session_id, // $1  resumable handle (TEXT, nullable) — NOT the key
+    s.title, // $2
+    s.session_date, // $3
+    s.goal, // $4
+    s.agent, // $5
+    s.agent_version, // $6
+    s.harness, // $7
+    s.machine, // $8
+    s.working_dir, // $9
+    s.repo_url, // $10
+    s.branch, // $11
+    s.head, // $12
+    s.worktree, // $13
+    s.started_at, // $14
+    s.last_update, // $15
+    s.ended_at, // $16
+    s.status, // $17
+    s.tags, // $18
+    s.linked_issues, // $19
+    s.related_sessions, // $20
+    s.next_actions, // $21
+    s.blockers, // $22
+    s.resume_context, // $23
+    s.summary, // $24
+    input.provenance.source, // $25
+    input.provenance.sourceNode, // $26
+    input.provenance.ingestedPath, // $27
+    input.rawToml, // $28
+    input.contentHash, // $29
+    embParam, // $30
+  ];
+
+  const insertSql = `
     INSERT INTO sessions.session (
       session_id, title, session_date, goal,
       agent, agent_version, harness,
@@ -152,7 +201,7 @@ export async function upsertSession(
       source, source_node, ingested_path, needs_file_sync,
       raw_toml, content_hash, embedding
     ) VALUES (
-      COALESCE($1::uuid, gen_random_uuid()), $2, $3::date, $4,
+      $1, $2, $3::date, $4,
       $5, $6, $7,
       $8, $9, $10, $11, $12, $13,
       $14::timestamptz, $15::timestamptz, $16::timestamptz,
@@ -162,96 +211,83 @@ export async function upsertSession(
       $25, $26, $27, false,
       $28, $29, $30::vector
     )
-    ON CONFLICT (session_id) DO UPDATE SET
-      title = EXCLUDED.title,
-      session_date = EXCLUDED.session_date,
-      goal = EXCLUDED.goal,
-      agent = EXCLUDED.agent,
-      agent_version = EXCLUDED.agent_version,
-      harness = EXCLUDED.harness,
-      machine = EXCLUDED.machine,
-      working_dir = EXCLUDED.working_dir,
-      repo_url = EXCLUDED.repo_url,
-      branch = EXCLUDED.branch,
-      head = EXCLUDED.head,
-      worktree = EXCLUDED.worktree,
-      started_at = EXCLUDED.started_at,
-      last_update = EXCLUDED.last_update,
-      ended_at = EXCLUDED.ended_at,
+    RETURNING id, session_id, status`;
+
+  const updateSql = `
+    UPDATE sessions.session SET
+      session_id = COALESCE($1, sessions.session.session_id),
+      title = $2,
+      session_date = $3::date,
+      goal = $4,
+      agent = $5,
+      agent_version = $6,
+      harness = $7,
+      machine = $8,
+      working_dir = $9,
+      repo_url = $10,
+      branch = $11,
+      head = $12,
+      worktree = $13,
+      started_at = $14::timestamptz,
+      last_update = $15::timestamptz,
+      ended_at = $16::timestamptz,
       status = COALESCE($17::sessions.session_status, sessions.session.status),
-      tags = EXCLUDED.tags,
-      linked_issues = EXCLUDED.linked_issues,
-      related_sessions = EXCLUDED.related_sessions,
-      next_actions = EXCLUDED.next_actions,
-      blockers = EXCLUDED.blockers,
-      resume_context = EXCLUDED.resume_context,
-      summary = EXCLUDED.summary,
-      source = EXCLUDED.source,
-      source_node = EXCLUDED.source_node,
-      ingested_path = EXCLUDED.ingested_path,
+      tags = $18::text[],
+      linked_issues = $19::text[],
+      related_sessions = $20::text[],
+      next_actions = $21::text[],
+      blockers = $22::text[],
+      resume_context = $23,
+      summary = $24,
+      source = $25,
+      source_node = $26,
+      ingested_path = $27,
       needs_file_sync = false,
-      raw_toml = EXCLUDED.raw_toml,
-      content_hash = EXCLUDED.content_hash,
+      raw_toml = $28,
+      content_hash = $29,
       embedding = COALESCE($30::vector, sessions.session.embedding),
       updated_at = now()
-    RETURNING session_id, status, (xmax = 0) AS created`;
+    WHERE id = $31
+    RETURNING id, session_id, status`;
 
-  const params = [
-    s.session_id,
-    s.title,
-    s.session_date,
-    s.goal,
-    s.agent,
-    s.agent_version,
-    s.harness,
-    s.machine,
-    s.working_dir,
-    s.repo_url,
-    s.branch,
-    s.head,
-    s.worktree,
-    s.started_at,
-    s.last_update,
-    s.ended_at,
-    s.status,
-    s.tags,
-    s.linked_issues,
-    s.related_sessions,
-    s.next_actions,
-    s.blockers,
-    s.resume_context,
-    s.summary,
-    input.provenance.source,
-    input.provenance.sourceNode,
-    input.provenance.ingestedPath,
-    input.rawToml,
-    input.contentHash,
-    embParam,
-  ];
+  type UpsertRow = { id: bigint; session_id: string | null; status: string };
+  const isUpdate = s.id != null;
 
   const client = await getClient(pool);
   try {
     await client.queryArray("BEGIN");
-    const up = await client.queryObject<UpsertOutcome>(sql, params);
-    const row = up.rows[0];
+    const res = isUpdate
+      ? await client.queryObject<UpsertRow>(updateSql, [...cols, s.id])
+      : await client.queryObject<UpsertRow>(insertSql, cols);
+    if (isUpdate && res.rows.length === 0) {
+      throw new Error(`no session with id ${s.id}`);
+    }
+    const row = res.rows[0];
+    // Bind the BIGINT key as a JS number for the artifact FK (same lossless
+    // bound as the returned id); deno-postgres decodes RETURNING id as BigInt.
+    const sessionPk = Number(row.id);
 
-    // Reconcile artifact children: a qualified (WHERE session_id) delete then
-    // re-insert. The WHERE is for correctness; it is kept on one physical line
-    // only as a habit mirroring the SQL files' qualified-DELETE style.
+    // Reconcile artifact children: a qualified (WHERE session_pk) delete then
+    // re-insert, keyed on the BIGINT canonical key.
     await client.queryArray(
-      `DELETE FROM sessions.artifact WHERE session_id = $1`,
-      [row.session_id],
+      `DELETE FROM sessions.artifact WHERE session_pk = $1`,
+      [sessionPk],
     );
     for (const a of input.artifacts) {
       await client.queryArray(
-        `INSERT INTO sessions.artifact (session_id, position, kind, title, detail)
+        `INSERT INTO sessions.artifact (session_pk, position, kind, title, detail)
          VALUES ($1, $2, $3, $4, $5)`,
-        [row.session_id, a.position, a.kind, a.title, a.detail],
+        [sessionPk, a.position, a.kind, a.title, a.detail],
       );
     }
 
     await client.queryArray("COMMIT");
-    return row;
+    return {
+      id: sessionPk,
+      session_id: row.session_id,
+      status: row.status,
+      created: !isUpdate,
+    };
   } catch (e) {
     try {
       await client.queryArray("ROLLBACK");
@@ -264,23 +300,25 @@ export async function upsertSession(
 
 export async function getSession(
   pool: Pool,
-  sessionId: string,
+  id: number,
 ): Promise<SessionRecord | null> {
   const client = await getClient(pool);
   try {
     const sess = await client.queryObject<SessionRow>(
-      `SELECT ${SESSION_COLUMNS} FROM sessions.session WHERE session_id = $1`,
-      [sessionId],
+      `SELECT ${SESSION_COLUMNS} FROM sessions.session WHERE id = $1`,
+      [id],
     );
-    if (!sess.rows[0]) return null;
+    const row = sess.rows[0];
+    if (!row) return null;
     const arts = await client.queryObject<ArtifactRow>(
       `SELECT position, kind, title, detail
        FROM sessions.artifact
-       WHERE session_id = $1
+       WHERE session_pk = $1
        ORDER BY position, id`,
-      [sessionId],
+      [id],
     );
-    return { ...sess.rows[0], artifacts: arts.rows };
+    // id comes back as a BigInt (JSON-unserializable) → narrow to a number.
+    return { ...row, id: Number(row.id), artifacts: arts.rows };
   } finally {
     client.release();
   }
@@ -288,28 +326,28 @@ export async function getSession(
 
 export async function resumeSession(
   pool: Pool,
-  opts: { sessionId?: string | null; branch?: string | null },
+  opts: { id?: number | null; branch?: string | null },
 ): Promise<SessionRecord | null> {
-  if (opts.sessionId) return getSession(pool, opts.sessionId);
+  if (opts.id != null) return getSession(pool, opts.id);
   if (!opts.branch) return null;
 
   const client = await getClient(pool);
-  let chosenId: string | null;
+  let chosenId: number | null;
   try {
     // Branch ties broken deterministically: newest last_update, then the
-    // server-managed updated_at, then session_id for total order.
-    const r = await client.queryObject<{ session_id: string }>(
-      `SELECT session_id FROM sessions.session
+    // server-managed updated_at, then id for total order.
+    const r = await client.queryObject<{ id: bigint }>(
+      `SELECT id FROM sessions.session
        WHERE branch = $1
-       ORDER BY last_update DESC NULLS LAST, updated_at DESC, session_id
+       ORDER BY last_update DESC NULLS LAST, updated_at DESC, id
        LIMIT 1`,
       [opts.branch],
     );
-    chosenId = r.rows[0]?.session_id ?? null;
+    chosenId = r.rows[0] ? Number(r.rows[0].id) : null;
   } finally {
     client.release();
   }
-  return chosenId ? getSession(pool, chosenId) : null;
+  return chosenId != null ? getSession(pool, chosenId) : null;
 }
 
 export async function searchSessions(
@@ -341,8 +379,10 @@ export async function searchSessions(
   }
   const client = await getClient(pool);
   try {
-    const r = await client.queryObject<SessionSearchRow>(
-      `SELECT session_id, title, status, last_update,
+    const r = await client.queryObject<
+      SessionSearchRow & { id: bigint; score: string }
+    >(
+      `SELECT id, session_id, title, status, last_update,
               1 - (embedding <=> $1::vector) AS score
        FROM sessions.session
        WHERE ${cond.join(" AND ")}
@@ -350,8 +390,13 @@ export async function searchSessions(
        LIMIT $${p}`,
       [...params, limit],
     );
-    // deno-postgres decodes the distance expression as text; expose a number.
-    return r.rows.map((row) => ({ ...row, score: Number(row.score) }));
+    // id decodes as a BigInt and the distance expression as text; expose both
+    // as JS numbers.
+    return r.rows.map((row) => ({
+      ...row,
+      id: Number(row.id),
+      score: Number(row.score),
+    }));
   } finally {
     client.release();
   }
@@ -414,15 +459,16 @@ export async function listSessions(
 
   const client = await getClient(pool);
   try {
-    const r = await client.queryObject<SessionListRow>(
-      `SELECT session_id, title, status, repo_url, branch, last_update, needs_file_sync
+    const r = await client.queryObject<SessionListRow & { id: bigint }>(
+      `SELECT id, session_id, title, status, repo_url, branch, last_update, needs_file_sync
        FROM sessions.session
        ${where}
-       ORDER BY ${orderBy} DESC NULLS LAST, updated_at DESC, session_id
+       ORDER BY ${orderBy} DESC NULLS LAST, updated_at DESC, id
        LIMIT $${p}`,
       [...params, limit],
     );
-    return r.rows;
+    // id decodes as a BigInt → narrow to a number for JSON.
+    return r.rows.map((row) => ({ ...row, id: Number(row.id) }));
   } finally {
     client.release();
   }
@@ -430,23 +476,24 @@ export async function listSessions(
 
 export async function updateSessionStatus(
   pool: Pool,
-  sessionId: string,
+  id: number,
   status: string,
 ): Promise<
-  { session_id: string; status: string; needs_file_sync: boolean } | null
+  { id: number; status: string; needs_file_sync: boolean } | null
 > {
   const client = await getClient(pool);
   try {
     const r = await client.queryObject<
-      { session_id: string; status: string; needs_file_sync: boolean }
+      { id: bigint; status: string; needs_file_sync: boolean }
     >(
       `UPDATE sessions.session
        SET status = $2::sessions.session_status, needs_file_sync = true
-       WHERE session_id = $1
-       RETURNING session_id, status, needs_file_sync`,
-      [sessionId, status],
+       WHERE id = $1
+       RETURNING id, status, needs_file_sync`,
+      [id, status],
     );
-    return r.rows[0] ?? null;
+    const row = r.rows[0];
+    return row ? { ...row, id: Number(row.id) } : null;
   } finally {
     client.release();
   }

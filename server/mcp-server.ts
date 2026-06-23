@@ -32,7 +32,6 @@ import {
   parseSessionToml,
   SESSION_ORDER_BY,
   SESSION_STATUSES,
-  UUID_RE,
 } from "./session_toml.ts";
 
 // Module-level shared TextEncoder so the byte-cap refine doesn't
@@ -80,8 +79,14 @@ to \`session_capture\`. The schema is **flat** — do NOT use nested
 ## Required
 - \`title\` (string)
 
+## The key
+- \`id\` (integer) — the canonical key. **Omit on first capture**; the server
+  assigns it and returns it. To *refresh* an existing session, write that exact
+  \`id\` back so the capture updates the same row (omitting it inserts a new one).
+
 ## Optional scalars
-- \`session_id\` (canonical hyphenated UUID; omit to let the server generate one)
+- \`session_id\` (string) — an optional, best-effort *resumable handle* (e.g. a
+  harness conversation-id), NOT the key. Free-form; NULL when none is available.
 - \`goal\`, \`agent\`, \`agent_version\`, \`harness\`, \`machine\`, \`working_dir\`,
   \`repo_url\`, \`branch\`, \`head\`, \`worktree\` (strings)
 - \`session_date\` (date), \`started_at\`, \`last_update\`, \`ended_at\`
@@ -453,14 +458,14 @@ export function createMcpServer(auth: RequestAuth): McpServer {
     {
       title: "Capture Session",
       description:
-        "Ingest or refresh an agent work session from its canonical TOML front matter. Upserts the session and its artifacts, re-embeds only when the embedded content changed, and stamps provenance server-side. Returns {session_id, status, created, reembedded}. Artifacts go in a [[artifacts]] array-of-tables: kind and title required, detail optional; unknown fields or a singular [[artifact]] block are rejected. See the 'Session TOML schema' resource for the full front-matter contract.",
+        "Ingest or refresh an agent work session from its canonical TOML front matter. Upserts the session and its artifacts, re-embeds only when the embedded content changed, and stamps provenance server-side. Returns {id, session_id, status, created, reembedded} — `id` is the canonical key; write it back into the TOML to refresh the same session. Artifacts go in a [[artifacts]] array-of-tables: kind and title required, detail optional; unknown fields or a singular [[artifact]] block are rejected. See the 'Session TOML schema' resource for the full front-matter contract.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
         destructiveHint: false,
-        // Not idempotent: a TOML without session_id inserts a fresh row every
-        // call, and even with one it bumps updated_at and delete-reinserts
-        // artifacts. Matches capture_thought's hint so clients don't auto-retry.
+        // Not idempotent: a TOML without `id` inserts a fresh row every call,
+        // and one with `id` bumps updated_at and delete-reinserts artifacts.
+        // Matches capture_thought's hint so clients don't auto-retry.
         idempotentHint: false,
       },
       inputSchema: {
@@ -485,7 +490,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
         const contentHash = await computeContentHash(session);
         const existingHash = await getSessionContentHash(
           pool,
-          session.session_id,
+          session.id,
         );
         // null (new session or no id) !== hash => embed; equal => skip embed.
         const reembedded = existingHash !== contentHash;
@@ -509,6 +514,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
           rawToml,
         });
         return text(JSON.stringify({
+          id: res.id,
           session_id: res.session_id,
           status: res.status,
           created: res.created,
@@ -521,29 +527,26 @@ export function createMcpServer(auth: RequestAuth): McpServer {
   );
 
   server.registerTool(
-    "session_resume",
+    "session_lookup",
     {
-      title: "Resume Session",
+      title: "Look up Session",
       description:
-        "Pick up where a session left off, by session_id or branch. Returns the full record (resume_context, next_actions, blockers, artifacts, raw_toml), or null if no match. On a branch tie the most-recently-updated session wins.",
+        "Retrieve a stored session record by id or branch — this does NOT resume execution, it fetches the record. Returns the full record (resume_context, next_actions, blockers, artifacts, raw_toml), or null if no match. On a branch tie the most-recently-updated session wins.",
       annotations: { readOnlyHint: true },
       inputSchema: {
-        session_id: z.string().regex(UUID_RE, "must be a UUID").optional()
-          .describe("Session UUID"),
+        id: z.number().int().positive().optional()
+          .describe("Session id (the canonical key returned by session_capture)"),
         branch: z.string().optional().describe(
           "Git branch; the newest matching session is returned",
         ),
       },
     },
-    async ({ session_id, branch }) => {
+    async ({ id, branch }) => {
       try {
-        if (!session_id && !branch) {
-          return err("Provide session_id or branch.");
+        if (id == null && !branch) {
+          return err("Provide id or branch.");
         }
-        const rec = await resumeSession(pool, {
-          sessionId: session_id,
-          branch,
-        });
+        const rec = await resumeSession(pool, { id, branch });
         return text(JSON.stringify(rec));
       } catch (e) {
         return err((e as Error).message);
@@ -556,7 +559,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
     {
       title: "Search Sessions",
       description:
-        "Semantic search over session title/goal/summary/resume_context. Optional structured filters by status, repo_url, tag. Returns [{session_id, title, status, last_update, score}].",
+        "Semantic search over session title/goal/summary/resume_context. Optional structured filters by status, repo_url, tag. Returns [{id, session_id, title, status, last_update, score}].",
       annotations: { readOnlyHint: true },
       inputSchema: {
         query: z.string().min(1).describe("What to search for"),
@@ -624,7 +627,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
     {
       title: "Update Session Status",
       description:
-        "Lightweight lifecycle flip (e.g. mark 'done' after a PR merges), usable from mobile with no repo checkout. Sets needs_file_sync=true so the next file-side session_capture reconciles the canonical TOML. Returns {session_id, status, needs_file_sync}.",
+        "Lightweight lifecycle flip (e.g. mark 'done' after a PR merges), usable from mobile with no repo checkout. Sets needs_file_sync=true so the next file-side session_capture reconciles the canonical TOML. Returns {id, status, needs_file_sync}.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
@@ -632,14 +635,15 @@ export function createMcpServer(auth: RequestAuth): McpServer {
         idempotentHint: true,
       },
       inputSchema: {
-        session_id: z.string().regex(UUID_RE, "must be a UUID"),
+        id: z.number().int().positive()
+          .describe("Session id (the canonical key returned by session_capture)"),
         status: z.enum(SESSION_STATUSES),
       },
     },
-    async ({ session_id, status }) => {
+    async ({ id, status }) => {
       try {
-        const row = await updateSessionStatus(pool, session_id, status);
-        if (!row) return err(`No session found for ID ${session_id}.`);
+        const row = await updateSessionStatus(pool, id, status);
+        if (!row) return err(`No session found for id ${id}.`);
         return text(JSON.stringify(row));
       } catch (e) {
         return err((e as Error).message);
