@@ -68,8 +68,10 @@ jobs:
         run: |
           # Read the pinned pgvector image from compose so this test always
           # exercises the same Postgres version the deployed stack uses — no
-          # second pin to drift. Fail loudly if it can't be found.
-          img=$(grep -oE 'pgvector/pgvector:[A-Za-z0-9._-]+' deploy/compose-local/docker-compose.yml | head -1)
+          # second pin to drift. `-m1` returns the first match (no `head`, so no
+          # SIGPIPE), and `|| true` keeps a no-match from tripping
+          # `set -eo pipefail` before the guard below can emit a clear error.
+          img=$(grep -m1 -oE 'pgvector/pgvector:[A-Za-z0-9._-]+' deploy/compose-local/docker-compose.yml || true)
           test -n "$img" || { echo "::error::no pgvector image found in deploy/compose-local/docker-compose.yml"; exit 1; }
           echo "PG_IMAGE=$img" >> "$GITHUB_ENV"
           echo "Using $img (from deploy/compose-local/docker-compose.yml)"
