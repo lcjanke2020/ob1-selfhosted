@@ -178,6 +178,12 @@ title = "Benchmark: sliding-window vs token-bucket"
    > write back the exact value the server handed you. (`session_id` is a separate,
    > optional resumable handle — not the upsert key; omitting it never duplicates.)
 
+   > ⚠️ **A session file that predates the `id` key** carries an old value in
+   > `session_id` and has no `id` line — so a straight re-capture takes the insert
+   > path and mints a *duplicate*, orphaning the existing DB row. First recover
+   > the row's `id` (`session_lookup(branch="…")` or `session_search`) and write
+   > it into the file's `id =` line; then capture.
+
 5. Don't author provenance — the server stamps `source` / `source_node`.
 
 ## Resuming a session

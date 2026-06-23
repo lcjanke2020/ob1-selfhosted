@@ -119,21 +119,23 @@ const SESSION_COLUMNS = `
   source, source_node, ingested_path, needs_file_sync,
   raw_toml, content_hash, created_at, updated_at`;
 
-// Read just the change-detection hash so the tool layer can decide whether to
-// pay for an Ollama embed before calling upsertSession. Keyed on the canonical
-// `id`; returns null on a fresh capture (no id yet) or an unknown id → embed.
+// Look up the change-detection hash for an existing session by its canonical
+// key, so the tool layer can decide whether to pay for an Ollama embed before
+// calling upsertSession. Returns { hash } when the row exists (hash may itself
+// be null — a row that was never embedded), or null when NO row matches. The
+// found/not-found distinction lets the caller fail fast on a stale/unknown id
+// WITHOUT first paying for an embedding (the same SELECT already reveals it).
 export async function getSessionContentHash(
   pool: Pool,
-  id: number | null,
-): Promise<string | null> {
-  if (id == null) return null;
+  id: number,
+): Promise<{ hash: string | null } | null> {
   const client = await getClient(pool);
   try {
     const r = await client.queryObject<{ content_hash: string | null }>(
       `SELECT content_hash FROM sessions.session WHERE id = $1`,
       [id],
     );
-    return r.rows[0]?.content_hash ?? null;
+    return r.rows.length ? { hash: r.rows[0].content_hash } : null;
   } finally {
     client.release();
   }
@@ -304,7 +306,9 @@ export async function getSession(
 ): Promise<SessionRecord | null> {
   const client = await getClient(pool);
   try {
-    const sess = await client.queryObject<SessionRow>(
+    // id decodes as a BigInt at runtime (deno-postgres); type it honestly as
+    // bigint here and narrow to a number on return, rather than mislabelling it.
+    const sess = await client.queryObject<Omit<SessionRow, "id"> & { id: bigint }>(
       `SELECT ${SESSION_COLUMNS} FROM sessions.session WHERE id = $1`,
       [id],
     );
@@ -380,7 +384,7 @@ export async function searchSessions(
   const client = await getClient(pool);
   try {
     const r = await client.queryObject<
-      SessionSearchRow & { id: bigint; score: string }
+      Omit<SessionSearchRow, "id" | "score"> & { id: bigint; score: string }
     >(
       `SELECT id, session_id, title, status, last_update,
               1 - (embedding <=> $1::vector) AS score
@@ -459,7 +463,7 @@ export async function listSessions(
 
   const client = await getClient(pool);
   try {
-    const r = await client.queryObject<SessionListRow & { id: bigint }>(
+    const r = await client.queryObject<Omit<SessionListRow, "id"> & { id: bigint }>(
       `SELECT id, session_id, title, status, repo_url, branch, last_update, needs_file_sync
        FROM sessions.session
        ${where}

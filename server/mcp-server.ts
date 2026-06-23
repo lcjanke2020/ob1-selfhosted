@@ -488,11 +488,16 @@ export function createMcpServer(auth: RequestAuth): McpServer {
       try {
         const { session, artifacts, rawToml } = parseSessionToml(toml_text);
         const contentHash = await computeContentHash(session);
-        const existingHash = await getSessionContentHash(
-          pool,
-          session.id,
-        );
-        // null (new session or no id) !== hash => embed; equal => skip embed.
+        // On the update path (id present), look the row up first so a stale or
+        // unknown id errors HERE — before paying for an embedding. A fresh
+        // capture (no id) has no existing hash, so it always (re)embeds.
+        let existingHash: string | null = null;
+        if (session.id != null) {
+          const cur = await getSessionContentHash(pool, session.id);
+          if (cur === null) return err(`No session found for id ${session.id}.`);
+          existingHash = cur.hash;
+        }
+        // equal hash => content unchanged, skip embed; otherwise (re)embed.
         const reembedded = existingHash !== contentHash;
         const embedding = reembedded ? await embed(embedSource(session)) : null;
         const res = await upsertSession(pool, {

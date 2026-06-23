@@ -172,6 +172,12 @@ Deno.test("parseSessionToml rejects malformed input", () => {
     Error,
     "positive integer",
   );
+  // Unsafe integer (> 2^53-1) is rejected, not silently rounded into mis-targeting.
+  assertThrows(
+    () => parseSessionToml(`title = "t"\nid = 9007199254740993`),
+    Error,
+    "2^53",
+  );
   // Regression guard: the old singular spelling is rejected loudly (was silently dropped).
   assertThrows(
     () =>

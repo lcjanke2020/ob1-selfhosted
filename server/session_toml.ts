@@ -90,13 +90,16 @@ export type ParsedSessionDoc = {
 // The canonical key is a positive integer (BIGINT identity in the DB). TOML
 // integers parse to JS number; tolerate a quoted integer too. Anything else is
 // rejected loudly rather than coerced — a bad key should fail, not mis-target.
+// Must be a SAFE integer: `id` is the upsert/lookup key, so a value past
+// 2^53-1 (which a JS number rounds silently) has to be rejected, not rounded
+// into mis-targeting a different row.
 function toPositiveIntOrNull(v: unknown): number | null {
   if (v === null || v === undefined) return null;
-  if (typeof v === "number" && Number.isInteger(v) && v > 0) return v;
-  if (typeof v === "string" && /^[1-9][0-9]*$/.test(v.trim())) {
-    return Number(v.trim());
-  }
-  throw new Error(`id ${JSON.stringify(v)} must be a positive integer`);
+  const n = typeof v === "number"
+    ? v
+    : (typeof v === "string" && /^[0-9]+$/.test(v.trim()) ? Number(v.trim()) : NaN);
+  if (Number.isSafeInteger(n) && n > 0) return n;
+  throw new Error(`id ${JSON.stringify(v)} must be a positive integer below 2^53`);
 }
 
 function toStrOrNull(v: unknown): string | null {
