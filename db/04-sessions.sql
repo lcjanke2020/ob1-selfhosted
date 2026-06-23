@@ -294,3 +294,15 @@ GRANT USAGE ON SCHEMA sessions TO openbrain_readonly;
 GRANT SELECT ON ALL TABLES IN SCHEMA sessions TO openbrain_readonly;
 ALTER DEFAULT PRIVILEGES IN SCHEMA sessions
   GRANT SELECT ON TABLES TO openbrain_readonly;
+
+-- ...and SELECT on the schema's sequences. This is NOT the same concern as the
+-- app role's INSERT path above (identity columns advance without USAGE): the
+-- off-box backup runs `pg_dump -U openbrain_readonly`, and pg_dump reads every
+-- sequence's state via `SELECT last_value, is_called FROM <seq>`. Without this,
+-- a dump as the read-only role aborts with "permission denied for sequence"
+-- the moment it reaches an identity/serial sequence (e.g. session.id's
+-- sessions.session_id_seq). ALL SEQUENCES covers the existing identity
+-- sequences; the default privilege keeps future sessions.* sequences dumpable.
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA sessions TO openbrain_readonly;
+ALTER DEFAULT PRIVILEGES IN SCHEMA sessions
+  GRANT SELECT ON SEQUENCES TO openbrain_readonly;
