@@ -106,10 +106,12 @@ carry no handle rather than a dead value.
   directory** (`working_dir`) the work happened in. See *Resuming the actual conversation
   from the CLI* below for how the fields are used together.
 - **Refresh caveat:** on a re-capture (with `id`), the server **COALESCE-preserves**
-  `session_id` — omitting it **keeps** the stored handle, it does *not* clear it. To replace
-  a handle, write the new value; to drop a now-dead one, set `session_id = ""`. This is
-  rarely needed — the resume step re-globs for the transcript before trusting any handle, so
-  a stale handle is harmless.
+  `session_id` — omitting it **keeps** the stored handle, and **TOML capture has no way to
+  reset it to SQL `NULL`**. To point at a different conversation, write the new value; to
+  retire a dead one, set `session_id = ""` — note this stores an **empty string**, not
+  `NULL`. Treat empty the same as unset everywhere: the resume glob can't match it, so it's
+  functionally "no handle". Rarely needed anyway — the resume step re-globs for the
+  transcript before trusting any handle, so a stale handle never yields a false resume.
 
 ### Minimal example (verified round-trip)
 
@@ -258,8 +260,8 @@ Manual resume, search-driven:
    right project. Transcripts are machine-local, so this only works on the host that
    recorded it.
 
-**No transcript available** — `session_id` is unset, you're on a different machine, or it
-was pruned/compacted — means **there is no scrollback**. Start a fresh `claude` and rebuild
+**No transcript available** — `session_id` is unset or empty, you're on a different machine,
+or it was pruned/compacted — means **there is no scrollback**. Start a fresh `claude` and rebuild
 from the work-log (`resume_context` + `next_actions` + `blockers`), checking out
 `repo_url` / `branch` / `head`. Say plainly that scrollback wasn't available and the context
 was reconstructed from the session record.
@@ -290,8 +292,8 @@ These directly counter the "agent asserts success about its own state" failure p
 - If a write fails or provenance can't be stamped, **say so plainly** — don't paper over it.
 - **Don't fabricate** `id`s, statuses, or artifact refs — report only what the
   tools return (don't claim an artifact landed unless the capture succeeded).
-- **Don't claim a conversation is resumable** unless `session_id` is set *and* its
-  transcript exists on this machine. Report what's actually known — host, dir, and
+- **Don't claim a conversation is resumable** unless `session_id` is set (non-empty) *and*
+  its transcript exists on this machine. Report what's actually known — host, dir, and
   `session_id` (or "no resumable transcript recorded") — and let the human resume.
 
 ## Anti-patterns
