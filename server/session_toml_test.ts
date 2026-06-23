@@ -31,6 +31,8 @@ title = "server/x.ts"
 `;
   const { session, artifacts, rawToml } = parseSessionToml(toml);
 
+  // session_id is now a free-form resumable handle (no id field here → null key).
+  assertEquals(session.id, null);
   assertEquals(session.session_id, "11111111-1111-1111-1111-111111111111");
   assertEquals(session.title, "Fix flaky tests");
   assertEquals(session.goal, "Stabilize CI");
@@ -98,6 +100,18 @@ Deno.test("parseSessionToml tolerates a single [artifacts] table", () => {
   }]);
 });
 
+Deno.test("parseSessionToml parses id and a free-form session_id handle", () => {
+  // id round-trips as the canonical key; session_id is no longer UUID-validated.
+  const { session } = parseSessionToml(
+    `title = "t"\nid = 42\nsession_id = "claude-code/abc-123"`,
+  );
+  assertEquals(session.id, 42);
+  assertEquals(session.session_id, "claude-code/abc-123");
+
+  // a quoted integer is tolerated for id.
+  assertEquals(parseSessionToml(`title = "t"\nid = "7"`).session.id, 7);
+});
+
 Deno.test("parseSessionToml tolerates partial TOML (title only)", () => {
   const { session, artifacts } = parseSessionToml(`title = "Only title"`);
   assertEquals(session.title, "Only title");
@@ -147,10 +161,22 @@ Deno.test("parseSessionToml rejects malformed input", () => {
     Error,
     "invalid status",
   );
+  // id (the server-assigned canonical key) must be a positive integer.
   assertThrows(
-    () => parseSessionToml(`title = "t"\nsession_id = "not-a-uuid"`),
+    () => parseSessionToml(`title = "t"\nid = "abc"`),
     Error,
-    "UUID",
+    "positive integer",
+  );
+  assertThrows(
+    () => parseSessionToml(`title = "t"\nid = -3`),
+    Error,
+    "positive integer",
+  );
+  // Unsafe integer (> 2^53-1) is rejected, not silently rounded into mis-targeting.
+  assertThrows(
+    () => parseSessionToml(`title = "t"\nid = 9007199254740993`),
+    Error,
+    "2^53",
   );
   // Regression guard: the old singular spelling is rejected loudly (was silently dropped).
   assertThrows(

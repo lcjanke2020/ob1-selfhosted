@@ -47,9 +47,18 @@ $$;
 -- ---------- Tables ---------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS sessions.session (
-  -- session_id is supplied by the TOML (file-of-record); the default lets a
-  -- partial/hand-written TOML still insert. pgcrypto is loaded by 01-schema.
-  session_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- Canonical key: "the Nth session row" — honest, ordered, human-friendly, and
+  -- the value the client round-trips to refresh a session. OB1 is
+  -- single-operator/self-hosted behind auth, so a UUID's non-enumerability buys
+  -- nothing here and readability wins. GENERATED ALWAYS forbids a client-chosen
+  -- id (same internally-owned-sequence reasoning as sessions.artifact.id below).
+  id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  -- Best-effort resumable handle, NOT a key: nullable, non-unique, no default.
+  -- Populated going forward with whatever resumable id a surface exposes (e.g.
+  -- a harness conversation-id); NULL when none is available (mobile/web/desktop)
+  -- and for every legacy row. It was the random UUID PK before — that read like
+  -- a real session token but correlated to nothing, so it is now demoted.
+  session_id        TEXT,
   title             TEXT NOT NULL,
   session_date      DATE,
   goal              TEXT,
@@ -109,7 +118,7 @@ CREATE TABLE IF NOT EXISTS sessions.session (
 
 CREATE TABLE IF NOT EXISTS sessions.artifact (
   id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  session_id  UUID NOT NULL REFERENCES sessions.session(session_id) ON DELETE CASCADE,
+  session_pk  BIGINT NOT NULL REFERENCES sessions.session(id) ON DELETE CASCADE,
   position    INT  NOT NULL DEFAULT 0,
   kind        TEXT NOT NULL,   -- pr | code | doc | note | ...
   title       TEXT NOT NULL,
@@ -160,6 +169,75 @@ $$;
 -- apply. Qualified UPDATE (never a blanket write).
 UPDATE sessions.session SET source = 'funnel' WHERE source = 'mobile';
 
+-- Identity-PK migration: the original schema made the random UUID `session_id`
+-- the PK. It read like a resumable session token but correlated to nothing the
+-- client/harness holds, so the canonical key is now an auto-increment `id` and
+-- `session_id` is demoted to a nullable TEXT resumable handle (NULLed for every
+-- legacy row — the old UUIDs were never resumable; no backfill). The child FK
+-- moves from the UUID to the new BIGINT key. Guarded on the catalog (absence of
+-- `session.id`) so a fresh DB — which the CREATE TABLE above already builds in
+-- the target shape — and any re-apply are both no-ops; only a legacy live DB is
+-- reshaped, exactly once. ORDER MATTERS: `id` must backfill before artifacts
+-- read it; `id` must become the PK before the artifact FK can reference it (an
+-- FK needs a unique/PK target); and the old PK must drop — after the old child
+-- FK is gone — before `session_id` is retyped/NULLed (a PK implies NOT NULL).
+-- Mirrors the guarded-DO convention used for ref→title above.
+DO $$
+DECLARE pk_name text;
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'sessions' AND table_name = 'session'
+      AND column_name = 'id'
+  ) THEN
+    -- 1. New canonical key. GENERATED ALWAYS backfills existing rows 1..N during
+    --    the table rewrite and leaves the owned sequence at N (next INSERT =
+    --    N+1; no setval needed, unlike a BIGSERIAL manual load). Identity != PK
+    --    yet — the PK is installed in step 4 (an FK target needs a key first).
+    ALTER TABLE sessions.session ADD COLUMN id BIGINT GENERATED ALWAYS AS IDENTITY;
+
+    -- 2. Copy the artifact parent-link onto a new BIGINT column via the
+    --    still-intact UUID join, and lock it NOT NULL. No FK yet — its target
+    --    sessions.session(id) is not a key until step 4.
+    ALTER TABLE sessions.artifact ADD COLUMN session_pk BIGINT;
+    UPDATE sessions.artifact a
+       SET session_pk = s.id
+      FROM sessions.session s
+     WHERE a.session_id = s.session_id;
+    ALTER TABLE sessions.artifact ALTER COLUMN session_pk SET NOT NULL;
+
+    -- 3. Drop the child's old UUID FK column. This cascades away the old FK
+    --    constraint (and idx_artifact_session), so the old parent PK on
+    --    session_id then has no dependents and can be dropped in step 4.
+    ALTER TABLE sessions.artifact DROP COLUMN session_id;
+
+    -- 4. Swap the parent PK: drop the old PK on session_id (name derived from
+    --    the catalog, not assumed to be 'session_pkey'), then make `id` the PK
+    --    so it can serve as the artifact FK target.
+    SELECT conname INTO pk_name
+      FROM pg_constraint
+     WHERE conrelid = 'sessions.session'::regclass AND contype = 'p';
+    EXECUTE format('ALTER TABLE sessions.session DROP CONSTRAINT %I', pk_name);
+    ALTER TABLE sessions.session ADD PRIMARY KEY (id);
+
+    -- 5. Now that sessions.session(id) is a key, wire the new CASCADE FK from
+    --    artifacts. (The child index on session_pk is (re)created idempotently
+    --    in the Indexes section below.)
+    ALTER TABLE sessions.artifact
+      ADD CONSTRAINT artifact_session_pk_fkey
+      FOREIGN KEY (session_pk) REFERENCES sessions.session(id) ON DELETE CASCADE;
+
+    -- 6. Repurpose the old UUID column: drop its default and its NOT NULL
+    --    (dropping the PK does not clear the column's NOT NULL), then retype to
+    --    TEXT and NULL every legacy value in one pass (the USING expression is
+    --    evaluated per row → NULL). DROP NOT NULL must precede the NULLing.
+    ALTER TABLE sessions.session ALTER COLUMN session_id DROP DEFAULT;
+    ALTER TABLE sessions.session ALTER COLUMN session_id DROP NOT NULL;
+    ALTER TABLE sessions.session ALTER COLUMN session_id TYPE TEXT USING NULL;
+  END IF;
+END;
+$$;
+
 -- ---------- Indexes --------------------------------------------------------
 
 CREATE INDEX IF NOT EXISTS idx_session_status
@@ -177,7 +255,7 @@ CREATE INDEX IF NOT EXISTS idx_session_issues_gin
 CREATE INDEX IF NOT EXISTS idx_session_embedding_hnsw
   ON sessions.session USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_artifact_session
-  ON sessions.artifact (session_id);
+  ON sessions.artifact (session_pk);
 
 -- ---------- Triggers -------------------------------------------------------
 -- Reuse update_updated_at() from 01-schema.sql (keeps updated_at server-managed
@@ -198,9 +276,10 @@ CREATE TRIGGER session_updated_at
 -- does not affect it. Precedent: 02-observability.sql grants DML on its own
 -- app-owned tables.
 
--- No sequence USAGE grant is needed here: sessions.artifact.id is
--- GENERATED ALWAYS AS IDENTITY, whose sequence is internally owned by the
--- column and advanced under the table's INSERT privilege — unlike
+-- No sequence USAGE grant is needed here: sessions.artifact.id and
+-- sessions.session.id are both GENERATED ALWAYS AS IDENTITY, whose sequences are
+-- internally owned by the column and advanced under the table's INSERT
+-- privilege — unlike
 -- 02-observability.sql's BIGSERIAL columns, where the column default calls
 -- nextval() under the inserter's own rights and therefore requires explicit
 -- USAGE. (Verified: `SET ROLE openbrain_app` + INSERT omitting id succeeds.)

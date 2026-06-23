@@ -38,6 +38,12 @@ export function normalizeOrderBy(v: string | null | undefined): SessionOrderBy {
 }
 
 export type ParsedSession = {
+  // Server-assigned canonical key. Absent on first capture (server mints it,
+  // returns it); the client writes it back to refresh the same row. Parsed as a
+  // positive integer.
+  id: number | null;
+  // Best-effort resumable handle — free-form TEXT, NOT the key. May be a
+  // harness conversation-id or anything a surface exposes; null when none.
   session_id: string | null;
   title: string;
   session_date: string | null;
@@ -81,15 +87,20 @@ export type ParsedSessionDoc = {
   rawToml: string;
 };
 
-// Accepts the canonical hyphenated UUID form with any version/variant
-// nibble, unlike zod v4's RFC-strict `.uuid()` (which rejects e.g. all-zero
-// or non-1-8 version UUIDs that Postgres' `uuid` type stores fine). We
-// require the canonical hyphenated spelling deliberately: Postgres also
-// accepts brace-wrapped and unhyphenated input, but a session_id in the TOML
-// should use the standard form. Shared by the tool input schemas so capture
-// and resume/update agree on what a session_id is.
-export const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// The canonical key is a positive integer (BIGINT identity in the DB). TOML
+// integers parse to JS number; tolerate a quoted integer too. Anything else is
+// rejected loudly rather than coerced — a bad key should fail, not mis-target.
+// Must be a SAFE integer: `id` is the upsert/lookup key, so a value past
+// 2^53-1 (which a JS number rounds silently) has to be rejected, not rounded
+// into mis-targeting a different row.
+function toPositiveIntOrNull(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  const n = typeof v === "number"
+    ? v
+    : (typeof v === "string" && /^[0-9]+$/.test(v.trim()) ? Number(v.trim()) : NaN);
+  if (Number.isSafeInteger(n) && n > 0) return n;
+  throw new Error(`id ${JSON.stringify(v)} must be a positive integer below 2^53`);
+}
 
 function toStrOrNull(v: unknown): string | null {
   if (v === null || v === undefined) return null;
@@ -150,15 +161,11 @@ export function parseSessionToml(tomlText: string): ParsedSessionDoc {
     throw new Error("session TOML is missing required field 'title'");
   }
 
-  const sessionId = toStrOrNull(doc.session_id);
-  if (sessionId !== null && !UUID_RE.test(sessionId)) {
-    throw new Error(
-      `session_id ${JSON.stringify(sessionId)} is not a valid UUID`,
-    );
-  }
-
   const session: ParsedSession = {
-    session_id: sessionId,
+    id: toPositiveIntOrNull(doc.id),
+    // Free-form resumable handle; no longer UUID-validated (the random UUID was
+    // the demoted PK — see db/04-sessions.sql).
+    session_id: toStrOrNull(doc.session_id),
     title,
     session_date: toDateOrNull(doc.session_date),
     goal: toStrOrNull(doc.goal),
