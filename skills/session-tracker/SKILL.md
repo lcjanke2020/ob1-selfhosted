@@ -86,22 +86,30 @@ Unknown fields, or a singular `[[artifact]]`, are **rejected with an error** —
 `session_id` is a **best-effort harness conversation id** — the handle that lets a human
 re-open the *actual chat transcript* later. It is **not** the key (the integer `id` is),
 it is free-form, and it is **nullable**: a session with no resumable transcript should
-leave it unset rather than carry a dead value.
+carry no handle rather than a dead value.
 
 - **Where it comes from (Claude Code):** the running agent's conversation id is exposed in
   the environment as `CLAUDE_CODE_SESSION_ID`. This is harness-specific and may change in
-  future Claude Code versions — treat it as advisory, not a contract.
-- **Only stamp an id that can actually be resumed.** Skip it when
-  `CLAUDE_CODE_CHILD_SESSION=1` (the value is then a child/sub-session), and confirm a real
-  transcript file exists at
-  `~/.claude/projects/<working_dir, each "/" replaced by "-">/<session_id>.jsonl` before
-  writing it. If you can't confirm one, **leave `session_id` unset** — an honest "no
-  transcript" beats an id that resolves to nothing.
+  future Claude Code versions — treat it as advisory, not a contract. If it's unset, don't
+  invent one; leave `session_id` out.
+- **Only stamp an id you've confirmed is resumable — the transcript file is the authority.**
+  Check for it by **glob**: `~/.claude/projects/*/<session_id>.jsonl`. The id is unique, so
+  this finds the transcript no matter how Claude Code encodes the project-dir name (it folds
+  more than just `/` — `_`, `.`, etc. all become `-`, so don't try to reconstruct the path
+  by hand). If no file matches, **don't stamp** — an honest "no transcript" beats an id that
+  resolves to nothing. Treat `CLAUDE_CODE_CHILD_SESSION=1` as a *caution* that the id may be
+  a sub-session rather than the top-level conversation (the two signals can disagree — a
+  child env can still have a real transcript): let the glob decide, and when in doubt leave
+  it out.
 - **Stamp `machine` and `working_dir` alongside it.** Transcripts are *machine-local*, so
   the record must say **which host** (`machine`, e.g. the box's hostname) and **which
-  directory** (`working_dir`) the transcript lives in; without them a later reader can't
-  find — or even know where to look for — the conversation. See *Resuming the actual
-  conversation from the CLI* below for how the three fields are used together.
+  directory** (`working_dir`) the work happened in. See *Resuming the actual conversation
+  from the CLI* below for how the fields are used together.
+- **Refresh caveat:** on a re-capture (with `id`), the server **COALESCE-preserves**
+  `session_id` — omitting it **keeps** the stored handle, it does *not* clear it. To replace
+  a handle, write the new value; to drop a now-dead one, set `session_id = ""`. This is
+  rarely needed — the resume step re-globs for the transcript before trusting any handle, so
+  a stale handle is harmless.
 
 ### Minimal example (verified round-trip)
 
@@ -241,11 +249,14 @@ two ids are **different namespaces**:
 Manual resume, search-driven:
 
 1. **Find it:** `session_search(query=…)` to discover, then `session_lookup(id=…)` for the
-   full record — or `session_lookup(id=…|branch=…)` directly if you already know it.
+   full record — or `session_lookup(id=…)` / `session_lookup(branch=…)` directly if you
+   already know it.
 2. **Read three fields** off the record: `machine` (which host), `working_dir` (which
    directory), `session_id` (the harness conversation id).
-3. **On that `machine`**, `cd <working_dir>` and run `claude --resume <session_id>`.
-   Transcripts are machine-local, so this only works on the host that recorded it.
+3. **On that `machine`**, run `claude --resume <session_id>` — it resolves the transcript by
+   id, so `cd` isn't required, but start from `working_dir` so the resumed work lands in the
+   right project. Transcripts are machine-local, so this only works on the host that
+   recorded it.
 
 **No transcript available** — `session_id` is unset, you're on a different machine, or it
 was pruned/compacted — means **there is no scrollback**. Start a fresh `claude` and rebuild
@@ -288,9 +299,9 @@ These directly counter the "agent asserts success about its own state" failure p
 - Don't shove session data into `thoughts` (or free-form memories into sessions).
 - Don't hand-edit the DB — edit the **file** and re-`capture`.
 - Don't omit `id` when re-capturing (you'll mint a duplicate).
-- Don't stamp `session_id` from `CLAUDE_CODE_SESSION_ID` unchecked — a child session
-  (`CLAUDE_CODE_CHILD_SESSION=1`) or a missing transcript file means it won't resume; leave
-  it unset instead.
+- Don't stamp `session_id` from `CLAUDE_CODE_SESSION_ID` unchecked — confirm a
+  `<session_id>.jsonl` transcript exists first (glob `~/.claude/projects/*/`); an id with no
+  transcript won't resume. Leave it unset rather than guess.
 - Don't author nested `[identity]` / `[where]` / `[state_for_resuming]` blocks —
   the schema is flat.
 - Don't author server-stamped fields (`source`, `content_hash`, …).
