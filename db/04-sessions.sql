@@ -177,9 +177,11 @@ UPDATE sessions.session SET source = 'funnel' WHERE source = 'mobile';
 -- moves from the UUID to the new BIGINT key. Guarded on the catalog (absence of
 -- `session.id`) so a fresh DB — which the CREATE TABLE above already builds in
 -- the target shape — and any re-apply are both no-ops; only a legacy live DB is
--- reshaped, exactly once. ORDER MATTERS: `id` must backfill before the artifact
--- repoint reads it, and the old PK must drop before `session_id` is NULLed (a PK
--- implies NOT NULL). Mirrors the guarded-DO convention used for ref→title above.
+-- reshaped, exactly once. ORDER MATTERS: `id` must backfill before artifacts
+-- read it; `id` must become the PK before the artifact FK can reference it (an
+-- FK needs a unique/PK target); and the old PK must drop — after the old child
+-- FK is gone — before `session_id` is retyped/NULLed (a PK implies NOT NULL).
+-- Mirrors the guarded-DO convention used for ref→title above.
 DO $$
 DECLARE pk_name text;
 BEGIN
@@ -190,41 +192,48 @@ BEGIN
   ) THEN
     -- 1. New canonical key. GENERATED ALWAYS backfills existing rows 1..N during
     --    the table rewrite and leaves the owned sequence at N (next INSERT =
-    --    N+1; no setval needed, unlike a BIGSERIAL manual load). Identity != PK.
+    --    N+1; no setval needed, unlike a BIGSERIAL manual load). Identity != PK
+    --    yet — the PK is installed in step 4 (an FK target needs a key first).
     ALTER TABLE sessions.session ADD COLUMN id BIGINT GENERATED ALWAYS AS IDENTITY;
 
-    -- 2. Repoint artifacts to the new key BEFORE the UUID is destroyed: add the
-    --    BIGINT column, map each child via the still-intact UUID join, lock it
-    --    down, wire the new CASCADE FK, then drop the old UUID column (which
-    --    cascades away its FK constraint and the old idx_artifact_session).
+    -- 2. Copy the artifact parent-link onto a new BIGINT column via the
+    --    still-intact UUID join, and lock it NOT NULL. No FK yet — its target
+    --    sessions.session(id) is not a key until step 4.
     ALTER TABLE sessions.artifact ADD COLUMN session_pk BIGINT;
     UPDATE sessions.artifact a
        SET session_pk = s.id
       FROM sessions.session s
      WHERE a.session_id = s.session_id;
     ALTER TABLE sessions.artifact ALTER COLUMN session_pk SET NOT NULL;
-    ALTER TABLE sessions.artifact
-      ADD CONSTRAINT artifact_session_pk_fkey
-      FOREIGN KEY (session_pk) REFERENCES sessions.session(id) ON DELETE CASCADE;
+
+    -- 3. Drop the child's old UUID FK column. This cascades away the old FK
+    --    constraint (and idx_artifact_session), so the old parent PK on
+    --    session_id then has no dependents and can be dropped in step 4.
     ALTER TABLE sessions.artifact DROP COLUMN session_id;
 
-    -- 3. Swap the parent PK. Derive the constraint name from the catalog rather
-    --    than assuming 'session_pkey' (true on a stock init, but a hand-restored
-    --    DB could differ); costs nothing and stays robust.
+    -- 4. Swap the parent PK: drop the old PK on session_id (name derived from
+    --    the catalog, not assumed to be 'session_pkey'), then make `id` the PK
+    --    so it can serve as the artifact FK target.
     SELECT conname INTO pk_name
       FROM pg_constraint
      WHERE conrelid = 'sessions.session'::regclass AND contype = 'p';
     EXECUTE format('ALTER TABLE sessions.session DROP CONSTRAINT %I', pk_name);
-
-    -- 4. Repurpose the old UUID column: drop its default, retype to TEXT and NULL
-    --    every legacy value in one pass (the USING expression is evaluated per
-    --    row → NULL). Must follow the PK drop.
-    ALTER TABLE sessions.session ALTER COLUMN session_id DROP DEFAULT;
-    ALTER TABLE sessions.session ALTER COLUMN session_id TYPE TEXT USING NULL;
-
-    -- 5. Install the new PK on the identity column. (The child index on
-    --    session_pk is (re)created idempotently in the Indexes section below.)
     ALTER TABLE sessions.session ADD PRIMARY KEY (id);
+
+    -- 5. Now that sessions.session(id) is a key, wire the new CASCADE FK from
+    --    artifacts. (The child index on session_pk is (re)created idempotently
+    --    in the Indexes section below.)
+    ALTER TABLE sessions.artifact
+      ADD CONSTRAINT artifact_session_pk_fkey
+      FOREIGN KEY (session_pk) REFERENCES sessions.session(id) ON DELETE CASCADE;
+
+    -- 6. Repurpose the old UUID column: drop its default and its NOT NULL
+    --    (dropping the PK does not clear the column's NOT NULL), then retype to
+    --    TEXT and NULL every legacy value in one pass (the USING expression is
+    --    evaluated per row → NULL). DROP NOT NULL must precede the NULLing.
+    ALTER TABLE sessions.session ALTER COLUMN session_id DROP DEFAULT;
+    ALTER TABLE sessions.session ALTER COLUMN session_id DROP NOT NULL;
+    ALTER TABLE sessions.session ALTER COLUMN session_id TYPE TEXT USING NULL;
   END IF;
 END;
 $$;
