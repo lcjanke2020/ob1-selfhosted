@@ -241,6 +241,12 @@ $$;
 -- and ingested_path (always NULL — files were never ingested) are dead. DROP
 -- COLUMN IF EXISTS is idempotent: no-op on a fresh DB (the CREATE TABLE above no
 -- longer declares them) and on any re-apply.
+--
+-- DEPLOY ORDER on an existing deployment: roll the NEW server image first, THEN
+-- apply this drop. The new code ignores these columns whether present or not,
+-- but an OLD image's SESSION_COLUMNS projection and upsert SQL still name them —
+-- so dropping while the old image is live makes every session_capture/_list/
+-- _lookup fail with 42703 (column does not exist) until the new image is up.
 ALTER TABLE sessions.session DROP COLUMN IF EXISTS needs_file_sync;
 ALTER TABLE sessions.session DROP COLUMN IF EXISTS ingested_path;
 
