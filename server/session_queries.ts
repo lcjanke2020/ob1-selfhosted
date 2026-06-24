@@ -16,7 +16,6 @@ export type SessionProvenance = {
   // Anthropic surfaces) or 'tailnet' (x-brain-key from an on-network client).
   source: "funnel" | "tailnet";
   sourceNode: string | null;
-  ingestedPath: string | null;
 };
 
 export type SessionUpsertInput = {
@@ -77,8 +76,6 @@ export type SessionRow = {
   summary: string | null;
   source: string | null;
   source_node: string | null;
-  ingested_path: string | null;
-  needs_file_sync: boolean;
   raw_toml: string | null;
   content_hash: string | null;
   created_at: string;
@@ -95,7 +92,6 @@ export type SessionListRow = {
   repo_url: string | null;
   branch: string | null;
   last_update: string | null;
-  needs_file_sync: boolean;
 };
 
 export type SessionSearchRow = {
@@ -116,7 +112,7 @@ const SESSION_COLUMNS = `
   started_at, last_update, ended_at, status,
   tags, linked_issues, related_sessions, next_actions, blockers,
   resume_context, summary,
-  source, source_node, ingested_path, needs_file_sync,
+  source, source_node,
   raw_toml, content_hash, created_at, updated_at`;
 
 // Look up the change-detection hash for an existing session by its canonical
@@ -158,7 +154,7 @@ export async function upsertSession(
   // omitted value keeps what's stored: a mobile-set status, an unchanged
   // embedding, or a resumable handle set by an earlier capture from a surface
   // that exposed one. The $-positions are shared by both statements; the UPDATE
-  // appends the key as $31.
+  // appends the key as $30.
   const cols = [
     s.session_id, // $1  resumable handle (TEXT, nullable) — NOT the key
     s.title, // $2
@@ -186,10 +182,9 @@ export async function upsertSession(
     s.summary, // $24
     input.provenance.source, // $25
     input.provenance.sourceNode, // $26
-    input.provenance.ingestedPath, // $27
-    input.rawToml, // $28
-    input.contentHash, // $29
-    embParam, // $30
+    input.rawToml, // $27
+    input.contentHash, // $28
+    embParam, // $29
   ];
 
   const insertSql = `
@@ -200,7 +195,7 @@ export async function upsertSession(
       started_at, last_update, ended_at, status,
       tags, linked_issues, related_sessions, next_actions, blockers,
       resume_context, summary,
-      source, source_node, ingested_path, needs_file_sync,
+      source, source_node,
       raw_toml, content_hash, embedding
     ) VALUES (
       $1, $2, $3::date, $4,
@@ -210,8 +205,8 @@ export async function upsertSession(
       COALESCE($17::sessions.session_status, 'active'),
       $18::text[], $19::text[], $20::text[], $21::text[], $22::text[],
       $23, $24,
-      $25, $26, $27, false,
-      $28, $29, $30::vector
+      $25, $26,
+      $27, $28, $29::vector
     )
     RETURNING id, session_id, status`;
 
@@ -243,13 +238,11 @@ export async function upsertSession(
       summary = $24,
       source = $25,
       source_node = $26,
-      ingested_path = $27,
-      needs_file_sync = false,
-      raw_toml = $28,
-      content_hash = $29,
-      embedding = COALESCE($30::vector, sessions.session.embedding),
+      raw_toml = $27,
+      content_hash = $28,
+      embedding = COALESCE($29::vector, sessions.session.embedding),
       updated_at = now()
-    WHERE id = $31
+    WHERE id = $30
     RETURNING id, session_id, status`;
 
   type UpsertRow = { id: bigint; session_id: string | null; status: string };
@@ -464,7 +457,7 @@ export async function listSessions(
   const client = await getClient(pool);
   try {
     const r = await client.queryObject<Omit<SessionListRow, "id"> & { id: bigint }>(
-      `SELECT id, session_id, title, status, repo_url, branch, last_update, needs_file_sync
+      `SELECT id, session_id, title, status, repo_url, branch, last_update
        FROM sessions.session
        ${where}
        ORDER BY ${orderBy} DESC NULLS LAST, updated_at DESC, id
@@ -483,17 +476,17 @@ export async function updateSessionStatus(
   id: number,
   status: string,
 ): Promise<
-  { id: number; status: string; needs_file_sync: boolean } | null
+  { id: number; status: string } | null
 > {
   const client = await getClient(pool);
   try {
     const r = await client.queryObject<
-      { id: bigint; status: string; needs_file_sync: boolean }
+      { id: bigint; status: string }
     >(
       `UPDATE sessions.session
-       SET status = $2::sessions.session_status, needs_file_sync = true
+       SET status = $2::sessions.session_status
        WHERE id = $1
-       RETURNING id, status, needs_file_sync`,
+       RETURNING id, status`,
       [id, status],
     );
     const row = r.rows[0];

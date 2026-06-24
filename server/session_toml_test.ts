@@ -125,6 +125,10 @@ Deno.test("parseSessionToml tolerates partial TOML (title only)", () => {
   assertEquals(artifacts, []);
 });
 
+// source/source_node are server-stamped; ingested_path/needs_file_sync are
+// legacy keys now dropped from the schema. The parser allowlist must keep
+// ignoring all of them, so a hand-supplied value never reaches a column —
+// the dropped pair doubles as a forward-compat guard for old on-disk TOML.
 Deno.test("parseSessionToml ignores caller-supplied provenance fields", () => {
   const { session } = parseSessionToml(`title = "P"
 source = "evil"

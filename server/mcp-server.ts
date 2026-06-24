@@ -109,8 +109,8 @@ A singular \`[[artifact]]\` block, or any other field name inside an entry, is
 **rejected** (it used to be silently dropped).
 
 ## Server-stamped — do NOT author by hand
-\`source\`, \`source_node\`, \`ingested_path\`, \`needs_file_sync\`, \`content_hash\`,
-\`created_at\`, \`updated_at\` are set server-side and ignored if present.
+\`source\`, \`source_node\`, \`content_hash\`, \`created_at\`, \`updated_at\` are set
+server-side and ignored if present.
 
 ## Example
 \`\`\`toml
@@ -450,9 +450,10 @@ export function createMcpServer(auth: RequestAuth): McpServer {
 
   // ---- session tracking -----------------------------------------
   // Sessions live in their own `sessions` schema (db/04-sessions.sql),
-  // alongside thoughts. The canonical artifact is a TOML front-matter file;
-  // the DB is a derived index. Provenance is stamped from `auth` (the
-  // per-request transport context), never trusted from the caller.
+  // alongside thoughts. The DB is the canonical store; TOML front matter is the
+  // interchange format accepted by session_capture, not a second on-disk
+  // artifact. Provenance is stamped from `auth` (the per-request transport
+  // context), never trusted from the caller.
 
   server.registerTool(
     "session_capture",
@@ -515,7 +516,6 @@ export function createMcpServer(auth: RequestAuth): McpServer {
             // 'mobile'.
             source: auth.door,
             sourceNode: auth.sub,
-            ingestedPath: null,
           },
           rawToml,
         });
@@ -633,7 +633,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
     {
       title: "Update Session Status",
       description:
-        "Lightweight lifecycle flip (e.g. mark 'done' after a PR merges), usable from mobile with no repo checkout. Sets needs_file_sync=true so the next file-side session_capture reconciles the canonical TOML. Returns {id, status, needs_file_sync}.",
+        "Lightweight lifecycle flip (e.g. mark 'done' after a PR merges), usable from any surface with no repo checkout — writes straight to the canonical store. Returns {id, status}.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,

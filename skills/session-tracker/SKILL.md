@@ -1,6 +1,6 @@
 ---
 name: session-tracker
-description: "Use when starting, resuming, or wrapping up an agent/coding work session — and on cues like \"where did I leave off\", \"resume the X work\", \"what's awaiting review\", \"save this session\", \"what was I doing on <branch>\". Captures and restores structured session state via Open Brain's session_* MCP tools. The canonical artifact is a flat TOML front-matter file; the DB is a derived index."
+description: "Use when starting, resuming, or wrapping up an agent/coding work session — and on cues like \"where did I leave off\", \"resume the X work\", \"what's awaiting review\", \"save this session\", \"what was I doing on <branch>\". Captures and restores structured session state via Open Brain's session_* MCP tools. State lives in Open Brain's canonical `sessions` store; TOML front matter is the interchange format."
 ---
 
 # Session Tracker
@@ -28,17 +28,18 @@ session data into `thoughts`, and don't log free-form memories as sessions.
 
 ## Mental model
 
-- The **canonical artifact is a flat TOML front-matter file** wrapped in `+++` delimiter
-  lines (a `+++` before and after the TOML). You author/update the **file**, then sync it
-  to the DB with `session_capture`.
-- The **DB is a derived index** — re-ingestible from the files, survives a DB wipe.
-  Never hand-edit the DB; edit the file and re-`capture`.
-- Keep session files in one directory that your machines share (a synced folder, a git
-  repo — anything). One TOML file per session; name it stably for humans (e.g.
-  `2026-06-08-rate-limit-gateway.toml`). The DB keys on the in-file `id` (see
-  Capturing), **not** the filename, so renaming a file is harmless as long as its
-  `id` line is kept. If the session directory isn't present on this machine,
-  **stop and ask the user** — don't invent a path.
+- The **OB1 Postgres `sessions` store is canonical** — there is no second on-disk
+  artifact. Durability is OB1's `pg_dump` backup path, not a separate replication
+  system. Mutate sessions only through the `session_*` tools, never raw SQL.
+- **TOML front matter is the input format** to `session_capture`: a flat TOML document
+  wrapped in `+++` delimiter lines (a `+++` before and after the TOML). Assemble it from
+  the live working context and capture it — you do **not** need to keep it on disk.
+- **Where the `id` lives between sessions.** With no file to hold it, the returned integer
+  `id` still needs a home so a later capture *updates* the same row instead of minting a
+  duplicate. The primary path is re-discovery: `session_lookup(branch="…")` or
+  `session_search(query=…)`, then read the `id` off the record and write it into the TOML
+  you re-capture. Optionally stash the `id` in agent project memory for the active
+  work-thread. Either way, **always recover the `id` before re-capturing** — see Capturing.
 
 ## Front-matter schema (authoring reference)
 
@@ -70,10 +71,9 @@ it; it is not a foreign-key reference.
 - **Embedded-for-search content** is `title` / `goal` / `summary` / `resume_context`;
   the server re-embeds only when that content changes (`content_hash`).
 
-**Server-stamped — never author these:** `source`, `source_node`, `ingested_path`,
-`needs_file_sync`, `content_hash`, `created_at`, `updated_at`. The server sets `source`
-/ `source_node` from the transport (tailnet x-brain-key vs OAuth door) — don't write a
-`source` by hand.
+**Server-stamped — never author these:** `source`, `source_node`, `content_hash`,
+`created_at`, `updated_at`. The server sets `source` / `source_node` from the transport
+(tailnet x-brain-key vs OAuth door) — don't write a `source` by hand.
 
 **`[[artifacts]]`** attach references — a PR, a note, a file, a branch — to the session.
 Each is a TOML table in an `[[artifacts]]` array: `kind` and `title` are **required**,
@@ -205,24 +205,25 @@ title = "Benchmark: sliding-window vs token-bucket"
    `branch`, `head` from the actual checkout (`git rev-parse`, `git branch --show-current`),
    `machine` / `working_dir` from the host, and the resumable `session_id` per *The
    resumable handle* above — not from memory.
-2. Write the TOML file into the session directory.
+2. Assemble the TOML in memory (no on-disk file needed).
 3. Call `session_capture(toml_text)`. It returns `{id, session_id, status, created, reembedded}`.
 4. **First capture only:** the front matter has no `id`, so the server **mints
-   one** and returns it (`created: true`). **Write that `id` back into the file's
-   front matter.** On every later capture the `id` line makes the call *update*
-   the same record (`created: false`); re-embedding happens only if `title`/`goal`/
-   `summary`/`resume_context` changed.
+   one** and returns it (`created: true`). **Retain that `id` for this work-thread** —
+   stash it in agent project memory, or plan to re-discover it via
+   `session_lookup(branch="…")` / `session_search` — and **include it on every later
+   capture.** The `id` makes the call *update* the same record (`created: false`);
+   re-embedding happens only if `title`/`goal`/`summary`/`resume_context` changed.
 
    > ⚠️ **Omitting `id` on a re-capture creates a duplicate session, not an
    > update.** The "never author `id`" rule means *never invent one* — only ever
-   > write back the exact value the server handed you. (`session_id` is a separate,
+   > re-send the exact value the server handed you. (`session_id` is a separate,
    > optional resumable handle — not the upsert key; omitting it never duplicates.)
 
-   > ⚠️ **A session file that predates the `id` key** carries an old value in
-   > `session_id` and has no `id` line — so a straight re-capture takes the insert
-   > path and mints a *duplicate*, orphaning the existing DB row. First recover
-   > the row's `id` (`session_lookup(branch="…")` or `session_search`) and write
-   > it into the file's `id =` line; then capture.
+   > ⚠️ **A record whose `id` you've lost** — you didn't stash it, or you're picking the
+   > thread up on another machine — takes the insert path on a straight re-capture and
+   > mints a *duplicate*, orphaning the existing DB row. First recover the row's `id`
+   > (`session_lookup(branch="…")` or `session_search`) and put it in the TOML's `id =`
+   > line; then capture.
 
 5. Don't author provenance — the server stamps `source` / `source_node`.
 
@@ -277,11 +278,9 @@ was reconstructed from the session record.
 ## Lifecycle
 
 - Quick transitions (e.g. mark `done` after a PR merges, or `blocked` when stuck) →
-  `session_update_status(id, status)`. Usable from mobile with no checkout.
-- A status flip sets **`needs_file_sync=true`** and the DB record's `status` now **leads
-  the file** (the file's `status` is stale until reconciled). Next time the
-  repo/file is in front of you, update the file's `status` + `last_update` and re-`capture`
-  (carrying the `id`) to reconcile.
+  `session_update_status(id, status)`. Usable from any surface with no checkout; it writes
+  the new `status` straight to the canonical store and returns `{id, status}`. There is no
+  file to reconcile.
 
 ## Honesty guardrails
 
@@ -299,7 +298,8 @@ These directly counter the "agent asserts success about its own state" failure p
 ## Anti-patterns
 
 - Don't shove session data into `thoughts` (or free-form memories into sessions).
-- Don't hand-edit the DB — edit the **file** and re-`capture`.
+- Don't mutate sessions with raw SQL against the `sessions` schema — go through
+  `session_capture` / `session_update_status`.
 - Don't omit `id` when re-capturing (you'll mint a duplicate).
 - Don't stamp `session_id` from `CLAUDE_CODE_SESSION_ID` unchecked — confirm a
   `<session_id>.jsonl` transcript exists first (glob `~/.claude/projects/*/`); an id with no
