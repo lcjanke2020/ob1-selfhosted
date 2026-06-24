@@ -63,7 +63,7 @@ function text(t: string) {
   return { content: [{ type: "text" as const, text: t }] };
 }
 
-// Canonical session TOML contract, served verbatim as an MCP resource
+// Session TOML schema contract, served verbatim as an MCP resource
 // (registered in createMcpServer). The original artifact silent-drop happened
 // because no schema was published and agents guessed field names; this is the
 // single source of truth they can fetch instead of reverse-engineering return
@@ -153,7 +153,10 @@ export function createMcpServer(auth: RequestAuth): McpServer {
     // Bump on behavior changes — this is the serverInfo version a client
     // sees on initialize. 1.2.0: breaking session-tool contract change
     // (session_resume → session_lookup; tools key on integer `id`).
-    version: "1.2.0",
+    // 1.3.0: retired the file/Syncthing model — session_update_status returns
+    // {id, status} (dropped needs_file_sync), and ingested_path/needs_file_sync
+    // are gone from the TOML schema resource.
+    version: "1.3.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -460,7 +463,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
     {
       title: "Capture Session",
       description:
-        "Ingest or refresh an agent work session from its canonical TOML front matter. Upserts the session and its artifacts, re-embeds only when the embedded content changed, and stamps provenance server-side. Returns {id, session_id, status, created, reembedded} — `id` is the canonical key; write it back into the TOML to refresh the same session. Artifacts go in a [[artifacts]] array-of-tables: kind and title required, detail optional; unknown fields or a singular [[artifact]] block are rejected. See the 'Session TOML schema' resource for the full front-matter contract.",
+        "Ingest or refresh an agent work session from its TOML front matter. Upserts the session and its artifacts, re-embeds only when the embedded content changed, and stamps provenance server-side. Returns {id, session_id, status, created, reembedded} — `id` is the canonical key; write it back into the TOML to refresh the same session. Artifacts go in a [[artifacts]] array-of-tables: kind and title required, detail optional; unknown fields or a singular [[artifact]] block are rejected. See the 'Session TOML schema' resource for the full front-matter contract.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
@@ -482,7 +485,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
             { message: "toml_text must be at most 100000 UTF-8 bytes" },
           )
           .describe(
-            "The session's canonical TOML front matter (optionally inside a +++ fence)",
+            "The session's TOML front matter (optionally inside a +++ fence)",
           ),
       },
     },
@@ -657,7 +660,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
     },
   );
 
-  // Publish the canonical session TOML schema (above) as an MCP
+  // Publish the session TOML schema (above) as an MCP
   // resource so agents can fetch the field contract instead of guessing it.
   // Static doc; same per-request server lifecycle as the tools.
   server.registerResource(
@@ -666,7 +669,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
     {
       title: "Session TOML schema",
       description:
-        "Canonical front-matter schema accepted by session_capture, including the [[artifacts]] block (kind/title/detail).",
+        "Session TOML front-matter schema accepted by session_capture, including the [[artifacts]] block (kind/title/detail).",
       mimeType: "text/markdown",
     },
     (uri) => ({

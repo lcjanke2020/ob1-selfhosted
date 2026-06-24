@@ -4,11 +4,11 @@
 // TOML front matter is the interchange format accepted by `session_capture`,
 // which hands the whole document to `parseSessionToml`. It maps the front
 // matter onto the sessions.session columns and the `[[artifacts]]`
-// array-of-tables onto sessions.artifact rows. The parser reads an allowlist of
-// known `doc.<field>` keys, so unknown or legacy keys (e.g. the retired
-// ingested_path/needs_file_sync) are silently ignored. Provenance fields
-// (source/source_node) are deliberately NOT read from the TOML — they are
-// stamped server-side from the transport.
+// array-of-tables onto sessions.artifact rows. The parser reads a fixed
+// allowlist of known top-level fields from the parsed document, so unknown or
+// legacy keys (e.g. the retired ingested_path/needs_file_sync) are silently
+// ignored. Provenance fields (source/source_node) are deliberately NOT read
+// from the TOML — they are stamped server-side from the transport.
 
 import { parse } from "@std/toml";
 
