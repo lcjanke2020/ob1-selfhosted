@@ -1,10 +1,11 @@
 -- Open Brain — session tracking schema.
 --
--- Adds a session-tracking layer ALONGSIDE thoughts. The canonical artifact is
--- a TOML front-matter file (Syncthing-replicated, survives a DB wipe); this
--- schema is a DERIVED INDEX over those files — structured columns for
--- exact/filter queries plus one embedding for semantic recall. Because it is
--- derived, the shape is reshape-able: rebuild by re-ingesting the TOML files.
+-- Adds a session-tracking layer ALONGSIDE thoughts. This schema is the
+-- CANONICAL STORE for sessions — structured columns for exact/filter queries
+-- plus one embedding for semantic recall. TOML front matter is the interchange
+-- format accepted by `session_capture` (it no longer has a mandatory on-disk
+-- home); durability is the OB1 `pg_dump` backup path, not a second replication
+-- system.
 --
 -- Lives in its own `sessions` schema. `public.thoughts` is untouched, so
 -- upstream `thoughts` merges stay clean and the grants invariant
@@ -82,7 +83,7 @@ CREATE TABLE IF NOT EXISTS sessions.session (
   ended_at          TIMESTAMPTZ,
   status            sessions.session_status NOT NULL DEFAULT 'active',
 
-  -- [what] + lists. Arrays, not join tables: this is a derived index, not 3NF.
+  -- [what] + lists. Arrays, not join tables: this is a denormalized record store, not 3NF.
   tags              TEXT[] NOT NULL DEFAULT '{}',
   linked_issues     TEXT[] NOT NULL DEFAULT '{}',
   related_sessions  TEXT[] NOT NULL DEFAULT '{}',
@@ -97,13 +98,9 @@ CREATE TABLE IF NOT EXISTS sessions.session (
   -- caller. source is 'tailnet' | 'funnel' (the door, matching
   -- thoughts.metadata.door — NOT 'mobile': the Funnel carries every Anthropic
   -- surface and the server can't tell them apart). source_node is the JWT sub
-  -- on the funnel path, null on tailnet. needs_file_sync is true when a DB-only
-  -- mutation (session_update_status, callable from either door) outran the
-  -- canonical file; the next file-side session_capture reconciles it.
+  -- on the funnel path, null on tailnet.
   source            TEXT,
   source_node       TEXT,
-  ingested_path     TEXT,
-  needs_file_sync   BOOLEAN NOT NULL DEFAULT false,
 
   -- canonical doc + change detection
   raw_toml          TEXT,
@@ -237,6 +234,21 @@ BEGIN
   END IF;
 END;
 $$;
+
+-- Retire the file/Syncthing reconcile columns: the DB is now the canonical
+-- store, so there is no second on-disk artifact to reconcile against.
+-- needs_file_sync (set by session_update_status, cleared by session_capture)
+-- and ingested_path (always NULL — files were never ingested) are dead. DROP
+-- COLUMN IF EXISTS is idempotent: no-op on a fresh DB (the CREATE TABLE above no
+-- longer declares them) and on any re-apply.
+--
+-- DEPLOY ORDER on an existing deployment: roll the NEW server image first, THEN
+-- apply this drop. The new code ignores these columns whether present or not,
+-- but an OLD image's SESSION_COLUMNS projection and upsert SQL still name them —
+-- so dropping while the old image is live makes every session_capture/_list/
+-- _lookup fail with 42703 (column does not exist) until the new image is up.
+ALTER TABLE sessions.session DROP COLUMN IF EXISTS needs_file_sync;
+ALTER TABLE sessions.session DROP COLUMN IF EXISTS ingested_path;
 
 -- ---------- Indexes --------------------------------------------------------
 

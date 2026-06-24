@@ -13,7 +13,7 @@ This repo is one codebase with **three install paths**, from "docker on a laptop
 ## What's in the box
 
 - **`thoughts` memory** — capture, semantic search, listing, stats over a pgvector store. Dedupe by content fingerprint. Optional LLM metadata extraction (topics, people, action items, type) via any OpenAI-compatible endpoint.
-- **Session tracking** — five additional MCP tools (`session_capture`, `session_lookup`, `session_search`, `session_list`, `session_update_status`) that store structured *agent work sessions* alongside (not inside) `thoughts`. The canonical artifact is a TOML front-matter file; the database is a derived index. See [`skills/session-tracker/`](skills/session-tracker/SKILL.md) for the agent-facing usage contract.
+- **Session tracking** — five additional MCP tools (`session_capture`, `session_lookup`, `session_search`, `session_list`, `session_update_status`) that store structured *agent work sessions* alongside (not inside) `thoughts`. The OB1 Postgres `sessions` schema is the canonical store; TOML front matter is the interchange format accepted by `session_capture`. See [`skills/session-tracker/`](skills/session-tracker/SKILL.md) for the agent-facing usage contract.
 - **Local embeddings** — Ollama (`nomic-embed-text`, 768-dim by default), in-stack or on another box.
 - **Two auth doors** — a static `x-brain-key` header for tailnet clients, and OAuth 2.1 resource-server validation (RS256 JWT via JWKS) for the public Funnel path. Every write is stamped server-side with the door it came through.
 - **Observability** — Caddy JSON access logs, an auth-failure audit table, a log-ingester sidecar, and a daily rollup with retention, so a public endpoint is *measured*, not guessed at.
