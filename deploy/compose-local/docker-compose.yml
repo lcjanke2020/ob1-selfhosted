@@ -7,10 +7,11 @@
 #               only so the LAN can't reach it directly.
 #   caddy     — Reverse proxy in front of mcp. Single :9787 listener that
 #               discriminates tailnet vs Funnel via the
-#               Tailscale-Funnel-Request header (Pattern Y):
-#               tailnet branch strips Authorization + accepts x-brain-key;
-#               funnel branch strips x-brain-key + accepts OAuth Bearer
-#               and enforces the Anthropic IP allowlist.
+#               Tailscale-Funnel-Request header (Pattern Y). It does NOT strip
+#               credentials per branch — the funnel branch enforces the
+#               Anthropic IP allowlist + body cap and both branches redact
+#               credential headers from the access log; the server accepts only
+#               the door(s) the deployment enabled.
 #               Only starts when the `pattern-b` profile is active.
 #   ollama    — Optional. If you already run Ollama on another tailnet box,
 #               comment this out and point OLLAMA_URL at it instead.

@@ -3,8 +3,10 @@
 // HTTP transport: Streamable HTTP at /mcp, gated by `requireAuth`, which accepts
 // whichever auth doors the deployment enabled — the static x-brain-key door
 // (compose-local) and/or an Auth0 RS256 Bearer JWT (the OAuth door used by the
-// funnel + Qubes deployments). On a publicly-reachable deployment the reverse
-// proxy also strips the inapplicable header per socket; `requireAuth` is the
+// funnel + Qubes deployments). On a publicly-reachable deployment Caddy fronts
+// the server (the Anthropic IP allowlist, body cap, access logging with
+// credential redaction) but does not strip credentials per branch — the server
+// accepts only the door(s) the deployment enabled, so `requireAuth` is the
 // load-bearing check and works equally well behind a single-port deployment.
 // Storage: vanilla Postgres + pgvector (no @supabase/supabase-js, no auth.uid).
 // Embeddings: local Ollama (default model nomic-embed-text, 768 dim).
@@ -54,9 +56,9 @@ app.get("/health", (c) => c.json({ ok: true }));
 // (see the Caddyfile), leaving it reachable only from loopback, the container
 // healthcheck, and tailnet-direct/in-qube callers. It is unauthenticated
 // because a readiness probe carrying a credential is impractical for uptime
-// monitors and the in-container healthcheck — and, with the x-brain-key door
-// optional per deployment, `requireBrainKey` could no longer gate it on an
-// Auth0-only install anyway.
+// monitors and the in-container healthcheck — and, with each auth door now
+// optional per deployment, there is no single static credential that could gate
+// it on an Auth0-only install anyway.
 app.get("/ready", async (c) => {
   try {
     await pingDb(pool);

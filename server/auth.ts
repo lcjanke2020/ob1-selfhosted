@@ -438,10 +438,11 @@ async function unauthorized(
 // Accepts the x-brain-key door (when enabled, MCP_ACCESS_KEY set) OR
 // Authorization: Bearer with a valid Auth0 RS256 JWT (OAuth door, when enabled).
 // Which doors are live is per-deployment: compose-local enables x-brain-key only;
-// the funnel + Qubes deployments enable OAuth only. The reverse proxy in front of
-// a publicly-reachable deployment additionally strips the inapplicable header per
-// socket, but this middleware is the load-bearing check — it works equally well
-// behind a single-port deployment with no proxy.
+// the funnel + Qubes deployments enable OAuth only. Caddy in front of a
+// publicly-reachable deployment does not strip credentials per branch — the
+// server simply ignores a door it wasn't configured for — so this middleware is
+// the load-bearing check; it works equally well behind a single-port deployment
+// with no proxy.
 //
 // Short-circuit policy: when the x-brain-key door is OFF the header is ignored
 // entirely (falls straight through to Bearer). When it's ON, an invalid

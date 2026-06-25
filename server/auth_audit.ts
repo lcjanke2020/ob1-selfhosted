@@ -1,7 +1,7 @@
 // Lightweight, non-blocking auth-event audit emitter.
 //
-// `requireAuth` and `requireBrainKey` in auth.ts call `logAuthFailure()`
-// from their 401 branches. Calls are fire-and-forget (queueMicrotask + a
+// `requireAuth` in auth.ts calls `logAuthFailure()` from its 401 / JSON-RPC
+// error branches. Calls are fire-and-forget (queueMicrotask + a
 // promise we don't await) so the 401 response goes out at the same
 // latency as before — Postgres downtime can't extend an auth-failure
 // response.
@@ -121,14 +121,17 @@ const pool: Pool | null = !FORCE_DISABLED && DB_PASSWORD
 //   'Token validation failed'          → 'token_validation_failed'
 //   'Invalid credentials'              → 'invalid_credentials'
 //   'Missing or unsupported credentials' → 'missing_credentials'
-//   'Invalid or missing access key'    → 'invalid_brain_key' (require_brain_key)
 export type AuthFailureReason =
   | "invalid_brain_key"
   | "token_validation_failed"
   | "invalid_credentials"
   | "missing_credentials";
 
-export type AuthMiddleware = "require_auth" | "require_brain_key";
+// Only `require_auth` is emitted now; the `require_brain_key` middleware was
+// removed when the static-key door became one of two per-deployment doors that
+// `requireAuth` checks. Kept as a named (single-member) type so the column's
+// domain stays self-documenting and a future second middleware has a home.
+export type AuthMiddleware = "require_auth";
 
 export interface AuthFailureRecord {
   reason: AuthFailureReason;

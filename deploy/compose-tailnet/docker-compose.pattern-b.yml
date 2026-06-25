@@ -23,6 +23,16 @@
 services:
   mcp:
     ports: !reset null
+    environment:
+      # Enforce the OAuth-only posture at the deployment level, not just in
+      # docs. The compose-local base inherits `MCP_ACCESS_KEY: ${MCP_ACCESS_KEY:-}`,
+      # so an operator who copies a working local `.env` into this directory
+      # (and forgets to blank the key) would otherwise leave the static
+      # x-brain-key door open on a publicly-reachable box. Pinning it empty
+      # here makes OAuth the only door, matching the Qubes app-qube compose
+      # which omits the variable entirely. (An empty key sets ENABLE_BRAIN_KEY
+      # false, so the server ignores any presented x-brain-key.)
+      MCP_ACCESS_KEY: ""
 
   # Caddy access log ingester.
   #

@@ -12,10 +12,11 @@ Prerequisite: Tailscale installed on the host, plus the [local install](../compo
 
 ### What changes
 
-`docker-compose.pattern-b.yml` does two things:
+`docker-compose.pattern-b.yml` does three things:
 
 1. **Removes mcp's host port mapping** (`ports: !reset null`) — the raw `:8787` becomes unreachable from the host, so a stray `tailscale funnel http://127.0.0.1:8787` physically cannot reach mcp past the Caddy perimeter (IP allowlist, body cap, logging). Requires compose v2.20+ (the `!reset` YAML tag).
-2. **Starts the `log-ingester` sidecar**, which tails Caddy's JSON access logs into Postgres (see Observability below).
+2. **Blanks `MCP_ACCESS_KEY`** (`MCP_ACCESS_KEY: ""`) — a backstop for the "leave it unset" instruction above. The base compose inherits `MCP_ACCESS_KEY: ${MCP_ACCESS_KEY:-}`, so copying a working local `.env` into this directory would otherwise re-open the static-key door on a public box; pinning it empty here makes OAuth the only door regardless.
+3. **Starts the `log-ingester` sidecar**, which tails Caddy's JSON access logs into Postgres (see Observability below).
 
 The `caddy` service itself lives in the base compose file, gated behind the `pattern-b` profile, with its build context and Caddyfile in this directory.
 

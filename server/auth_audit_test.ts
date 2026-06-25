@@ -57,7 +57,7 @@ Deno.test("auth_audit (disabled path)", async (t) => {
     await t.step("logAuthFailure: tolerates undefined optional fields", () => {
       logAuthFailure({
         reason: "missing_credentials",
-        middleware: "require_brain_key",
+        middleware: "require_auth",
       });
       logAuthFailure({
         reason: "token_validation_failed",
