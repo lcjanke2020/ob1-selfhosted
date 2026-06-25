@@ -15,7 +15,7 @@ Each known limitation, and what this stack does about it:
 | Funnel hostnames are discoverable via Certificate Transparency logs the moment the cert is minted | "Nobody knows my URL" is not a control | Neutral hostname (nothing in the name says what it serves), and the assumption that scanners arrive on day one — hence observability |
 | Bandwidth caps and Let's Encrypt rate limits on a long-lived name | Availability footguns | Accepted for a personal store; monitor, don't assume |
 | Forwarded headers are only as trustworthy as your proxy chain | Header spoofing / IP confusion | Trust XFF only where the port boundary guarantees the traffic came through `tailscaled`; `trusted_proxies static private_ranges` + strict mode; the `Tailscale-Funnel-Request` discriminator header is injected by tailscaled itself and is not client-controllable |
-| Nothing stops a misconfigured second route to the backend | A stray `tailscale funnel` pointed at the raw backend bypasses the proxy | The backend's host port is removed in the public-facing compose mode, and the server refuses to boot in the half-configured state |
+| Nothing stops a misconfigured second route to the backend | A stray `tailscale funnel` pointed at the raw backend bypasses the proxy | The backend's host port is removed by the public-facing compose override (`ports: !reset null`), so the raw port isn't published when the override is applied. The forgotten-override case (loopback-only port republished) is a consciously-accepted residual risk — a container can't detect its own host-port mapping — recorded in [security-model.md](security-model.md) |
 
 ## The transferable pattern
 
