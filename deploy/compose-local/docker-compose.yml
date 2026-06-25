@@ -137,11 +137,13 @@ services:
       # off, extraction skips the primary and uses the fallback (or the
       # uncategorized stub if no fallback is configured).
       ENABLE_PRIMARY_EXTRACTION: ${ENABLE_PRIMARY_EXTRACTION:-}
-      MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      # x-brain-key door for this single-box install. Empty disables it; set it
+      # (or all three AUTH0_* below) — at least one auth door is required.
+      MCP_ACCESS_KEY: ${MCP_ACCESS_KEY:-}
       CITATION_BASE_URL: ${CITATION_BASE_URL:-https://openbrain.local/thoughts}
-      # Auth0 OAuth resource-server config. Leave all three empty for pattern A
-      # (x-brain-key only). Set all three to enable the OAuth/Funnel path —
-      # caddy is then the required entry point for header-strip enforcement.
+      # Auth0 OAuth resource-server config. Leave all three empty to keep
+      # x-brain-key as the only auth. Set all three to ALSO enable the
+      # OAuth/Funnel door (caddy fronts it and enforces the IP allowlist).
       AUTH0_ISSUER: ${AUTH0_ISSUER:-}
       AUTH0_JWKS_URI: ${AUTH0_JWKS_URI:-}
       AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:-}
@@ -158,7 +160,8 @@ services:
     # Pattern B REMOVES this mapping via docker-compose.pattern-b.yml so the
     # raw mcp port is unreachable from the host — caddy is then the only
     # entry point. Without that override a stray `tailscale funnel
-    # http://127.0.0.1:8787` would bypass the Caddy header-strip boundary.
+    # http://127.0.0.1:8787` would bypass the Caddy perimeter (IP allowlist,
+    # body cap, access logging).
     ports:
       - "127.0.0.1:8787:8787"
 

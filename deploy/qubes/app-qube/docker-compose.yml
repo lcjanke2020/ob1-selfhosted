@@ -86,20 +86,18 @@ services:
       # uncategorized stub if no fallback is configured). Leave off until the
       # primary endpoint is verified reachable + safe.
       ENABLE_PRIMARY_EXTRACTION: ${ENABLE_PRIMARY_EXTRACTION:-}
-      MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      # OAuth-only deployment: no x-brain-key door (MCP_ACCESS_KEY omitted),
+      # so a leaked static key can't be used against this public install.
       CITATION_BASE_URL: ${CITATION_BASE_URL:-https://openbrain.local/thoughts}
-      AUTH0_ISSUER: ${AUTH0_ISSUER:-}
-      AUTH0_JWKS_URI: ${AUTH0_JWKS_URI:-}
-      AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:-}
+      # REQUIRED — the only auth door here. Compose fails fast if any is unset.
+      AUTH0_ISSUER: ${AUTH0_ISSUER:?set AUTH0_ISSUER (Qubes deployment is OAuth-only)}
+      AUTH0_JWKS_URI: ${AUTH0_JWKS_URI:?set AUTH0_JWKS_URI (Qubes deployment is OAuth-only)}
+      AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:?set AUTH0_AUDIENCE (Qubes deployment is OAuth-only)}
       JWKS_FETCH_TIMEOUT_MS: ${JWKS_FETCH_TIMEOUT_MS:-10000}
       OBS_AUTH_EVENTS_ENABLED: ${OBS_AUTH_EVENTS_ENABLED:-true}
       OBS_AUTH_EVENTS_MAX_IN_FLIGHT: ${OBS_AUTH_EVENTS_MAX_IN_FLIGHT:-500}
       AUTH_BODY_READ_TIMEOUT_MS: ${AUTH_BODY_READ_TIMEOUT_MS:-2000}
       PORT: "8787"
-      # config.ts fail-fast: with AUTH0_* set, PATTERN_B must be "true". OAuth
-      # is enforced here; the header-strip boundary PATTERN_B also guards is
-      # enforced by Caddy on the ingress qube.
-      PATTERN_B: "true"
     # Published on ALL host interfaces (0.0.0.0) so the ingress qube's Caddy can
     # reach mcp across qubes over the tailnet — the single-qube Pattern B kept
     # this on loopback because Caddy shared the host; here Caddy is elsewhere.
@@ -109,7 +107,7 @@ services:
     #   2. Host firewall  — a DOCKER-USER rule dropping :8787 from anything but
     #      the ingress qube (docker DNAT bypasses the qubes INPUT chain, so the
     #      rule must live in DOCKER-USER). See qubes-firewall-user-script here.
-    #   3. mcp app auth   — x-brain-key for tailnet, OAuth Bearer JWT for funnel.
+    #   3. mcp app auth   — OAuth Bearer JWT (the only auth path; no x-brain-key).
     ports:
       - "0.0.0.0:8787:8787"
     # To offload metadata classification to an external GPU box, reach a

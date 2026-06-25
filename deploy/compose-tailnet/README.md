@@ -2,47 +2,20 @@
 
 This path takes the [local install](../compose-local/README.md) and puts it on your tailnet — and, if you want claude.ai / Claude mobile to reach it, on the public internet behind a hardened edge. It reuses `../compose-local/docker-compose.yml` as the base; the files in this directory only *add* to it.
 
-Two patterns:
+This directory is the **public Funnel + OAuth edge**. Auth here is **OAuth (RS256 JWT) only** — there is no static `x-brain-key` on a publicly-reachable deployment (that door lives only in the [local install](../compose-local/README.md)). It adds Caddy (single `:9787` listener that discriminates tailnet vs Funnel traffic — **Pattern Y**), removes the MCP server's host port so Caddy is the only entry point, validates RS256 JWTs on the public door, enforces an Anthropic egress IP allowlist, and ships observability (access logs → Postgres, daily rollups). This is what claude.ai and Claude mobile need, since they reach MCP servers from Anthropic's cloud, not from your device.
 
-- **Pattern A — tailnet only.** `tailscale serve` fronts the MCP server directly with a real-cert HTTPS URL. Auth is the `x-brain-key` header. Simplest; nothing in this directory is needed beyond the wiring below.
-- **Pattern B — tailnet + Tailscale Funnel with OAuth.** Adds Caddy (single `:9787` listener that discriminates tailnet vs Funnel traffic — **Pattern Y**), removes the MCP server's host port so Caddy is the only entry point, validates RS256 JWTs on the public door, enforces an Anthropic egress IP allowlist, and ships observability (access logs → Postgres, daily rollups). Needed for claude.ai and Claude mobile, which reach MCP servers from Anthropic's cloud, not from your device.
+Prerequisite: Tailscale installed on the host, plus the [local install](../compose-local/README.md) working (start there — all five setup steps apply unchanged). Leave `MCP_ACCESS_KEY` **unset** here and set the `AUTH0_*` trio instead.
 
-Prerequisite for both: Tailscale installed on the host and on every device that should reach it, plus the [local install](../compose-local/README.md) working (start there — all five setup steps apply unchanged).
+> **Just want tailnet reach, no public internet?** You don't need this directory. Front the [local install](../compose-local/README.md) (x-brain-key auth) with `sudo tailscale serve --bg --https=443 http://127.0.0.1:8787` and connect tailnet devices at `https://homebox.tailnet-name.ts.net/mcp` with the `x-brain-key` header — only WireGuard-authenticated tailnet peers (gated by your ACLs) can reach it. The rest of this guide is the public Funnel + OAuth door.
 
-## Pattern A — tailnet only
-
-The MCP server binds only to `127.0.0.1:8787`; the LAN cannot reach it. `tailscale serve` terminates TLS on the tailnet IP with a Tailscale-issued cert and forwards to loopback. Only WireGuard-authenticated peers in your tailnet can connect, and your Tailscale ACLs gate which ones.
-
-```bash
-sudo tailscale serve --bg --https=443 http://127.0.0.1:8787
-```
-
-Verify from another tailnet device:
-
-```bash
-curl https://homebox.tailnet-name.ts.net/health
-```
-
-Client config is the same as the local install, with the tailnet URL:
-
-```json
-"args": ["-y", "mcp-remote", "https://homebox.tailnet-name.ts.net/mcp",
-         "--header", "x-brain-key: <key>"]
-```
-
-For direct DB inspection (DBeaver, psql, DataGrip), connect to the box as `openbrain_readonly` — it can `SELECT` everything and change nothing.
-
-> **Trust boundary (Pattern A).** Anyone with the `x-brain-key` plus tailnet membership gets full read/write to your thoughts. There is no per-user RLS. Treat the key like a database password and your tailnet ACLs as the perimeter. Details: [`docs/security-model.md`](../../docs/security-model.md).
-
-## Pattern B — Funnel + OAuth
+## Funnel + OAuth setup
 
 ### What changes
 
-`docker-compose.pattern-b.yml` does three things:
+`docker-compose.pattern-b.yml` does two things:
 
-1. **Removes mcp's host port mapping** (`ports: !reset null`) — the raw `:8787` becomes unreachable from the host, so a stray `tailscale funnel http://127.0.0.1:8787` physically cannot bypass Caddy. Requires compose v2.20+ (the `!reset` YAML tag).
-2. **Sets `PATTERN_B=true`** on the mcp container. `server/config.ts` refuses to start when OAuth env vars are set but `PATTERN_B` isn't — proving you loaded this override and not just the `--profile` flag.
-3. **Starts the `log-ingester` sidecar**, which tails Caddy's JSON access logs into Postgres (see Observability below).
+1. **Removes mcp's host port mapping** (`ports: !reset null`) — the raw `:8787` becomes unreachable from the host, so a stray `tailscale funnel http://127.0.0.1:8787` physically cannot reach mcp past the Caddy perimeter (IP allowlist, body cap, logging). Requires compose v2.20+ (the `!reset` YAML tag).
+2. **Starts the `log-ingester` sidecar**, which tails Caddy's JSON access logs into Postgres (see Observability below).
 
 The `caddy` service itself lives in the base compose file, gated behind the `pattern-b` profile, with its build context and Caddyfile in this directory.
 
@@ -71,7 +44,7 @@ docker compose --project-directory . \
 A single Funnel rule on `:443` fronts *both* tailnet and public traffic ( `tailscale serve` and `tailscale funnel` can't both bind `:443` for one hostname, and Anthropic's MCP client refuses non-default-HTTPS ports — Pattern Y's single listener is what reconciles those constraints):
 
 ```bash
-# Vacate :443 if tailscale serve was bound there (Pattern A):
+# Vacate :443 if tailscale serve was bound there (e.g. tailnet-only use):
 sudo tailscale serve --https=443 off
 
 # Single Funnel rule. Caddy discriminates tailnet vs public via the
@@ -84,24 +57,22 @@ Funnel must also be enabled per-device in your Tailscale admin console (Access C
 
 > **Funnel access is locked to Anthropic egress.** Caddy's `@anthropic_funnel` matcher enforces an allowlist of `160.79.104.0/21` — Anthropic's published egress range — so every funnel-originated request from anywhere else gets a `403` at the edge before reaching the MCP server. The check uses Caddy's `client_ip` matcher against the `X-Forwarded-For`-resolved origin (XFF is trusted only from the loopback proxy peer; a tailnet client can't spoof its way into the funnel branch because the funnel header itself is injected by `tailscaled`, not the client). If Anthropic announces additional ranges, extend the `client_ip` matcher in the `Caddyfile` (space-separated CIDRs) and `docker compose restart caddy`.
 
-### Verify both doors
+### Verify the OAuth door + allowlist
 
 ```bash
-# Tailnet door — succeeds with the brain key, 401 without:
-curl https://homebox.tailnet-name.ts.net/mcp -H "x-brain-key: $KEY" \
-  -X POST -H "content-type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-
 # OAuth discovery metadata (public by design, RFC 9728):
 curl https://homebox.tailnet-name.ts.net/.well-known/oauth-protected-resource/mcp
 
 # Funnel door without a token — 401 with a WWW-Authenticate header:
 curl -i https://homebox.tailnet-name.ts.net/mcp
+
+# A stale x-brain-key is NOT accepted here (OAuth-only) — also 401:
+curl -i https://homebox.tailnet-name.ts.net/mcp -H "x-brain-key: anything"
 ```
 
 ### Connect claude.ai / Claude mobile
 
-claude.ai → Settings → Connectors → Add custom connector → URL `https://homebox.tailnet-name.ts.net/mcp` (no port) → Advanced: paste your OAuth application's client_id + client_secret → Connect → provider login + consent. Captures from mobile land with `metadata.door = 'funnel'` and `metadata.sub = <your OAuth sub>`; tailnet captures carry `door = 'tailnet'`.
+claude.ai → Settings → Connectors → Add custom connector → URL `https://homebox.tailnet-name.ts.net/mcp` (no port) → Advanced: paste your OAuth application's client_id + client_secret → Connect → provider login + consent. Captures land with `metadata.door = 'funnel'` and `metadata.sub = <your OAuth sub>`.
 
 If the connector fails after a successful consent screen, the most common cause is a client_secret paste mismatch — see the failure-mode catalog in [`docs/funnel-mcp-perimeter.md`](../../docs/funnel-mcp-perimeter.md).
 
@@ -179,4 +150,4 @@ A non-zero exit means a grant drifted. Prefer a targeted fix (e.g. `REVOKE DELET
 
 ## Key rotation
 
-Same procedure as the [local install](../compose-local/README.md#key-rotation), run from this directory. Rotating `MCP_ACCESS_KEY` does not affect the OAuth door; rotate the OAuth client secret in your provider's dashboard (and re-paste into claude.ai) independently.
+This OAuth-only deployment has no `MCP_ACCESS_KEY` to rotate. Rotate the OAuth client secret in your provider's dashboard and re-paste it into claude.ai; nothing in this stack stores it.

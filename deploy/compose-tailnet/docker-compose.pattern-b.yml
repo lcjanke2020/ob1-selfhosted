@@ -2,11 +2,6 @@
 # is unreachable from the host. Caddy (running under the `pattern-b` profile)
 # is then the only entry point, reaching mcp over the docker network.
 #
-# This file ALSO sets `PATTERN_B=true` on the mcp container — the mcp
-# server's `config.ts` refuses to start when AUTH0_* is set but
-# PATTERN_B isn't (Pattern B fail-fast). Don't remove the env block below
-# without also removing the matching guard in `server/config.ts`.
-#
 # Also brings up the log-ingester sidecar which tails Caddy's
 # JSON access logs and writes structured rows to Postgres. Only useful when
 # Caddy is running, so it's also profile-gated.
@@ -20,23 +15,14 @@
 #   COMPOSE_PROFILES=pattern-b
 #
 # Without this override, mcp's `127.0.0.1:8787:8787` host port stays published.
-# A stray `tailscale funnel http://127.0.0.1:8787` then bypasses the Caddy
-# header-strip boundary and turns a leaked x-brain-key into a public route.
-# That's the Caddy-bypass risk in network-layer terms.
+# A stray `tailscale funnel http://127.0.0.1:8787` then reaches mcp directly,
+# bypassing the Caddy perimeter (IP allowlist, body cap, access logging).
 #
 # Requires a Docker Compose v2 that supports the `!reset` tag (v2.24.4 documents it).
 
 services:
   mcp:
     ports: !reset null
-    # boot-time guard against the half-configured Pattern B
-    # invocation. mcp's config.ts refuses to start when ENABLE_OAUTH is
-    # true but PATTERN_B is not — proving the operator loaded THIS
-    # override file (which sets the env var) and not just the
-    # --profile pattern-b flag against the base compose. See the
-    # rationale in config.ts.
-    environment:
-      PATTERN_B: "true"
 
   # Caddy access log ingester.
   #
