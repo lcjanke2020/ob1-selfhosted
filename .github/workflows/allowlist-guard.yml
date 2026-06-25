@@ -1,0 +1,56 @@
+# Allowlist guard: fails the build if the Anthropic IP allowlist disappears
+# from the funnel Caddyfile.
+#
+# The `client_ip 160.79.104.0/21` matcher on the funnel branch is the only
+# network-layer control between the public internet and the MCP server — see
+# the banner in deploy/compose-tailnet/Caddyfile. A refactor that drops it
+# would silently expose the server to the whole internet (OAuth still gates
+# writes, but the IP perimeter would be gone). This check makes that an
+# unmissable CI failure instead of a quiet regression.
+#
+# To intentionally change the range (Anthropic publishes a new CIDR), update
+# BOTH the Caddyfile matcher and the EXPECTED_CIDR below in the same PR.
+
+name: Allowlist guard
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/compose-tailnet/Caddyfile'
+      - '.github/workflows/allowlist-guard.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/compose-tailnet/Caddyfile'
+      - '.github/workflows/allowlist-guard.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  allowlist-guard:
+    name: Anthropic IP allowlist present
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head safely
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          fetch-depth: 1
+
+      - name: Assert the allowlist CIDR is present
+        run: |
+          set -u
+          CADDYFILE=deploy/compose-tailnet/Caddyfile
+          EXPECTED_CIDR='client_ip 160.79.104.0/21'
+          if [ ! -f "$CADDYFILE" ]; then
+            echo "::error::$CADDYFILE is missing — the funnel perimeter config is gone"
+            exit 1
+          fi
+          if ! grep -qF "$EXPECTED_CIDR" "$CADDYFILE"; then
+            echo "::error::'$EXPECTED_CIDR' not found in $CADDYFILE."
+            echo "::error::The Anthropic IP allowlist is the only network-layer perimeter on the public funnel. Do not remove it. If Anthropic published a new range, update the Caddyfile matcher AND EXPECTED_CIDR in this workflow together."
+            exit 1
+          fi
+          echo "OK: Anthropic IP allowlist present in $CADDYFILE"

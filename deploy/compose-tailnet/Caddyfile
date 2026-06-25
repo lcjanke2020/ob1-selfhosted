@@ -25,10 +25,11 @@
 # headers join with commas and still match. See PR description for the
 # full test matrix.
 #
-# Per-branch credential strips and the request_body cap are scoped via
-# named-matcher directive form (e.g. `request_header @funnel -X-Brain-Key`)
-# so the tailnet branch is unaffected by the funnel-only DoS-amp cap and
-# vice-versa.
+# The funnel-only request_body cap is scoped via named-matcher directive
+# form (`request_body @funnel { ... }`) so the tailnet branch is unaffected
+# by the funnel-only DoS-amp cap. Credentials are NOT stripped per-branch:
+# the access-log `format filter` redacts them on disk, and the server
+# decides per-deployment which auth door (x-brain-key / OAuth) it accepts.
 #
 # Per-branch access logs are routed via Caddy's `log_name` directive
 # inside each handle — funnel-originated requests land in
@@ -120,19 +121,21 @@
 	# defense-in-depth behaviors.
 	@funnel header Tailscale-Funnel-Request *
 
-	# ----- Defense-in-depth credential strips --------------------------
-	# Scoped via named-matcher form so each strip is branch-specific
-	# without putting the directive inside every handle.
-	#
-	# @funnel side strips x-brain-key: a leaked static key cannot be
-	# used over the public path. Applies on @non_anthropic_funnel too
-	# so the access log never captures the value to disk even if a
-	# scanner sends one.
-	request_header @funnel -X-Brain-Key
+	# ----- Credentials are NOT stripped per-branch ---------------------
+	# x-brain-key is passed through to the server, which decides whether to
+	# accept it: the funnel + Qubes deployments leave MCP_ACCESS_KEY unset
+	# (the server ignores any x-brain-key — OAuth is the sole door), while
+	# the single-box compose-local install sets it and accepts the key over
+	# this same path, gated by the Anthropic IP allowlist below. Either way
+	# the key never reaches disk — the access-log `format filter` deletes
+	# the X-Brain-Key header (see the loggers below).
 
-	# @tailnet side strips Authorization: a misconfigured OAuth client
-	# that lands on the tailnet path gets the same 401 as a stranger.
-	request_header @tailnet -Authorization
+	# NOTE: the tailnet branch does NOT strip Authorization. This Caddyfile
+	# fronts the OAuth-only deployments (single-box funnel + the Qubes split),
+	# where tailnet-direct clients authenticate with the same Auth0 Bearer JWT
+	# as funnel clients, so the tailnet branch must forward Authorization to
+	# the server. (Stripping it was correct only while the tailnet door was the
+	# static x-brain-key door; it is the OAuth door now.)
 
 	# ----- Body cap (funnel only) --------------------------------------
 	# 1. Bogus-Bearer floods — RS256 verify is CPU-expensive; small body
@@ -224,7 +227,32 @@
 		respond "ok" 200
 	}
 
+	# ----- /ready probe: internal-only --------------------------------
+	# /ready reveals DB connectivity, so it must never be served over the
+	# public funnel. A funnel-originated /ready returns 404 here, before the
+	# allowlist branches. Tailnet/loopback /ready has no funnel header, so it
+	# falls through to @tailnet and is proxied to the server, which serves it
+	# unauthenticated (the in-container healthcheck and uptime monitors use
+	# that path).
+	@funnel_ready {
+		header Tailscale-Funnel-Request *
+		path /ready
+	}
+	handle @funnel_ready {
+		log_name access_funnel
+		respond 404
+	}
+
 	# ----- Anthropic funnel (Anthropic IP allowlist) -------------------------
+	# IMPORTANT - PRIMARY PUBLIC PERIMETER: DO NOT REMOVE OR WEAKEN.
+	# The `client_ip 160.79.104.0/21` allowlist on @anthropic_funnel /
+	# @non_anthropic_funnel is the only network-layer control between the
+	# public internet and the MCP server. Everything else (OAuth, the
+	# funnel-header trust anchor) is application/structural; this is THE IP
+	# perimeter. Dropping it exposes the server to the entire internet even
+	# though OAuth still gates writes. A CI check asserts this CIDR stays
+	# present so it can't be silently removed.
+	#
 	# 160.79.104.0/21 is Anthropic's currently-published egress range.
 	# Re-confirm against Anthropic's docs at every deploy. If they
 	# announce additional ranges, extend the @anthropic_funnel matcher

@@ -19,8 +19,10 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { type Context, Hono } from "hono";
 
 import {
+  ENABLE_BRAIN_KEY,
   ENABLE_FALLBACK_EXTRACTION,
   ENABLE_METADATA_EXTRACTION,
+  ENABLE_OAUTH,
   ENABLE_PRIMARY_EXTRACTION,
   PORT,
 } from "./config.ts";
@@ -117,6 +119,26 @@ app.all("/", requireAuth, async (c) => {
 });
 
 console.log(`open-brain-homelab listening on :${PORT}`);
+
+// Auth-door posture at boot. Both doors on is intended only for the loopback /
+// LAN single-box install (which may opt into OAuth on top of the static key).
+// On a publicly-reachable funnel / Qubes deployment the static x-brain-key door
+// should be OFF — warn so an accidental MCP_ACCESS_KEY on a public box is visible
+// in the boot log rather than silently widening the attack surface.
+if (ENABLE_BRAIN_KEY && ENABLE_OAUTH) {
+  console.warn(
+    "[auth] both doors enabled (x-brain-key AND OAuth). Intended for the " +
+      "single-box / LAN install only — on a public funnel/Qubes deployment, " +
+      "unset MCP_ACCESS_KEY so OAuth is the sole auth path.",
+  );
+} else if (ENABLE_BRAIN_KEY) {
+  console.log(
+    "[auth] x-brain-key door only (OAuth off). Keep this install on loopback/" +
+      "LAN, or behind the Anthropic IP allowlist if funnel-exposed.",
+  );
+} else {
+  console.log("[auth] OAuth door only (x-brain-key disabled).");
+}
 
 // Announce the metadata-extraction mode at boot so the two silent degradations
 // (every capture stamping the stub; every capture going to the fallback, which
