@@ -1,9 +1,11 @@
 // Open Brain MCP server — Homelab + Tailscale variant.
 //
-// HTTP transport: Streamable HTTP at /mcp, gated by x-brain-key (tailnet door)
-// or Auth0 RS256 Bearer JWT (OAuth/Funnel door). The reverse proxy in front
-// is expected to strip the inapplicable header per socket; `requireAuth`
-// works in either case as defense in depth.
+// HTTP transport: Streamable HTTP at /mcp, gated by `requireAuth`, which accepts
+// whichever auth doors the deployment enabled — the static x-brain-key door
+// (compose-local) and/or an Auth0 RS256 Bearer JWT (the OAuth door used by the
+// funnel + Qubes deployments). On a publicly-reachable deployment the reverse
+// proxy also strips the inapplicable header per socket; `requireAuth` is the
+// load-bearing check and works equally well behind a single-port deployment.
 // Storage: vanilla Postgres + pgvector (no @supabase/supabase-js, no auth.uid).
 // Embeddings: local Ollama (default model nomic-embed-text, 768 dim).
 //
@@ -28,7 +30,6 @@ import {
   PROTECTED_RESOURCE_METADATA_PATH,
   protectedResourceMetadata,
   requireAuth,
-  requireBrainKey,
 } from "./auth.ts";
 import { createMcpServer } from "./mcp-server.ts";
 import { pingDb } from "./queries.ts";
@@ -45,11 +46,16 @@ const app = new Hono<{ Variables: AppVariables }>();
 // we don't want to advertise the service identity to drive-by scanners.
 app.get("/health", (c) => c.json({ ok: true }));
 
-// Deeper health probe that confirms DB connectivity. Auth-gated because the
-// failure mode reveals whether the DB is reachable. `requireBrainKey` (not
-// `requireAuth`) — OAuth callers should not be able to probe internal DB
-// status; this is an insider-only smoke test.
-app.get("/ready", requireBrainKey, async (c) => {
+// Deeper health probe that confirms DB connectivity. Unauthenticated, but
+// INTERNAL-ONLY: it reveals whether the DB is reachable, so it must never be
+// served over the public funnel. Caddy 404s `/ready` on the funnel branch
+// (see the Caddyfile), leaving it reachable only from loopback, the container
+// healthcheck, and tailnet-direct/in-qube callers. It is unauthenticated
+// because a readiness probe carrying a credential is impractical for uptime
+// monitors and the in-container healthcheck — and, with the x-brain-key door
+// optional per deployment, `requireBrainKey` could no longer gate it on an
+// Auth0-only install anyway.
+app.get("/ready", async (c) => {
   try {
     await pingDb(pool);
     return c.json({ ok: true, db: "connected" });

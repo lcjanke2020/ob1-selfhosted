@@ -79,17 +79,19 @@ export const ENABLE_FALLBACK_EXTRACTION = Boolean(
 export const ENABLE_METADATA_EXTRACTION = ENABLE_PRIMARY_EXTRACTION ||
   ENABLE_FALLBACK_EXTRACTION;
 
-// MCP_ACCESS_KEY is the only credential between any tailnet member
-// (and, once Funnel is on, the public internet) and full read/write to every
-// captured thought. `.env.example` documents `openssl rand -hex 32` (64 hex
-// chars = 256 bits of entropy) as the recommended generator, but `required()`
-// alone accepts any non-empty value — so a typo'd `password` / `dev` / `test`
-// passes validation, and a weak key turns the (correct) `safeEqual` defense
-// against timing enumeration into theatre. Enforce a minimum length at boot.
+// MCP_ACCESS_KEY enables the static x-brain-key auth door. It is OPTIONAL:
+// set it to turn the x-brain-key path ON (the `compose-local` single-box
+// install uses it as its sole auth, for environments where a tailnet / Auth0
+// tenant isn't practical), or leave it empty to turn the path OFF entirely so
+// the server accepts no x-brain-key at all. The `compose-tailnet` (funnel) and
+// `qubes` deployments leave it empty and rely on Auth0 (OAuth) alone — the
+// single-door posture recommended for any publicly-reachable install.
 //
-// MIN length 32 admits both the recommended `openssl rand -hex 32` output
-// (64 chars) and `-hex 16` (32 chars — still 128 bits, well above any
-// realistic brute-force horizon) while rejecting the weak literals an
+// When set, a minimum length is enforced. `.env.example` documents
+// `openssl rand -hex 32` (64 hex chars = 256 bits) as the generator; a weak key
+// would turn the (correct) `safeEqual` defense against timing enumeration into
+// theatre. MIN 32 admits `openssl rand -hex 16` (32 chars, still 128 bits, well
+// above any realistic brute-force horizon) while rejecting the weak literals an
 // operator would type in a hurry. The constant is intentionally not exported:
 // rotating it later is a one-line edit here.
 const MCP_ACCESS_KEY_MIN_LENGTH = 32;
@@ -104,16 +106,20 @@ function requireMinLength(name: string, value: string, min: number): string {
   return value;
 }
 
-export const MCP_ACCESS_KEY = requireMinLength(
-  "MCP_ACCESS_KEY",
-  required("MCP_ACCESS_KEY"),
-  MCP_ACCESS_KEY_MIN_LENGTH,
-);
+// null ⇒ x-brain-key door disabled. A blank/unset env var disables it; a set
+// value must clear the min-length floor. `ENABLE_BRAIN_KEY` is the toggle the
+// rest of the server reads — see the "at least one auth door" guard below.
+const rawBrainKey = optionalTrimmed("MCP_ACCESS_KEY");
+export const MCP_ACCESS_KEY: string | null = rawBrainKey
+  ? requireMinLength("MCP_ACCESS_KEY", rawBrainKey, MCP_ACCESS_KEY_MIN_LENGTH)
+  : null;
+export const ENABLE_BRAIN_KEY = MCP_ACCESS_KEY !== null;
 export const PORT = requiredInt("PORT", 8787);
 
 // Auth0 OAuth resource-server config. The three vars below have a tri-state
-// contract: all three empty → server runs in x-brain-key-only mode; all three
-// set → OAuth path is enabled; any partial state (1 or 2 set) throws below.
+// contract: all three set → OAuth door is enabled; all three empty → OAuth door
+// is off (the deployment must then have the x-brain-key door on — see the "at
+// least one auth door" guard below); any partial state (1 or 2 set) throws below.
 // Audience MUST match the API Identifier in Auth0 byte-for-byte — it's
 // immutable, so a mismatch means recreating the API. See the Caddyfile for
 // the matching reverse-proxy wiring on the Funnel socket.
@@ -129,44 +135,24 @@ export const ENABLE_OAUTH = Boolean(
 // diagnose from the client side.
 if ((AUTH0_ISSUER || AUTH0_JWKS_URI || AUTH0_AUDIENCE) && !ENABLE_OAUTH) {
   throw new Error(
-    "Partial Auth0 config: AUTH0_ISSUER, AUTH0_JWKS_URI, and AUTH0_AUDIENCE must all be set together (or all empty for x-brain-key-only deployments).",
+    "Partial Auth0 config: AUTH0_ISSUER, AUTH0_JWKS_URI, and AUTH0_AUDIENCE must all be set together (or all empty to leave the OAuth door off).",
   );
 }
 
-// Pattern B is the compose-mode that REMOVES mcp's host port
-// mapping so caddy is the only entry point and the Caddyfile header-strip
-// boundary is enforced. The override (docker-compose.pattern-b.yml) sets
-// PATTERN_B=true in the mcp container's env, so this server can verify
-// the operator actually loaded the override file — not just the
-// `--profile pattern-b` flag.
-//
-// Without this check, an operator who sets AUTH0_* in .env but only runs
-// `docker compose --profile pattern-b up -d` (without
-// `-f docker-compose.pattern-b.yml`) lands in a half-configured state:
-// caddy starts, BUT mcp's host port stays published. A stray
-// `tailscale funnel http://127.0.0.1:8787` would then bypass the
-// Caddyfile header-strip boundary entirely, turning a leaked
-// x-brain-key into a public route.
-//
-// Constraint: ENABLE_OAUTH implies PATTERN_B. The other direction
-// (PATTERN_B without OAuth) is allowed — it's just an extra env var
-// with no behavioral effect, useful for parity in dev rigs that mirror
-// the compose override without enabling Auth0.
-const PATTERN_B = Deno.env.get("PATTERN_B")?.trim().toLowerCase() === "true";
-
-if (ENABLE_OAUTH && !PATTERN_B) {
+// At least one auth door must be enabled. With both MCP_ACCESS_KEY (x-brain-key)
+// and AUTH0_* (OAuth) now optional, a deployment that configures neither would
+// boot wide open — refuse that. compose-local sets MCP_ACCESS_KEY; the funnel +
+// Qubes deployments set AUTH0_*. (This replaces the old PATTERN_B guard, whose
+// only job was to stop a leaked x-brain-key going public over the funnel — moot
+// now that funnel deployments carry no x-brain-key. Keeping Caddy as the sole
+// entry point — not publishing mcp's raw host port — is now a deployment-hygiene
+// measure handled by the compose override structure + docs, not a boot check.)
+if (!ENABLE_BRAIN_KEY && !ENABLE_OAUTH) {
   throw new Error(
-    "OAuth is enabled (AUTH0_* set) but PATTERN_B is not. " +
-      "Pattern B requires BOTH the compose override " +
-      "(-f docker-compose.pattern-b.yml) AND the --profile pattern-b " +
-      "flag — the override sets PATTERN_B=true on the mcp container. " +
-      "If you used --profile pattern-b without the override file, mcp's " +
-      "host port (127.0.0.1:8787) is still published and a misconfigured " +
-      "`tailscale funnel` would bypass the Caddyfile header-strip " +
-      "boundary. Fix: either run `docker compose -f docker-compose.yml " +
-      "-f docker-compose.pattern-b.yml --profile pattern-b up -d`, or " +
-      "set COMPOSE_FILE and COMPOSE_PROFILES in .env per .env.example so " +
-      "a bare `docker compose up -d` does the right thing.",
+    "No auth door configured: set MCP_ACCESS_KEY (x-brain-key door — e.g. the " +
+      "compose-local single-box install) and/or all three AUTH0_* vars (OAuth " +
+      "door — used by the funnel + Qubes deployments). Refusing to start with " +
+      "no authentication.",
   );
 }
 

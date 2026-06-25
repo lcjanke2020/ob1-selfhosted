@@ -1,7 +1,8 @@
-// Tests for the `requireAuth` middleware in Pattern B (OAuth enabled).
-// Covers the full (brain-key × Bearer × OAuth-on) matrix an early review
-// asked to bottle, plus the JWT failure modes (expired, wrong
-// issuer/audience, malformed). Run with `deno task test`.
+// Tests for the `requireAuth` middleware with BOTH auth doors enabled — OAuth
+// (Bearer) AND the x-brain-key door (a valid compose-local config that opts into
+// OAuth on top of the static key). Covers the full (brain-key × Bearer × OAuth)
+// matrix an early review asked to bottle, plus the JWT failure modes (expired,
+// wrong issuer/audience, malformed). Run with `deno task test`.
 //
 // auth failure shape depends on whether a credential
 // was offered:
@@ -48,12 +49,6 @@ const ENV_KEYS = [
   "AUTH0_AUDIENCE",
   // see auth_brainkey_test.ts for why this is here.
   "OBS_AUTH_EVENTS_ENABLED",
-  // config.ts now refuses to start when ENABLE_OAUTH && !PATTERN_B
-  // (forces operators to use the compose override that strips mcp's host
-  // port). This file's tests run with OAuth enabled, so PATTERN_B=true
-  // must be set BEFORE the auth.ts dynamic import — otherwise config.ts
-  // throws and the entire test suite fails at module load.
-  "PATTERN_B",
   // bound the boot-time JWKS reachability probe with a short
   // timeout so this test suite stays fast even if the mock somehow
   // doesn't intercept the probe fetch.
@@ -121,7 +116,7 @@ async function assertEnvelopeBody(
   assertEquals(body.id, expectedId);
 }
 
-Deno.test("requireAuth (Pattern B — OAuth enabled)", async (t) => {
+Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => {
   // ─── Setup ─────────────────────────────────────────────────────────────
   // Snapshot fetch and env so teardown can restore them.
   const origFetch = globalThis.fetch;
@@ -170,9 +165,6 @@ Deno.test("requireAuth (Pattern B — OAuth enabled)", async (t) => {
   Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
   // disable audit emission; the audit module reads this at load.
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-  // Pattern B fail-fast guard; OAuth is enabled in this suite,
-  // so PATTERN_B must be set or config.ts throws at module load.
-  Deno.env.set("PATTERN_B", "true");
   // short JWKS fetch timeout so the boot probe (intercepted by
   // the fetch mock above) and any per-request refresh fail fast in tests
   // rather than waiting the production 10 s default.
