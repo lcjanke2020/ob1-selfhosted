@@ -49,7 +49,7 @@ Four roles, least privilege, with drift detection:
 
 ### Audit layer
 
-- Caddy redacts `Authorization`, `X-Brain-Key`, `Cookie`, `Set-Cookie`, `Proxy-Authorization` from access logs at format level; the ingester additionally keeps only UA + Host from headers and strips query strings.
+- Caddy redacts `Authorization`, `X-Brain-Key`, `Cookie`, `Set-Cookie`, `Proxy-Authorization` at format level from **both the per-handle access logs and the process-level error log** — the latter matters because `reverse_proxy` warnings otherwise serialize the full request header map (incl. a Bearer) to `docker logs`; the ingester additionally keeps only UA + Host from headers and strips query strings.
 - Every 401 inserts a reason-coded row into `mcp_auth_events` (fire-and-forget, with an in-flight cap so a 401 flood can't queue unbounded memory).
 - A daily rollup retains a year of trend data after raw rows age out at 30 days.
 

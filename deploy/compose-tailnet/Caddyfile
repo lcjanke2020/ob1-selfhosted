@@ -88,9 +88,25 @@
 	}
 
 	# Process-level error/info log (operational, not access).
+	#
+	# format filter (NOT plain json): reverse_proxy WARN entries serialize the
+	# FULL request header map — incl. X-Brain-Key / Authorization — to stderr,
+	# which Docker persists to the on-disk json-file log. The per-handle access
+	# `format filter` loggers below do NOT cover this default process logger, so
+	# without these deletes a presented credential lands in `docker logs` in
+	# cleartext. Mirror the access-log redaction field-for-field.
 	log {
 		output stderr
-		format json
+		format filter {
+			wrap json
+			fields {
+				request>headers>X-Brain-Key delete
+				request>headers>Authorization delete
+				request>headers>Cookie delete
+				request>headers>Set-Cookie delete
+				request>headers>Proxy-Authorization delete
+			}
+		}
 		level INFO
 	}
 }
