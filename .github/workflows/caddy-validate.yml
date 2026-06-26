@@ -1,0 +1,71 @@
+# Caddyfile validate: adapts + validates the perimeter Caddyfile so a syntax or
+# feature mistake fails CI instead of only surfacing at deploy/restart time.
+#
+# The repo's auth perimeter lives in deploy/compose-tailnet/Caddyfile (a single
+# shared Caddyfile fronted by the tailnet + Qubes deployments). Until now nothing
+# in CI parsed it — ci.yml is scoped to server/** (Deno), and allowlist-guard.yml
+# only greps for the IP-allowlist matchers. This job closes that gap by running
+# `caddy validate` against the SAME caddy version the perimeter image pins, so a
+# config that won't load can't reach main.
+#
+# The caddy version is DERIVED from deploy/compose-tailnet/caddy/Dockerfile's
+# FROM line, so the validator and the shipped image can't drift. Bump the
+# Dockerfile and this job follows automatically.
+
+name: Caddyfile validate
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/compose-tailnet/Caddyfile'
+      - 'deploy/compose-tailnet/caddy/Dockerfile'
+      - '.github/workflows/caddy-validate.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/compose-tailnet/Caddyfile'
+      - 'deploy/compose-tailnet/caddy/Dockerfile'
+      - '.github/workflows/caddy-validate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  caddy-validate:
+    name: Caddyfile adapts + validates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head safely
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          fetch-depth: 1
+
+      - name: Validate the Caddyfile against the pinned caddy image
+        run: |
+          set -euo pipefail
+          DOCKERFILE=deploy/compose-tailnet/caddy/Dockerfile
+          CADDYFILE=deploy/compose-tailnet/Caddyfile
+
+          for f in "$DOCKERFILE" "$CADDYFILE"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::expected file $f is missing"
+              exit 1
+            fi
+          done
+
+          # Derive the pinned caddy version from the perimeter image's FROM line
+          # so the validator tracks exactly what ships (e.g. caddy:2.11.3-alpine).
+          CADDY_IMAGE=$(grep -oE 'caddy:[0-9]+\.[0-9]+\.[0-9]+-alpine' "$DOCKERFILE" | head -1)
+          if [ -z "$CADDY_IMAGE" ]; then
+            echo "::error::could not derive a pinned caddy:X.Y.Z-alpine image from $DOCKERFILE"
+            exit 1
+          fi
+
+          echo "Validating $CADDYFILE with $CADDY_IMAGE"
+          # `caddy validate` adapts the Caddyfile to JSON and loads it without
+          # serving. The one env placeholder ({$MCP_UPSTREAM:mcp:8787}) carries a
+          # default, so no env needs to be supplied here.
+          docker run --rm -v "$PWD:/work:ro" -w /work "$CADDY_IMAGE" \
+            caddy validate --adapter caddyfile --config "$CADDYFILE"
