@@ -67,20 +67,29 @@ jobs:
           # a `caddy:X.Y.Z` string in a comment or example elsewhere in the file
           # can't be picked — and it's a single process that exits 0 on no match,
           # so it can't trip `set -euo pipefail` (which would skip the friendly
-          # error below). The `^caddy:[0-9]…` anchor also keeps the docker-run
-          # target constrained to the official, version-pinned caddy image
-          # (rejects `latest` and any non-`caddy:` registry); it accepts -alpine
-          # or any other pinned tag variant, so a routine version bump won't
-          # false-fail.
+          # error below).
+          #
+          # The pattern requires a full `major.minor.patch` pin (an optional
+          # `-alpine`/`-slim`/… variant suffix is allowed) and rejects FLOATING
+          # tags like `caddy:2` / `caddy:2-alpine` — a moving target would drift
+          # from the shipped image, and the perimeter Dockerfile explicitly calls
+          # `2-alpine` unsafe for this image. It also keeps the docker-run target
+          # constrained to the official `caddy:` repo (rejects `latest` and any
+          # other registry).
+          #
+          # Assumes a plain `FROM caddy:<tag>` line (no `--platform=` flag, no
+          # `@sha256:` digest pin, LF endings). Any of those make the match fail
+          # LOUD via the guard below rather than silently wrong — extend the
+          # extractor if the Dockerfile adopts one.
           #
           # We validate against the UPSTREAM caddy image, not the repo's custom
           # perimeter image: that Dockerfile only strips the binary's file
           # capability, leaving the same caddy modules, so adapt/validate is
           # equivalent. Revisit (build + validate the custom image) if it ever
           # adds plugins / xcaddy modules that could change config parsing.
-          CADDY_IMAGE=$(awk '$1 == "FROM" && $2 ~ /^caddy:[0-9][A-Za-z0-9._-]*$/ { print $2; exit }' "$DOCKERFILE")
+          CADDY_IMAGE=$(awk '$1 == "FROM" && $2 ~ /^caddy:[0-9]+[.][0-9]+[.][0-9]+[A-Za-z0-9._-]*$/ { print $2; exit }' "$DOCKERFILE")
           if [ -z "$CADDY_IMAGE" ]; then
-            echo "::error::could not derive a pinned 'FROM caddy:<version>' image from $DOCKERFILE"
+            echo "::error::could not derive a pinned 'FROM caddy:<major.minor.patch>' image from $DOCKERFILE (floating tags like caddy:2-alpine are rejected)"
             exit 1
           fi
 
