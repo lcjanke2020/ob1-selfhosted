@@ -31,10 +31,16 @@ on:
 permissions:
   contents: read
 
+# Cancel a superseded run when new commits land on the same ref.
+concurrency:
+  group: caddy-validate-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   caddy-validate:
     name: Caddyfile adapts + validates
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout PR head safely
         uses: actions/checkout@v4
@@ -55,11 +61,26 @@ jobs:
             fi
           done
 
-          # Derive the pinned caddy version from the perimeter image's FROM line
-          # so the validator tracks exactly what ships (e.g. caddy:2.11.3-alpine).
-          CADDY_IMAGE=$(grep -oE 'caddy:[0-9]+\.[0-9]+\.[0-9]+-alpine' "$DOCKERFILE" | head -1)
+          # Derive the caddy image from the perimeter Dockerfile's active FROM
+          # directive so the validator runs exactly what ships. awk (not
+          # `grep | head`) for two reasons: it reads $1/$2 of the FROM line — so
+          # a `caddy:X.Y.Z` string in a comment or example elsewhere in the file
+          # can't be picked — and it's a single process that exits 0 on no match,
+          # so it can't trip `set -euo pipefail` (which would skip the friendly
+          # error below). The `^caddy:[0-9]…` anchor also keeps the docker-run
+          # target constrained to the official, version-pinned caddy image
+          # (rejects `latest` and any non-`caddy:` registry); it accepts -alpine
+          # or any other pinned tag variant, so a routine version bump won't
+          # false-fail.
+          #
+          # We validate against the UPSTREAM caddy image, not the repo's custom
+          # perimeter image: that Dockerfile only strips the binary's file
+          # capability, leaving the same caddy modules, so adapt/validate is
+          # equivalent. Revisit (build + validate the custom image) if it ever
+          # adds plugins / xcaddy modules that could change config parsing.
+          CADDY_IMAGE=$(awk '$1 == "FROM" && $2 ~ /^caddy:[0-9][A-Za-z0-9._-]*$/ { print $2; exit }' "$DOCKERFILE")
           if [ -z "$CADDY_IMAGE" ]; then
-            echo "::error::could not derive a pinned caddy:X.Y.Z-alpine image from $DOCKERFILE"
+            echo "::error::could not derive a pinned 'FROM caddy:<version>' image from $DOCKERFILE"
             exit 1
           fi
 
