@@ -1,9 +1,13 @@
 // Open Brain MCP server — Homelab + Tailscale variant.
 //
-// HTTP transport: Streamable HTTP at /mcp, gated by x-brain-key (tailnet door)
-// or Auth0 RS256 Bearer JWT (OAuth/Funnel door). The reverse proxy in front
-// is expected to strip the inapplicable header per socket; `requireAuth`
-// works in either case as defense in depth.
+// HTTP transport: Streamable HTTP at /mcp, gated by `requireAuth`, which accepts
+// whichever auth doors the deployment enabled — the static x-brain-key door
+// (compose-local) and/or an Auth0 RS256 Bearer JWT (the OAuth door used by the
+// funnel + Qubes deployments). On a publicly-reachable deployment Caddy fronts
+// the server (the Anthropic IP allowlist, body cap, access logging with
+// credential redaction) but does not strip credentials per branch — the server
+// accepts only the door(s) the deployment enabled, so `requireAuth` is the
+// load-bearing check and works equally well behind a single-port deployment.
 // Storage: vanilla Postgres + pgvector (no @supabase/supabase-js, no auth.uid).
 // Embeddings: local Ollama (default model nomic-embed-text, 768 dim).
 //
@@ -17,8 +21,10 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { type Context, Hono } from "hono";
 
 import {
+  ENABLE_BRAIN_KEY,
   ENABLE_FALLBACK_EXTRACTION,
   ENABLE_METADATA_EXTRACTION,
+  ENABLE_OAUTH,
   ENABLE_PRIMARY_EXTRACTION,
   PORT,
 } from "./config.ts";
@@ -28,7 +34,6 @@ import {
   PROTECTED_RESOURCE_METADATA_PATH,
   protectedResourceMetadata,
   requireAuth,
-  requireBrainKey,
 } from "./auth.ts";
 import { createMcpServer } from "./mcp-server.ts";
 import { pingDb } from "./queries.ts";
@@ -45,11 +50,16 @@ const app = new Hono<{ Variables: AppVariables }>();
 // we don't want to advertise the service identity to drive-by scanners.
 app.get("/health", (c) => c.json({ ok: true }));
 
-// Deeper health probe that confirms DB connectivity. Auth-gated because the
-// failure mode reveals whether the DB is reachable. `requireBrainKey` (not
-// `requireAuth`) — OAuth callers should not be able to probe internal DB
-// status; this is an insider-only smoke test.
-app.get("/ready", requireBrainKey, async (c) => {
+// Deeper health probe that confirms DB connectivity. Unauthenticated, but
+// INTERNAL-ONLY: it reveals whether the DB is reachable, so it must never be
+// served over the public funnel. Caddy 404s `/ready` on the funnel branch
+// (see the Caddyfile), leaving it reachable only from loopback, the container
+// healthcheck, and tailnet-direct/in-qube callers. It is unauthenticated
+// because a readiness probe carrying a credential is impractical for uptime
+// monitors and the in-container healthcheck — and, with each auth door now
+// optional per deployment, there is no single static credential that could gate
+// it on an Auth0-only install anyway.
+app.get("/ready", async (c) => {
   try {
     await pingDb(pool);
     return c.json({ ok: true, db: "connected" });
@@ -111,6 +121,26 @@ app.all("/", requireAuth, async (c) => {
 });
 
 console.log(`open-brain-homelab listening on :${PORT}`);
+
+// Auth-door posture at boot. Both doors on is intended only for the loopback /
+// LAN single-box install (which may opt into OAuth on top of the static key).
+// On a publicly-reachable funnel / Qubes deployment the static x-brain-key door
+// should be OFF — warn so an accidental MCP_ACCESS_KEY on a public box is visible
+// in the boot log rather than silently widening the attack surface.
+if (ENABLE_BRAIN_KEY && ENABLE_OAUTH) {
+  console.warn(
+    "[auth] both doors enabled (x-brain-key AND OAuth). Intended for the " +
+      "single-box / LAN install only — on a public funnel/Qubes deployment, " +
+      "unset MCP_ACCESS_KEY so OAuth is the sole auth path.",
+  );
+} else if (ENABLE_BRAIN_KEY) {
+  console.log(
+    "[auth] x-brain-key door only (OAuth off). Keep this install on loopback/" +
+      "LAN, or behind the Anthropic IP allowlist if funnel-exposed.",
+  );
+} else {
+  console.log("[auth] OAuth door only (x-brain-key disabled).");
+}
 
 // Announce the metadata-extraction mode at boot so the two silent degradations
 // (every capture stamping the stub; every capture going to the fallback, which

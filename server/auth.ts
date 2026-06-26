@@ -18,15 +18,12 @@ import {
   AUTH0_AUDIENCE,
   AUTH0_ISSUER,
   AUTH0_JWKS_URI,
+  ENABLE_BRAIN_KEY,
   ENABLE_OAUTH,
   JWKS_FETCH_TIMEOUT_MS,
   MCP_ACCESS_KEY,
 } from "./config.ts";
-import {
-  type AuthFailureReason,
-  type AuthMiddleware,
-  logAuthFailure,
-} from "./auth_audit.ts";
+import { type AuthFailureReason, logAuthFailure } from "./auth_audit.ts";
 import { parseInetCandidate } from "./inet.ts";
 
 // Best-effort source-IP extraction for the audit emitter. Caddy
@@ -187,8 +184,12 @@ export const PROTECTED_RESOURCE_METADATA_URL: string | null = metadata?.url ??
 export const PROTECTED_RESOURCE_METADATA_PATH: string | null = metadata?.path ??
   null;
 
+// Returns false when the x-brain-key door is disabled (MCP_ACCESS_KEY unset) so
+// a presented header is simply ignored on Auth0-only deployments rather than
+// ever matching. Callers also gate on ENABLE_BRAIN_KEY, but the null guard here
+// keeps the type honest and the function safe in isolation.
 function checkBrainKey(provided: string | undefined): boolean {
-  if (!provided) return false;
+  if (!provided || MCP_ACCESS_KEY === null) return false;
   return safeEqual(provided, MCP_ACCESS_KEY);
 }
 
@@ -356,53 +357,38 @@ function extractJsonRpcId(bodyText: string | null): string | number | null {
   return null;
 }
 
-// Auth-failure response.
+// Auth-failure response for `require_auth` (mounted on /mcp + /), which speaks
+// MCP. The shape depends on whether any credential was actually offered:
 //
-// The shape depends on which middleware fired and — for require_auth —
-// whether any credential was actually offered:
+//   - A request that DID try a credential (`invalid_credentials`,
+//     `invalid_brain_key`, `token_validation_failed`) gets HTTP 200 with a
+//     JSON-RPC 2.0 error envelope (code -32001). The application-layer error
+//     keeps the long-lived MCP transport up so strict clients (claude.ai,
+//     Claude Mobile, Codex CLI, Claude Code) can surface the failure and
+//     recover (prompt for a new key, refetch a stale cache) without tearing
+//     down the connection.
 //
-//   - `require_auth` (mounted on /mcp + /) speaks MCP. For a request
-//     that DID try a credential (`invalid_credentials`,
-//     `invalid_brain_key`, `token_validation_failed`) we return HTTP
-//     200 with a JSON-RPC 2.0 error envelope (code -32001). The
-//     application-layer error keeps the long-lived MCP transport up
-//     so strict clients (claude.ai, Claude Mobile, Codex CLI, Claude
-//     Code) can surface the failure and recover (prompt for a new
-//     key, refetch a stale cache) without tearing down the connection.
+//   - A request with NO credential at all (`missing_credentials`) gets HTTP 401
+//     with the same JSON-RPC envelope body. This is the RFC 6750 / MCP-
+//     Authorization-spec "auth required" signal claude.ai's connector-validation
+//     client expects on a pre-OAuth probe; HTTP 200 there made it report the
+//     connector as broken even after a successful OAuth dance. The keep-alive
+//     rationale only applies once a session is established and creds were tried —
+//     a pre-auth probe has no session to preserve, so RFC compliance wins.
+//     WWW-Authenticate still carries the resource_metadata URL on this path.
 //
-//     For a request with NO credential at all (`missing_credentials`)
-//     we return HTTP 401 with the same JSON-RPC envelope body. This
-//     is the RFC 6750 / MCP-Authorization-spec "auth required" signal
-//     claude.ai's connector-validation client expects on a pre-OAuth
-//     probe; receiving HTTP 200 there made it report the connector
-//     as broken even after a successful OAuth dance (see the missing-credentials carve-out below).
-//     The connection-keep-alive rationale only applies once a session
-//     is established and creds were tried — a pre-auth probe has no
-//     session to preserve, so RFC compliance wins. WWW-Authenticate
-//     still carries the resource_metadata URL on this path.
+// All paths emit WWW-Authenticate when OAuth is enabled (OAuth-aware clients use
+// it for AS discovery per RFC 9728), set `Cache-Control: no-store`, and fire the
+// audit row. The envelope's JSON-RPC `error.message` is a neutral
+// "Unauthorized: missing or invalid authentication." — opaque w.r.t. which
+// credential failed (the side-channel we deliberately close). The distinguishing
+// AuthFailureReason is preserved internally via logAuthFailure() for audit.
 //
-//   - `require_brain_key` (mounted on /ready only) is an operator probe
-//     surface, not MCP. Returning HTTP 200 there would break (a) the
-//     observability daily summary, which treats no-auth as part of the 4xx
-//     scan signal, and (b) script callers that gate on status code.
-//     So this path returns a bare HTTP 401 with `{error:"unauthorized"}`.
-//
-// All paths emit WWW-Authenticate when OAuth is enabled (OAuth-aware
-// clients use it for AS discovery per RFC 9728), all set
-// `Cache-Control: no-store`, and all fire the audit row.
-//
-// Both shapes carry a neutral operator-facing string — the envelope's
-// JSON-RPC `error.message` is `"Unauthorized: missing or invalid
-// authentication."`, the bare 401's body is `{error:"unauthorized"}`.
-// They're intentionally NOT identical strings (different body shapes,
-// different transport semantics) but both are opaque w.r.t. which
-// credential failed — that's the side-channel we deliberately
-// close. The distinguishing AuthFailureReason is preserved internally
-// via logAuthFailure() for long-term audit aggregation.
+// (`/ready` no longer goes through this path: it is unauthenticated and kept off
+// the public funnel branch by Caddy — see index.ts and the Caddyfile.)
 async function unauthorized(
   c: Context,
   code: AuthFailureReason,
-  middleware: AuthMiddleware,
 ) {
   if (PROTECTED_RESOURCE_METADATA_URL) {
     c.header(
@@ -420,16 +406,10 @@ async function unauthorized(
   c.header("Cache-Control", "no-store");
   logAuthFailure({
     reason: code,
-    middleware,
+    middleware: "require_auth",
     clientIp: clientIpFor(c),
     path: c.req.path,
   });
-
-  // Operator-facing path → bare HTTP 401 so the 4xx scan
-  // baseline and script-based callers keep working as before.
-  if (middleware === "require_brain_key") {
-    return c.json({ error: "unauthorized" }, 401);
-  }
 
   // MCP path → JSON-RPC envelope. Extract the inbound id so strict-MCP
   // clients can correlate. Safe to consume the body here because
@@ -455,38 +435,28 @@ async function unauthorized(
   );
 }
 
-// Header-only x-brain-key check. Query-string credentials (`?key=...`) leak
-// through proxy logs, server access logs, browser history, and Referrer
-// headers, so they're rejected here even though some upstream OB1 variants
-// accept them. Use for routes that should NEVER be exposed to OAuth callers
-// (e.g., /ready, which reveals internal DB connectivity status).
-export const requireBrainKey: MiddlewareHandler = async (c, next) => {
-  if (checkBrainKey(c.req.header("x-brain-key"))) {
-    await next();
-    return;
-  }
-  return unauthorized(c, "invalid_brain_key", "require_brain_key");
-};
-
-// Accepts EITHER x-brain-key (tailnet path) OR Authorization: Bearer with a
-// valid Auth0 RS256 JWT (OAuth/Funnel path). The reverse proxy in front of
-// this server is expected to have stripped the inapplicable header per
-// socket so an OAuth token can't reach the tailnet path and an x-brain-key
-// can't reach the Funnel path. This middleware is defense-in-depth — it
-// works equally well behind a single-port dev deployment with no proxy.
+// Accepts the x-brain-key door (when enabled, MCP_ACCESS_KEY set) OR
+// Authorization: Bearer with a valid Auth0 RS256 JWT (OAuth door, when enabled).
+// Which doors are live is per-deployment: compose-local enables x-brain-key only;
+// the funnel + Qubes deployments enable OAuth only. Caddy in front of a
+// publicly-reachable deployment does not strip credentials per branch — the
+// server simply ignores a door it wasn't configured for — so this middleware is
+// the load-bearing check; it works equally well behind a single-port deployment
+// with no proxy.
 //
-// Short-circuit policy: an invalid x-brain-key falls through to Bearer
-// instead of 401'ing immediately. A request that carries BOTH headers
-// (only reachable if Caddy isn't stripping — e.g., a dev single-port
-// deployment) authenticates if EITHER is valid. Otherwise an attacker
-// who could attach a stale x-brain-key would prevent a valid Bearer in
-// the same request from being honored.
+// Short-circuit policy: when the x-brain-key door is OFF the header is ignored
+// entirely (falls straight through to Bearer). When it's ON, an invalid
+// x-brain-key still falls through to Bearer rather than 401'ing immediately, so a
+// request carrying BOTH headers authenticates if EITHER is valid — an attacker
+// who could attach a stale x-brain-key can't suppress a valid Bearer in the same
+// request.
 export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> =
   async (c, next) => {
     // x-brain-key fast path — cheaper than JWT crypto, but only short-circuit
-    // on success. Failure falls through to the Bearer attempt below.
+    // on success, and only when the door is enabled. Failure / disabled falls
+    // through to the Bearer attempt below.
     const brainKey = c.req.header("x-brain-key");
-    if (brainKey && checkBrainKey(brainKey)) {
+    if (ENABLE_BRAIN_KEY && brainKey && checkBrainKey(brainKey)) {
       // tag the tailnet door. The shared x-brain-key is not a
       // per-user identity (every tailnet agent uses the same secret), so
       // sub is null here. Downstream capture path stamps these into
@@ -526,14 +496,19 @@ export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> =
     // Operator-facing message is collapsed (no credential-status side-channel), but the distinguishing
     // reason code is preserved for the audit row so we keep granular visibility
     // into which auth path failed.
-    const brainKeyTried = brainKey !== undefined && brainKey !== "";
+    // Only count the x-brain-key as "tried" when the door is enabled — on an
+    // Auth0-only deployment a presented x-brain-key is ignored, so a request
+    // with only that header reads as missing_credentials (the honest signal:
+    // no credential this server accepts was offered).
+    const brainKeyTried = ENABLE_BRAIN_KEY && brainKey !== undefined &&
+      brainKey !== "";
     let code: AuthFailureReason;
     if (brainKeyTried && bearerTried) code = "invalid_credentials";
     else if (brainKeyTried) code = "invalid_brain_key";
     else if (bearerTried) code = "token_validation_failed";
     else code = "missing_credentials";
 
-    return unauthorized(c, code, "require_auth");
+    return unauthorized(c, code);
   };
 
 // Public metadata endpoint per RFC 9728. Wired in index.ts only when

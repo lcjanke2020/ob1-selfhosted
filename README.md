@@ -6,22 +6,22 @@ This repo is one codebase with **three install paths**, from "docker on a laptop
 
 | Install path | What you get | Start here |
 |---|---|---|
-| **Local compose** | Postgres + MCP server + Ollama on one box, loopback-only, shared-key auth. Runs anywhere Docker runs — including a work machine. | [`deploy/compose-local/`](deploy/compose-local/README.md) |
-| **Tailnet / Funnel** | The same stack reachable from every device in your tailnet (`tailscale serve`), and optionally from claude.ai and Claude mobile over the public internet via Tailscale Funnel + Caddy + OAuth (RS256) + an Anthropic egress IP allowlist. | [`deploy/compose-tailnet/`](deploy/compose-tailnet/README.md) |
-| **Qubes OS** | The stack inside a Qubes app qube, with the persistence and SELinux gotchas solved, plus a design for splitting ingress / app / database into separate qubes. | [`deploy/qubes/`](deploy/qubes/README.md) |
+| **Local compose** | Postgres + MCP server + Ollama on one box (bound to loopback only by default — the LAN can't reach it directly), simple shared `x-brain-key` auth (no Auth0 tenant needed). Runs anywhere Docker runs — including a work machine where a tailnet or hosted IdP isn't practical. | [`deploy/compose-local/`](deploy/compose-local/README.md) |
+| **Tailnet / Funnel** | The same stack exposed to claude.ai and Claude mobile over the public internet via Tailscale Funnel + Caddy + OAuth (RS256 JWT) + an Anthropic egress IP allowlist. **OAuth is the only auth door** here — no static key on the public edge. | [`deploy/compose-tailnet/`](deploy/compose-tailnet/README.md) |
+| **Qubes OS** | The stack split across ingress / app / database qubes, with the persistence and SELinux gotchas solved. Also OAuth-only, like the Funnel path. | [`deploy/qubes/`](deploy/qubes/README.md) |
 
 ## What's in the box
 
 - **`thoughts` memory** — capture, semantic search, listing, stats over a pgvector store. Dedupe by content fingerprint. Optional LLM metadata extraction (topics, people, action items, type) via any OpenAI-compatible endpoint.
 - **Session tracking** — five additional MCP tools (`session_capture`, `session_lookup`, `session_search`, `session_list`, `session_update_status`) that store structured *agent work sessions* alongside (not inside) `thoughts`. The OB1 Postgres `sessions` schema is the canonical store; TOML front matter is the interchange format accepted by `session_capture`. See [`skills/session-tracker/`](skills/session-tracker/SKILL.md) for the agent-facing usage contract.
 - **Local embeddings** — Ollama (`nomic-embed-text`, 768-dim by default), in-stack or on another box.
-- **Two auth doors** — a static `x-brain-key` header for tailnet clients, and OAuth 2.1 resource-server validation (RS256 JWT via JWKS) for the public Funnel path. Every write is stamped server-side with the door it came through.
+- **Two auth modes, one per deployment** — a static `x-brain-key` header for the simple single-box local install (also usable over your tailnet if you front it with `tailscale serve`), or OAuth 2.1 resource-server validation (RS256 JWT via JWKS) as the single door on the publicly-reachable Funnel and Qubes deployments. The two doors are independently toggleable and the server refuses to boot with neither, so a public deployment carries no static key. Every write is stamped server-side with the door it came through.
 - **Observability** — Caddy JSON access logs, an auth-failure audit table, a log-ingester sidecar, and a daily rollup with retention, so a public endpoint is *measured*, not guessed at.
-- **Defense in depth** — loopback-only binds, dropped capabilities, read-only rootfs, least-privilege DB roles with a drift assertion, header-strip boundaries at the proxy, fail-fast misconfiguration guards. The full inventory is in [`docs/security-model.md`](docs/security-model.md).
+- **Defense in depth** — loopback-only binds, dropped capabilities, read-only rootfs, least-privilege DB roles with a drift assertion, an Anthropic-egress IP allowlist at the proxy edge (the primary public perimeter, CI-guarded so it can't be silently dropped), credential redaction in access logs, fail-fast misconfiguration guards. The full inventory is in [`docs/security-model.md`](docs/security-model.md).
 
 ## Architecture
 
-Pattern A (tailnet-only) runs postgres + mcp + ollama and fronts the MCP server directly with `tailscale serve`. Pattern B adds Caddy and Tailscale Funnel for public access. Both patterns converge on the same backend; Caddy's single `:9787` listener discriminates tailnet vs Funnel traffic via the `Tailscale-Funnel-Request` header that Tailscale injects only on funnel-originated requests (we call this single-listener design **Pattern Y** throughout the repo).
+The Tailnet/Funnel and Qubes deployments front the MCP server with Caddy + Tailscale Funnel and authenticate with OAuth (RS256 JWT) — the single auth door on any publicly-reachable install. Caddy's single `:9787` listener discriminates Funnel vs tailnet traffic via the `Tailscale-Funnel-Request` header that Tailscale injects only on funnel-originated requests (the single-listener design we call **Pattern Y**); that split scopes the Anthropic IP allowlist to public traffic and keeps the internal `/ready` probe off the public door — it no longer routes credentials, since both branches now carry the same Bearer JWT. (The local single-box install skips Caddy entirely and uses the simple `x-brain-key` door.)
 
 On the [Qubes install path](deploy/qubes/README.md) these roles are split across **three qubes** — a Funnel + Caddy **ingress** qube, an **app** qube (mcp + Ollama), and a **db** qube (Postgres) — reached over a firewall-scoped tailnet ([three-qube-design.md](deploy/qubes/three-qube-design.md)) so that a compromised public edge need not expose the memory store, which lives in its own db qube. The sequence below shows that topology; on a single host the same flow runs over the local docker network.
 
@@ -44,12 +44,12 @@ sequenceDiagram
     end
 
     rect rgba(60, 200, 120, 0.15)
-        Note over CD,DB: Tailnet branch (x-brain-key, no funnel header)
-        CD->>TS: HTTPS :443, x-brain-key header
+        Note over CD,DB: Tailnet branch (Bearer JWT, no funnel header)
+        CD->>TS: HTTPS :443, Authorization Bearer JWT
         TS->>CA: HTTP 127.0.0.1:9787 (no Tailscale-Funnel-Request)
-        Note right of CA: at @tailnet, strip Authorization
-        CA->>OB: HTTP :8787 over tailnet (ingress to app), x-brain-key
-        OB->>OB: requireAuth (safeEqual vs MCP_ACCESS_KEY)
+        Note right of CA: at @tailnet, forward Authorization (no strip); allowlist not applied
+        CA->>OB: HTTP :8787 over tailnet (ingress to app), Bearer
+        OB->>OB: requireAuth (jwtVerify RS256, keyset cached)
         OB->>OL: embed (capture / search)
         OB->>DB: tool exec over tailnet (app to db)
         DB-->>OB: rows / embedding
@@ -62,7 +62,7 @@ sequenceDiagram
         Note over CL,DB: Funnel branch (OAuth Bearer, with funnel header)
         CL->>TS: HTTPS :443, Authorization Bearer JWT
         TS->>CA: HTTP 127.0.0.1:9787 (Tailscale-Funnel-Request injected)
-        Note right of CA: at @anthropic_funnel needs funnel header AND Anthropic IP 160.79.104.0/21, else 403, strip x-brain-key
+        Note right of CA: at @anthropic_funnel needs funnel header AND Anthropic IP 160.79.104.0/21, else 403
         CA->>OB: HTTP :8787 over tailnet (ingress to app), Bearer
         OB->>A0: fetch JWKS (first request, then cached)
         A0-->>OB: keyset
@@ -114,7 +114,7 @@ Then point any MCP client at `http://127.0.0.1:8787/mcp` with your `x-brain-key`
 
 ## Trust model, in one paragraph
 
-Anyone who can present your `x-brain-key` from inside the perimeter (loopback, or your tailnet ACLs in the tailnet install) gets full read/write to your memory store — treat the key like a database password. On the Funnel path, anyone on the public internet with a valid RS256 JWT from your OAuth tenant gets the same — identity rests on your tenant's user management, and an IP allowlist restricts the door to Anthropic's published egress range before auth is even attempted. There is no per-user row-level security yet; the JWT `sub` is recorded on every write but is informational. The longer version, including what each container is allowed to do after a hypothetical compromise, is in [`docs/security-model.md`](docs/security-model.md).
+On the **local single-box install**, anyone who can present your `x-brain-key` (loopback, your LAN, or your tailnet if you front it with `tailscale serve`) gets full read/write to your memory store — treat the key like a database password. On any **Funnel or Qubes** deployment there is no static key at all: anyone on the public internet with a valid RS256 JWT from your OAuth tenant gets full read/write — identity rests on your tenant's user management, and the Anthropic-egress IP allowlist restricts the door to Anthropic's published range before auth is even attempted. There is no per-user row-level security yet; the JWT `sub` is recorded on every write but is informational. The longer version, including what each container is allowed to do after a hypothetical compromise, is in [`docs/security-model.md`](docs/security-model.md).
 
 ## Status & roadmap
 

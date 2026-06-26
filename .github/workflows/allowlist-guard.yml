@@ -1,0 +1,81 @@
+# Allowlist guard: fails the build if the Anthropic IP allowlist disappears
+# from the funnel Caddyfile.
+#
+# The `client_ip 160.79.104.0/21` matcher on the funnel branch is the only
+# network-layer control between the public internet and the MCP server — see
+# the banner in deploy/compose-tailnet/Caddyfile. A refactor that drops it
+# would silently expose the server to the whole internet (OAuth still gates
+# writes, but the IP perimeter would be gone). This check makes that an
+# unmissable CI failure instead of a quiet regression.
+#
+# To intentionally change the range (Anthropic publishes a new CIDR), update
+# BOTH the Caddyfile matchers and the regexes below in the same PR.
+#
+# The check asserts the ACTIVE matcher directives, not just the literal string:
+# the CIDR also appears in the Caddyfile's banner/comment lines, so a plain
+# `grep -F` would stay green even if someone deleted the real @anthropic_funnel
+# allow / @non_anthropic_funnel deny lines and left the comments behind. We
+# strip comment lines first, then require both the allow and the deny directive.
+
+name: Allowlist guard
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/compose-tailnet/Caddyfile'
+      - '.github/workflows/allowlist-guard.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/compose-tailnet/Caddyfile'
+      - '.github/workflows/allowlist-guard.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  allowlist-guard:
+    name: Anthropic IP allowlist present
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head safely
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          fetch-depth: 1
+
+      - name: Assert the allowlist matchers are present and active
+        run: |
+          set -u
+          CADDYFILE=deploy/compose-tailnet/Caddyfile
+          if [ ! -f "$CADDYFILE" ]; then
+            echo "::error::$CADDYFILE is missing — the funnel perimeter config is gone"
+            exit 1
+          fi
+
+          # Drop comment lines (first non-blank char is '#') so the banner and
+          # the "extend inline" example — which both contain the CIDR — can't
+          # satisfy the check. Only an active Caddy directive counts.
+          ACTIVE="$(grep -vE '^[[:space:]]*#' "$CADDYFILE")"
+
+          # @anthropic_funnel allow: an active `client_ip <CIDR>` directive that
+          # is NOT the `not client_ip` deny line.
+          ALLOW_RE='^[[:space:]]*client_ip[[:space:]]+160\.79\.104\.0/21([[:space:]]|$)'
+          # @non_anthropic_funnel deny: the `not client_ip <CIDR>` 403 matcher.
+          DENY_RE='^[[:space:]]*not[[:space:]]+client_ip[[:space:]]+160\.79\.104\.0/21([[:space:]]|$)'
+
+          fail=0
+          if ! printf '%s\n' "$ACTIVE" | grep -qE "$ALLOW_RE"; then
+            echo "::error::Active '@anthropic_funnel' allow directive (client_ip 160.79.104.0/21) not found in $CADDYFILE."
+            fail=1
+          fi
+          if ! printf '%s\n' "$ACTIVE" | grep -qE "$DENY_RE"; then
+            echo "::error::Active '@non_anthropic_funnel' deny directive (not client_ip 160.79.104.0/21) not found in $CADDYFILE."
+            fail=1
+          fi
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::The Anthropic IP allowlist is the only network-layer perimeter on the public funnel. Do not remove it. If Anthropic published a new range, update the Caddyfile matchers AND the regexes in this workflow together. (A CIDR in a comment line does NOT satisfy this check.)"
+            exit 1
+          fi
+          echo "OK: active Anthropic IP allowlist matchers present in $CADDYFILE"

@@ -36,7 +36,6 @@ const ENV_KEYS = [
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
   "OBS_AUTH_EVENTS_ENABLED",
-  "PATTERN_B",
   "JWKS_FETCH_TIMEOUT_MS",
 ];
 
@@ -73,8 +72,9 @@ Deno.test("probeJwksReachability — negative cases", async (t) => {
   Deno.env.delete("AUTH0_ISSUER");
   Deno.env.delete("AUTH0_JWKS_URI");
   Deno.env.delete("AUTH0_AUDIENCE");
-  Deno.env.delete("PATTERN_B");
   Deno.env.set("DB_PASSWORD", "test-password");
+  // MCP_ACCESS_KEY set so the "at least one auth door" guard is satisfied while
+  // OAuth is disabled (which is what skips the module-load probe).
   Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
 

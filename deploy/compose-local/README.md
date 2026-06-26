@@ -60,8 +60,10 @@ You should see `open-brain-homelab listening on :8787`. The Postgres init script
 # Public health endpoint (no auth, doesn't touch the DB):
 curl http://127.0.0.1:8787/health
 
-# Auth-gated readiness probe (confirms the DB is reachable):
-curl http://127.0.0.1:8787/ready -H "x-brain-key: <your MCP_ACCESS_KEY>"
+# Readiness probe (confirms the DB is reachable). Unauthenticated, but
+# internal-only — on a funnel deployment Caddy returns 404 for /ready on the
+# public branch, so it stays reachable from loopback/LAN/in-qube only:
+curl http://127.0.0.1:8787/ready
 ```
 
 ### 5. Connect a client

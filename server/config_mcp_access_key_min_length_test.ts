@@ -7,9 +7,9 @@
 // `password`, `dev`, `test`) must throw at module load with a clear,
 // operator-actionable error citing `openssl rand -hex 32`.
 //
-// Why a separate test file: see config_pattern_b_test.ts header comment.
-// Deno caches dynamic imports per worker subprocess; one-throw-per-file
-// is the contract we need.
+// Why a separate test file: Deno caches dynamic imports per worker
+// subprocess, so a module that throws at load can only be observed once —
+// one-throw-per-file is the contract we need.
 //
 // Run with: `deno task test` (or `deno test --allow-env --allow-net=127.0.0.1
 // config_mcp_access_key_min_length_test.ts`).
@@ -23,7 +23,6 @@ const ENV_KEYS = [
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
   "OBS_AUTH_EVENTS_ENABLED",
-  "PATTERN_B",
 ];
 
 Deno.test(
@@ -33,13 +32,13 @@ Deno.test(
       ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
     );
 
-    // Force Pattern A so this test isn't gated on the Pattern B fail-fast
-    // (which would mask the min-length throw if we left OAuth env partially
-    // set from a developer's shell).
+    // Delete AUTH0_* so the min-length throw isn't masked by partial-OAuth env
+    // left in a developer's shell. The min-length check fires while evaluating
+    // MCP_ACCESS_KEY, before the "at least one auth door" guard, so a short key
+    // still throws the min-length error even with OAuth off.
     Deno.env.delete("AUTH0_ISSUER");
     Deno.env.delete("AUTH0_JWKS_URI");
     Deno.env.delete("AUTH0_AUDIENCE");
-    Deno.env.delete("PATTERN_B");
     Deno.env.set("DB_PASSWORD", "test-password");
     Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
     // The weak literal the ticket calls out. 8 chars < 32 → must throw.

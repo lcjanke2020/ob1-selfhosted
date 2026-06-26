@@ -1,29 +1,23 @@
-// Tests for the `requireAuth` and `requireBrainKey` middlewares in Pattern A
-// (OAuth disabled). Run with `deno task test`.
+// Tests for the `requireAuth` middleware with the x-brain-key door ENABLED
+// (MCP_ACCESS_KEY set) and OAuth DISABLED — the `compose-local` deployment mode.
+// Run with `deno task test`.
 //
-// auth failure shape now depends on which middleware
-// fired and (for requireAuth) whether any credential was offered:
-//   - requireAuth + creds-tried-but-invalid → JSON-RPC 2.0 error envelope
-//     (HTTP 200, code -32001) so strict MCP hosts don't tear the
-//     established transport down.
-//   - requireAuth + missing_credentials → HTTP 401 with the same JSON-RPC
-//     envelope body. Spec-compliant OAuth-discovery signal for claude.ai's
-//     MCP connector validator on the pre-OAuth probe (missing-credentials 401).
-//   - requireBrainKey (operator probe on /ready) → bare HTTP 401 with
-//     {error:"unauthorized"} so the 4xx-scan baseline and
-//     script-based callers keep working.
-// Both shapes are intentionally NOT identical strings (envelope's
-// JSON-RPC message and bare-401's `error` field differ verbatim), but
-// both are opaque w.r.t. which credential failed — that's the
-// side-channel we deliberately close. The granular
-// AuthFailureReason is preserved internally via the audit
-// row regardless of which response shape went out.
+// auth failure shape depends on whether any credential was offered:
+//   - creds-tried-but-invalid → JSON-RPC 2.0 error envelope (HTTP 200,
+//     code -32001) so strict MCP hosts don't tear the established transport down.
+//   - missing_credentials → HTTP 401 with the same JSON-RPC envelope body.
+//     Spec-compliant OAuth-discovery signal for claude.ai's MCP connector
+//     validator on the pre-OAuth probe (missing-credentials 401).
+// The operator-facing message is a single neutral string regardless of which
+// credential failed — that's the side-channel we deliberately close. The
+// granular AuthFailureReason is preserved internally via the audit row.
 //
 // Hermetic: snapshots + restores DB_PASSWORD / MCP_ACCESS_KEY / AUTH0_* /
 // AUTH_BODY_READ_TIMEOUT_MS so the suite is not order-/machine-dependent.
 // Explicitly deletes AUTH0_* before importing auth.ts so a dev/CI host
 // that has those set in its shell doesn't accidentally enable OAuth
-// (which would break the Pattern A expectations).
+// (which would change the expectations here). The x-brain-key door being OFF
+// (a presented header ignored) is covered separately in auth_oauth_only_test.ts.
 
 import { assertEquals, assertFalse } from "jsr:@std/assert@1";
 import { Hono, type MiddlewareHandler } from "hono";
@@ -118,35 +112,17 @@ async function assertEnvelopeBody(
   assertEquals(body.id, expectedId);
 }
 
-// Asserts the bare HTTP 401 shape returned by requireBrainKey (operator
-// probe surface — /ready). Distinct from the MCP envelope so the observability layer's
-// 4xx-scan baseline and script callers behave as before.
-async function assertBare401(res: Response): Promise<void> {
-  assertEquals(res.status, 401, "bare 401, not the MCP envelope");
-  assertEquals(
-    res.headers.get("content-type")?.startsWith("application/json"),
-    true,
-    "bare 401 content-type is JSON",
-  );
-  assertEquals(
-    res.headers.get("cache-control"),
-    "no-store",
-    "bare 401 carries no-store for consistency with envelope",
-  );
-  const body = await res.json();
-  assertEquals(body.error, "unauthorized");
-}
-
-Deno.test("requireAuth + requireBrainKey (Pattern A — OAuth disabled)", async (t) => {
+Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-local mode)", async (t) => {
   // ─── Setup ─────────────────────────────────────────────────────────────
   const origEnv = new Map<string, string | undefined>(
     ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
   );
 
-  // Force Pattern A regardless of host env. config.ts evaluates ENABLE_OAUTH
-  // from these at module load; if any of the AUTH0_* are set in the shell,
-  // ENABLE_OAUTH becomes true and the Pattern A assertions below would all
-  // fail in confusing ways.
+  // Force the x-brain-key-only mode regardless of host env. config.ts evaluates
+  // ENABLE_OAUTH from these at module load; if any AUTH0_* are set in the shell,
+  // ENABLE_OAUTH becomes true and the OAuth-disabled assertions below would fail
+  // in confusing ways. MCP_ACCESS_KEY is set, so the "at least one auth door"
+  // guard is satisfied.
   Deno.env.delete("AUTH0_ISSUER");
   Deno.env.delete("AUTH0_JWKS_URI");
   Deno.env.delete("AUTH0_AUDIENCE");
@@ -161,8 +137,9 @@ Deno.test("requireAuth + requireBrainKey (Pattern A — OAuth disabled)", async 
   // dynamic-import below.
   Deno.env.set("AUTH_BODY_READ_TIMEOUT_MS", TEST_BODY_READ_TIMEOUT_MS);
 
-  const { requireAuth, requireBrainKey, PROTECTED_RESOURCE_METADATA_URL } =
-    await import("./auth.ts");
+  const { requireAuth, PROTECTED_RESOURCE_METADATA_URL } = await import(
+    "./auth.ts"
+  );
 
   try {
     await t.step(
@@ -296,123 +273,6 @@ Deno.test("requireAuth + requireBrainKey (Pattern A — OAuth disabled)", async 
           headers: { "x-brain-key": wrong },
         });
         await assertUnauthorizedEnvelope(res, null);
-      },
-    );
-
-    // ─── requireBrainKey (operator probe → bare 401 on auth-fail) ─────
-    await t.step("requireBrainKey: valid → 200", async () => {
-      const app = makeApp(requireBrainKey);
-      const res = await app.request("/", { headers: { "x-brain-key": KEY } });
-      assertEquals(res.status, 200);
-    });
-
-    await t.step(
-      "requireBrainKey: invalid → bare 401 (preserves 4xx scan baseline)",
-      async () => {
-        const app = makeApp(requireBrainKey);
-        const res = await app.request("/", {
-          headers: { "x-brain-key": "wrong" },
-        });
-        await assertBare401(res);
-      },
-    );
-
-    await t.step(
-      "requireBrainKey: Bearer is NOT a substitute (header-only middleware)",
-      async () => {
-        // requireBrainKey is mounted on /ready in production — should never
-        // accept an OAuth token, even if the token would be valid for
-        // requireAuth. Operator probe → bare 401 (not envelope).
-        const app = makeApp(requireBrainKey);
-        const res = await app.request("/", {
-          headers: { "authorization": "Bearer would-be-valid-elsewhere" },
-        });
-        await assertBare401(res);
-      },
-    );
-
-    await t.step("requireBrainKey: missing key → bare 401", async () => {
-      const app = makeApp(requireBrainKey);
-      const res = await app.request("/");
-      await assertBare401(res);
-    });
-
-    await t.step(
-      "requireBrainKey: bare 401 returns without consuming the request body",
-      async () => {
-        // Direct check: instrument the stream's pull() to flip a flag
-        // when (and only when) the body is actually demanded. Per the
-        // WHATWG Streams spec, pull() is invoked when a reader calls
-        // read() against an empty buffer — so `bodyRead === true`
-        // after the response means readBodyForJsonRpcId (or anything
-        // else) called body.getReader().read().
-        //
-        // highWaterMark: 0 disables the runtime's eager pre-fill — pull
-        // is only called on explicit read demand, not on stream creation.
-        // Without this, an HWM=1 default could pre-pull a chunk and
-        // produce a false-positive bodyRead.
-        //
-        // Race against a 1 s timeout so a regression that hangs (or
-        // settles slowly via AUTH_BODY_READ_TIMEOUT_MS) fails CI fast
-        // rather than passing on wall-clock luck. Earlier round used
-        // wall-clock timing alone — that's flaky on loaded runners AND
-        // doesn't prove what we want; this version does both.
-        const app = makeApp(requireBrainKey);
-        let bodyRead = false;
-        const stallStream = new ReadableStream({
-          pull(_controller) {
-            bodyRead = true;
-            // Park forever. If a regression DID demand the body, we
-            // want the race-against-timeout below to be the failure
-            // path, not a successful "id: null" envelope coming back
-            // after the body-read timeout cancels the reader.
-            return new Promise(() => {});
-          },
-        }, { highWaterMark: 0 });
-        const req = new Request("http://test/", {
-          method: "POST",
-          headers: {
-            "x-brain-key": "wrong",
-            "content-type": "application/json",
-          },
-          body: stallStream,
-          // Required by the Fetch standard whenever the body is a stream.
-          // deno-lint-ignore no-explicit-any
-          duplex: "half" as any,
-        } as RequestInit);
-        // Capture the timer handle so the winning side of the race can
-        // clear it. Without the clearTimeout the setTimeout fires (or is
-        // pending) after the test step returns, which deno's leak
-        // sanitizer flags as a leak — failing the whole Pattern A suite
-        // even when the body-read check itself passed.
-        // ReturnType<typeof setTimeout> (not `number`): on newer Deno
-        // releases setTimeout is typed to return a `Timeout`, so a bare
-        // `number` annotation fails type-check. clearTimeout below accepts
-        // either, so this stays correct across Deno versions.
-        let timerHandle: ReturnType<typeof setTimeout> | undefined;
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          timerHandle = setTimeout(
-            () =>
-              reject(
-                new Error(
-                  "requireBrainKey did not respond in <1s — likely body-read regression",
-                ),
-              ),
-            1000,
-          );
-        });
-        let res: Response;
-        try {
-          res = await Promise.race([app.fetch(req), timeoutPromise]);
-        } finally {
-          if (timerHandle !== undefined) clearTimeout(timerHandle);
-        }
-        await assertBare401(res);
-        assertEquals(
-          bodyRead,
-          false,
-          "requireBrainKey must not invoke pull() on the request body stream — operator path is bare 401",
-        );
       },
     );
 

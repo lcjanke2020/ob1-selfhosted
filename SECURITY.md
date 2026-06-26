@@ -12,7 +12,7 @@ This policy covers the contents of this repository: the MCP server (`server/`), 
 
 ## What counts
 
-- Auth bypasses on either door (x-brain-key or OAuth), including header-strip or allowlist circumvention
+- Auth bypasses on either door (x-brain-key or OAuth), including Anthropic IP-allowlist circumvention, or an `x-brain-key` being accepted on an OAuth-only deployment
 - Privilege escalation across the database roles (`openbrain_app` / `openbrain_ingester` / `openbrain_readonly`)
 - Credential leakage into logs, error responses, or the observability tables
 - CI workflows exploitable from a pull request
