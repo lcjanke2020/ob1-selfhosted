@@ -89,12 +89,22 @@
 
 	# Process-level error/info log (operational, not access).
 	#
-	# format filter (NOT plain json): reverse_proxy WARN entries serialize the
-	# FULL request header map — incl. X-Brain-Key / Authorization — to stderr,
-	# which Docker persists to the on-disk json-file log. The per-handle access
-	# `format filter` loggers below do NOT cover this default process logger, so
-	# without these deletes a presented credential lands in `docker logs` in
-	# cleartext. Mirror the access-log redaction field-for-field.
+	# format filter (NOT plain json): reverse_proxy error/WARN entries serialize
+	# the request header map to stderr (which Docker persists to the on-disk
+	# json-file log). Caddy's default json encoder auto-redacts the STANDARD
+	# sensitive headers (Authorization, Cookie, Set-Cookie, Proxy-Authorization)
+	# but NOT a custom one like `X-Brain-Key` — so a presented x-brain-key lands
+	# in `docker logs` in cleartext (verified: a `reverse_proxy` dial failure logs
+	# `request.headers` with X-Brain-Key intact under plain json). The per-handle
+	# access `format filter` loggers below don't cover this default process
+	# logger, so delete the same field set here: X-Brain-Key is the load-bearing
+	# one; the rest are explicit belt-and-suspenders.
+	#
+	# Scope: request headers only. Credentials ride in headers on this path (OAuth
+	# Bearer / x-brain-key), never in the URL, so the unfiltered `request>uri` is
+	# not a credential sink. Like the access-log filter, this does NOT reach a
+	# `reverse_proxy` entry's upstream *response* headers (a trusted internal
+	# upstream that returns no secrets) — re-check both when bumping Caddy.
 	log {
 		output stderr
 		format filter {
