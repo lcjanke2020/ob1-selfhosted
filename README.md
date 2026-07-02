@@ -47,7 +47,7 @@ sequenceDiagram
         Note over CD,DB: Tailnet branch (Bearer JWT, no funnel header)
         CD->>TS: HTTPS :443, Authorization Bearer JWT
         TS->>CA: HTTP 127.0.0.1:9787 (no Tailscale-Funnel-Request)
-        Note right of CA: at @tailnet, forward Authorization (no strip); allowlist not applied
+        Note right of CA: at @tailnet, forward Authorization (no strip) — allowlist not applied
         CA->>OB: HTTP :8787 over tailnet (ingress to app), Bearer
         OB->>OB: requireAuth (jwtVerify RS256, keyset cached)
         OB->>OL: embed (capture / search)
