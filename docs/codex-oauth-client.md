@@ -15,8 +15,9 @@ session capture all ride on the OAuth flow. It was verified with **Codex CLI 0.1
 tailnet-connected Linux host.
 
 > **Scope: Auth0, as we run it today.** This documents the one OAuth provider and flow this project
-> actually operates — **Auth0**, with a Native/public PKCE client. The server validates any RS256
-> issuer ([funnel-mcp-perimeter.md](funnel-mcp-perimeter.md)) and Codex speaks standard OAuth 2.1 +
+> actually operates — **Auth0**, with a Native/public PKCE client. The server isn't Auth0-specific:
+> it validates RS256 JWTs against the single issuer and audience *you* configure
+> ([funnel-mcp-perimeter.md](funnel-mcp-perimeter.md)), and Codex speaks standard OAuth 2.1 +
 > PKCE, so other OIDC providers and other registration flows almost certainly work — we just don't
 > run them, so we can't document them firsthand. **If you wire Codex to another provider or flow and
 > want to contribute it back, a PR is welcome.**
@@ -129,10 +130,19 @@ codex mcp add openbrain \
   --oauth-client-id <oauth-native-client-id>
 ```
 
-The first attempt saves the server entry and prints an authorization URL. Read **only** its decoded
+`codex mcp add` only writes the server entry — it does **not** start OAuth. Begin the flow
+explicitly:
+
+```bash
+codex mcp login openbrain
+```
+
+That prints an authorization URL (and tries to open a browser). Read **only** its decoded
 `redirect_uri`, add that **exact full URI** to the Auth0 Native application's **Allowed Callback
 URLs**, then press **Ctrl-C** to stop this first login and release the fixed callback port. Only
-after that process exits, retry with `codex mcp login openbrain`.
+after that process exits, run `codex mcp login openbrain` **again** to complete authorization. (If
+your Codex build happens to surface the authorization URL at `codex mcp add` time, the same
+`redirect_uri` applies — the two-step `add` → `login` sequence is robust either way.)
 
 > Don't paste the full authorization URL into issues or docs — it also carries transient OAuth
 > `state` and PKCE values.
@@ -145,8 +155,9 @@ codex mcp add openbrain \
   --url https://homebox.tailnet-name.ts.net/mcp
 ```
 
-That may start login immediately; otherwise run `codex mcp login openbrain`. The authorization
-request includes `offline_access` when Auth0 advertises it.
+As with the preferred route, `mcp add` only writes config — start login explicitly with
+`codex mcp login openbrain`. The authorization request includes `offline_access` when Auth0
+advertises it.
 
 Codex derives `resource` from protected-resource discovery. Supplying the same value again in
 `oauth_resource` makes Codex 0.144.1 emit **two** `resource` parameters, which Auth0 may reject with
@@ -265,9 +276,10 @@ is not the refresh signal. Restore the normal access-token lifetime after any sh
   enabled on that application. For a DCR client, `no connections enabled for the client` means the
   login connection wasn't promoted to Domain Level. Open Redirect Protection hides this in the browser.
 - **Auth0 log says `Missing required parameter: response_type` with `qs: {}`** — the browser opened
-  only the tenant URL, not the full authorization URL. Reopen the exact URL Codex printed; on WSL
-  hosts where Windows interop is disabled, write the full URL into a temporary Windows `.url` shortcut
-  rather than copying a wrapped link.
+  only the tenant URL, not the full authorization URL — a wrapped or line-broken copy from the
+  terminal can drop the query string entirely. Reopen the exact, single-line URL Codex printed; on
+  WSL hosts where Windows interop is disabled, write the full URL into a temporary Windows `.url`
+  shortcut rather than copying a wrapped link.
 - **No refresh token / browser login required after expiry** — confirm the login requested
   `offline_access`, the application permits the `refresh_token` grant, and the refresh-token policy
   hasn't expired or been revoked.
