@@ -41,8 +41,10 @@ tailnet-connected Linux host.
   see [security-model.md](security-model.md).
 - This does **not** authorize cloud-hosted Codex workers. Keep public cloud ingress disabled until
   the OAuth path and an automated source-range control are independently verified. If you ever do
-  allowlist a cloud provider's egress, **generate the CIDRs from that provider's official current
-  source** — never hard-code a static range into this repo or the Caddyfile.
+  allowlist a cloud provider's egress, **source the CIDRs from that provider's official published
+  feed and keep them current** — the hazard is a stale, hand-copied list, not the allowlist pattern
+  itself (the Funnel edge already allowlists Anthropic's published egress range in the Caddyfile the
+  same way).
 - Never put access tokens, refresh tokens, authorization codes, client secrets, or the contents of
   Codex's OAuth credential store into git, issue comments, shell transcripts, or test artifacts.
 
@@ -227,15 +229,17 @@ lookup, search, list, status-update) before importing anything. See
 4. Look the ID up and verify title, branch, summary, next actions, blockers, and artifacts.
 5. Re-submit the same payload **including `id`**; success must report an *update*, not a second record.
 
-Server-side provenance should show the OAuth door and a non-null subject. Query the session row by its
-integer ID (the similarly named [thought-capture check](../deploy/compose-tailnet/README.md#observability-pattern-b)
-reads a different store and does **not** verify `session_capture`):
+Server-side provenance should show the OAuth door and a non-null subject. Run this read-only query as
+the `openbrain_readonly` role against your OB1 Postgres — reach it however your install path does
+(e.g. `docker compose exec -T postgres psql -U openbrain_readonly -d openbrain` from a compose
+deployment directory, or `psql` directly on the Qubes db qube). The similarly named
+[thought-capture check](../deploy/compose-tailnet/README.md#observability-pattern-b) reads a
+different store and does **not** verify `session_capture`:
 
-```bash
-docker compose exec -T postgres psql -U openbrain_readonly -d openbrain -c \
-  "SELECT id, title, source, source_node, updated_at
-   FROM sessions.session
-   WHERE id = <session-id>;"
+```sql
+SELECT id, title, source, source_node, updated_at
+FROM sessions.session
+WHERE id = <session-id>;
 ```
 
 `source = 'funnel'` here is an **authentication-door** label, not a proof of network path: every
