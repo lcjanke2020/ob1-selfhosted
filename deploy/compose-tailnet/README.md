@@ -77,6 +77,8 @@ claude.ai → Settings → Connectors → Add custom connector → URL `https://
 
 If the connector fails after a successful consent screen, the most common cause is a client_secret paste mismatch — see the failure-mode catalog in [`docs/funnel-mcp-perimeter.md`](../../docs/funnel-mcp-perimeter.md).
 
+> **Connecting a local Codex CLI instead?** That's a different client shape — a public PKCE client with no secret, authorized per Codex account, per machine. See [`docs/codex-oauth-client.md`](../../docs/codex-oauth-client.md).
+
 ## Observability (Pattern B)
 
 Once Funnel is live, the box has a public surface for the first time — this stack measures it instead of guessing.

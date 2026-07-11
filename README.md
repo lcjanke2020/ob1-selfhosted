@@ -93,7 +93,7 @@ sequenceDiagram
 ├── scripts/                   Daily observability summary, existing-deployment upgrades
 ├── skills/session-tracker/    Agent-facing skill: how to use the session_* tools
 ├── docs/                      Security model, Funnel-as-MCP-perimeter guide,
-│                              "why not Cloudflare?" design rationale
+│                              "why not Cloudflare?" rationale, Codex-over-OAuth client setup
 └── .github/workflows/         CI (deno tests, --allow-env drift guard) + leak gate
 ```
 
