@@ -58,7 +58,10 @@ tailnet-connected Linux host.
    ```
 
    The first should return `401` with a `WWW-Authenticate: Bearer` challenge; the second should name
-   the exact MCP URL as `resource` and your Auth0 tenant as its authorization server.
+   the exact MCP URL as `resource` and your Auth0 tenant as its authorization server. When OpenBrain
+   has no resource-specific scopes, the metadata must **omit** `scopes_supported`; RFC 9728 forbids
+   publishing a metadata parameter with zero values, and an empty array can suppress the client's
+   configured OIDC scopes.
 
 2. Use a Codex release whose CLI exposes `--oauth-client-id` (and `--oauth-resource`) on
    `codex mcp add`:
@@ -77,6 +80,10 @@ tailnet-connected Linux host.
 
 3. In **Auth0 Dashboard → Settings → Advanced**, enable **Resource Parameter Compatibility Profile**
    so Auth0 treats the standards-based OAuth `resource` parameter as the API audience.
+
+4. In the OpenBrain **Auth0 API → Settings**, enable **Allow Offline Access**. Auth0 returns a refresh
+   token only when the API permits offline access, the client permits the `refresh_token` grant, and
+   the authorization request includes the `offline_access` scope.
 
 ## Choose a client-registration route
 
@@ -132,6 +139,19 @@ codex mcp add openbrain \
   --oauth-client-id <oauth-native-client-id>
 ```
 
+Add the refresh-capable OIDC scopes to the server entry that command created:
+
+```toml
+[mcp_servers.openbrain]
+url = "https://homebox.tailnet-name.ts.net/mcp"
+scopes = ["openid", "offline_access"]
+```
+
+OpenBrain currently has no resource-specific authorization scopes, so its protected-resource
+metadata omits `scopes_supported` and Codex uses these configured scopes. Do not publish
+`scopes_supported = []`: besides violating RFC 9728's zero-value rule, Codex 0.144.1 can persist an
+empty granted scope and receive no refresh token from that flow.
+
 `codex mcp add` only writes the server entry — it does **not** start OAuth. Begin the flow
 explicitly:
 
@@ -157,9 +177,8 @@ codex mcp add openbrain \
   --url https://homebox.tailnet-name.ts.net/mcp
 ```
 
-As with the preferred route, `mcp add` only writes config — start login explicitly with
-`codex mcp login openbrain`. The authorization request includes `offline_access` when Auth0
-advertises it.
+As with the preferred route, add `scopes = ["openid", "offline_access"]` to the generated server
+entry, then start login explicitly with `codex mcp login openbrain`.
 
 Codex derives `resource` from protected-resource discovery. Supplying the same value again in
 `oauth_resource` makes Codex 0.144.1 emit **two** `resource` parameters, which Auth0 may reject with
@@ -179,10 +198,12 @@ require every static-credential source to be **absent**: no bearer-token env var
 preferred route, inspect the public client ID in `config.toml` without reading the credential store:
 
 ```bash
-rg -n -A 1 '^\[mcp_servers\.openbrain\.oauth\]$' ~/.codex/config.toml
+rg -n -A 3 '^\[mcp_servers\.openbrain\]$|^\[mcp_servers\.openbrain\.oauth\]$' \
+  ~/.codex/config.toml
 ```
 
-You should see `client_id = "<oauth-native-client-id>"` — a client ID is public, not a secret.
+You should see `scopes = ["openid", "offline_access"]` on the server and
+`client_id = "<oauth-native-client-id>"` in its OAuth table. A client ID is public, not a secret.
 
 If login was canceled or failed after the entry was added, retry it:
 
@@ -284,9 +305,11 @@ is not the refresh signal. Restore the normal access-token lifetime after any sh
   terminal can drop the query string entirely. Reopen the exact, single-line URL Codex printed; on
   WSL hosts where Windows interop is disabled, write the full URL into a temporary Windows `.url`
   shortcut rather than copying a wrapped link.
-- **No refresh token / browser login required after expiry** — confirm the login requested
-  `offline_access`, the application permits the `refresh_token` grant, and the refresh-token policy
-  hasn't expired or been revoked.
+- **No refresh token / browser login required after expiry** — confirm the deployed protected-resource
+  metadata omits (rather than emptily advertises) `scopes_supported`, the Codex server entry requests
+  `openid` + `offline_access`, the Auth0 API enables Allow Offline Access, the application permits the
+  `refresh_token` grant, and the refresh-token policy hasn't expired or been revoked. An existing
+  access-only credential must be reauthorized once after correcting those settings.
 - **Current thread has no OpenBrain tools** — open a fresh Codex thread after configuration and
   confirm the personal skill symlink resolves.
 - **`Address already in use` during callback** — another process owns Codex's selected loopback port.
