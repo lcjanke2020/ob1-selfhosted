@@ -96,7 +96,10 @@ qube ends up with no network-facing listener.
 ## 2. App-qube host forwarder (socat)
 
 The container can't issue qrexec itself, so a small `socat` on the **app-qube
-host** bridges a local TCP port to the qrexec call.
+host** bridges a local TCP port to the qrexec call. (`socat` isn't in every
+template — install it in the app qube's **template**: `/usr` is
+template-provided, so a package installed in the app qube itself vanishes on
+reboot.)
 
 `/rw/config/ob1-ollama-forward.sh`:
 
@@ -175,8 +178,10 @@ if ! nft list chain ip qubes custom-input 2>/dev/null | grep -q 'dport 11434'; t
 fi
 ```
 
-The qubes-firewall hook re-runs this script on every firewall reload/boot, so
-the rule is self-healing. Two scope caveats:
+`qubes-firewall` runs this script when its worker starts — boot or a service
+restart. An ordinary firewall **reload** reapplies the QubesDB rules but does
+*not* re-run the user script, so treat this as boot-time persistence (the rule,
+once added, stays in the chain for the qube's uptime). Two scope caveats:
 
 - **`br-*` matches every docker user-defined bridge on the qube**, not just this
   project's — fine on a single-purpose app qube, where the OB1 bridge is the
@@ -202,18 +207,20 @@ if [ -f /rw/config/ob1-ollama-forward.service ]; then
   cp /rw/config/ob1-ollama-forward.service /etc/systemd/system/
   systemctl daemon-reload
   systemctl enable --now ob1-ollama-forward.service
-fi
 
-# Mirror of the step-3 firewall rule (idempotent) — covers qubes where the
-# qubes-firewall service flag is off and the user-script hook never runs.
-if ! nft list chain ip qubes custom-input 2>/dev/null | grep -q 'dport 11434'; then
-  nft add rule ip qubes custom-input iifname "br-*" tcp dport 11434 ct state new accept
+  # Mirror of the step-3 firewall rule (idempotent) — covers qubes where the
+  # qubes-firewall service flag is off and the user-script hook never runs.
+  # Inside the same guard, so parking the transport (removing the unit file)
+  # doesn't leave a dangling accept.
+  if ! nft list chain ip qubes custom-input 2>/dev/null | grep -q 'dport 11434'; then
+    nft add rule ip qubes custom-input iifname "br-*" tcp dport 11434 ct state new accept
+  fi
 fi
 ```
 
-(`Restart=always` lets the unit converge once docker is up; wherever the
-qubes-firewall hook runs, the step-3 rule also re-applies on every firewall
-reload.)
+(`Restart=always` lets the unit converge once docker is up; where the
+qubes-firewall hook does run, it re-applies the step-3 rule at boot as well —
+this mirror just removes the service-flag dependency.)
 
 ## 5. Wire it to OB1
 
@@ -244,12 +251,16 @@ model instead of dropping metadata. See
   proves the path, but the extractor actually POSTs `/chat/completions` with a
   strict `response_format: {type: "json_schema", …}`
   ([`server/metadata.ts`](../../server/metadata.ts)); a server can list the
-  model yet reject that request shape, after which every capture silently
-  classifies via `FALLBACK_CHAT_*` — thought content leaves the box, the
-  outcome this transport exists to prevent. Capture a test thought and check
-  the mcp container logs for `[metadata] classified via primary endpoint`; a
-  `primary endpoint failed` line followed by `classified via FALLBACK endpoint`
-  means the primary rejected the request shape.
+  model yet reject that request shape, after which every capture falls through
+  to `FALLBACK_CHAT_*` — thought content leaves the box, the outcome this
+  transport exists to prevent. Captures still succeed and the extractor *does*
+  warn on every fallback classification, but only in the container logs — so
+  check them deliberately: capture a test thought and look for
+  `[metadata] classified via primary endpoint`. A `primary endpoint failed`
+  line followed by `classified via FALLBACK endpoint` proves only that the
+  primary failed — the same line covers a rejected request shape, connectivity
+  errors, timeouts, non-2xx responses, and unparseable output alike; check the
+  model server's own logs to tell which.
 - This plumbing exists only to keep content on a **loopback-only** GPU qube. A
   reachable OpenAI-compatible server (local or over the tailnet) used directly
   as `CHAT_API_BASE` needs none of it.

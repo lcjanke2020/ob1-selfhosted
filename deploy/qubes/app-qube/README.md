@@ -30,10 +30,11 @@ to `rc.local` after the docker start, or run it by hand after a reboot.
 
 ## Offloading metadata classification (`CHAT_*`) to a GPU qube
 
-The `mcp` server's optional metadata extractor (`CHAT_API_BASE`) calls any
-OpenAI-compatible `/chat/completions` endpoint, so it routes with equal ease to another
-machine on your network running a local LLM, or (with `CHAT_API_KEY`) to any hosted
-OpenAI-compatible provider — neither needs plumbing. To instead keep thought content on a
+The `mcp` server's optional metadata extractor (`CHAT_API_BASE`) calls an
+OpenAI-compatible `/chat/completions` endpoint — any server that also supports the strict
+`json_schema` response format it sends — so it routes with equal ease to another machine
+on your network running a local LLM, or (with `CHAT_API_KEY`) to a hosted
+OpenAI-compatible provider; neither needs plumbing. To instead keep thought content on a
 **GPU qube on this same Qubes host** whose model server is bound to loopback only (no
 network-facing listener — no LAN/tailnet bind, no sshd), see
 [`../gpu-offload-transport.md`](../gpu-offload-transport.md): a host-side `socat` forwarder +
