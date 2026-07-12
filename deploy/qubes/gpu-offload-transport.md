@@ -1,13 +1,24 @@
 # Offloading metadata classification to a GPU qube (qrexec ConnectTCP)
 
-> **Optional pattern.** OB1's metadata extractor (`CHAT_API_BASE`) calls any
-> OpenAI-compatible `/chat/completions` endpoint. The simplest offload is an
-> external GPU box reached over the tailnet — that needs **none** of the
-> plumbing below. This doc is for the harder case: a **GPU qube on the same
-> Qubes host** whose model server is bound to **loopback only** (no tailnet/LAN
-> listener — smallest attack surface). Reaching that from the app qube's
-> containerised `mcp` needs a host-side forwarder plus a qrexec `ConnectTCP`
-> transport.
+> **One configuration option among three — pick deliberately.** OB1's metadata
+> extractor (`CHAT_API_BASE`) calls any OpenAI-compatible `/chat/completions`
+> endpoint, so it routes with equal ease to:
+>
+> 1. **Another machine on your network running a local LLM** (LM Studio,
+>    ollama, …) — just set `CHAT_API_BASE` to its URL; no plumbing.
+> 2. **Any hosted OpenAI-compatible provider** with an API key — same, plus
+>    `CHAT_API_KEY`; thought content leaves your network.
+> 3. **A GPU qube on the same Qubes host** whose model server is bound to
+>    **loopback only** — no tailnet/LAN listener, no sshd, zero inbound
+>    surface on the serving qube. This is the only option that needs the
+>    plumbing below (a host-side forwarder + a qrexec `ConnectTCP` transport),
+>    and it is **not a good fit for everyone**: it trades setup effort and a
+>    console-only administration model for the smallest possible attack
+>    surface. For the rationale — what the zero-listener posture buys, the
+>    GPU-passthrough privilege argument, and the honest tradeoffs (no sshd
+>    means no remote administration without purpose-built tooling) — see
+>    [Serving From a Qube With Zero Inbound Surface](https://github.com/lcjanke2020/qubes-os-explorations/blob/master/qrexec-connecttcp-service-qube.md)
+>    in the qubes-os-explorations repo. This doc is the OB1-specific how-to.
 
 ```
 mcp container ──(compose-bridge gateway :11434)──▶ socat  [app qube host]
@@ -21,14 +32,19 @@ ollama port; substitute your server's port throughout.
 
 ---
 
-## Status: parked
+## Degradation, disabling, re-enabling
 
 This transport is **optional and easy to disable**. If the GPU qube becomes
 unavailable, leave the safety knobs below in place (`autostart=no` on the policy
-+ a stopped forwarder) and OB1 degrades cleanly to its `FALLBACK_CHAT_*`
-endpoint — captures keep working, no qrexec call fires. Re-enable by starting
-the GPU qube and the forwarder; no code change is required (the extractor is
-endpoint-agnostic).
++ the forwarder) and OB1 degrades cleanly to its `FALLBACK_CHAT_*` endpoint —
+captures keep working, and the halted qube is never started as a side effect.
+This degradation path is field-verified: with the GPU qube halted, a capture's
+primary attempt fails fast (the forwarder accepts the TCP connection, the qrexec
+call is refused, the connection closes — no timeout burn), the fallback
+classifies in the same request, and the GPU qube stays halted. Re-enable by
+starting the GPU qube; no code or config change is required (the extractor is
+endpoint-agnostic). To park the transport entirely, additionally stop + disable
+the forwarder unit and remove its rc.local restage lines.
 
 ---
 
