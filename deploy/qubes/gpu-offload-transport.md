@@ -24,7 +24,7 @@
 
 ```
 mcp container ──(compose-bridge gateway :11434)──▶ socat  [app qube host]
-                                                     └─ qrexec ConnectTCP+11434 ─▶ <gpu-qube> 127.0.0.1:11434
+                                                     └─ qubes.ConnectTCP+11434 (qrexec) ─▶ <gpu-qube> 127.0.0.1:11434
 ```
 
 Placeholders below: `<app-qube>` = the qube running this compose project,
@@ -48,7 +48,9 @@ call is refused, the connection closes — no timeout burn), the fallback
 classifies in the same request, and the GPU qube stays halted. Re-enable by
 starting the GPU qube; no code or config change is required (the extractor is
 endpoint-agnostic). To park the transport entirely, additionally stop + disable
-the forwarder unit and remove its rc.local restage lines.
+the forwarder unit, remove its rc.local restage lines, and drop the step-3
+accept stanza from `qubes-firewall-user-script` — otherwise the firewall hook
+re-adds the (now-listenerless) `:11434` accept at each boot.
 
 ---
 
@@ -210,8 +212,9 @@ if [ -f /rw/config/ob1-ollama-forward.service ]; then
 
   # Mirror of the step-3 firewall rule (idempotent) — covers qubes where the
   # qubes-firewall service flag is off and the user-script hook never runs.
-  # Inside the same guard, so parking the transport (removing the unit file)
-  # doesn't leave a dangling accept.
+  # Inside the same guard so a parked transport doesn't re-add the accept from
+  # here; the step-3 stanza still does where the hook runs — remove it too when
+  # parking (see the degradation section).
   if ! nft list chain ip qubes custom-input 2>/dev/null | grep -q 'dport 11434'; then
     nft add rule ip qubes custom-input iifname "br-*" tcp dport 11434 ct state new accept
   fi
