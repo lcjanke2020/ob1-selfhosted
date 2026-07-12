@@ -9,15 +9,15 @@
 > 2. **Any hosted OpenAI-compatible provider** with an API key — same, plus
 >    `CHAT_API_KEY`; thought content leaves your network.
 > 3. **A GPU qube on the same Qubes host** whose model server is bound to
->    **loopback only** — no tailnet/LAN listener, no sshd, zero inbound
->    surface on the serving qube. This is the only option that needs the
+>    **loopback only** — no network-facing listener on the serving qube: no
+>    tailnet/LAN bind, no sshd. This is the only option that needs the
 >    plumbing below (a host-side forwarder + a qrexec `ConnectTCP` transport),
 >    and it is **not a good fit for everyone**: it trades setup effort and a
->    console-only administration model for the smallest possible attack
->    surface. For the rationale — what the zero-listener posture buys, the
->    GPU-passthrough privilege argument, and the honest tradeoffs (no sshd
->    means no remote administration without purpose-built tooling) — see
->    [Serving From a Qube With Zero Inbound Surface](https://github.com/lcjanke2020/qubes-os-explorations/blob/master/qrexec-connecttcp-service-qube.md)
+>    console-only administration model for the smallest network exposure. For
+>    the rationale — what the no-listener posture buys, the GPU-passthrough
+>    privilege argument, and the honest tradeoffs (no sshd means no remote
+>    administration without purpose-built tooling) — see
+>    [Serving From a Qube With No Network-Facing Listener](https://github.com/lcjanke2020/qubes-os-explorations/blob/master/qrexec-connecttcp-service-qube.md)
 >    in the qubes-os-explorations repo. This doc is the OB1-specific how-to.
 
 ```

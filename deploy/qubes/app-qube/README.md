@@ -34,13 +34,13 @@ The `mcp` server's optional metadata extractor (`CHAT_API_BASE`) calls any
 OpenAI-compatible `/chat/completions` endpoint, so it routes with equal ease to another
 machine on your network running a local LLM, or (with `CHAT_API_KEY`) to any hosted
 OpenAI-compatible provider — neither needs plumbing. To instead keep thought content on a
-**GPU qube on this same Qubes host** whose model server is bound to loopback only (zero
-inbound surface — no LAN/tailnet listener, no sshd), see
+**GPU qube on this same Qubes host** whose model server is bound to loopback only (no
+network-facing listener — no LAN/tailnet bind, no sshd), see
 [`../gpu-offload-transport.md`](../gpu-offload-transport.md): a host-side `socat` forwarder +
 qrexec `ConnectTCP` transport, with the firewall/`custom-input`, persistence, and
 `autostart=no` safety notes. It is a deliberate tradeoff, not a default — the why and the
 costs are covered in
-[Serving From a Qube With Zero Inbound Surface](https://github.com/lcjanke2020/qubes-os-explorations/blob/master/qrexec-connecttcp-service-qube.md).
+[Serving From a Qube With No Network-Facing Listener](https://github.com/lcjanke2020/qubes-os-explorations/blob/master/qrexec-connecttcp-service-qube.md).
 
 ## Credentials (per-qube split)
 
