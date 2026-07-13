@@ -142,6 +142,13 @@ docker compose exec -T postgres psql -U postgres -d openbrain < ../../db/04-sess
 docker compose build mcp && docker compose up -d
 ```
 
+The full `up -d` matters on the upgrade path: it creates services newly defined since the
+last deploy (e.g. `log-ingester`) as well as recreating changed ones.
+
+For an MCP code-only rollout with no schema or edge change, run
+`docker compose build mcp && docker compose up -d --no-deps mcp` instead. This recreates the
+MCP container without restarting Postgres, Ollama, Caddy, or the log ingester.
+
 **Edits to existing init files** (a tightened grant, a new role) silently *don't* reach an already-initialized DB. The drift check is read-only and safe to run any time:
 
 ```bash
