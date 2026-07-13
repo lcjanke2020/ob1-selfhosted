@@ -514,24 +514,11 @@ export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> =
 // Public metadata endpoint per RFC 9728. Wired in index.ts only when
 // ENABLE_OAUTH is true — no point advertising an authorization server when
 // we don't accept its tokens.
-export function buildProtectedResourceMetadata(
-  resource: string,
-  issuer: string,
-) {
-  return {
-    resource,
-    authorization_servers: [issuer],
-    bearer_methods_supported: ["header"],
-  };
-}
-
 export function protectedResourceMetadata(c: Context) {
-  // RFC 9728 §3.2 requires metadata parameters with zero values to be
-  // omitted. OpenBrain has no resource-specific authorization scopes, so do
-  // not publish an empty `scopes_supported` array: clients such as Codex may
-  // otherwise treat the empty list as authoritative and suppress configured
-  // OIDC scopes such as `offline_access`.
-  return c.json(
-    buildProtectedResourceMetadata(AUTH0_AUDIENCE, AUTH0_ISSUER),
-  );
+  return c.json({
+    resource: AUTH0_AUDIENCE,
+    authorization_servers: [AUTH0_ISSUER],
+    bearer_methods_supported: ["header"],
+    scopes_supported: [],
+  });
 }
