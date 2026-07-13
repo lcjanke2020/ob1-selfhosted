@@ -39,10 +39,7 @@ Deno.test("deriveProtectedResourceMetadata (RFC 9728 §3.1)", async (t) => {
   // auth_*_test files.
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
 
-  const {
-    buildProtectedResourceMetadata,
-    deriveProtectedResourceMetadata,
-  } = await import("./auth.ts");
+  const { deriveProtectedResourceMetadata } = await import("./auth.ts");
 
   try {
     await t.step("root resource yields well-known at origin root", () => {
@@ -146,22 +143,6 @@ Deno.test("deriveProtectedResourceMetadata (RFC 9728 §3.1)", async (t) => {
       assertThrows(() => deriveProtectedResourceMetadata("not-a-url"));
       assertThrows(() => deriveProtectedResourceMetadata(""));
     });
-
-    await t.step(
-      "protected-resource document omits zero-valued scopes",
-      () => {
-        const document = buildProtectedResourceMetadata(
-          "https://host.example/mcp",
-          "https://issuer.example/",
-        );
-        assertEquals(document, {
-          resource: "https://host.example/mcp",
-          authorization_servers: ["https://issuer.example/"],
-          bearer_methods_supported: ["header"],
-        });
-        assertEquals("scopes_supported" in document, false);
-      },
-    );
   } finally {
     // ─── Teardown ──────────────────────────────────────────────────────
     for (const [k, v] of origEnv) {

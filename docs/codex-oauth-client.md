@@ -11,9 +11,8 @@ pasted into a custom connector). This doc covers the other client we run: a **lo
 The procedure below registers a local Codex process as an OpenBrain client over OAuth. It
 deliberately configures **no** `x-brain-key`, **no** bearer-token environment variable, and **no**
 client secret — initial authorization, credential reuse across fresh sessions, tool discovery, and
-session capture all ride on the OAuth flow. The DCR route was verified on 2026-07-11 and the
-preferred pre-registered Native route, including refresh-token issuance and an 11-tool MCP listing,
-was verified on 2026-07-12 with **Codex CLI 0.144.1** on tailnet-connected Linux/WSL hosts.
+session capture all ride on the OAuth flow. It was verified with **Codex CLI 0.144.1** on a
+tailnet-connected Linux host.
 
 > **Scope: Auth0, as we run it today.** This documents the one OAuth provider and flow this project
 > actually operates — **Auth0**, with a Native/public PKCE client. The server isn't Auth0-specific:
@@ -59,10 +58,7 @@ was verified on 2026-07-12 with **Codex CLI 0.144.1** on tailnet-connected Linux
    ```
 
    The first should return `401` with a `WWW-Authenticate: Bearer` challenge; the second should name
-   the exact MCP URL as `resource` and your Auth0 tenant as its authorization server. When OpenBrain
-   has no resource-specific scopes, the metadata must **omit** `scopes_supported`; RFC 9728 forbids
-   publishing a metadata parameter with zero values, and an empty array can suppress the client's
-   configured OIDC scopes.
+   the exact MCP URL as `resource` and your Auth0 tenant as its authorization server.
 
 2. Use a Codex release whose CLI exposes `--oauth-client-id` (and `--oauth-resource`) on
    `codex mcp add`:
@@ -82,10 +78,6 @@ was verified on 2026-07-12 with **Codex CLI 0.144.1** on tailnet-connected Linux
 3. In **Auth0 Dashboard → Settings → Advanced**, enable **Resource Parameter Compatibility Profile**
    so Auth0 treats the standards-based OAuth `resource` parameter as the API audience.
 
-4. In the OpenBrain **Auth0 API → Settings**, enable **Allow Offline Access**. Auth0 returns a refresh
-   token only when the API permits offline access, the client permits the `refresh_token` grant, and
-   the authorization request includes the `offline_access` scope.
-
 ## Choose a client-registration route
 
 ### Preferred — pre-registered Native (public PKCE) client
@@ -96,19 +88,13 @@ Create an Auth0 **Application** with:
 - Grants: **Authorization Code + PKCE** and **Refresh Token**.
 - The intended Database / Social / Enterprise login connection enabled **for this application only**.
 
-Create a separate application for Codex rather than repurposing a Claude custom-connector
-application: the latter is normally a confidential Regular Web Application that authenticates with
-a client secret, while local Codex is a public client that cannot safely hold one. Copy the value
-explicitly labeled **Client ID** from the Native application's Settings page, not Auth0's
-24-character internal Application ID, and never configure Codex with a Client Secret.
-
 Use its **public client ID** with Codex and register the exact fixed loopback callback described
 below. This route needs **no DCR** and **no Domain-Level connection** promotion. See Auth0's
 [public-application guidance](https://auth0.com/docs/get-started/applications/confidential-and-public-applications).
 
-> This is the preferred and live-validated route. It keeps the Codex callback, revocation, consent,
-> and audit boundary separate from confidential clients while requiring no DCR window or
-> Domain-Level connection promotion.
+> This route follows documented Codex 0.144.1 behavior; the live validation for this repo exercised
+> the DCR fallback below. If you run the pre-registered route, a PR confirming it (and any wrinkles)
+> is welcome.
 
 ### Validated fallback — temporary DCR
 
@@ -132,8 +118,6 @@ that table):
 
 ```toml
 mcp_oauth_callback_port = 4321
-# On headless Linux/WSL without a usable Secret Service/keyring:
-mcp_oauth_credentials_store = "file"
 ```
 
 Codex appends a deterministic, server-specific callback ID, so the final URI looks like
@@ -147,19 +131,6 @@ codex mcp add openbrain \
   --url https://homebox.tailnet-name.ts.net/mcp \
   --oauth-client-id <oauth-native-client-id>
 ```
-
-Add the refresh-capable OIDC scopes to the server entry that command created:
-
-```toml
-[mcp_servers.openbrain]
-url = "https://homebox.tailnet-name.ts.net/mcp"
-scopes = ["openid", "offline_access"]
-```
-
-OpenBrain currently has no resource-specific authorization scopes, so its protected-resource
-metadata omits `scopes_supported` and Codex uses these configured scopes. Do not publish
-`scopes_supported = []`: besides violating RFC 9728's zero-value rule, Codex 0.144.1 can persist an
-empty granted scope and receive no refresh token from that flow.
 
 `codex mcp add` only writes the server entry — it does **not** start OAuth. Begin the flow
 explicitly:
@@ -178,13 +149,6 @@ your Codex build happens to surface the authorization URL at `codex mcp add` tim
 > Don't paste the full authorization URL into issues or docs — it also carries transient OAuth
 > `state` and PKCE values.
 
-On headless or remote WSL, Codex may print the URL without opening a Windows browser. Keep the login
-process running and open the **exact current URL** from a local WSL/Windows session; Windows can
-normally reach WSL2's `127.0.0.1` listener through localhost forwarding. Do not reuse a URL from a
-canceled attempt. If an agent harness hides the URL, hand it off through an owner-only (`0600`)
-temporary file and delete that file immediately after the callback; never relay it through chat,
-issues, logs, or a committed artifact.
-
 For the **temporary-DCR fallback**, complete its Auth0 prerequisites first, omit `--oauth-client-id`,
 and let Codex register the public PKCE client:
 
@@ -193,8 +157,9 @@ codex mcp add openbrain \
   --url https://homebox.tailnet-name.ts.net/mcp
 ```
 
-As with the preferred route, add `scopes = ["openid", "offline_access"]` to the generated server
-entry, then start login explicitly with `codex mcp login openbrain`.
+As with the preferred route, `mcp add` only writes config — start login explicitly with
+`codex mcp login openbrain`. The authorization request includes `offline_access` when Auth0
+advertises it.
 
 Codex derives `resource` from protected-resource discovery. Supplying the same value again in
 `oauth_resource` makes Codex 0.144.1 emit **two** `resource` parameters, which Auth0 may reject with
@@ -214,12 +179,10 @@ require every static-credential source to be **absent**: no bearer-token env var
 preferred route, inspect the public client ID in `config.toml` without reading the credential store:
 
 ```bash
-rg -n -A 3 '^\[mcp_servers\.openbrain\]$|^\[mcp_servers\.openbrain\.oauth\]$' \
-  ~/.codex/config.toml
+rg -n -A 1 '^\[mcp_servers\.openbrain\.oauth\]$' ~/.codex/config.toml
 ```
 
-You should see `scopes = ["openid", "offline_access"]` on the server and
-`client_id = "<oauth-native-client-id>"` in its OAuth table. A client ID is public, not a secret.
+You should see `client_id = "<oauth-native-client-id>"` — a client ID is public, not a secret.
 
 If login was canceled or failed after the entry was added, retry it:
 
@@ -233,15 +196,14 @@ the generated `Codex` third-party application; that registration is what permits
 and refresh without reopening DCR.
 
 Codex stores MCP OAuth credentials outside `config.toml`. On Linux without a usable
-Secret Service/keyring, set `mcp_oauth_credentials_store = "file"` explicitly as shown above; Codex
-then uses `~/.codex/.credentials.json`. Confirm that file is owner-only (`0600`) **without printing
-it**:
+Secret Service/keyring it falls back to `~/.codex/.credentials.json`; confirm that file is owner-only
+(`0600`) **without printing it**:
 
 ```bash
 stat -c '%a %U:%G %n' ~/.codex/.credentials.json
 ```
 
-## Skill and process-restart discovery
+## Skill and fresh-session discovery
 
 Install the canonical session workflow as a personal skill by **symlink**, rather than copying it and
 creating a second source of truth:
@@ -252,10 +214,10 @@ ln -s /path/to/ob1-selfhosted/skills/session-tracker ~/.codex/skills/session-tra
 ```
 
 Adjust the source path to wherever your `ob1-selfhosted` checkout lives; if the link already resolves
-there, leave it. Restart the Codex CLI process after adding the MCP server or skill; resuming the same
-conversation in that new process is sufficient. Confirm `session-tracker` is listed and that
-OpenBrain exposes the `session_*` tools (capture, lookup, search, list, status-update) before
-importing anything. See
+there, leave it. Restart Codex or open a **fresh thread** after adding the MCP server or the skill —
+the current thread does not pick up newly configured MCP tools retroactively. In the fresh thread,
+confirm `session-tracker` is listed and that OpenBrain exposes the `session_*` tools (capture,
+lookup, search, list, status-update) before importing anything. See
 [`skills/session-tracker/SKILL.md`](../skills/session-tracker/SKILL.md) for the usage contract.
 
 ## Smoke test and staged-session import
@@ -291,10 +253,8 @@ header-discrimination model is in [funnel-mcp-perimeter.md](funnel-mcp-perimeter
 
 ## Restart and refresh verification
 
-Close and restart the Codex CLI process, then repeat a read-only lookup. Resuming the same conversation
-is sufficient; a brand-new conversation is not required because the new process reloads MCP
-configuration and tools. This proves persisted credential and tool-discovery behavior, but **not**
-refresh-token renewal on its own. For renewal:
+Close Codex completely, start a fresh session, and repeat a read-only lookup — that proves persisted
+credential and tool-discovery behavior, but **not** refresh-token renewal on its own. For renewal:
 wait until the access token has expired (or use a shortened Auth0 test lifetime), leave the refresh
 token intact, then look up again. After the old access token expires and Codex silently renews,
 confirm a **`sertft`** event (successful exchange of Refresh Token for Access Token; see Auth0's
@@ -321,19 +281,14 @@ is not the refresh signal. Restore the normal access-token lifetime after any sh
   login connection wasn't promoted to Domain Level. Open Redirect Protection hides this in the browser.
 - **Auth0 log says `Missing required parameter: response_type` with `qs: {}`** — the browser opened
   only the tenant URL, not the full authorization URL — a wrapped or line-broken copy from the
-  terminal can drop the query string entirely. Reopen the exact, single-line URL from the current
-  login attempt. On headless/remote WSL, use the owner-only temporary-file handoff above rather than
-  a wrapped chat link, and delete it immediately after the callback.
-- **No refresh token / browser login required after expiry** — confirm the deployed protected-resource
-  metadata omits (rather than emptily advertises) `scopes_supported`, the Codex server entry requests
-  `openid` + `offline_access`, the Auth0 API enables Allow Offline Access, the application permits the
-  `refresh_token` grant, and the refresh-token policy hasn't expired or been revoked. An existing
-  access-only credential must be reauthorized once after correcting those settings.
-- **Current thread has no OpenBrain tools** — restart the Codex CLI so it reloads MCP configuration;
-  resuming the same conversation is sufficient. Then confirm the personal skill symlink resolves.
-- **Logout says it failed to delete OAuth tokens from the keyring** — on headless Linux/WSL, set the
-  top-level `mcp_oauth_credentials_store = "file"` and retry. If changing config is undesirable, use
-  `codex mcp logout -c 'mcp_oauth_credentials_store="file"' openbrain` for that operation.
+  terminal can drop the query string entirely. Reopen the exact, single-line URL Codex printed; on
+  WSL hosts where Windows interop is disabled, write the full URL into a temporary Windows `.url`
+  shortcut rather than copying a wrapped link.
+- **No refresh token / browser login required after expiry** — confirm the login requested
+  `offline_access`, the application permits the `refresh_token` grant, and the refresh-token policy
+  hasn't expired or been revoked.
+- **Current thread has no OpenBrain tools** — open a fresh Codex thread after configuration and
+  confirm the personal skill symlink resolves.
 - **`Address already in use` during callback** — another process owns Codex's selected loopback port.
   Stop the stale login or pick another fixed port, update Auth0's exact callback URL, and retry; never
   expose the callback listener on a non-loopback address.
