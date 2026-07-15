@@ -76,10 +76,10 @@ tailnet IP ([`../db-qube/pg_hba.snippet.conf`](../db-qube/pg_hba.snippet.conf)).
 **Install on this qube** (as the regular user, from the repo checkout):
 
 ```sh
+mkdir -p ~/.config/systemd/user
 cp scripts/funnel_monitor.sh ~/funnel_monitor.sh && chmod +x ~/funnel_monitor.sh
 cp deploy/qubes/ingress-qube/funnel-monitor.env.example ~/.config/funnel-monitor.env
 chmod 0600 ~/.config/funnel-monitor.env && $EDITOR ~/.config/funnel-monitor.env
-mkdir -p ~/.config/systemd/user
 cp deploy/qubes/ingress-qube/funnel-monitor.service ~/.config/systemd/user/
 cp deploy/qubes/ingress-qube/funnel-monitor.timer   ~/.config/systemd/user/
 systemctl --user daemon-reload
