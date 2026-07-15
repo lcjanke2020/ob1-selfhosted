@@ -24,8 +24,26 @@ fi
 # shellcheck disable=SC1090
 set -a; . "$ENV_FILE"; set +a
 
+# Fail loud on a broken env file, with the actual problem named (a missing
+# var would otherwise surface as the generic probe-failure alert).
+for req in DB_HOST OPENBRAIN_MONITOR_PASSWORD; do
+  if [ -z "${!req:-}" ]; then
+    echo "[$ts] !!! ALERT: $req missing/empty in $ENV_FILE" >> "$LOG"; exit 0
+  fi
+done
+# A malformed threshold must not silently disable the volume alarm: the
+# bash integer comparison below would error to stderr (the journal, not our
+# log) and leave alert=0. Alert and fall back to the default instead.
+if ! [[ "$VOLUME_THRESHOLD" =~ ^[0-9]+$ ]]; then
+  echo "[$ts] !!! ALERT: invalid VOLUME_THRESHOLD='$VOLUME_THRESHOLD' in $ENV_FILE — using 200" >> "$LOG"
+  VOLUME_THRESHOLD=200
+fi
+
 q() {  # scalar query -> stdout; empty on failure (stderr -> ERRLOG)
-  PGCONNECT_TIMEOUT=5 PGPASSWORD="$OPENBRAIN_MONITOR_PASSWORD" \
+  # PGCONNECT_TIMEOUT bounds the handshake; statement_timeout bounds a hung
+  # backend after connect — without it a stuck query outlives the 5-min timer.
+  PGCONNECT_TIMEOUT=5 PGOPTIONS='-c statement_timeout=15s' \
+  PGPASSWORD="$OPENBRAIN_MONITOR_PASSWORD" \
   psql -w -h "$DB_HOST" -p "${DB_PORT:-5432}" -U openbrain_monitor \
        -d "${POSTGRES_DB:-openbrain}" -tA -c "$1" 2>>"$ERRLOG"
 }

@@ -14,6 +14,11 @@
 # run the equivalent CREATE/ALTER ROLE by hand over the loopback socket or
 # from the app qube as superuser — see deploy/qubes/db-qube/README.md.
 #
+# Note the credential deliberately lives in TWO places: the compose .env
+# value here only PROVISIONS the role; the running monitor reads its own
+# copy from ~/.config/funnel-monitor.env (0600, host-side). If you rotate
+# one, update the other.
+#
 # Run from your compose directory (deploy/compose-local or deploy/compose-tailnet) with .env present.
 # Idempotent and reconciling — safe to re-run, and the "role exists"
 # branch runs `ALTER ROLE ... WITH PASSWORD` so the role's password is
@@ -71,7 +76,7 @@ if [[ -n "$existing" ]]; then
     <<-'EOSQL'
     ALTER ROLE openbrain_monitor WITH LOGIN PASSWORD :'monitor_password';
 EOSQL
-  echo "[upgrade-monitor-role] openbrain_monitor role exists; password reconciled with .env"
+  echo "[upgrade-monitor-role] openbrain_monitor role exists; password reconciled with $(pwd)/.env"
   exit 0
 fi
 
@@ -82,5 +87,5 @@ docker compose exec -T postgres \
   CREATE ROLE openbrain_monitor LOGIN PASSWORD :'monitor_password';
 EOSQL
 
-echo "[upgrade-monitor-role] created openbrain_monitor role"
+echo "[upgrade-monitor-role] created openbrain_monitor role (compose project: $(pwd))"
 echo "[upgrade-monitor-role] next: re-run db/02-observability.sql to apply monitor grants"

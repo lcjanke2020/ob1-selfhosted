@@ -80,7 +80,8 @@ cp scripts/funnel_monitor.sh ~/funnel_monitor.sh && chmod +x ~/funnel_monitor.sh
 cp deploy/qubes/ingress-qube/funnel-monitor.env.example ~/.config/funnel-monitor.env
 chmod 0600 ~/.config/funnel-monitor.env && $EDITOR ~/.config/funnel-monitor.env
 mkdir -p ~/.config/systemd/user
-cp deploy/qubes/ingress-qube/funnel-monitor.{service,timer} ~/.config/systemd/user/
+cp deploy/qubes/ingress-qube/funnel-monitor.service ~/.config/systemd/user/
+cp deploy/qubes/ingress-qube/funnel-monitor.timer   ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now funnel-monitor.timer
 ```
@@ -88,7 +89,9 @@ systemctl --user enable --now funnel-monitor.timer
 These are **user** units — linger must be on or the timer stops firing without an open
 shell session; see the [Qubes README](../README.md) § user timers. Watch it work with
 `tail -f ~/funnel_monitor.log` (a `vol=N auth_failures=N` line every 5 minutes; probe
-errors accumulate in `~/funnel_monitor.err`).
+errors accumulate in `~/funnel_monitor.err`). Both files append indefinitely — at 5-minute
+cadence that's slow, but on a long-lived qube add a logrotate rule (or an occasional
+truncate) for the pair.
 
 Future note: if the funnel logs ever move into this qube's parked local postgres
 ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)), the volume query's target

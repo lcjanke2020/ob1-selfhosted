@@ -65,6 +65,9 @@ services:
       # Optional Pattern B role for the log-ingester sidecar.
       # Empty for Pattern A; 00-roles.sh skips role creation when unset.
       OPENBRAIN_INGESTER_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD:-}
+      # Optional SELECT-only role for the host-side funnel monitor
+      # (scripts/funnel_monitor.sh). Same contract: empty → skipped.
+      OPENBRAIN_MONITOR_PASSWORD: ${OPENBRAIN_MONITOR_PASSWORD:-}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # Init files are mounted individually rather than the whole ../../db

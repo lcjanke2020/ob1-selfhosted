@@ -142,6 +142,10 @@ docker compose exec -T postgres psql -U postgres -d openbrain < ../../db/04-sess
 docker compose build mcp && docker compose up -d
 ```
 
+Optional: the SELECT-only role for the host-side funnel monitor follows the same shape —
+set `OPENBRAIN_MONITOR_PASSWORD` in `.env`, run `bash ../../scripts/upgrade-add-monitor-role.sh`,
+then re-apply `db/02-observability.sql` as above for its grants.
+
 The full `up -d` matters on the upgrade path: it creates services newly defined since the
 last deploy (e.g. `log-ingester`) as well as recreating changed ones.
 

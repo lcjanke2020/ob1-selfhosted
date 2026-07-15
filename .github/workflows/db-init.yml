@@ -145,8 +145,8 @@ jobs:
           # thought content (03-grants-assertion.sql asserts this in the
           # catalog; this exercises it end-to-end).
           if docker exec -e PGPASSWORD="$OPENBRAIN_MONITOR_PASSWORD" pgci \
-            psql -h 127.0.0.1 -U openbrain_monitor -d "$POSTGRES_DB" -tAc \
-            "SELECT 1 FROM thoughts LIMIT 1" 2>/dev/null; then
+            psql -h 127.0.0.1 -U openbrain_monitor -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT 1 FROM public.thoughts LIMIT 1" >/dev/null 2>&1; then
             echo "::error::openbrain_monitor can read public.thoughts — SELECT should be denied"
             exit 1
           fi

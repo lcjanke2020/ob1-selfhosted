@@ -58,36 +58,102 @@ $$ LANGUAGE plpgsql;
 --   (a) NO privilege of any kind on `public.thoughts` — a popped edge must
 --       not be able to read (or touch) memories with the monitor credential;
 --   (b) read-only on its two metadata tables: SELECT on funnel_access_log
---       and mcp_auth_events, and no INSERT/UPDATE/DELETE on either.
+--       and mcp_auth_events, and nothing else.
+--
+-- Enforcement is deliberately belt-and-braces, because each mechanism has a
+-- blind spot the other covers:
+--   * direct-ACL scans (aclexplode over pg_class.relacl + pg_attribute.attacl)
+--     see EVERY privilege type the server knows — including TRUNCATE,
+--     REFERENCES, TRIGGER, PG17's MAINTAIN, and whatever a future major adds —
+--     and column-level grants, without this file naming (and lagging) the
+--     privilege list. Blind spot: privileges inherited via role membership.
+--   * has_table_privilege()/has_any_column_privilege() check EFFECTIVE
+--     privileges (inheritance included). Blind spot: only the privilege types
+--     named in the call.
+--   * a membership check closes the inheritance route generically: the
+--     monitor is designed as a standalone LOGIN role, so ANY membership is
+--     drift (e.g. GRANT openbrain_readonly TO openbrain_monitor would hand it
+--     thoughts without touching an ACL this file scans).
 DO $$
+DECLARE
+  tbl  text;
+  bad  text;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'openbrain_monitor') THEN
     RAISE NOTICE 'openbrain_monitor role missing; skipping monitor grants assertion';
     RETURN;
   END IF;
-  IF has_table_privilege('openbrain_monitor', 'public.thoughts', 'SELECT')
-      OR has_table_privilege('openbrain_monitor', 'public.thoughts', 'INSERT')
-      OR has_table_privilege('openbrain_monitor', 'public.thoughts', 'UPDATE')
-      OR has_table_privilege('openbrain_monitor', 'public.thoughts', 'DELETE') THEN
+
+  -- No role memberships: everything below reasons about direct grants, and
+  -- membership would smuggle in another role's privileges wholesale.
+  SELECT string_agg(roleid::regrole::text, ', ') INTO bad
+    FROM pg_auth_members WHERE member = 'openbrain_monitor'::regrole;
+  IF bad IS NOT NULL THEN
     RAISE EXCEPTION
-      'grants assertion failed: openbrain_monitor has privileges on public.thoughts. '
-      'The edge-resident monitor credential must never reach thought content.';
+      'grants assertion failed: openbrain_monitor is a member of: % — it must be a '
+      'standalone role (membership would bypass the per-table checks).', bad;
   END IF;
-  IF NOT (has_table_privilege('openbrain_monitor', 'public.funnel_access_log', 'SELECT')
-      AND has_table_privilege('openbrain_monitor', 'public.mcp_auth_events', 'SELECT')) THEN
+
+  -- (a) public.thoughts: zero ACL entries of any kind, table or column level…
+  IF EXISTS (
+       SELECT 1 FROM pg_class c
+       CROSS JOIN LATERAL aclexplode(c.relacl) a
+       WHERE c.oid = 'public.thoughts'::regclass
+         AND a.grantee = 'openbrain_monitor'::regrole)
+     OR EXISTS (
+       SELECT 1 FROM pg_attribute att
+       CROSS JOIN LATERAL aclexplode(att.attacl) a
+       WHERE att.attrelid = 'public.thoughts'::regclass
+         AND a.grantee = 'openbrain_monitor'::regrole) THEN
     RAISE EXCEPTION
-      'grants assertion failed: openbrain_monitor missing SELECT on funnel_access_log/mcp_auth_events '
-      '(did 02-observability.sql run after the role was created?).';
+      'grants assertion failed: openbrain_monitor has a direct grant (table- or '
+      'column-level) on public.thoughts. The edge-resident monitor credential '
+      'must never reach thought content.';
   END IF;
-  IF has_table_privilege('openbrain_monitor', 'public.funnel_access_log', 'INSERT')
-      OR has_table_privilege('openbrain_monitor', 'public.funnel_access_log', 'UPDATE')
-      OR has_table_privilege('openbrain_monitor', 'public.funnel_access_log', 'DELETE')
-      OR has_table_privilege('openbrain_monitor', 'public.mcp_auth_events', 'INSERT')
-      OR has_table_privilege('openbrain_monitor', 'public.mcp_auth_events', 'UPDATE')
-      OR has_table_privilege('openbrain_monitor', 'public.mcp_auth_events', 'DELETE') THEN
+  -- …and no effective privilege either (catches routes the ACL scan cannot see).
+  IF has_table_privilege('openbrain_monitor', 'public.thoughts',
+       'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+     OR has_any_column_privilege('openbrain_monitor', 'public.thoughts',
+       'SELECT, INSERT, UPDATE, REFERENCES') THEN
     RAISE EXCEPTION
-      'grants assertion failed: openbrain_monitor has write privileges on an observability table; '
-      'it must stay SELECT-only.';
+      'grants assertion failed: openbrain_monitor has an effective privilege on '
+      'public.thoughts. The edge-resident monitor credential must never reach '
+      'thought content.';
   END IF;
+
+  -- (b) the two observability tables: SELECT present, and nothing but SELECT.
+  FOREACH tbl IN ARRAY ARRAY['public.funnel_access_log', 'public.mcp_auth_events'] LOOP
+    IF NOT has_table_privilege('openbrain_monitor', tbl, 'SELECT') THEN
+      RAISE EXCEPTION
+        'grants assertion failed: openbrain_monitor missing SELECT on % '
+        '(did 02-observability.sql run after the role was created?).', tbl;
+    END IF;
+    IF has_table_privilege('openbrain_monitor', tbl,
+         'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') THEN
+      RAISE EXCEPTION
+        'grants assertion failed: openbrain_monitor has an effective non-SELECT '
+        'privilege on %; it must stay SELECT-only.', tbl;
+    END IF;
+    SELECT string_agg(DISTINCT a.privilege_type, ', ') INTO bad
+      FROM pg_class c
+      CROSS JOIN LATERAL aclexplode(c.relacl) a
+      WHERE c.oid = tbl::regclass
+        AND a.grantee = 'openbrain_monitor'::regrole
+        AND a.privilege_type <> 'SELECT';
+    IF bad IS NOT NULL THEN
+      RAISE EXCEPTION
+        'grants assertion failed: openbrain_monitor has direct non-SELECT grants '
+        'on % (%) — it must stay SELECT-only.', tbl, bad;
+    END IF;
+    IF EXISTS (
+         SELECT 1 FROM pg_attribute att
+         CROSS JOIN LATERAL aclexplode(att.attacl) a
+         WHERE att.attrelid = tbl::regclass
+           AND a.grantee = 'openbrain_monitor'::regrole) THEN
+      RAISE EXCEPTION
+        'grants assertion failed: openbrain_monitor has column-level grants on % — '
+        'only a plain table-level SELECT is expected.', tbl;
+    END IF;
+  END LOOP;
 END;
 $$ LANGUAGE plpgsql;
