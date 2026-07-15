@@ -33,9 +33,11 @@ for req in DB_HOST OPENBRAIN_MONITOR_PASSWORD; do
 done
 # A malformed threshold must not silently disable the volume alarm: the
 # bash integer comparison below would error to stderr (the journal, not our
-# log) and leave alert=0. Alert and fall back to the default instead.
-if ! [[ "$VOLUME_THRESHOLD" =~ ^[0-9]+$ ]]; then
-  echo "[$ts] !!! ALERT: invalid VOLUME_THRESHOLD='$VOLUME_THRESHOLD' in $ENV_FILE — using 200" >> "$LOG"
+# log) and leave alert=0. That includes syntactically-numeric values beyond
+# the comparison's integer range (e.g. a 21-digit typo), so the width is
+# capped at 9 digits. Alert and fall back to the default instead.
+if ! [[ "$VOLUME_THRESHOLD" =~ ^[0-9]{1,9}$ ]]; then
+  echo "[$ts] !!! ALERT: invalid VOLUME_THRESHOLD='$VOLUME_THRESHOLD' (need a 1-9 digit integer) in $ENV_FILE — using 200" >> "$LOG"
   VOLUME_THRESHOLD=200
 fi
 

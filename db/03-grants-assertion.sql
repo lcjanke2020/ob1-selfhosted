@@ -66,14 +66,22 @@ $$ LANGUAGE plpgsql;
 --     see EVERY privilege type the server knows — including TRUNCATE,
 --     REFERENCES, TRIGGER, PG17's MAINTAIN, and whatever a future major adds —
 --     and column-level grants, without this file naming (and lagging) the
---     privilege list. Blind spot: privileges inherited via role membership.
+--     privilege list. The scans match grants to the role AND to PUBLIC:
+--     PUBLIC is implicit for every role, never appears in pg_auth_members,
+--     and an unlistable privilege granted to PUBLIC (e.g. MAINTAIN on PG17)
+--     would otherwise reach the monitor invisibly. Blind spot: privileges
+--     inherited via role membership.
 --   * has_table_privilege()/has_any_column_privilege() check EFFECTIVE
---     privileges (inheritance included). Blind spot: only the privilege types
---     named in the call.
+--     privileges (inheritance and PUBLIC included). Blind spot: only the
+--     privilege types named in the call.
 --   * a membership check closes the inheritance route generically: the
 --     monitor is designed as a standalone LOGIN role, so ANY membership is
 --     drift (e.g. GRANT openbrain_readonly TO openbrain_monitor would hand it
 --     thoughts without touching an ACL this file scans).
+-- The allowed SELECT on the two observability tables must also be plain —
+-- WITH GRANT OPTION is rejected, or the monitor could re-grant its own
+-- access (e.g. to PUBLIC) and the widened grant would sit outside this
+-- file's per-role reasoning.
 DO $$
 DECLARE
   tbl  text;
@@ -94,21 +102,22 @@ BEGIN
       'standalone role (membership would bypass the per-table checks).', bad;
   END IF;
 
-  -- (a) public.thoughts: zero ACL entries of any kind, table or column level…
+  -- (a) public.thoughts: zero ACL entries of any kind, table or column level,
+  --     to the monitor OR to PUBLIC (grantee oid 0 — implicit for every role)…
   IF EXISTS (
        SELECT 1 FROM pg_class c
        CROSS JOIN LATERAL aclexplode(c.relacl) a
        WHERE c.oid = 'public.thoughts'::regclass
-         AND a.grantee = 'openbrain_monitor'::regrole)
+         AND (a.grantee = 'openbrain_monitor'::regrole OR a.grantee = 0))
      OR EXISTS (
        SELECT 1 FROM pg_attribute att
        CROSS JOIN LATERAL aclexplode(att.attacl) a
        WHERE att.attrelid = 'public.thoughts'::regclass
-         AND a.grantee = 'openbrain_monitor'::regrole) THEN
+         AND (a.grantee = 'openbrain_monitor'::regrole OR a.grantee = 0)) THEN
     RAISE EXCEPTION
-      'grants assertion failed: openbrain_monitor has a direct grant (table- or '
-      'column-level) on public.thoughts. The edge-resident monitor credential '
-      'must never reach thought content.';
+      'grants assertion failed: public.thoughts has a direct grant (table- or '
+      'column-level) to openbrain_monitor or to PUBLIC. The edge-resident monitor '
+      'credential must never reach thought content.';
   END IF;
   -- …and no effective privilege either (catches routes the ACL scan cannot see).
   IF has_table_privilege('openbrain_monitor', 'public.thoughts',
@@ -129,30 +138,35 @@ BEGIN
         '(did 02-observability.sql run after the role was created?).', tbl;
     END IF;
     IF has_table_privilege('openbrain_monitor', tbl,
-         'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') THEN
+         'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+       OR has_table_privilege('openbrain_monitor', tbl, 'SELECT WITH GRANT OPTION') THEN
       RAISE EXCEPTION
         'grants assertion failed: openbrain_monitor has an effective non-SELECT '
-        'privilege on %; it must stay SELECT-only.', tbl;
+        '(or grantable-SELECT) privilege on %; it must stay plain SELECT-only.', tbl;
     END IF;
-    SELECT string_agg(DISTINCT a.privilege_type, ', ') INTO bad
+    -- Direct entries to the monitor or PUBLIC that are anything other than a
+    -- plain, non-grantable SELECT.
+    SELECT string_agg(DISTINCT a.privilege_type
+             || CASE WHEN a.is_grantable THEN ' (WITH GRANT OPTION)' ELSE '' END,
+             ', ') INTO bad
       FROM pg_class c
       CROSS JOIN LATERAL aclexplode(c.relacl) a
       WHERE c.oid = tbl::regclass
-        AND a.grantee = 'openbrain_monitor'::regrole
-        AND a.privilege_type <> 'SELECT';
+        AND (a.grantee = 'openbrain_monitor'::regrole OR a.grantee = 0)
+        AND (a.privilege_type <> 'SELECT' OR a.is_grantable);
     IF bad IS NOT NULL THEN
       RAISE EXCEPTION
-        'grants assertion failed: openbrain_monitor has direct non-SELECT grants '
-        'on % (%) — it must stay SELECT-only.', tbl, bad;
+        'grants assertion failed: % has direct grants beyond plain SELECT to '
+        'openbrain_monitor or PUBLIC (%) — the monitor must stay plain SELECT-only.', tbl, bad;
     END IF;
     IF EXISTS (
          SELECT 1 FROM pg_attribute att
          CROSS JOIN LATERAL aclexplode(att.attacl) a
          WHERE att.attrelid = tbl::regclass
-           AND a.grantee = 'openbrain_monitor'::regrole) THEN
+           AND (a.grantee = 'openbrain_monitor'::regrole OR a.grantee = 0)) THEN
       RAISE EXCEPTION
-        'grants assertion failed: openbrain_monitor has column-level grants on % — '
-        'only a plain table-level SELECT is expected.', tbl;
+        'grants assertion failed: % has column-level grants to openbrain_monitor '
+        'or PUBLIC — only a plain table-level SELECT is expected.', tbl;
     END IF;
   END LOOP;
 END;

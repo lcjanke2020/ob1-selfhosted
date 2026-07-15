@@ -77,7 +77,7 @@ Each role gets its own directory with a self-contained `docker-compose.yml`, a p
 
 ### db qube — Postgres only
 
-Postgres runs natively, out of compose, in [`db-qube/`](db-qube/). The app qube reaches it as the full app role (and the readonly role for backups); the ingress qube reaches it as the INSERT-only observability role for the log-ingester. Both are scoped by Tailscale ACL + nft `tailscale0:5432` + `pg_hba` scram. Its on-disk config — bind-dirs, the `tailscale0:5432` firewall unit, the boot ordering in `rc.local`, and the `pg_hba` / `listen_addresses` snippets — is provided as reproducible placeholders in [`db-qube/`](db-qube/) (see its [README](db-qube/README.md)).
+Postgres runs natively, out of compose, in [`db-qube/`](db-qube/). The app qube reaches it as the full app role (and the readonly role for backups); the ingress qube reaches it as two scoped observability roles — the INSERT-only ingester and the SELECT-only funnel monitor. All are scoped by Tailscale ACL + nft `tailscale0:5432` + `pg_hba` scram. Its on-disk config — bind-dirs, the `tailscale0:5432` firewall unit, the boot ordering in `rc.local`, and the `pg_hba` / `listen_addresses` snippets — is provided as reproducible placeholders in [`db-qube/`](db-qube/) (see its [README](db-qube/README.md)).
 
 ### app qube — mcp + Ollama
 

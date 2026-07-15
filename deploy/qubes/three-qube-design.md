@@ -25,8 +25,8 @@ In the [baseline single-qube deployment](README.md), Tailscale Funnel, Caddy, th
                                         │
 ┌─ ingress qube ─────────────────────── ▼ ──────┐
 │  tailscaled (Funnel) + Caddy + log-ingester   │   no memory store; a parked
-│  IP allowlist enforced here                   │   local logs DB; one INSERT-
-└───────────────┬───────────────────────────────┘   only path to the db qube *
+│  IP allowlist enforced here                   │   local logs DB; two scoped
+└───────────────┬───────────────────────────────┘   obs-only paths to db qube *
                 │  MCP port only (scoped)
 ┌─ app qube ──── ▼ ──────────────────────────────┐
 │  MCP server (+ Ollama) + encrypted backup      │  reachable ONLY from the
@@ -34,13 +34,15 @@ In the [baseline single-qube deployment](README.md), Tailscale Funnel, Caddy, th
                 │  Postgres port only (scoped)
 ┌─ db qube ───── ▼ ──────────────────────────────┐
 │  Postgres + pgvector, native install           │  the memory store; reached
-│  loopback + scoped peers (app + ingester)      │  by app qube + ingester *
+│  loopback; scoped peers: app, ingester, monitor│  by app, ingester, monitor *
 └─────────────────────────────────────────────────┘
 ```
 
 \* Log-ingester placement is **decided for now**: it runs on the ingress qube and
-writes across to the db qube, so the edge keeps that one INSERT-only path; the
-parked local logs DB on the ingress qube is its documented future home ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)).
+writes across to the db qube, so the edge keeps that INSERT-only path — and the
+host-side funnel monitor keeps a second, SELECT-only metadata path over the same
+wire; the parked local logs DB on the ingress qube is the ingester path's
+documented future home ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)).
 
 - **Ingress qube** — runs `tailscaled` (Funnel), Caddy, and the log-ingester, from a self-contained [`ingress-qube/`](ingress-qube/) compose that defines **only** those (plus a parked local logs DB), and the host-side [funnel monitor](ingress-qube/README.md#funnel-monitor-host-side-not-compose). It holds **no** Postgres memory store and **no** app credential — only two observability credentials (INSERT-only ingester, SELECT-only monitor) and their scoped paths to the db qube. The unused edge `mcp` + `ollama` the old override recipe once started are gone by construction ([#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13) resolved). The store itself is never on the edge; it lives in the db qube.
 - **App qube** — the MCP server (+ Ollama), from [`app-qube/`](app-qube/). Reachable only from the ingress qube, only on the MCP port. As the trusted DB control-plane it holds the admin + app + readonly credentials and runs the encrypted off-box backup ([`app-qube/backup/`](app-qube/backup/)).
