@@ -1,0 +1,15 @@
+# systemd USER unit — install at ~/.config/systemd/user/funnel-monitor.timer
+# on the ingress qube. Needs linger to fire without an open shell session —
+# see ../README.md § user timers.
+[Unit]
+Description=Run Open Brain Funnel monitor every 5 minutes
+Requires=funnel-monitor.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=10s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -174,3 +174,23 @@ BEGIN
   END IF;
 END;
 $$ LANGUAGE plpgsql;
+
+-- openbrain_monitor: SELECT-only on the two tables the host-side funnel
+-- monitor (scripts/funnel_monitor.sh, ingress qube) probes for its
+-- volume and auth-failure counts. Deliberately NOT openbrain_readonly
+-- (SELECT on everything, thoughts included): this credential lives on the
+-- internet-adjacent edge, so it reads request metadata only — never
+-- thought content. No sequence grants — the monitor only COUNTs, and
+-- unlike openbrain_readonly it never runs pg_dump. Role created by
+-- 00-roles.sh only when OPENBRAIN_MONITOR_PASSWORD is set; the GRANT is
+-- wrapped so deployments without a monitor don't error at init time.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'openbrain_monitor') THEN
+    EXECUTE 'GRANT SELECT ON funnel_access_log TO openbrain_monitor';
+    EXECUTE 'GRANT SELECT ON mcp_auth_events   TO openbrain_monitor';
+  ELSE
+    RAISE NOTICE 'openbrain_monitor role missing; skipping monitor grants (OPENBRAIN_MONITOR_PASSWORD unset)';
+  END IF;
+END;
+$$ LANGUAGE plpgsql;

@@ -56,6 +56,9 @@ jobs:
       # Set so the Pattern B ingester role + its conditional grants in
       # 02-observability.sql are exercised too (the fuller init path).
       OPENBRAIN_INGESTER_PASSWORD: ci_ingester_pw
+      # Same for the optional SELECT-only funnel-monitor role (and the
+      # monitor assertions in 03-grants-assertion.sql).
+      OPENBRAIN_MONITOR_PASSWORD: ci_monitor_pw
     steps:
       # Same fork-safe ref pattern as ci.yml.
       - name: Checkout PR head safely
@@ -83,7 +86,7 @@ jobs:
           docker run -d --name pgci \
             -e POSTGRES_DB -e POSTGRES_USER -e POSTGRES_PASSWORD \
             -e OPENBRAIN_APP_PASSWORD -e OPENBRAIN_READONLY_PASSWORD \
-            -e OPENBRAIN_INGESTER_PASSWORD \
+            -e OPENBRAIN_INGESTER_PASSWORD -e OPENBRAIN_MONITOR_PASSWORD \
             -v "$GITHUB_WORKSPACE/db/00-roles.sh:/docker-entrypoint-initdb.d/00-roles.sh:ro" \
             -v "$GITHUB_WORKSPACE/db/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/02-observability.sql:/docker-entrypoint-initdb.d/02-observability.sql:ro" \
@@ -126,6 +129,28 @@ jobs:
             pg_dump -h 127.0.0.1 -U openbrain_readonly -d "$POSTGRES_DB" \
             --no-owner --no-privileges > /dev/null
           echo "pg_dump as openbrain_readonly succeeded"
+
+      - name: Smoke test — monitor role runs its real probes, cannot read thoughts
+        run: |
+          # The two queries scripts/funnel_monitor.sh actually runs, as the
+          # role it runs them with. Catches a grant regression the same way
+          # the pg_dump step does for the backup path.
+          docker exec -e PGPASSWORD="$OPENBRAIN_MONITOR_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_monitor -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT COUNT(*) FROM funnel_access_log WHERE socket='funnel' AND ts > now() - interval '5 minutes';" >/dev/null
+          docker exec -e PGPASSWORD="$OPENBRAIN_MONITOR_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_monitor -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT COUNT(*) FROM mcp_auth_events WHERE ts > now() - interval '5 minutes' AND reason <> 'missing_credentials';" >/dev/null
+          # Negative check: the edge-resident credential must NOT reach
+          # thought content (03-grants-assertion.sql asserts this in the
+          # catalog; this exercises it end-to-end).
+          if docker exec -e PGPASSWORD="$OPENBRAIN_MONITOR_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_monitor -d "$POSTGRES_DB" -tAc \
+            "SELECT 1 FROM thoughts LIMIT 1" 2>/dev/null; then
+            echo "::error::openbrain_monitor can read public.thoughts — SELECT should be denied"
+            exit 1
+          fi
+          echo "openbrain_monitor probes succeeded; thoughts access correctly denied"
 
       - name: Container logs on failure
         if: failure()

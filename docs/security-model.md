@@ -30,13 +30,14 @@ The system has **two auth doors, chosen per deployment** — typically one, thou
 
 ### Database layer
 
-Four roles, least privilege, with drift detection:
+Five roles, least privilege, with drift detection:
 
 | Role | Privileges | Used by |
 |---|---|---|
 | `postgres` | superuser | init + DB admin (role provisioning / migrations) — never the app runtime. In the three-qube split it's reachable from the app qube's IP only for remote admin — a deliberate trade-off (a compromised app qube then has full DB admin, including an app→db OS pivot via `COPY … TO/FROM PROGRAM`); see [db-qube/README.md](../deploy/qubes/db-qube/README.md) and [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15) |
 | `openbrain_app` | SELECT/INSERT/UPDATE on `thoughts` (+ scoped observability/sessions grants); **no DELETE**, no schema-wide DML | MCP server, daily summary |
 | `openbrain_ingester` | INSERT-only on `funnel_access_log` | log-ingester sidecar — it parses attacker-influenced log lines, so its blast radius is one table |
+| `openbrain_monitor` | SELECT on `funnel_access_log` + `mcp_auth_events` only | host-side funnel monitor ([`scripts/funnel_monitor.sh`](../scripts/funnel_monitor.sh)) — its credential sits on the internet-adjacent edge, so it reads request metadata but can never reach a thought. Optional, like the ingester |
 | `openbrain_readonly` | SELECT on everything | humans with psql/DBeaver |
 
 `db/01-schema.sql` actively REVOKEs historical broad grants (idempotent, safe on live DBs), and `db/03-grants-assertion.sql` is a read-only invariant check you can run any time — because init scripts only run on a fresh data directory, a tightened grant **does not** reach an existing deployment by itself. The assertion is how you notice.

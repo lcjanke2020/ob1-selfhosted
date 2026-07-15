@@ -1,4 +1,5 @@
--- invariant assertion for openbrain_app grants on public.thoughts.
+-- invariant assertions for role grants: openbrain_app on public.thoughts,
+-- and (when the role exists) the SELECT-only openbrain_monitor.
 --
 -- Why this is its own file:
 --
@@ -46,6 +47,47 @@ BEGIN
       AND has_table_privilege('openbrain_app', 'public.thoughts', 'UPDATE')) THEN
     RAISE EXCEPTION
       'grants assertion failed: openbrain_app missing required SELECT/INSERT/UPDATE on public.thoughts.';
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- openbrain_monitor invariants (checked only when the role exists — it is
+-- optional, created by 00-roles.sh when OPENBRAIN_MONITOR_PASSWORD is set).
+-- This credential lives on the internet-adjacent ingress qube, so the
+-- invariant that matters is a NEGATIVE one:
+--   (a) NO privilege of any kind on `public.thoughts` — a popped edge must
+--       not be able to read (or touch) memories with the monitor credential;
+--   (b) read-only on its two metadata tables: SELECT on funnel_access_log
+--       and mcp_auth_events, and no INSERT/UPDATE/DELETE on either.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'openbrain_monitor') THEN
+    RAISE NOTICE 'openbrain_monitor role missing; skipping monitor grants assertion';
+    RETURN;
+  END IF;
+  IF has_table_privilege('openbrain_monitor', 'public.thoughts', 'SELECT')
+      OR has_table_privilege('openbrain_monitor', 'public.thoughts', 'INSERT')
+      OR has_table_privilege('openbrain_monitor', 'public.thoughts', 'UPDATE')
+      OR has_table_privilege('openbrain_monitor', 'public.thoughts', 'DELETE') THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_monitor has privileges on public.thoughts. '
+      'The edge-resident monitor credential must never reach thought content.';
+  END IF;
+  IF NOT (has_table_privilege('openbrain_monitor', 'public.funnel_access_log', 'SELECT')
+      AND has_table_privilege('openbrain_monitor', 'public.mcp_auth_events', 'SELECT')) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_monitor missing SELECT on funnel_access_log/mcp_auth_events '
+      '(did 02-observability.sql run after the role was created?).';
+  END IF;
+  IF has_table_privilege('openbrain_monitor', 'public.funnel_access_log', 'INSERT')
+      OR has_table_privilege('openbrain_monitor', 'public.funnel_access_log', 'UPDATE')
+      OR has_table_privilege('openbrain_monitor', 'public.funnel_access_log', 'DELETE')
+      OR has_table_privilege('openbrain_monitor', 'public.mcp_auth_events', 'INSERT')
+      OR has_table_privilege('openbrain_monitor', 'public.mcp_auth_events', 'UPDATE')
+      OR has_table_privilege('openbrain_monitor', 'public.mcp_auth_events', 'DELETE') THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_monitor has write privileges on an observability table; '
+      'it must stay SELECT-only.';
   END IF;
 END;
 $$ LANGUAGE plpgsql;

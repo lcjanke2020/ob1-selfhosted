@@ -1,5 +1,5 @@
 #!/bin/bash
-# Create the two application roles using passwords passed in via env vars.
+# Create the application roles using passwords passed in via env vars.
 # Runs first (alphabetical order) so 01-schema.sql can grant to existing roles.
 #
 # Passwords are passed to psql via --set and substituted with :'var' (which
@@ -42,4 +42,23 @@ if [ -n "${OPENBRAIN_INGESTER_PASSWORD:-}" ]; then
 EOSQL
 else
   echo "[00-roles] OPENBRAIN_INGESTER_PASSWORD not set; skipping openbrain_ingester (Pattern A)"
+fi
+
+# SELECT-only metadata role for the host-side funnel monitor
+# (scripts/funnel_monitor.sh, run from the ingress qube in the three-qube
+# split). Created conditionally like the ingester: set
+# OPENBRAIN_MONITOR_PASSWORD to create it; its grants (SELECT on
+# funnel_access_log + mcp_auth_events ONLY) land in 02-observability.sql.
+# Deliberately not openbrain_readonly (SELECT on everything): this
+# credential sits on the internet-adjacent edge, so it may read request
+# metadata but must never be able to read a thought.
+if [ -n "${OPENBRAIN_MONITOR_PASSWORD:-}" ]; then
+  psql -v ON_ERROR_STOP=1 \
+    --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+    --set=monitor_password="$OPENBRAIN_MONITOR_PASSWORD" \
+    <<-'EOSQL'
+    CREATE ROLE openbrain_monitor LOGIN PASSWORD :'monitor_password';
+EOSQL
+else
+  echo "[00-roles] OPENBRAIN_MONITOR_PASSWORD not set; skipping openbrain_monitor (no host-side funnel monitor)"
 fi
