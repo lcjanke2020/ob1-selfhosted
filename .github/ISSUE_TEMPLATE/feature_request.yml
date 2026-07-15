@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose an improvement or new capability
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can't you do today, or what is harder than it should be?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What you'd like to see. Check CONTRIBUTING.md's scope section first — perimeter-weakening changes and multi-tenant rework need discussion before code.
+    validations:
+      required: true
+  - type: dropdown
+    id: willing-to-pr
+    attributes:
+      label: Willing to PR it?
+      options:
+        - Yes, I'd like to implement this
+        - Yes, with some guidance
+        - No, just proposing
+    validations:
+      required: true
