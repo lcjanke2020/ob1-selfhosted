@@ -1,0 +1,10 @@
+# systemd USER unit — install at ~/.config/systemd/user/funnel-monitor.service
+# on the ingress qube. Pairs with funnel-monitor.timer; the script is
+# scripts/funnel_monitor.sh copied to ~/funnel_monitor.sh (%h = the user home).
+# See ingress-qube/README.md § "Funnel monitor".
+[Unit]
+Description=Open Brain Funnel monitor (alert-only)
+
+[Service]
+Type=oneshot
+ExecStart=%h/funnel_monitor.sh

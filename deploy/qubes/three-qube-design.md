@@ -2,15 +2,15 @@
 
 **Status: implemented — ingress, app, and db run in three qubes, each from its own self-contained compose directory.** The dedicated DB qube is provisioned ([`db-qube/`](db-qube/)), the app→DB transport is wired (firewall-scoped tailnet — see below), and the public edge (Funnel + Caddy) runs in its own ingress qube reverse-proxying to the app qube's mcp over the tailnet via the parameterized `MCP_UPSTREAM` upstream. Each role now has a self-contained per-qube compose file rather than a `COMPOSE_FILE` override stack: [`app-qube/`](app-qube/) (mcp + Ollama) and [`ingress-qube/`](ingress-qube/) (Caddy + log-ingester) — operator recipe in the [Qubes README](README.md#splitting-the-stack-across-qubes). Kept as a design doc because the reasoning — the threat model and the trust layers — is the transferable part.
 
-The edge is now app-stateless by construction: `ingress-qube/docker-compose.yml` defines **only** Caddy + the log-ingester (and a parked-for-future local logs DB), so the edge no longer starts the unused `mcp` + `ollama` it once did ([#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13) resolved) and holds no app-role DB credential — only the INSERT-only ingester credential. The [log-ingester](#log-ingester-placement-decided-for-now)'s placement is **decided for now**: it stays on the ingress qube writing across to the db qube, with the parked local Postgres on the ingress qube as its documented future home ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)).
+The edge is now app-stateless by construction: `ingress-qube/docker-compose.yml` defines **only** Caddy + the log-ingester (and a parked-for-future local logs DB), so the edge no longer starts the unused `mcp` + `ollama` it once did ([#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13) resolved) and holds no app-role DB credential — only the INSERT-only ingester credential and the SELECT-only funnel-monitor credential. The [log-ingester](#log-ingester-placement-decided-for-now)'s placement is **decided for now**: it stays on the ingress qube writing across to the db qube, with the parked local Postgres on the ingress qube as its documented future home ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)).
 
 ## Implemented: app→DB transport (firewall-scoped tailnet)
 
-The DB qube runs Postgres natively and is reachable by just two scoped peers — the app qube on the full app role, and (while the log-ingester runs on the edge) the ingress qube on an INSERT-only observability role; see [Log-ingester placement](#log-ingester-placement-decided-for-now). The app→DB transport — the primary, full-role path — is enforced in three independent layers (the ingester path reuses the same layers with one extra grant/host line):
+The DB qube runs Postgres natively and is reachable by just two scoped peers — the app qube on the full app role, and (while the log-ingester runs on the edge) the ingress qube on an INSERT-only observability role plus a SELECT-only monitor role; see [Log-ingester placement](#log-ingester-placement-decided-for-now). The app→DB transport — the primary, full-role path — is enforced in three independent layers (the ingester and monitor paths reuse the same layers with one extra grant/host line each):
 
 1. **Tailscale ACL** — grants permit exactly `app-qube → db-qube:5432` (and, for the ingester, `ingress-qube → db-qube:5432`); every other tailnet peer is default-denied at the wire. The DB qube carries its own tag (e.g. `tag:ob1-db`) and nothing else routes to it.
 2. **Qubes nftables** — the DB qube accepts inbound `tcp/5432` on `tailscale0` only (a `custom-input` rule reapplied after `tailscaled` by a one-shot unit, since `qubes-firewall.service` runs before the interface exists). No `:22` — there is no sshd; all admin is dom0 `qvm-run`.
-3. **`pg_hba.conf`** — `scram-sha-256` host lines scoped per peer: the app + readonly roles and the **superuser** (for remote DB admin — a deliberate trade-off, see [db-qube/README.md](db-qube/README.md)) from the app qube's IP, the INSERT-only ingester role from the ingress qube's IP. Every role is locked to exactly one peer IP.
+3. **`pg_hba.conf`** — `scram-sha-256` host lines scoped per peer: the app + readonly roles and the **superuser** (for remote DB admin — a deliberate trade-off, see [db-qube/README.md](db-qube/README.md)) from the app qube's IP, the INSERT-only ingester and SELECT-only monitor roles from the ingress qube's IP. Every role is locked to exactly one peer IP.
 
 PGDATA, `/etc/postgresql`, and `/var/lib/tailscale` are bind-dir'd into `/rw` so the cluster, its hardened config, and the node identity survive reboots; the cluster is started on boot (after `tailscale0` is up) from `rc.local`. The more-isolated qrexec / `qubes.ConnectTCP` transport (no listener at all) remains a tracked follow-up.
 
@@ -25,8 +25,8 @@ In the [baseline single-qube deployment](README.md), Tailscale Funnel, Caddy, th
                                         │
 ┌─ ingress qube ─────────────────────── ▼ ──────┐
 │  tailscaled (Funnel) + Caddy + log-ingester   │   no memory store; a parked
-│  IP allowlist enforced here                   │   local logs DB; one INSERT-
-└───────────────┬───────────────────────────────┘   only path to the db qube *
+│  IP allowlist enforced here                   │   local logs DB; two scoped
+└───────────────┬───────────────────────────────┘   obs-only paths to db qube *
                 │  MCP port only (scoped)
 ┌─ app qube ──── ▼ ──────────────────────────────┐
 │  MCP server (+ Ollama) + encrypted backup      │  reachable ONLY from the
@@ -34,17 +34,19 @@ In the [baseline single-qube deployment](README.md), Tailscale Funnel, Caddy, th
                 │  Postgres port only (scoped)
 ┌─ db qube ───── ▼ ──────────────────────────────┐
 │  Postgres + pgvector, native install           │  the memory store; reached
-│  loopback + scoped peers (app + ingester)      │  by app qube + ingester *
+│  loopback; scoped peers: app, ingester, monitor│  by app, ingester, monitor *
 └─────────────────────────────────────────────────┘
 ```
 
 \* Log-ingester placement is **decided for now**: it runs on the ingress qube and
-writes across to the db qube, so the edge keeps that one INSERT-only path; the
-parked local logs DB on the ingress qube is its documented future home ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)).
+writes across to the db qube, so the edge keeps that INSERT-only path — and the
+host-side funnel monitor keeps a second, SELECT-only metadata path over the same
+wire; the parked local logs DB on the ingress qube is the ingester path's
+documented future home ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)).
 
-- **Ingress qube** — runs `tailscaled` (Funnel), Caddy, and the log-ingester, from a self-contained [`ingress-qube/`](ingress-qube/) compose that defines **only** those (plus a parked local logs DB). It holds **no** Postgres memory store and **no** app credential — only the INSERT-only ingester credential and its one INSERT-only path to the db qube. The unused edge `mcp` + `ollama` the old override recipe once started are gone by construction ([#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13) resolved). The store itself is never on the edge; it lives in the db qube.
+- **Ingress qube** — runs `tailscaled` (Funnel), Caddy, and the log-ingester, from a self-contained [`ingress-qube/`](ingress-qube/) compose that defines **only** those (plus a parked local logs DB), and the host-side [funnel monitor](ingress-qube/README.md#funnel-monitor-host-side-not-compose). It holds **no** Postgres memory store and **no** app credential — only two observability credentials (INSERT-only ingester, SELECT-only monitor) and their scoped paths to the db qube. The unused edge `mcp` + `ollama` the old override recipe once started are gone by construction ([#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13) resolved). The store itself is never on the edge; it lives in the db qube.
 - **App qube** — the MCP server (+ Ollama), from [`app-qube/`](app-qube/). Reachable only from the ingress qube, only on the MCP port. As the trusted DB control-plane it holds the admin + app + readonly credentials and runs the encrypted off-box backup ([`app-qube/backup/`](app-qube/backup/)).
-- **DB qube** — Postgres + pgvector, **out of docker-compose**, run natively (or as a single container). Reached by the app qube (the full app role) and — while the log-ingester lives on the edge — by the ingress qube on one INSERT-only observability role; nothing else routes to it.
+- **DB qube** — Postgres + pgvector, **out of docker-compose**, run natively (or as a single container). Reached by the app qube (the full app role) and — while the log-ingester lives on the edge — by the ingress qube on one INSERT-only observability role plus the monitor's SELECT-only metadata role; nothing else routes to it.
 
 The minimum viable step, if the full split slips: get Postgres out of the Funnel-exposed qube. Edge compromise ≠ memory-store compromise is most of the value.
 

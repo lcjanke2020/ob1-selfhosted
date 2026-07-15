@@ -3,7 +3,8 @@
 The [three-qube design](../three-qube-design.md) pulls Postgres out of compose into
 a dedicated **database qube**: a minimal Debian-templated AppVM running Postgres +
 pgvector natively, reachable over a firewall-scoped tailnet only by its scoped peers
-— the app qube (full app role) and the ingress qube's log-ingester (INSERT-only); see
+— the app qube (full app role) and the ingress qube's log-ingester (INSERT-only) plus
+its SELECT-only funnel monitor; see
 the [design doc](../three-qube-design.md). This directory holds the on-disk config that makes that qube reproducible —
 the counterpart to the compose files for the other install paths.
 
@@ -21,14 +22,14 @@ and most of `/etc` on every reboot), and is re-installed at boot by `rc.local`.
 | `qubes-firewall-user-script` | `/rw/config/qubes-firewall-user-script` (chmod +x) | nft accept for inbound `tcp/5432` on `tailscale0` only |
 | `ob1-db-firewall.service` | `/rw/config/ob1-db-firewall.service` | One-shot that re-applies the firewall rule *after* `tailscaled` is up |
 | `rc.local` | `/rw/config/rc.local` (chmod +x) | Boot order: start tailscaled → install/enable the firewall unit → start Postgres once `tailscale0` has an IP |
-| `pg_hba.snippet.conf` | append to `/etc/postgresql/<ver>/main/pg_hba.conf` | scram host lines: superuser (remote admin) + app + readonly from the app qube, ingester from the ingress qube |
+| `pg_hba.snippet.conf` | append to `/etc/postgresql/<ver>/main/pg_hba.conf` | scram host lines: superuser (remote admin) + app + readonly from the app qube, ingester + SELECT-only monitor from the ingress qube |
 | `postgresql.local.conf` | `conf.d/` drop-in or `ALTER SYSTEM` | `listen_addresses` (loopback + tailnet IP) and `ssl = off` |
 
 ## Placeholders to fill
 
 - `<db-qube-tailnet-ip>` — this qube's own tailnet address (in `postgresql.local.conf`).
 - `<app-qube-tailnet-ip>` — the app qube's tailnet address: the superuser (remote admin), app, and readonly host lines in `pg_hba.snippet.conf`.
-- `<ingress-qube-tailnet-ip>` — the ingress qube's tailnet address: the `openbrain_ingester` host line in `pg_hba.snippet.conf` (the log-ingester runs on the ingress qube).
+- `<ingress-qube-tailnet-ip>` — the ingress qube's tailnet address: the `openbrain_ingester` and `openbrain_monitor` host lines in `pg_hba.snippet.conf` (the log-ingester and the funnel monitor both run on the ingress qube).
 - Postgres major version (`17` in the paths/commands) — match your template.
 
 ## The three trust layers (why this is shaped the way it is)
@@ -52,9 +53,9 @@ misconfiguration exposes the database:
    differs, the accept won't land and the log will say so.
 3. **`pg_hba.conf`** — `scram-sha-256` host lines scoped per peer: the app and
    readonly roles from the app qube's IP, the INSERT-only `openbrain_ingester`
-   role from the ingress qube's IP, and the **superuser from the app qube's IP
-   only** (for remote DB admin — see the trade-off note below). No role gets a
-   line from any other peer.
+   and SELECT-only `openbrain_monitor` roles from the ingress qube's IP, and
+   the **superuser from the app qube's IP only** (for remote DB admin — see
+   the trade-off note below). No role gets a line from any other peer.
 
 **Superuser remote-admin trade-off.** The superuser (`postgres`) is reachable
 from the **app qube's IP only**, so role provisioning + schema migrations can be
@@ -120,9 +121,10 @@ once per cluster:
 # as the postgres superuser, over the loopback socket:
 sudo -u postgres psql -c "CREATE DATABASE openbrain;"
 sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
-# then create the openbrain_app / openbrain_ingester / openbrain_readonly roles
-# and load the schema — see db/00-roles.sh and db/01-schema.sql for the exact,
-# up-to-date statements (Pattern A vs B, passwords, grants).
+# then create the openbrain_app / openbrain_ingester / openbrain_readonly /
+# openbrain_monitor roles and load the schema — see db/00-roles.sh and
+# db/01-schema.sql for the exact, up-to-date statements (Pattern A vs B,
+# passwords, grants; ingester + monitor are optional).
 ```
 
 Apply `pg_hba.snippet.conf` and `postgresql.local.conf` after the roles exist,
