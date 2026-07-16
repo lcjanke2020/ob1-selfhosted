@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Validate the perimeter Caddyfile against the pinned Caddy image — the local
-# mirror of the CI gate in .github/workflows/caddy-validate.yml (keep the
-# extractor below in lockstep with the workflow's).
+# companion to the CI gate in .github/workflows/caddy-validate.yml: same
+# validation, same image-pinning guard (keep the extractor below in lockstep
+# with the workflow's), plus stronger local sandboxing the CI runner doesn't
+# need (staged single-file mount, --network none).
 #
 # The checkout's FILES are treated as untrusted input:
 #   - the image is restricted to an official, patch-pinned `caddy:` tag taken
@@ -17,9 +19,11 @@
 #
 # THIS SCRIPT is not: it runs on your host with your permissions, so it is
 # only as trustworthy as the ref it came from. Reviewing a PR you haven't
-# read? Don't execute the PR's copy of this file — run the trusted one from
-# main against the PR worktree:
-#   bash <(git show origin/main:scripts/validate_caddyfile.sh)
+# read? Don't execute the PR's copy of this file — run the canonical
+# repository's copy against the PR worktree. Attach trust to the repo URL,
+# not to a remote name (in a fork checkout, `origin` is the fork):
+#   git fetch https://github.com/lcjanke2020/ob1-selfhosted.git main
+#   bash <(git show FETCH_HEAD:scripts/validate_caddyfile.sh)
 set -euo pipefail
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
