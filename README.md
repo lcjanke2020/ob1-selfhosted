@@ -1,5 +1,11 @@
 # Open Brain — Self-Hosted
 
+[![CI](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/ci.yml)
+[![Leak gate](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/leak-gate.yml/badge.svg?branch=main)](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/leak-gate.yml)
+[![Allowlist guard](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/allowlist-guard.yml/badge.svg?branch=main)](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/allowlist-guard.yml)
+[![Caddyfile validate](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/caddy-validate.yml/badge.svg?branch=main)](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/caddy-validate.yml)
+[![DB init smoke test](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/db-init.yml/badge.svg?branch=main)](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/db-init.yml)
+
 Self-hosted [Open Brain (OB1)](https://github.com/NateBJones-Projects/OB1): a persistent AI memory layer — Postgres + pgvector storage, local embeddings, one MCP server — that any MCP-aware AI client can read and write. No Supabase, no cloud, $0/month, your data never leaves hardware you own.
 
 This repo is one codebase with **three install paths**, from "docker on a laptop" to "compartmentalized Qubes OS deployment with a hardened public edge":
@@ -10,6 +16,54 @@ This repo is one codebase with **three install paths**, from "docker on a laptop
 | **Tailnet / Funnel** | The same stack exposed to claude.ai and Claude mobile over the public internet via Tailscale Funnel + Caddy + OAuth (RS256 JWT) + an Anthropic egress IP allowlist. **OAuth is the only auth door** here — no static key on the public edge. | [`deploy/compose-tailnet/`](deploy/compose-tailnet/README.md) |
 | **Qubes OS** | The stack split across ingress / app / database qubes, with the persistence and SELinux gotchas solved. Also OAuth-only, like the Funnel path. | [`deploy/qubes/`](deploy/qubes/README.md) |
 
+> [!IMPORTANT]
+> **The Tailnet / Funnel and Qubes OS paths need two external accounts before you start** (Local compose needs only Docker + Compose):
+>
+> - A **Tailscale account** — the free Personal plan is enough — with **Funnel enabled**: HTTPS certificates turned on for your tailnet and the `funnel` node attribute granted to the node. Pick a non-descriptive node name *before* enabling HTTPS — the hostname lands in public Certificate Transparency logs the moment the certificate is minted.
+> - An **OAuth identity provider that issues RS256 JWTs** — the guides walk through a free **Auth0 tenant**, but any issuer with a JWKS endpoint works. You'll register one API whose identifier must equal your public MCP URL byte-for-byte (it's immutable — pick the hostname first) and one confidential application whose client id + secret you paste into claude.ai.
+>
+> The Funnel overlay also needs **Docker Compose v2.20+** (the `!reset` YAML tag); the Qubes path additionally assumes a working **Qubes OS** machine with Docker-capable templates.
+
+## Architecture at a glance
+
+The hardened shape (the **Qubes OS** install path). Each tinted box is a separate Qubes VM, connected over a firewall-scoped tailnet — a compromised public edge holds no memory store and no app credential. On the **Tailnet / Funnel** path the same components co-locate on one host over the local docker network — same OAuth door, minus the VM boundaries. **Local compose** is simpler still: just Postgres + the MCP server + Ollama behind the `x-brain-key` door, with no public edge at all.
+
+```mermaid
+flowchart TB
+    CL["claude.ai / Claude mobile<br/>(Anthropic egress 160.79.104.0/21)"]
+    CD["Claude Desktop / tailnet clients<br/>(mcp-remote, Bearer JWT)"]
+
+    subgraph ING["ingress qube — public edge, holds no memory store"]
+        TS["tailscaled<br/>Funnel :443 — TLS terminates here"]
+        CA["Caddy :9787<br/>funnel-header split · Anthropic IP allowlist<br/>(Funnel requests only)"]
+        LI["log-ingester"]
+        TS --> CA
+        CA -. "JSON access logs<br/>(credential-redacted)" .-> LI
+    end
+
+    subgraph APP["app qube"]
+        MCP["MCP server<br/>OAuth resource server (RS256 JWT)"]
+        OL["Ollama<br/>local embeddings"]
+        MCP --> OL
+    end
+
+    subgraph DBQ["db qube"]
+        PG["Postgres + pgvector<br/>the memory store"]
+    end
+
+    CL -- "HTTPS :443 via Funnel relay" --> TS
+    CD -. "WireGuard (tailnet)" .-> TS
+    CA -- "MCP port only, scoped tailnet<br/>Bearer JWT forwarded" --> MCP
+    MCP -- "openbrain_app role:<br/>SELECT / INSERT / UPDATE —<br/>no DELETE on thoughts" --> PG
+    LI -. "openbrain_ingester role:<br/>INSERT-only, one table (funnel_access_log)" .-> PG
+
+    style ING fill:#d777571a,stroke:#d77757
+    style APP fill:#3cc8781a,stroke:#3cc878
+    style DBQ fill:#5082f01a,stroke:#5082f0
+```
+
+In text: clients reach tailscaled's single Funnel listener on the ingress qube; Caddy applies the funnel-header split (Pattern Y — tailnet clients hit the same listener) and the Anthropic IP allowlist, then proxies to the MCP server on the app qube, which embeds via Ollama and reads/writes Postgres on the db qube; the edge's log-ingester writes access-log rows to the db qube on an INSERT-only role. Design reasoning and the enforcement layers behind each arrow: [`three-qube-design.md`](deploy/qubes/three-qube-design.md). Request-level detail — both auth branches, step by step — is in [Request flow in detail](#request-flow-in-detail) below.
+
 ## What's in the box
 
 - **`thoughts` memory** — capture, semantic search, listing, stats over a pgvector store. Dedupe by content fingerprint. Optional LLM metadata extraction (topics, people, action items, type) via any OpenAI-compatible endpoint.
@@ -19,13 +73,13 @@ This repo is one codebase with **three install paths**, from "docker on a laptop
 - **Observability** — Caddy JSON access logs, an auth-failure audit table, a log-ingester sidecar, and a daily rollup with retention, so a public endpoint is *measured*, not guessed at.
 - **Defense in depth** — loopback-only binds, dropped capabilities, read-only rootfs, least-privilege DB roles with a drift assertion, an Anthropic-egress IP allowlist at the proxy edge (the primary public perimeter, CI-guarded so it can't be silently dropped), credential redaction in access logs, fail-fast misconfiguration guards. The full inventory is in [`docs/security-model.md`](docs/security-model.md).
 
-## Architecture
+## Request flow in detail
 
 The Tailnet/Funnel and Qubes deployments front the MCP server with Caddy + Tailscale Funnel and authenticate with OAuth (RS256 JWT) — the single auth door on any publicly-reachable install. Caddy's single `:9787` listener discriminates Funnel vs tailnet traffic via the `Tailscale-Funnel-Request` header that Tailscale injects only on funnel-originated requests (the single-listener design we call **Pattern Y**); that split scopes the Anthropic IP allowlist to public traffic and keeps the internal `/ready` probe off the public door — it no longer routes credentials, since both branches now carry the same Bearer JWT. (The local single-box install skips Caddy entirely and uses the simple `x-brain-key` door.)
 
 > **Why Tailscale Funnel and not a Cloudflare Tunnel?** Cloudflare is a reasonable — for many people, better — choice; this project picks Funnel so TLS terminates on your own hardware (no edge with plaintext capability in the routine path) and so no vendor is added beyond the Tailscale account the private door already needs. The full trade-off, the honest caveats to that argument, and a sketch of the Cloudflare variant are in [`docs/why-not-cloudflare.md`](docs/why-not-cloudflare.md).
 
-On the [Qubes install path](deploy/qubes/README.md) these roles are split across **three qubes** — a Funnel + Caddy **ingress** qube, an **app** qube (mcp + Ollama), and a **db** qube (Postgres) — reached over a firewall-scoped tailnet ([three-qube-design.md](deploy/qubes/three-qube-design.md)) so that a compromised public edge need not expose the memory store, which lives in its own db qube. The sequence below shows that topology; on a single host the same flow runs over the local docker network.
+On the [Qubes install path](deploy/qubes/README.md) these roles are split across **three qubes** — a Funnel + Caddy **ingress** qube, an **app** qube (mcp + Ollama), and a **db** qube (Postgres) — reached over a firewall-scoped tailnet ([three-qube-design.md](deploy/qubes/three-qube-design.md)) so that a compromised public edge need not expose the memory store, which lives in its own db qube. The sequence below traces a request through that topology; on a single host the same flow runs over the local docker network.
 
 ```mermaid
 sequenceDiagram
@@ -126,4 +180,4 @@ On the **local single-box install**, anyone who can present your `x-brain-key` (
 
 ## License & attribution
 
-This project is a self-hosted derivative of [Open Brain](https://github.com/NateBJones-Projects/OB1) by Nate B. Jones, developed against the [OB1-homelab](https://github.com/openbrain-build/OB1-homelab) line. It is licensed under the same **FSL-1.1-MIT** terms (see [LICENSE.md](LICENSE.md)) — free for any non-competing use, converting to MIT two years after release. The `thoughts` table layout stays compatible with upstream OB1 so schema extensions from that community work here too.
+This project is a self-hosted derivative of [Open Brain (OB1)](https://github.com/NateBJones-Projects/OB1) by Nate B. Jones. It began as a private working fork of OB1 (the *OB1-homelab* line, since retired) and deliberately keeps a smaller footprint than upstream — no web dashboard, no Supabase, just the memory layer and its perimeter. It is licensed under the same **FSL-1.1-MIT** terms (see [LICENSE.md](LICENSE.md)): free for any non-competing use, converting to MIT two years after release. The `thoughts` table layout stays compatible with upstream OB1, so schema extensions from that community work here too.
