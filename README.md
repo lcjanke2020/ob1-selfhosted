@@ -170,6 +170,18 @@ curl http://127.0.0.1:8787/health
 
 Then point any MCP client at `http://127.0.0.1:8787/mcp` with your `x-brain-key`.
 
+## See it working
+
+Capture a thought, find it again by meaning (not keywords), checkpoint an agent work session, and resume it by branch — against a local compose install, driven with nothing but `curl` and `jq`:
+
+![Terminal demo: capture_thought, semantic search_thoughts, session_capture, session_lookup](docs/assets/demo.gif)
+
+*(The recording is also committed as [`docs/assets/demo.cast`](docs/assets/demo.cast) for `asciinema play`.)*
+
+And what the observability stack is for — one week of real perimeter data from a live Funnel deployment: every request classified by door and status, and the internet's background scanning (`/.env` probes and friends) rejected by the IP allowlist before auth is ever attempted:
+
+![One week of funnel access summarized by day, socket, and status class, plus the top rejected scan paths](docs/assets/funnel-summary.png)
+
 ## Trust model, in one paragraph
 
 On the **local single-box install**, anyone who can present your `x-brain-key` (loopback, your LAN, or your tailnet if you front it with `tailscale serve`) gets full read/write to your memory store — treat the key like a database password. On any **Funnel or Qubes** deployment there is no static key at all: anyone on the public internet with a valid RS256 JWT from your OAuth tenant gets full read/write — identity rests on your tenant's user management, and the Anthropic-egress IP allowlist restricts the door to Anthropic's published range before auth is even attempted. There is no per-user row-level security yet; the JWT `sub` is recorded on every write but is informational. The longer version, including what each container is allowed to do after a hypothetical compromise, is in [`docs/security-model.md`](docs/security-model.md). The assembled one-page view — assets, attacker entry points, defense layers, residual risks — is in [`docs/threat-model.md`](docs/threat-model.md).
