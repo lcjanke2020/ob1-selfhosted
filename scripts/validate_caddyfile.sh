@@ -26,7 +26,10 @@
 # `core.hooksPath .githooks`, the hooks directory is branch-controlled, so
 # the fetch itself would otherwise run the unread PR's hooks:
 #   git -c core.hooksPath=/dev/null fetch https://github.com/lcjanke2020/ob1-selfhosted.git main
-#   bash <(git show FETCH_HEAD:scripts/validate_caddyfile.sh)
+#   validator=$(git show FETCH_HEAD:scripts/validate_caddyfile.sh) && bash -c "$validator"
+# (Not `bash <(git show …)`: a process-substitution failure doesn't propagate —
+# bash would run an empty script and report success, silently skipping the
+# validation. The && form fails closed if the extraction fails.)
 set -euo pipefail
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
