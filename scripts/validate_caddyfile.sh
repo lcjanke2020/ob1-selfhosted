@@ -21,8 +21,11 @@
 # only as trustworthy as the ref it came from. Reviewing a PR you haven't
 # read? Don't execute the PR's copy of this file — run the canonical
 # repository's copy against the PR worktree. Attach trust to the repo URL,
-# not to a remote name (in a fork checkout, `origin` is the fork):
-#   git fetch https://github.com/lcjanke2020/ob1-selfhosted.git main
+# not to a remote name (in a fork checkout, `origin` is the fork), and
+# disable hooks for the fetch: with this repo's recommended
+# `core.hooksPath .githooks`, the hooks directory is branch-controlled, so
+# the fetch itself would otherwise run the unread PR's hooks:
+#   git -c core.hooksPath=/dev/null fetch https://github.com/lcjanke2020/ob1-selfhosted.git main
 #   bash <(git show FETCH_HEAD:scripts/validate_caddyfile.sh)
 set -euo pipefail
 
