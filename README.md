@@ -35,7 +35,7 @@ flowchart TB
 
     subgraph ING["ingress qube — public edge, holds no memory store"]
         TS["tailscaled<br/>Funnel :443 — TLS terminates here"]
-        CA["Caddy :9787<br/>funnel-header split · Anthropic IP allowlist<br/>(public branch only)"]
+        CA["Caddy :9787<br/>funnel-header split · Anthropic IP allowlist<br/>(Funnel requests only)"]
         LI["log-ingester"]
         TS --> CA
         CA -. "JSON access logs<br/>(credential-redacted)" .-> LI
