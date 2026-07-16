@@ -3,7 +3,7 @@
 # mirror of the CI gate in .github/workflows/caddy-validate.yml (keep the
 # extractor below in lockstep with the workflow's).
 #
-# Deliberately safe to run on any checkout, including a PR you haven't read:
+# The checkout's FILES are treated as untrusted input:
 #   - the image is restricted to an official, patch-pinned `caddy:` tag taken
 #     from the perimeter Dockerfile's FROM line — a Dockerfile pointing at any
 #     other registry or a floating tag fails loudly instead of running an
@@ -14,6 +14,12 @@
 #     SELinux-enforcing hosts (Fedora/Qubes); the relabel hits the staged
 #     copy, not your files;
 #   - the container runs with --network none.
+#
+# THIS SCRIPT is not: it runs on your host with your permissions, so it is
+# only as trustworthy as the ref it came from. Reviewing a PR you haven't
+# read? Don't execute the PR's copy of this file — run the trusted one from
+# main against the PR worktree:
+#   bash <(git show origin/main:scripts/validate_caddyfile.sh)
 set -euo pipefail
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
