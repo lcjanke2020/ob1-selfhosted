@@ -26,7 +26,7 @@ This repo is one codebase with **three install paths**, from "docker on a laptop
 
 ## Architecture at a glance
 
-The hardened shape (the **Qubes OS** install path). Each tinted box is a separate Qubes VM, connected over a firewall-scoped tailnet — a compromised public edge holds no memory store and no app credential. On the other two install paths the same components run on one host over the local docker network: same auth doors, one fewer isolation boundary.
+The hardened shape (the **Qubes OS** install path). Each tinted box is a separate Qubes VM, connected over a firewall-scoped tailnet — a compromised public edge holds no memory store and no app credential. On the **Tailnet / Funnel** path the same components co-locate on one host over the local docker network — same OAuth door, minus the VM boundaries. **Local compose** is simpler still: just Postgres + the MCP server + Ollama behind the `x-brain-key` door, with no public edge at all.
 
 ```mermaid
 flowchart TB
@@ -54,7 +54,7 @@ flowchart TB
     CL -- "HTTPS :443 via Funnel relay" --> TS
     CD -. "WireGuard (tailnet)" .-> TS
     CA -- "MCP port only, scoped tailnet<br/>Bearer JWT forwarded" --> MCP
-    MCP -- "openbrain_app role:<br/>SELECT / INSERT / UPDATE — no DELETE" --> PG
+    MCP -- "openbrain_app role:<br/>SELECT / INSERT / UPDATE —<br/>no DELETE on thoughts" --> PG
     LI -. "openbrain_ingester role:<br/>INSERT-only, one table (funnel_access_log)" .-> PG
 
     style ING fill:#d777571a,stroke:#d77757
@@ -62,7 +62,7 @@ flowchart TB
     style DBQ fill:#5082f01a,stroke:#5082f0
 ```
 
-Design reasoning and the enforcement layers behind each arrow: [`three-qube-design.md`](deploy/qubes/three-qube-design.md). Request-level detail — the Pattern Y header split and both auth branches — is in [Request flow in detail](#request-flow-in-detail) below.
+In text: clients reach tailscaled's single Funnel listener on the ingress qube; Caddy applies the funnel-header split (Pattern Y — tailnet clients hit the same listener) and the Anthropic IP allowlist, then proxies to the MCP server on the app qube, which embeds via Ollama and reads/writes Postgres on the db qube; the edge's log-ingester writes access-log rows to the db qube on an INSERT-only role. Design reasoning and the enforcement layers behind each arrow: [`three-qube-design.md`](deploy/qubes/three-qube-design.md). Request-level detail — both auth branches, step by step — is in [Request flow in detail](#request-flow-in-detail) below.
 
 ## What's in the box
 
