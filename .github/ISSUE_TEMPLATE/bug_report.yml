@@ -1,0 +1,48 @@
+name: Bug report
+description: Something doesn't work as documented
+body:
+  - type: dropdown
+    id: install-path
+    attributes:
+      label: Install path
+      description: Which deployment does this affect?
+      options:
+        - Local compose (deploy/compose-local)
+        - Tailnet / Funnel (deploy/compose-tailnet)
+        - Qubes three-qube split (deploy/qubes)
+        - Other / not deployment-specific
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, and what went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: Include the README/doc section you were following, if any.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or output
+      description: "`docker compose logs <service>`, server boot output, CI output — whatever shows the failure."
+      render: shell
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: e.g. Deno 2.3.x / Docker 27.x / Compose 2.2x / Tailscale 1.8x — as applicable
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction check
+      description: This is a public repo. The CI leak gate scans the codebase, but it can't scan your issue text.
+      options:
+        - label: I have redacted hostnames, IPs, and credentials from everything pasted above.
+          required: true

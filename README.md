@@ -146,8 +146,9 @@ sequenceDiagram
 │   └── qubes/                 Install path 3 — Qubes runbook + three-qube design doc
 ├── scripts/                   Daily observability summary, existing-deployment upgrades
 ├── skills/session-tracker/    Agent-facing skill: how to use the session_* tools
-├── docs/                      Security model, Funnel-as-MCP-perimeter guide,
-│                              "why not Cloudflare?" rationale, Codex-over-OAuth client setup
+├── docs/                      Threat model (one page), security model, Funnel-as-MCP-
+│                              perimeter guide, "why not Cloudflare?" rationale,
+│                              Codex-over-OAuth client setup
 └── .github/workflows/         CI (deno tests, --allow-env drift guard) + leak gate
 ```
 
@@ -171,12 +172,16 @@ Then point any MCP client at `http://127.0.0.1:8787/mcp` with your `x-brain-key`
 
 ## Trust model, in one paragraph
 
-On the **local single-box install**, anyone who can present your `x-brain-key` (loopback, your LAN, or your tailnet if you front it with `tailscale serve`) gets full read/write to your memory store — treat the key like a database password. On any **Funnel or Qubes** deployment there is no static key at all: anyone on the public internet with a valid RS256 JWT from your OAuth tenant gets full read/write — identity rests on your tenant's user management, and the Anthropic-egress IP allowlist restricts the door to Anthropic's published range before auth is even attempted. There is no per-user row-level security yet; the JWT `sub` is recorded on every write but is informational. The longer version, including what each container is allowed to do after a hypothetical compromise, is in [`docs/security-model.md`](docs/security-model.md).
+On the **local single-box install**, anyone who can present your `x-brain-key` (loopback, your LAN, or your tailnet if you front it with `tailscale serve`) gets full read/write to your memory store — treat the key like a database password. On any **Funnel or Qubes** deployment there is no static key at all: anyone on the public internet with a valid RS256 JWT from your OAuth tenant gets full read/write — identity rests on your tenant's user management, and the Anthropic-egress IP allowlist restricts the door to Anthropic's published range before auth is even attempted. There is no per-user row-level security yet; the JWT `sub` is recorded on every write but is informational. The longer version, including what each container is allowed to do after a hypothetical compromise, is in [`docs/security-model.md`](docs/security-model.md). The assembled one-page view — assets, attacker entry points, defense layers, residual risks — is in [`docs/threat-model.md`](docs/threat-model.md).
 
 ## Status & roadmap
 
 - All three install paths describe deployments that are running today; the test suite (`cd server && deno task test`) is hermetic and runs in CI.
 - The Qubes install path runs as the **three-qube split**, each role in its own self-contained per-qube compose directory ([`deploy/qubes/db-qube/`](deploy/qubes/db-qube/), [`app-qube/`](deploy/qubes/app-qube/), [`ingress-qube/`](deploy/qubes/ingress-qube/) — see [`three-qube-design.md`](deploy/qubes/three-qube-design.md)): Postgres in its own db qube; the app (mcp + Ollama) plus the encrypted off-box backup in an app qube; Funnel + Caddy + the log-ingester in an ingress qube that reverse-proxies to the app qube across a firewall-scoped tailnet. The ingress qube no longer starts the app containers ([#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13)) — its compose defines only Caddy + the log-ingester. The log-ingester writes its access-log rows across to the db qube for now, with a parked local logs store on the ingress qube as its documented future home ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)).
+
+## Contributing
+
+Contributions are welcome — [`docs/why-not-cloudflare.md`](docs/why-not-cloudflare.md) even sketches a `deploy/compose-cloudflare/` variant waiting to be built. Start with [CONTRIBUTING.md](CONTRIBUTING.md); the one non-negotiable is enabling the local leak guard first (`git config core.hooksPath .githooks`) — this is a public repo and CI blocks anything that looks like a credential or private-infrastructure identifier.
 
 ## License & attribution
 

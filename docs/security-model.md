@@ -1,6 +1,6 @@
 # Security model
 
-What this stack trusts, what it doesn't, and what each layer is allowed to do after the layer above it fails. The companion doc [`funnel-mcp-perimeter.md`](funnel-mcp-perimeter.md) covers the transferable pattern for running *any* MCP server behind Tailscale Funnel.
+What this stack trusts, what it doesn't, and what each layer is allowed to do after the layer above it fails. The companion doc [`funnel-mcp-perimeter.md`](funnel-mcp-perimeter.md) covers the transferable pattern for running *any* MCP server behind Tailscale Funnel; the assembled one-page view of the whole model is [`threat-model.md`](threat-model.md).
 
 ## Trust boundaries
 

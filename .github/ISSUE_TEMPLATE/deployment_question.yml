@@ -1,0 +1,36 @@
+name: Deployment question
+description: You're wiring up an install path and something is unclear or stuck
+body:
+  - type: dropdown
+    id: install-path
+    attributes:
+      label: Install path
+      options:
+        - Local compose (deploy/compose-local)
+        - Tailnet / Funnel (deploy/compose-tailnet)
+        - Qubes three-qube split (deploy/qubes)
+        - Not sure yet / choosing between them
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: What you're trying to do
+      description: The end state you want, in a sentence or two.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+      description: Which README/doc section you followed, where you got stuck, and any output you saw.
+    validations:
+      required: true
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction check
+      description: This is a public repo. The CI leak gate scans the codebase, but it can't scan your issue text.
+      options:
+        - label: I have redacted hostnames, IPs, and credentials from everything pasted above.
+          required: true
