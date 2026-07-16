@@ -1,4 +1,4 @@
-{"version":3,"term":{"cols":100,"rows":30},"timestamp":1784159829,"command":"bash /tmp/claude-1001/ob1demo/demo-play.sh","env":{"SHELL":"/usr/sbin/zsh"}}
+{"version":3,"term":{"cols":100,"rows":30},"timestamp":1784159829,"env":{"SHELL":"/usr/sbin/zsh"}}
 [0.002, "o", "\u001b[2m# Open Brain, local compose install — one MCP server on loopback :8787\u001b[0m\r\n"]
 [0.901, "o", "\u001b[1;32m$\u001b[0m m"]
 [0.013, "o", "c"]

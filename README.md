@@ -172,15 +172,15 @@ Then point any MCP client at `http://127.0.0.1:8787/mcp` with your `x-brain-key`
 
 ## See it working
 
-Capture a thought, find it again by meaning (not keywords), checkpoint an agent work session, and resume it by branch — against a local compose install, driven with nothing but `curl` and `jq`:
+Capture a thought, find it again by meaning (not keywords), checkpoint an agent work session, and resume it by branch — against a local compose install, driven with a tiny shell helper around `curl` and `jq` (the `mcp()` function shown in the recording is just `curl … | jq`, with the endpoint and key taken from `$BRAIN` and `$BRAIN_KEY`):
 
 ![Terminal demo: capture_thought, semantic search_thoughts, session_capture, session_lookup](docs/assets/demo.gif)
 
-*(The recording is also committed as [`docs/assets/demo.cast`](docs/assets/demo.cast) for `asciinema play`.)*
+*(The recording is also committed as [`docs/assets/demo.cast`](docs/assets/demo.cast) for `asciinema play` — it's asciicast v3, so it needs asciinema ≥ 3.0.)*
 
-And what the observability stack is for — one week of real perimeter data from a live Funnel deployment: every request classified by door and status, and the internet's background scanning (`/.env` probes and friends) rejected by the IP allowlist before auth is ever attempted:
+And what the observability stack is for — one week of real data from a live deployment's public Funnel door (UTC-day buckets): every request bucketed by day and status class, the internet's background scanning (`/.env` probes and friends) rejected `403` by the Anthropic IP allowlist before auth is ever attempted, and the handful of requests from inside the allowlist that still failed OAuth token validation:
 
-![One week of funnel access summarized by day, socket, and status class, plus the top rejected scan paths](docs/assets/funnel-summary.png)
+![One week of public-door funnel access summarized by UTC day and status class, plus the top scan paths rejected 403 by the IP allowlist](docs/assets/funnel-summary.png)
 
 ## Trust model, in one paragraph
 
