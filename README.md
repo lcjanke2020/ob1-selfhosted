@@ -170,6 +170,18 @@ curl http://127.0.0.1:8787/health
 
 Then point any MCP client at `http://127.0.0.1:8787/mcp` with your `x-brain-key`.
 
+## See it working
+
+Capture a thought, find it again by meaning (not keywords), checkpoint an agent work session, and resume it by branch — against a local compose install, driven with a tiny shell helper around `curl` and `jq` (the `mcp()` function shown in the recording is just `curl … | jq`, with the endpoint and key taken from `$BRAIN` and `$BRAIN_KEY`):
+
+![Terminal demo: capture_thought, semantic search_thoughts, session_capture, session_lookup](docs/assets/demo.gif)
+
+*(The recording is also committed as [`docs/assets/demo.cast`](docs/assets/demo.cast) for `asciinema play` — it's asciicast v3, so it needs asciinema ≥ 3.0.)*
+
+And what the observability stack is for — one week of real data from a live deployment's public Funnel door (UTC-day buckets): every request bucketed by day and status class, the internet's background scanning (`/.env` probes and friends) rejected `403` by the Anthropic IP allowlist before auth is ever attempted, and the handful of in-allowlist requests that presented no usable credentials and drew the `401` challenge that starts OAuth discovery (tried-but-invalid tokens get a `200` JSON-RPC error envelope by design, so they never appear as 4xx):
+
+![One week of public-door funnel access summarized by UTC day and status class, plus the top scan paths rejected 403 by the IP allowlist](docs/assets/funnel-summary.png)
+
 ## Trust model, in one paragraph
 
 On the **local single-box install**, anyone who can present your `x-brain-key` (loopback, your LAN, or your tailnet if you front it with `tailscale serve`) gets full read/write to your memory store — treat the key like a database password. On any **Funnel or Qubes** deployment there is no static key at all: anyone on the public internet with a valid RS256 JWT from your OAuth tenant gets full read/write — identity rests on your tenant's user management, and the Anthropic-egress IP allowlist restricts the door to Anthropic's published range before auth is even attempted. There is no per-user row-level security yet; the JWT `sub` is recorded on every write but is informational. The longer version, including what each container is allowed to do after a hypothetical compromise, is in [`docs/security-model.md`](docs/security-model.md). The assembled one-page view — assets, attacker entry points, defense layers, residual risks — is in [`docs/threat-model.md`](docs/threat-model.md).
