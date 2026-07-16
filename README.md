@@ -178,7 +178,7 @@ Capture a thought, find it again by meaning (not keywords), checkpoint an agent 
 
 *(The recording is also committed as [`docs/assets/demo.cast`](docs/assets/demo.cast) for `asciinema play` — it's asciicast v3, so it needs asciinema ≥ 3.0.)*
 
-And what the observability stack is for — one week of real data from a live deployment's public Funnel door (UTC-day buckets): every request bucketed by day and status class, the internet's background scanning (`/.env` probes and friends) rejected `403` by the Anthropic IP allowlist before auth is ever attempted, and the handful of requests from inside the allowlist that still failed OAuth token validation:
+And what the observability stack is for — one week of real data from a live deployment's public Funnel door (UTC-day buckets): every request bucketed by day and status class, the internet's background scanning (`/.env` probes and friends) rejected `403` by the Anthropic IP allowlist before auth is ever attempted, and the handful of in-allowlist requests that presented no usable credentials and drew the `401` challenge that starts OAuth discovery (tried-but-invalid tokens get a `200` JSON-RPC error envelope by design, so they never appear as 4xx):
 
 ![One week of public-door funnel access summarized by UTC day and status class, plus the top scan paths rejected 403 by the IP allowlist](docs/assets/funnel-summary.png)
 
