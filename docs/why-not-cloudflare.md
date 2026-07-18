@@ -23,7 +23,7 @@ This project chose Funnel anyway, for two reasons:
 
 Run an all-local configuration — local models, your own client devices — and the first row drops out entirely: no party in this table ever sees your thoughts in plaintext, only connection metadata. That configuration is the one this project is built not to foreclose.
 
-This table is about who can *read* your thoughts. For the companion question — who can *reject or alter* a write, even without reading it — and a case study in why keeping a local-runtime path closes it, see [why-local-only](./why-local-only.md).
+This table is about who can *read* your thoughts. For the companion question — who can *reject or alter* a write it never reads — and a case study in why executing MCP through a local runtime removes the hosted-connector edge behind it, see [why-local-only](./why-local-only.md).
 
 ## Honest caveats to our own argument
 

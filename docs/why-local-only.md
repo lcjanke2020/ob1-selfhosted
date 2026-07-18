@@ -13,9 +13,10 @@ away until a write you expected to land simply doesn't.
 
 The deployment was close to the maximal local configuration this project supports:
 embeddings from a local model, metadata classification from a local model on a GPU host,
-storage in a local database. Nothing in the write path *reached* a third-party model. (A
-cloud classifier fallback stays wired for when the local model is unavailable, but it never
-fired here — and even on failure it only stamps a placeholder; it can't reject a write.)
+storage in a local database. Once a request reached the store, no server-side processing
+called a third-party model. (A cloud classifier fallback stays wired for when the local model
+is unavailable, but it never fired here — and even on failure it only stamps a placeholder; it
+can't reject a write.)
 
 The **client**, though, was a hosted model reaching the store's tools through the **vendor's
 hosted connector** — the cloud-side path a hosted model uses to call your MCP server, as
@@ -51,31 +52,38 @@ nothing. That is worse than a clean error and worse than a clean success: a non-
 dual question is who can *reject or alter* a write. The two are independent, and — the part
 worth being precise about — they are closed by different moves:
 
-| Configuration | An edge filter can reject a write? | A third party reads the plaintext? |
-|---|---|---|
-| Hosted model **+ hosted connector** (the incident) | **Yes** — the vendor's edge is in the path | Yes — the hosted model reads it by design |
-| Hosted model **+ local MCP execution** (a local agent runtime over loopback / your tailnet door) | **No** — the hosted connector is out of the path | Yes — the hosted model still reads it |
-| **Local model + local client** (loopback) | No | **No** |
+| Configuration | Connector edge filter on the MCP transport? | Hosted model in the loop at inference? | Third party reads your plaintext? |
+|---|---|---|---|
+| Hosted model **+ hosted connector** (the incident) | **Yes** — the vendor's edge sits on the tool-call transport | Yes | Yes — by design |
+| Hosted model **+ local MCP execution** (a local agent runtime over loopback / your tailnet door) | **No** — the connector edge is off the transport | Yes — inference is still hosted | Yes — the hosted model still reads it |
+| **Local model + local client** (loopback) | No | **No** | **No** |
 
-The middle row is the one this argument usually misses. **Removing the connector filter does
-not require local inference.** Run the agent as a *local runtime* — a client on your own box
-that reaches the MCP server over loopback (`127.0.0.1`) or your private tailnet door, the way
-the local-install path already works — and its tool calls never traverse the vendor's hosted
-connector, so no edge filter can turn them back. The model can still be a hosted one. What
-that *doesn't* buy you is confidentiality: a hosted model reads every byte it is handed,
-exactly as [`why-not-cloudflare`](./why-not-cloudflare.md) and the [threat model](./threat-model.md)
-spell out. Closing *that* is what local inference is for.
+The middle row is the one this argument usually misses. **Taking the connector edge off the
+transport does not require local inference.** Run the agent as a *local runtime* — a client on
+your own box that reaches the MCP server over loopback (`127.0.0.1`) or your private tailnet
+door, the way the local-install path already works — and its tool calls never traverse the
+vendor's hosted connector, so the specific edge filter that produced this incident is off the
+path. The model can still be a hosted one.
 
-So, separating the two wins:
+But be precise about what that removes. It removes **one** rejection surface: the connector's
+content filter on the MCP HTTP transport. It does **not** remove the hosted model provider,
+which is still in the loop at inference — it receives your prompt (so it still reads your
+plaintext), and it can refuse the request, policy-filter the input or output, omit the tool
+call, or return altered arguments. That is a narrower and less arbitrary surface than an
+opaque transport WAF, but it is a real one. Only moving inference local removes it too.
 
-- The **integrity / availability** win — no edge filter can reject your write — comes from
-  taking the **hosted connector out of the transport** (a local runtime over loopback or the
-  tailnet door), not from the model being local.
-- The **confidentiality** win — no third party reads the plaintext — comes from **local
-  inference**.
+So, sorting the wins by where they come from:
+
+- The win against **this incident's failure mode** — the hosted-connector edge filter can no
+  longer reject a tool call — comes from executing MCP through a **local runtime** (loopback or
+  the tailnet door), not from the model being local. It takes the connector edge off the
+  transport; it does not take the hosted provider out of inference.
+- The **confidentiality** win — no third party reads your plaintext — comes from **local
+  inference**, which also removes the provider's inference-time ability to refuse or alter what
+  gets written. See [`why-not-cloudflare`](./why-not-cloudflare.md) and the [threat model](./threat-model.md).
 - The **fully local loop** — local model, local client, loopback — is the only configuration
-  with both, *and* it removes even the transport intermediary: nothing but your own process
-  and disk is in the path.
+  that removes *both* the connector edge and the inference provider: nothing but your own
+  process and disk is in the path.
 
 ## Honest caveats to our own argument
 
@@ -109,11 +117,13 @@ store" as the risk, whoever's CDN it is.
 
 - **Hosted model + hosted connector** — most convenient, works from anywhere, nothing local;
   accept that an edge filter may occasionally, opaquely, reject a technical write.
-- **Hosted model + local runtime** (loopback or tailnet door) — removes the filter; the model
-  still reads your plaintext. A large reliability gain at no confidentiality cost you weren't
-  already paying.
-- **Local model + local client** (loopback) — removes both: no party can read *or* reject your
-  writes, and nothing but your own hardware is in the path. This is the maximal configuration
+- **Hosted model + local runtime** (loopback or tailnet door) — takes the connector edge off
+  the transport, so this incident's failure mode is gone; the hosted model still reads your
+  prompt and can refuse or alter at inference. A large reliability gain at no confidentiality
+  cost you weren't already paying.
+- **Local model + local client** (loopback) — removes both the connector edge and the inference
+  provider: no outside party can read *or* reject your writes, and nothing but your own hardware
+  is in the path. This is the maximal configuration
   the project keeps first-class — for exactly the notes you least want a stranger's filter to
   have an opinion about.
 
