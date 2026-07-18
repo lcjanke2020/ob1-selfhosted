@@ -23,6 +23,8 @@ This project chose Funnel anyway, for two reasons:
 
 Run an all-local configuration — local models, your own client devices — and the first row drops out entirely: no party in this table ever sees your thoughts in plaintext, only connection metadata. That configuration is the one this project is built not to foreclose.
 
+This table is about who can *read* your thoughts. For the companion question — who can *reject or alter* a write, even without reading it — and a case study in why keeping a local-runtime path closes it, see [why-local-only](./why-local-only.md).
+
 ## Honest caveats to our own argument
 
 **If a hosted LLM is your client, it already sees everything.** Anthropic, OpenAI, or Google sees your thoughts in plaintext by design — that's what it means to use their models against your memory store. Adding Cloudflare's (hypothetical) ability to read the same bytes may not move your threat model at all. The end-to-end argument bites hardest if you run local models against the tailnet door and keep the public door for occasional hosted-client convenience. If you'll never run a local model, the case for Funnel weakens to "one fewer account."
