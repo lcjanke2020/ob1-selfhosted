@@ -78,6 +78,8 @@ claude.ai → Settings → Connectors → Add custom connector → URL `https://
 If the connector fails after a successful consent screen, the most common cause is a client_secret paste mismatch — see the failure-mode catalog in [`docs/funnel-mcp-perimeter.md`](../../docs/funnel-mcp-perimeter.md).
 
 > **Connecting a local Codex CLI instead?** That's a different client shape — a public PKCE client with no secret, authorized per Codex account, per machine. See [`docs/codex-oauth-client.md`](../../docs/codex-oauth-client.md).
+>
+> **Connecting a local Kimi Code CLI?** Same public-PKCE shape, but registered exclusively through a time-boxed Dynamic Client Registration window (Kimi Code has no pre-registered-client option). See [`docs/kimi-code-oauth-client.md`](../../docs/kimi-code-oauth-client.md).
 
 ## Observability (Pattern B)
 
