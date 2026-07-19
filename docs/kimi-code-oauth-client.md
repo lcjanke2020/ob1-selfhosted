@@ -141,7 +141,7 @@ resource metadata), and `-tokens.json`. Confirm owner-only permissions **without
 stat -c '%a %U:%G %n' ~/.kimi-code/credentials/mcp/openbrain-*
 ```
 
-Expect `0600` throughout. The tokens file should contain a `refresh_token` key (a keys-only check
+Expect `600` throughout. The tokens file should contain a `refresh_token` key (a keys-only check
 with `jq 'keys'` is safe; do not print values).
 
 ## Skill and process-restart discovery
