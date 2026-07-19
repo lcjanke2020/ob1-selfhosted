@@ -76,11 +76,13 @@ the same procedure the Codex doc documents as its fallback:
 3. Enable **Dynamic Client Registration** (tenant **Settings → Advanced**).
 
 Plan to disable DCR **immediately after** the login completes. Open DCR lets anyone register a
-third-party application against your tenant during that window. The registered client and its
-refresh token keep working after DCR is off — **do not delete** the DCR-created application
-(typically named after the client, e.g. `Kimi Code`); deleting it forces re-registration through
-another DCR window. Because Kimi Code has no pre-registered route, each *additional* Kimi Code host
-needs this window opened again.
+third-party application against your tenant during that window, while the Domain-Level login
+connection remains available to third-party applications after DCR is disabled. Treat both as
+deliberate exposure. The registered client and its refresh token keep working after DCR is off —
+**do not delete** the newly DCR-created application (normally `kimi-code (<server-name>)`, which is
+`kimi-code (openbrain)` for the entry below); deleting it forces re-registration through another
+DCR window. Because Kimi Code has no pre-registered route, each *additional* Kimi Code host needs
+this window opened again.
 
 ## Configure and log in
 
@@ -98,10 +100,9 @@ Add the server to the user-level `~/.kimi-code/mcp.json` (or `$KIMI_CODE_HOME/mc
 }
 ```
 
-`auth: "oauth"` marks the server for the OAuth login flow. No scopes field exists — and none is
-needed: against this deployment the flow returns with `offline_access` granted and a refresh token
-stored (verified), because OpenBrain's protected-resource metadata omits `scopes_supported` and
-Kimi Code requests the refresh-capable scope set on its own.
+`auth: "oauth"` marks the server for the OAuth login flow. No scopes field exists. Against this
+deployment, the observed flow returned `offline_access` and stored a refresh token, so no additional
+scope configuration was needed in Kimi Code 0.27.0.
 
 **MCP servers load at process start.** Restart the CLI after editing `mcp.json` — resuming the
 previous session (`kimi resume`) is sufficient; a brand-new conversation is not required. The new
@@ -114,12 +115,19 @@ Start the login from the TUI:
 ```
 
 (An agent inside the session can run the same flow via the server's `authenticate` tool.) The flow
-starts a loopback callback server, registers the client over DCR, prints the Auth0 authorization
-URL, and blocks up to 15 minutes for the callback. Open the URL in a browser and complete
-login/consent. On a headless or remote host where the CLI can't open a browser, open the URL from a
-session that can reach the host's loopback (an SSH forward of the callback port works); if the URL
-must leave the terminal, hand it off through an owner-only (`0600`) temporary file and delete it
-after the callback — never relay it through chat, issues, logs, or a committed artifact.
+starts a callback server on a random `127.0.0.1` port, registers the client over DCR, prints the
+Auth0 authorization URL, and blocks up to 15 minutes for the callback. Complete login/consent in a
+browser on the Kimi host. To use a browser on another machine, leave the login running, read
+`<port>` from the current URL's `redirect_uri` (`http://127.0.0.1:<port>/callback`), and start
+this local forward on the browser machine before opening that exact URL:
+
+```bash
+ssh -N -L <port>:127.0.0.1:<port> <user>@<kimi-host>
+```
+
+The browser's callback to its own `127.0.0.1:<port>` then traverses the tunnel to the Kimi host. If
+the URL must leave the terminal, hand it off through an owner-only (`0600`) temporary file and
+delete it after the callback — never relay it through chat, issues, logs, or a committed artifact.
 
 Then disable DCR in Auth0 (keep the registered application).
 
@@ -196,5 +204,7 @@ the stored credentials and tests *reauthorization*, not refresh.
   once after correcting those settings.
 - **Current session has no OpenBrain tools** — restart the CLI so it reloads `mcp.json`; resuming
   the same conversation is sufficient. Then confirm the personal skill symlink resolves.
-- **`Address already in use` during callback** — another process owns the callback port. Stop the
-  stale login and retry; never expose the callback listener on a non-loopback address.
+- **`Address already in use` while starting the SSH forward** — another process owns that port on
+  the browser machine. The local forwarding port must match the current `redirect_uri`, so stop the
+  login, start a new one to obtain another random callback port, and build the forward from the new
+  authorization URL.
