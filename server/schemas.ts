@@ -1,9 +1,9 @@
 // Shared Zod input validation for the MCP tools (mcp-server.ts) and the REST
-// gateway (api.ts). The MCP SDK's registerTool takes a RAW SHAPE (a plain
-// object of Zod fields), so the shared exports here are raw shapes; the REST
-// layer wraps them in z.object(...) — both transports validate byte-identically,
-// including defaults. REST-only derivations (query-string coercion, path-param
-// schemas) live at the bottom so every input bound is auditable in one file.
+// gateway (api.ts). Shared fields are raw shapes so both transports can compose
+// them. When envelope strictness is part of the contract, as it is for thought
+// search, both transports reuse the same assembled object schema. REST-only
+// derivations (query-string coercion, path-param schemas) live at the bottom so
+// every input bound is auditable in one file.
 
 import { z } from "zod";
 import { SESSION_ORDER_BY, SESSION_STATUSES } from "./session_toml.ts";
@@ -203,6 +203,11 @@ export const sessionUpdateStatusShape = {
   status: z.enum(SESSION_STATUSES),
 };
 
+// A typo in the top-level filter key would otherwise be stripped into an
+// unfiltered search. The MCP SDK accepts an assembled object schema here, so
+// REST and MCP can share the same fail-closed envelope as well as field shapes.
+export const searchThoughtsSchema = z.object(searchThoughtsShape).strict();
+
 // ---- REST bodies ------------------------------------------------------
 // z.object(...) around the shared shapes, so a REST body and an MCP tool
 // call cannot drift apart in what they accept.
@@ -211,7 +216,9 @@ export const sessionUpdateStatusShape = {
 // whose extra fields were historically ignored. The new provenance envelope
 // is intentionally strict because misspelled identity claims must fail visibly.
 export const captureThoughtBody = z.object(captureThoughtShape);
-export const searchThoughtsBody = z.object(searchThoughtsShape);
+// Search filters narrow or exclude returned memory, so a misspelled envelope
+// key must fail visibly instead of being stripped into an unfiltered search.
+export const searchThoughtsBody = searchThoughtsSchema;
 export const sessionCaptureBody = z.object(sessionCaptureShape);
 export const sessionSearchBody = z.object(sessionSearchShape);
 // The session id arrives via the URL path on REST (PATCH /sessions/:id/status),

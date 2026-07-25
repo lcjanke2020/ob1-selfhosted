@@ -152,7 +152,7 @@ jobs:
           fi
           echo "openbrain_monitor probes succeeded; thoughts access correctly denied"
 
-      - name: Smoke test — thought filter has one path and keeps metadata GIN
+      - name: Smoke test — thought filters keep GIN and fill HNSW results
         run: |
           # The retired RPC must not survive a fresh/replayed schema. Search is
           # owned by server/queries.ts for MCP, REST, and future hybrid legs.
@@ -166,12 +166,17 @@ jobs:
           plan=$(docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
             < db/search-filter-plan-smoke.sql)
-          grep -q 'Bitmap Index Scan on idx_thoughts_metadata' <<< "$plan" || {
+          grep -q 'idx_thoughts_metadata' <<< "$plan" || {
             echo "::error::positive metadata containment did not select idx_thoughts_metadata"
             echo "$plan"
             exit 1
           }
-          echo "positive thought filter selected idx_thoughts_metadata"
+          grep -q 'idx_thoughts_embedding_hnsw' <<< "$plan" || {
+            echo "::error::exclude-only vector search did not select idx_thoughts_embedding_hnsw"
+            echo "$plan"
+            exit 1
+          }
+          echo "positive filter selected metadata GIN; exclude-only iterative search selected HNSW"
 
       - name: Container logs on failure
         if: failure()

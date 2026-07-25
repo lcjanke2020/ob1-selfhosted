@@ -141,6 +141,14 @@ alone is not expected to use that index. The search implementation emits no
 metadata predicate when `filter` is absent, preserving the historical
 unfiltered path.
 
+pgvector applies residual predicates after an approximate HNSW candidate scan.
+Every filtered search therefore enables `hnsw.iterative_scan = strict_order`
+with `SET LOCAL` inside a transaction, allowing HNSW to scan beyond an initial
+candidate batch that the provenance filter rejects. The setting reverts at
+commit or rollback instead of leaking through the connection pool. Iteration
+continues until enough rows pass or pgvector reaches its configured scan bound.
+Iterative HNSW scans require pgvector 0.8.0 or newer.
+
 This filter is intentionally limited to the versioned provenance keys instead
 of exposing an open-ended JSON query language. Future workspace/project and
 visibility scoping is a separate fail-closed partitioning concern; hybrid

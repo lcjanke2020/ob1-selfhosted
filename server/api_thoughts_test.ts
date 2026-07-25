@@ -348,6 +348,32 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
     );
 
     await t.step(
+      "POST /thoughts/search: unknown envelope key → 400 instead of widening",
+      async () => {
+        const deps = makeDeps();
+        const api = makeApi(() => undefined, deps);
+        const res = await api.request(
+          "/thoughts/search",
+          authed({
+            method: "POST",
+            body: JSON.stringify({
+              query: "x",
+              filters: { include: { author: "alice" } },
+            }),
+          }),
+        );
+        assertEquals(res.status, 400);
+        const body = await res.json();
+        assertEquals(body.error.code, "validation_error");
+        assertEquals(
+          body.error.message.includes('Unrecognized key: "filters"'),
+          true,
+        );
+        assertEquals(deps.embedCalls, []);
+      },
+    );
+
+    await t.step(
       "GET /thoughts: query coercion flows into SQL params",
       async () => {
         let captured: unknown[] = [];

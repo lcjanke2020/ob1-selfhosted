@@ -57,8 +57,9 @@ CREATE TRIGGER thoughts_updated_at
 -- Thought search lives in server/queries.ts, shared by MCP and REST. The old
 -- match_thoughts() RPC was never called by the server and supported only
 -- positive metadata containment, so retaining it created a second contract
--- that could silently drift. Replaying this idempotent schema also removes the
--- historical function from an existing database.
+-- that could silently drift. Init scripts do not re-run automatically on an
+-- existing database: replay this schema in the documented 01 -> 02 -> 03 order
+-- or run this DROP directly during a maintenance window.
 DROP FUNCTION IF EXISTS match_thoughts(
   VECTOR,
   DOUBLE PRECISION,

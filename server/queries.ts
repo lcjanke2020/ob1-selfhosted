@@ -71,7 +71,21 @@ export async function searchThoughts(
   params.push(limit);
   const limitParam = params.length;
   const client = await getClient(pool);
+  let transactionOpen = false;
   try {
+    if (filter !== undefined) {
+      // pgvector applies WHERE predicates after an approximate HNSW candidate
+      // scan. Without an iterative scan, a metadata filter can discard the
+      // initial candidate batch and return fewer than LIMIT even when eligible
+      // rows remain. SET LOCAL keeps the fix scoped to this transaction so a
+      // pooled connection cannot leak it into later unfiltered searches.
+      await client.queryArray("BEGIN");
+      transactionOpen = true;
+      await client.queryArray(
+        "SET LOCAL hnsw.iterative_scan = strict_order",
+      );
+    }
+
     // The distance expression decodes as text (same driver behavior
     // session_queries.ts narrows `score` for); type it honestly and expose a
     // JS number so JSON consumers don't receive `similarity` as a string.
@@ -86,10 +100,21 @@ export async function searchThoughts(
        LIMIT $${limitParam}`,
       params,
     );
+    if (transactionOpen) {
+      await client.queryArray("COMMIT");
+      transactionOpen = false;
+    }
     return result.rows.map((row) => ({
       ...row,
       similarity: Number(row.similarity),
     }));
+  } catch (e) {
+    if (transactionOpen) {
+      try {
+        await client.queryArray("ROLLBACK");
+      } catch { /* surface the original query/transaction error */ }
+    }
+    throw e;
   } finally {
     client.release();
   }

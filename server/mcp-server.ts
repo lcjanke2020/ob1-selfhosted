@@ -18,7 +18,7 @@ import {
 import {
   captureThoughtShape,
   listThoughtsShape,
-  searchThoughtsShape,
+  searchThoughtsSchema,
   sessionCaptureShape,
   sessionListShape,
   sessionLookupShape,
@@ -239,7 +239,7 @@ export function createMcpServer(
       description:
         "Search captured thoughts by meaning, optionally requiring or excluding caller-asserted author/agent/repo/branch provenance in the same call.",
       annotations: { readOnlyHint: true },
-      inputSchema: searchThoughtsShape,
+      inputSchema: searchThoughtsSchema,
     },
     async ({ query, limit, threshold, filter }) => {
       try {

@@ -1,7 +1,8 @@
--- CI-only planner smoke test for the positive thought-provenance predicate.
+-- CI-only semantics and planner smoke for thought-provenance filtering.
 -- This file is NOT mounted into docker-entrypoint-initdb.d. The DB-init
 -- workflow runs it explicitly after the operational init/grant checks, then
--- asserts that EXPLAIN names idx_thoughts_metadata.
+-- asserts that the positive predicate names idx_thoughts_metadata and the
+-- exclude-only iterative path names idx_thoughts_embedding_hnsw.
 --
 -- Bulk insertion can leave fresh GIN entries in the pending list, where the
 -- planner correctly prices the index as temporarily expensive. VACUUM ANALYZE
@@ -98,6 +99,42 @@ SELECT
 FROM generate_series(1, 20000) AS g
 CROSS JOIN constant_vector;
 
+-- Reproduce the HNSW post-filter underfill that iterative scans prevent.
+-- The first 400 neighbors exactly match the query vector but are excluded;
+-- the next 1,600 have cosine similarity ~0.707 and remain eligible. With the
+-- default ef_search of 40, the initial candidate batch is therefore all
+-- denied even though far more than LIMIT eligible rows exist behind it.
+WITH vectors AS (
+  SELECT
+    (
+      '[' || '1,' || rtrim(repeat('0,', 767), ',') || ']'
+    )::vector AS blocked_embedding,
+    (
+      '[' || '1,1,' || rtrim(repeat('0,', 766), ',') || ']'
+    )::vector AS eligible_embedding
+)
+INSERT INTO thoughts (content, embedding, metadata)
+SELECT
+  'search-filter-hnsw-fixture-' || g,
+  CASE
+    WHEN g <= 400 THEN vectors.blocked_embedding
+    ELSE vectors.eligible_embedding
+  END,
+  jsonb_build_object(
+    '_ci_search_filter_fixture',
+    true,
+    'provenance',
+    jsonb_build_object(
+      'schema_version', 1,
+      'caller_asserted',
+      jsonb_build_object(
+        'author', CASE WHEN g <= 400 THEN 'blocked' ELSE 'eligible' END
+      )
+    )
+  )
+FROM generate_series(1, 2000) AS g
+CROSS JOIN vectors;
+
 VACUUM ANALYZE thoughts;
 
 -- Mirrors the live queries.ts shape: vector threshold + positive JSONB
@@ -121,6 +158,65 @@ ORDER BY embedding <=> (
   '[' || rtrim(repeat('0.1,', 768), ',') || ']'
 )::vector
 LIMIT 10;
+
+-- Mirrors queries.ts's filtered-search transaction. SET LOCAL is deliberate:
+-- a pooled connection must revert to pgvector defaults after COMMIT.
+BEGIN;
+SET LOCAL hnsw.ef_search = 40;
+SET LOCAL hnsw.iterative_scan = strict_order;
+
+DO $$
+DECLARE
+  result_count INTEGER;
+BEGIN
+  SELECT count(*) INTO result_count
+  FROM (
+    SELECT id
+    FROM thoughts
+    WHERE 1 - (
+            embedding <=> (
+              '[' || '1,' || rtrim(repeat('0,', 767), ',') || ']'
+            )::vector
+          ) >= 0.5
+      AND NOT (
+        metadata @> '{"provenance":{"caller_asserted":{"author":"blocked"}}}'::jsonb
+      )
+    ORDER BY embedding <=> (
+      '[' || '1,' || rtrim(repeat('0,', 767), ',') || ']'
+    )::vector
+    LIMIT 10
+  ) AS filtered_neighbors;
+
+  IF result_count <> 10 THEN
+    RAISE EXCEPTION
+      'iterative HNSW exclude-only search returned %, expected 10',
+      result_count;
+  END IF;
+END;
+$$;
+
+EXPLAIN
+SELECT id, content, metadata, created_at,
+       1 - (
+         embedding <=> (
+           '[' || '1,' || rtrim(repeat('0,', 767), ',') || ']'
+         )::vector
+       ) AS similarity
+FROM thoughts
+WHERE 1 - (
+        embedding <=> (
+          '[' || '1,' || rtrim(repeat('0,', 767), ',') || ']'
+        )::vector
+      ) >= 0.5
+  AND NOT (
+    metadata @> '{"provenance":{"caller_asserted":{"author":"blocked"}}}'::jsonb
+  )
+ORDER BY embedding <=> (
+  '[' || '1,' || rtrim(repeat('0,', 767), ',') || ']'
+)::vector
+LIMIT 10;
+
+COMMIT;
 
 DELETE FROM thoughts
 WHERE metadata @> '{"_ci_search_filter_fixture":true}'::jsonb;

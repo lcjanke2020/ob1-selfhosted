@@ -255,7 +255,9 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       async () => {
         let capturedSql = "";
         let capturedParams: unknown[] = [];
+        const statements: string[] = [];
         const pool = new FakePool((sql, params) => {
+          statements.push(sql.trim());
           if (sql.includes("FROM thoughts")) {
             capturedSql = sql;
             capturedParams = params;
@@ -282,6 +284,12 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         );
 
         assertEquals(deps.embedCalls, ["release checklist"]);
+        assertEquals(statements[1], "BEGIN");
+        assertEquals(
+          statements[2],
+          "SET LOCAL hnsw.iterative_scan = strict_order",
+        );
+        assertEquals(statements[statements.length - 1], "COMMIT");
         assertEquals(capturedParams, [
           `[${FAKE_VECTOR.join(",")}]`,
           0.6,
@@ -312,6 +320,40 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         );
         assertEquals(capturedSql.includes("LIMIT $6"), true);
         assertEquals(capturedSql.includes("match_thoughts"), false);
+      },
+    );
+
+    await t.step(
+      "thought search: filtered query failures roll back the local HNSW setting",
+      async () => {
+        const statements: string[] = [];
+        const pool = new FakePool((sql) => {
+          statements.push(sql.trim());
+          return undefined;
+        });
+
+        await assertRejects(
+          () =>
+            searchThoughtsByQuery(
+              asPool(pool),
+              {
+                query: "release checklist",
+                filter: { exclude: { author: "blocked" } },
+              },
+              makeDeps(),
+            ),
+          Error,
+          "unscripted queryObject",
+        );
+        assertEquals(statements.includes("BEGIN"), true);
+        assertEquals(
+          statements.includes(
+            "SET LOCAL hnsw.iterative_scan = strict_order",
+          ),
+          true,
+        );
+        assertEquals(statements.includes("ROLLBACK"), true);
+        assertEquals(statements.includes("COMMIT"), false);
       },
     );
 

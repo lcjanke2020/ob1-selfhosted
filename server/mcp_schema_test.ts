@@ -136,6 +136,26 @@ Deno.test("MCP publishes and executes the thought provenance contracts", async (
         }),
         2,
       ]);
+
+      const invalidEnvelope = await client.callTool({
+        name: "search_thoughts",
+        arguments: {
+          query: "release checklist",
+          filters: { include: { author: "alice" } },
+        },
+      });
+      assertEquals(invalidEnvelope.isError, true);
+      const invalidContent = JSON.stringify(invalidEnvelope.content);
+      assert(
+        invalidContent.includes("Input validation error") &&
+          invalidContent.includes("filters"),
+        invalidContent,
+      );
+      assertEquals(
+        deps.embedCalls,
+        ["release checklist"],
+        "invalid MCP envelope must fail before embedding",
+      );
     } finally {
       await client.close();
       await server.close();
