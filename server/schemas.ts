@@ -119,7 +119,7 @@ export const thoughtSearchFilterSchema = z.object({
   ),
 }).strict().refine(
   (filter) => filter.include !== undefined || filter.exclude !== undefined,
-  { message: "filter must include include or exclude" },
+  { message: "filter must specify include or exclude" },
 ).meta({ minProperties: 1 });
 
 export type ThoughtSearchFilter = z.infer<typeof thoughtSearchFilterSchema>;

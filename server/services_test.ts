@@ -370,7 +370,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
               deps,
             ),
           ValidationError,
-          "filter must include include or exclude",
+          "filter must specify include or exclude",
         );
         assertEquals(deps.embedCalls, []);
         assertEquals(pool.connectCalls, 0);

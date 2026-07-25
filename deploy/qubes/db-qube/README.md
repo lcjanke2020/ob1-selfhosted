@@ -135,6 +135,13 @@ later migrations) **remotely from the app qube** over the tailnet instead of on
 this qube — e.g. `PGPASSWORD=… psql -h <db-qube-tailnet-ip> -U postgres -d postgres`
 — which is the point of the superuser remote-admin line above.
 
+Filtered provenance search requires pgvector `0.8.0` or newer. Before updating
+an existing deployment, run
+`SELECT extversion FROM pg_extension WHERE extname = 'vector';` in `openbrain`.
+If the result is older, first install a pgvector package that provides `0.8.0`
+or newer, run `ALTER EXTENSION vector UPDATE;` as the database owner, and verify
+the version again before restarting the app-side MCP service.
+
 ## Template note
 
 The shared Debian template keeps `tailscaled` **disabled**: enabling it in the

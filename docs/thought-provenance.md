@@ -149,6 +149,17 @@ commit or rollback instead of leaking through the connection pool. Iteration
 continues until enough rows pass or pgvector reaches its configured scan bound.
 Iterative HNSW scans require pgvector 0.8.0 or newer.
 
+Before rolling filtered search out against an existing database, check the
+installed extension version:
+
+```sql
+SELECT extversion FROM pg_extension WHERE extname = 'vector';
+```
+
+If it is older than `0.8.0`, first install a pgvector package or container image
+that provides `0.8.0` or newer, then run `ALTER EXTENSION vector UPDATE;` as the
+database owner. Re-run the version query before starting the updated MCP server.
+
 This filter is intentionally limited to the versioned provenance keys instead
 of exposing an open-ended JSON query language. Future workspace/project and
 visibility scoping is a separate fail-closed partitioning concern; hybrid
