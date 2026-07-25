@@ -68,6 +68,7 @@ In text: clients reach tailscaled's single Funnel listener on the ingress qube; 
 
 - **`thoughts` memory** — capture, semantic search, listing, stats over a pgvector store. Dedupe by content fingerprint. Optional LLM metadata extraction (topics, people, action items, type) via any OpenAI-compatible endpoint.
 - **Session tracking** — five additional MCP tools (`session_capture`, `session_lookup`, `session_search`, `session_list`, `session_update_status`) that store structured *agent work sessions* alongside (not inside) `thoughts`. The OB1 Postgres `sessions` schema is the canonical store; TOML front matter is the interchange format accepted by `session_capture`. See [`skills/session-tracker/`](skills/session-tracker/SKILL.md) for the agent-facing usage contract.
+- **REST gateway (`/api/v1`)** — the same thoughts + sessions operations as structured-JSON HTTP endpoints, behind the same auth doors, for CLI/cron/dashboard consumers that don't speak MCP. Opt-in per deployment (`ENABLE_REST_API`): on by default in the docker-compose installs, deliberately absent from the Qubes install, and never served over the public Funnel. See [REST API](#rest-api-apiv1) below.
 - **Local embeddings** — Ollama (`nomic-embed-text`, 768-dim by default), in-stack or on another box.
 - **Two auth modes, one per deployment** — a static `x-brain-key` header for the simple single-box local install (also usable over your tailnet if you front it with `tailscale serve`), or OAuth 2.1 resource-server validation (RS256 JWT via JWKS) as the single door on the publicly-reachable Funnel and Qubes deployments. The two doors are independently toggleable and the server refuses to boot with neither, so a public deployment carries no static key. Every write is stamped server-side with the door it came through.
 - **Observability** — Caddy JSON access logs, an auth-failure audit table, a log-ingester sidecar, and a daily rollup with retention, so a public endpoint is *measured*, not guessed at.
@@ -136,8 +137,9 @@ sequenceDiagram
 
 ```
 .
-├── server/                    Deno + Hono MCP server (11 tools), unit tests,
-│                              Dockerfiles for mcp and the log-ingester sidecar
+├── server/                    Deno + Hono server: MCP (11 tools) + REST gateway
+│                              (/api/v1), unit tests, Dockerfiles for mcp and
+│                              the log-ingester sidecar
 ├── db/                        Postgres init: roles, pgvector schema, observability,
 │                              grants-drift assertion, sessions schema, daily rollup
 ├── deploy/
@@ -152,7 +154,36 @@ sequenceDiagram
 └── .github/workflows/         CI (deno tests, --allow-env drift guard) + leak gate
 ```
 
-The `queries.ts` / `mcp-server.ts` / `index.ts` split keeps all SQL in a pure, reusable module — a REST gateway, CLI, or dashboard could be added without rewriting database code.
+The `queries.ts` / `mcp-server.ts` / `index.ts` split keeps all SQL in a pure, reusable module — that is what let the REST gateway below be added without rewriting database code, and a CLI or dashboard could follow the same path (shared validation in `schemas.ts`, shared orchestration in `services.ts`).
+
+## REST API (`/api/v1`)
+
+The same operations the MCP tools expose, as plain HTTP + JSON for consumers that don't speak MCP (shell scripts, cron jobs, dashboards). Same auth doors (`x-brain-key` header or OAuth Bearer), same validation bounds (including the 100 000-UTF-8-byte content cap), same orchestration code path — but responses are always structured JSON, never prose. Errors are `{"error": {"code", "message", "details"?}}` with conventional status codes (400 validation, 401 auth, 404 not found, 413 body over 1 MiB, 502 embedding backend down).
+
+**Where it exists:** opt-in via `ENABLE_REST_API` (server default **off**). The docker-compose installs enable it; the Qubes install deliberately does not (its posture is minimum attack surface — when the flag is unset the router is never mounted, so the paths 404). On the Funnel deployment Caddy 404s `/api/v1*` on the public branch, so REST is reachable from the tailnet only.
+
+| Method | Path | Body / query | Success |
+|---|---|---|---|
+| POST | `/api/v1/thoughts` | `{content}` | 201 `{id, metadata}` |
+| POST | `/api/v1/thoughts/search` | `{query, limit?, threshold?}` | 200 `{results}` |
+| GET | `/api/v1/thoughts` | `?limit&type&topic&person&days` | 200 `{thoughts}` |
+| GET | `/api/v1/thoughts/stats` | — | 200 stats |
+| GET | `/api/v1/thoughts/:id` | UUID path param | 200 thought |
+| POST | `/api/v1/sessions` | `{toml_text}` (session TOML) | 201 created / 200 updated |
+| POST | `/api/v1/sessions/search` | `{query, limit?, status?, repo_url?, tag?}` | 200 `{results}` |
+| GET | `/api/v1/sessions` | `?status&repo_url&branch&agent&tag&linked_issue&since&until&order_by&limit` | 200 `{sessions}` |
+| GET | `/api/v1/sessions/lookup` | `?id` or `?branch` | 200 session record |
+| GET | `/api/v1/sessions/:id` | integer path param | 200 session record |
+| PATCH | `/api/v1/sessions/:id/status` | `{status}` | 200 `{id, status}` |
+
+Notes: thought capture upserts by content fingerprint, so re-posting identical content returns the existing id (still 201). Session capture mirrors `session_capture`: omit `id` in the TOML to create (201), include it to refresh the same row (200); an unknown `id` is a 404, and an unchanged content hash skips the re-embed (`reembedded: false` in the response).
+
+```sh
+curl -s -X POST http://127.0.0.1:8787/api/v1/thoughts \
+  -H "x-brain-key: $MCP_ACCESS_KEY" -H "content-type: application/json" \
+  -d '{"content": "REST smoke test"}'
+# → {"id":"…","metadata":{…,"source":"rest","door":"tailnet","sub":null}}
+```
 
 ## Quickstart
 
