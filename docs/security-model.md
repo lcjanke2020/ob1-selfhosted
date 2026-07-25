@@ -25,8 +25,9 @@ The system has **two auth doors, chosen per deployment** — typically one, thou
 - Bearer validation pins issuer, audience, algorithm (RS256), and requires `exp` and `sub` claims; verification fails closed before any source-marker stamping runs.
 - A boot-time JWKS reachability probe (with an explicit wall-clock timeout that also caps every later refresh) surfaces a typo'd JWKS URI at startup rather than at the first attacker request.
 - Auth-failure responses are deliberately shaped: **missing** credentials get HTTP 401 + `WWW-Authenticate` (RFC 6750 — what OAuth discovery needs), while **invalid** credentials get an HTTP 200 JSON-RPC error envelope so MCP clients don't tear down an established transport. Operator-facing messages are collapsed to a single "unauthorized" — the granular reason goes to the audit table, not to the caller, closing a credential-status side-channel.
-- Captured content is hard-capped (100,000 UTF-8 bytes) on both `capture_thought` and `session_capture`.
+- Captured content is hard-capped (100,000 UTF-8 bytes) on both `capture_thought` and `session_capture`; the REST gateway enforces the identical cap via the same shared schema module, plus a 1 MiB request-body limit for tailnet-direct callers that have no Caddy edge in front of them.
 - Session provenance (`source`, `source_node`) is stamped server-side from the transport; caller-supplied values are ignored.
+- The REST gateway (`/api/v1`) is opt-in (`ENABLE_REST_API`, default off) and sits behind the same `requireAuth` doors and audit path as `/mcp`. When the flag is unset — as on the Qubes deployment, which deliberately never sets it — the router is not mounted and the surface does not exist. On the Funnel deployment Caddy 404s `/api/v1*` on the public branch (same mechanism as `/ready`), so REST is tailnet-only even where enabled; auth failures on REST return a plain HTTP 401 JSON error instead of the MCP keep-alive envelope, with the same collapsed "unauthorized" message.
 
 ### Database layer
 

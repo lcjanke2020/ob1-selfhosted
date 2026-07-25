@@ -141,6 +141,14 @@ services:
       # off, extraction skips the primary and uses the fallback (or the
       # uncategorized stub if no fallback is configured).
       ENABLE_PRIMARY_EXTRACTION: ${ENABLE_PRIMARY_EXTRACTION:-}
+      # REST gateway (/api/v1) behind the same auth doors as /mcp. On by
+      # default for the docker-compose installs; set ENABLE_REST_API=false in
+      # .env to turn it off. (An EMPTY value does NOT disable it: compose's
+      # `:-` substitutes the default for unset AND empty — the server treats
+      # anything but exactly "true" as off, so "false" is the reliable
+      # opt-out.) The Qubes deployment does NOT set this — REST is
+      # deliberately absent there (smaller attack surface).
+      ENABLE_REST_API: ${ENABLE_REST_API:-true}
       # x-brain-key door for this single-box install. Empty disables it; set it
       # (or all three AUTH0_* below) — at least one auth door is required.
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY:-}

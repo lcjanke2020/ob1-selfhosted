@@ -237,7 +237,11 @@ async function verifyBearer(token: string): Promise<JWTPayload> {
 // signal to proceed with the OAuth dance.
 // Adapted from upstream NateBJones-Projects/OB1@a42695f.
 const JSON_RPC_UNAUTHORIZED_CODE = -32001;
-const UNAUTHORIZED_MESSAGE = "Unauthorized: missing or invalid authentication.";
+// Exported: the REST gateway (api.ts) reuses this exact operator-facing text
+// for its 401 body, so a future rewording here can't silently diverge the
+// two transports.
+export const UNAUTHORIZED_MESSAGE =
+  "Unauthorized: missing or invalid authentication.";
 
 // Hard cap on the body we'll buffer just to extract a JSON-RPC `id` from
 // an unauthorized request. Caddy is the primary body-size enforcer in

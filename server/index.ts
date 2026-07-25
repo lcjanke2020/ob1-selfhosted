@@ -26,8 +26,10 @@ import {
   ENABLE_METADATA_EXTRACTION,
   ENABLE_OAUTH,
   ENABLE_PRIMARY_EXTRACTION,
+  ENABLE_REST_API,
   PORT,
 } from "./config.ts";
+import { createApiRouter } from "./api.ts";
 import { pool } from "./db.ts";
 import {
   type AppVariables,
@@ -75,6 +77,15 @@ app.get("/ready", async (c) => {
 // `https://host/mcp` is served at `/.well-known/oauth-protected-resource/mcp`.
 if (PROTECTED_RESOURCE_METADATA_PATH) {
   app.get(PROTECTED_RESOURCE_METADATA_PATH, protectedResourceMetadata);
+}
+
+// REST gateway (/api/v1) — same auth doors, same pool, structured JSON
+// (see api.ts). Opt-in per deployment: the docker-compose installs set
+// ENABLE_REST_API; the Qubes deployment leaves it unset, so on that posture
+// the router is never mounted and the surface does not exist. requireAuth is
+// mounted inside the router, so the gate travels with it.
+if (ENABLE_REST_API) {
+  app.route("/api/v1", createApiRouter(pool));
 }
 
 // MCP transport. requireAuth accepts either x-brain-key (tailnet) or
@@ -140,6 +151,14 @@ if (ENABLE_BRAIN_KEY && ENABLE_OAUTH) {
   );
 } else {
   console.log("[auth] OAuth door only (x-brain-key disabled).");
+}
+
+// REST posture, next to the auth posture: an unexpectedly-on gateway should
+// be as visible in the boot log as an unexpectedly-open auth door.
+if (ENABLE_REST_API) {
+  console.log(
+    "[rest] REST gateway enabled at /api/v1 (same auth doors as /mcp)",
+  );
 }
 
 // Announce the metadata-extraction mode at boot so the two silent degradations

@@ -79,6 +79,16 @@ export const ENABLE_FALLBACK_EXTRACTION = Boolean(
 export const ENABLE_METADATA_EXTRACTION = ENABLE_PRIMARY_EXTRACTION ||
   ENABLE_FALLBACK_EXTRACTION;
 
+// Opt-in REST gateway (/api/v1). Default OFF; when off the router is never
+// mounted, so the surface does not exist (every /api/v1 path 404s before any
+// handler is registered). The docker-compose installs opt in
+// (compose-local sets it, and the compose-tailnet overlay inherits it); the
+// Qubes deployment deliberately leaves it unset — its posture is
+// minimum-attack-surface, and the MCP transport is the only surface it
+// needs. Same exactly-"true" contract as ENABLE_PRIMARY_EXTRACTION above.
+export const ENABLE_REST_API =
+  optionalTrimmed("ENABLE_REST_API").toLowerCase() === "true";
+
 // MCP_ACCESS_KEY enables the static x-brain-key auth door. It is OPTIONAL:
 // set it to turn the x-brain-key path ON (the `compose-local` single-box
 // install uses it as its sole auth, for environments where a tailnet / Auth0

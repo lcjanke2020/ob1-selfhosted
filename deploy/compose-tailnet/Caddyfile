@@ -269,6 +269,24 @@
 		respond 404
 	}
 
+	# ----- /api/v1 REST gateway: tailnet-only -------------------------
+	# The REST gateway exists for on-network consumers (CLI, cron jobs,
+	# dashboards). It is never served over the public funnel — the server
+	# would auth-gate it just like /mcp, but keeping the public surface to
+	# exactly one path class is cheaper to reason about than a second
+	# authenticated one. A funnel-originated /api/v1 request 404s here,
+	# before the allowlist branches, exactly like /ready above.
+	# Tailnet/loopback requests carry no funnel header and fall through
+	# to @tailnet, which proxies them to the server.
+	@funnel_api {
+		header Tailscale-Funnel-Request *
+		path /api/v1*
+	}
+	handle @funnel_api {
+		log_name access_funnel
+		respond 404
+	}
+
 	# ----- Anthropic funnel (Anthropic IP allowlist) -------------------------
 	# IMPORTANT - PRIMARY PUBLIC PERIMETER: DO NOT REMOVE OR WEAKEN.
 	# The `client_ip 160.79.104.0/21` allowlist on @anthropic_funnel /

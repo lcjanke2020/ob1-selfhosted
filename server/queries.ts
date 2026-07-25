@@ -21,7 +21,12 @@ export async function searchThoughts(
   const embStr = toVectorLiteral(embedding);
   const client = await getClient(pool);
   try {
-    const result = await client.queryObject<ThoughtMatch>(
+    // The distance expression decodes as text (same driver behavior
+    // session_queries.ts narrows `score` for); type it honestly and expose a
+    // JS number so JSON consumers don't receive `similarity` as a string.
+    const result = await client.queryObject<
+      Omit<ThoughtMatch, "similarity"> & { similarity: string | number }
+    >(
       `SELECT id, content, metadata, created_at,
               1 - (embedding <=> $1::vector) AS similarity
        FROM thoughts
@@ -30,7 +35,10 @@ export async function searchThoughts(
        LIMIT $3`,
       [embStr, threshold, limit],
     );
-    return result.rows;
+    return result.rows.map((row) => ({
+      ...row,
+      similarity: Number(row.similarity),
+    }));
   } finally {
     client.release();
   }

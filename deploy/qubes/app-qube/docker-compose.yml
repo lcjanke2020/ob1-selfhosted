@@ -88,6 +88,12 @@ services:
       ENABLE_PRIMARY_EXTRACTION: ${ENABLE_PRIMARY_EXTRACTION:-}
       # OAuth-only deployment: no x-brain-key door (MCP_ACCESS_KEY omitted),
       # so a leaked static key can't be used against this public install.
+      #
+      # ENABLE_REST_API is DELIBERATELY not set here: the REST gateway
+      # (/api/v1) is a docker-compose-install feature and this deployment's
+      # posture is minimum-attack-surface — the MCP transport is the only
+      # application surface it exposes. Unset means the router is never
+      # mounted (server default is off). Do not add it.
       CITATION_BASE_URL: ${CITATION_BASE_URL:-https://openbrain.local/thoughts}
       # REQUIRED — the only auth door here. Compose fails fast if any is unset.
       AUTH0_ISSUER: ${AUTH0_ISSUER:?set AUTH0_ISSUER (Qubes deployment is OAuth-only)}

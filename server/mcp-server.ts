@@ -9,34 +9,28 @@ import { z } from "zod";
 
 import { CITATION_BASE_URL } from "./config.ts";
 import { pool } from "./db.ts";
-import { embed } from "./embeddings.ts";
-import { extractMetadata } from "./metadata.ts";
+import { fetchThought, getStats, listThoughts } from "./queries.ts";
 import {
-  captureThought,
-  fetchThought,
-  getStats,
-  listThoughts,
-  searchThoughts,
-} from "./queries.ts";
-import {
-  getSessionContentHash,
   listSessions,
   resumeSession,
-  searchSessions,
   updateSessionStatus,
-  upsertSession,
 } from "./session_queries.ts";
 import {
-  computeContentHash,
-  embedSource,
-  parseSessionToml,
-  SESSION_ORDER_BY,
-  SESSION_STATUSES,
-} from "./session_toml.ts";
-
-// Module-level shared TextEncoder so the byte-cap refine doesn't
-// allocate a fresh instance on every capture_thought call.
-const UTF8_ENCODER = new TextEncoder();
+  captureThoughtShape,
+  listThoughtsShape,
+  searchThoughtsShape,
+  sessionCaptureShape,
+  sessionListShape,
+  sessionLookupShape,
+  sessionSearchShape,
+  sessionUpdateStatusShape,
+} from "./schemas.ts";
+import {
+  captureSessionFromToml,
+  captureThoughtWithMetadata,
+  searchSessionsByQuery,
+  searchThoughtsByQuery,
+} from "./services.ts";
 
 function thoughtTitle(content: string, createdAt?: string): string {
   const firstLine = content.replace(/\s+/g, " ").trim().slice(0, 80);
@@ -176,8 +170,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
     },
     async ({ query }) => {
       try {
-        const embedding = await embed(query);
-        const rows = await searchThoughts(pool, { query, embedding });
+        const rows = await searchThoughtsByQuery(pool, { query });
         const results = rows.map((t) => ({
           id: t.id,
           title: thoughtTitle(t.content, t.created_at),
@@ -230,18 +223,12 @@ export function createMcpServer(auth: RequestAuth): McpServer {
       description:
         "Search captured thoughts by meaning. Use when the user asks about a topic, person, or idea they've previously captured.",
       annotations: { readOnlyHint: true },
-      inputSchema: {
-        query: z.string().min(1).describe("What to search for"),
-        limit: z.number().int().min(1).max(100).optional().default(10),
-        threshold: z.number().min(0).max(1).optional().default(0.5),
-      },
+      inputSchema: searchThoughtsShape,
     },
     async ({ query, limit, threshold }) => {
       try {
-        const embedding = await embed(query);
-        const rows = await searchThoughts(pool, {
+        const rows = await searchThoughtsByQuery(pool, {
           query,
-          embedding,
           limit,
           threshold,
         });
@@ -283,17 +270,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
       description:
         "List recently captured thoughts with optional filters by type, topic, person, or time range.",
       annotations: { readOnlyHint: true },
-      inputSchema: {
-        limit: z.number().int().min(1).max(100).optional().default(10),
-        type: z.string().optional()
-          .describe(
-            "Filter by type: observation, task, idea, reference, person_note",
-          ),
-        topic: z.string().optional().describe("Filter by topic tag"),
-        person: z.string().optional().describe("Filter by person mentioned"),
-        days: z.number().int().min(1).max(3650).optional()
-          .describe("Only thoughts from the last N days"),
-      },
+      inputSchema: listThoughtsShape,
     },
     async (opts) => {
       try {
@@ -369,67 +346,19 @@ export function createMcpServer(auth: RequestAuth): McpServer {
         destructiveHint: false,
         idempotentHint: false,
       },
-      inputSchema: {
-        // Hard cap on captured content at 100 000 UTF-8 bytes
-        // (≈97.7 KiB; round-decimal limit, not a binary KiB). Downstream
-        // paths fan out through metadata.ts (full content sent to a paid
-        // CHAT_API_BASE /chat/completions endpoint) and queries.ts (full
-        // content INSERTed into postgres), so an authenticated client
-        // without a size bound can rack up token costs or chew through
-        // disk. The cost is byte-driven (tokens, storage, request body),
-        // so the strict bound is measured in UTF-8 bytes, not JS UTF-16
-        // code units.
-        //
-        // `.max(100_000)` runs first as a fast-path pre-check. Zod's
-        // `.max` on a string measures
-        // UTF-16 code units (JS string length); UTF-8 encoding takes
-        // ≥ 1 byte per UTF-16 code unit (the smallest UTF-8 encoding
-        // of a BMP codepoint is 1 byte, and codepoints outside the BMP
-        // take 2 code units AND 4 UTF-8 bytes, so the inequality still
-        // holds). Therefore any string with code-unit length above the
-        // byte budget is guaranteed to exceed the byte budget too —
-        // sound cheap rejection of adversarial multi-MB inputs without
-        // allocating ~4× the input as a UTF-8 buffer. The `.refine`
-        // then enforces the byte-accurate bound for inputs that pass
-        // the code-unit pre-check (which would otherwise slip ~4×
-        // over budget for pure-non-ASCII content under just `.max`).
-        content: z
-          .string()
-          .min(1)
-          .max(100_000)
-          .refine(
-            (s) => UTF8_ENCODER.encode(s).length <= 100_000,
-            { message: "content must be at most 100000 UTF-8 bytes" },
-          )
-          .describe("The thought to capture"),
-      },
+      // The UTF-8 byte cap and its rationale live with the shared shape in
+      // schemas.ts — the REST gateway validates the identical bound.
+      inputSchema: captureThoughtShape,
     },
     async ({ content }) => {
       try {
-        const [embedding, metadata] = await Promise.all([
-          embed(content),
-          extractMetadata(content),
-        ]);
-        // Stamp the door of origin (and JWT sub on the OAuth
-        // path) into the persisted metadata so the source-attribution
-        // "mobile-originated writes" dashboard tile can discriminate
-        // Funnel/mobile captures from tailnet captures. `door` is
-        // populated unconditionally by `requireAuth` (and validated by
-        // the index.ts authContextOr500 guard before this code runs);
-        // `sub` is the verified JWT `sub` claim on Funnel captures and
-        // null on tailnet captures (shared x-brain-key has no per-user
-        // identity). JSONB column needs no schema change.
-        const meta: Record<string, unknown> = {
-          ...metadata,
-          source: "mcp",
-          door: auth.door,
-          sub: auth.sub,
-        };
-        const { id } = await captureThought(pool, {
-          content,
-          embedding,
-          metadata: meta,
-        });
+        // Embed + extract + door/sub stamping live in services.ts, shared
+        // with the REST gateway; via: "mcp" keeps persisted rows identical
+        // to the pre-extraction behavior (metadata.source === "mcp").
+        const { id, metadata: meta } = await captureThoughtWithMetadata(
+          pool,
+          { content, auth, via: "mcp" },
+        );
 
         const parts: string[] = [`Captured as ${meta.type ?? "thought"}`];
         if (Array.isArray(meta.topics) && meta.topics.length) {
@@ -473,61 +402,25 @@ export function createMcpServer(auth: RequestAuth): McpServer {
         // Matches capture_thought's hint so clients don't auto-retry.
         idempotentHint: false,
       },
-      inputSchema: {
-        // Same UTF-8 byte cap as capture_thought: the full doc is
-        // embedded and stored, so bound it in bytes, not UTF-16 code units.
-        toml_text: z
-          .string()
-          .min(1)
-          .max(100_000)
-          .refine(
-            (s) => UTF8_ENCODER.encode(s).length <= 100_000,
-            { message: "toml_text must be at most 100000 UTF-8 bytes" },
-          )
-          .describe(
-            "The session's TOML front matter (optionally inside a +++ fence)",
-          ),
-      },
+      // Byte cap shared with the REST gateway via schemas.ts.
+      inputSchema: sessionCaptureShape,
     },
     async ({ toml_text }) => {
       try {
-        const { session, artifacts, rawToml } = parseSessionToml(toml_text);
-        const contentHash = await computeContentHash(session);
-        // On the update path (id present), look the row up first so a stale or
-        // unknown id errors HERE — before paying for an embedding. A fresh
-        // capture (no id) has no existing hash, so it always (re)embeds.
-        let existingHash: string | null = null;
-        if (session.id != null) {
-          const cur = await getSessionContentHash(pool, session.id);
-          if (cur === null) return err(`No session found for id ${session.id}.`);
-          existingHash = cur.hash;
-        }
-        // equal hash => content unchanged, skip embed; otherwise (re)embed.
-        const reembedded = existingHash !== contentHash;
-        const embedding = reembedded ? await embed(embedSource(session)) : null;
-        const res = await upsertSession(pool, {
-          session,
-          artifacts,
-          contentHash,
-          embedding,
-          provenance: {
-            // Store the transport door faithfully ('funnel' | 'tailnet'),
-            // mirroring how capture_thought stamps thoughts.metadata.door. The
-            // funnel door carries every Anthropic surface (web/desktop/mobile),
-            // indistinguishable server-side (requests arrive from Anthropic
-            // egress, not the device), so 'funnel' is the honest label — not
-            // 'mobile'.
-            source: auth.door,
-            sourceNode: auth.sub,
-          },
-          rawToml,
+        // The parse → hash → fail-fast → conditional-embed pipeline and the
+        // server-side provenance stamping live in services.ts, shared with
+        // the REST gateway. Error messages are unchanged (the typed errors
+        // it throws carry the exact pre-extraction text).
+        const res = await captureSessionFromToml(pool, {
+          tomlText: toml_text,
+          auth,
         });
         return text(JSON.stringify({
           id: res.id,
           session_id: res.session_id,
           status: res.status,
           created: res.created,
-          reembedded,
+          reembedded: res.reembedded,
         }));
       } catch (e) {
         return err((e as Error).message);
@@ -542,13 +435,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
       description:
         "Retrieve a stored session record by id or branch — this does NOT resume execution, it fetches the record. Returns the full record (resume_context, next_actions, blockers, artifacts, raw_toml), or null if no match. On a branch tie the most-recently-updated session wins.",
       annotations: { readOnlyHint: true },
-      inputSchema: {
-        id: z.number().int().positive().optional()
-          .describe("Session id (the canonical key returned by session_capture)"),
-        branch: z.string().optional().describe(
-          "Git branch; the newest matching session is returned",
-        ),
-      },
+      inputSchema: sessionLookupShape,
     },
     async ({ id, branch }) => {
       try {
@@ -570,19 +457,12 @@ export function createMcpServer(auth: RequestAuth): McpServer {
       description:
         "Semantic search over session title/goal/summary/resume_context. Optional structured filters by status, repo_url, tag. Returns [{id, session_id, title, status, last_update, score}].",
       annotations: { readOnlyHint: true },
-      inputSchema: {
-        query: z.string().min(1).describe("What to search for"),
-        limit: z.number().int().min(1).max(50).optional().default(5),
-        status: z.enum(SESSION_STATUSES).optional(),
-        repo_url: z.string().optional(),
-        tag: z.string().optional().describe("Match a single tag"),
-      },
+      inputSchema: sessionSearchShape,
     },
     async ({ query, limit, status, repo_url, tag }) => {
       try {
-        const embedding = await embed(query);
-        const rows = await searchSessions(pool, {
-          embedding,
+        const rows = await searchSessionsByQuery(pool, {
+          query,
           limit,
           status,
           repo_url,
@@ -602,24 +482,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
       description:
         "List sessions by structured filters (no embedding) — the 'show me everything awaiting_review' path. Returns lightweight rows ordered by the chosen column.",
       annotations: { readOnlyHint: true },
-      inputSchema: {
-        status: z.enum(SESSION_STATUSES).optional(),
-        repo_url: z.string().optional(),
-        branch: z.string().optional(),
-        agent: z.string().optional(),
-        tag: z.string().optional(),
-        linked_issue: z.string().optional().describe(
-          "Match a single linked issue (e.g. PROJ-123)",
-        ),
-        since: z.string().optional().describe(
-          "ISO date/datetime lower bound on last_update",
-        ),
-        until: z.string().optional().describe(
-          "ISO date/datetime upper bound on last_update",
-        ),
-        order_by: z.enum(SESSION_ORDER_BY).optional().default("last_update"),
-        limit: z.number().int().min(1).max(200).optional().default(50),
-      },
+      inputSchema: sessionListShape,
     },
     async (opts) => {
       try {
@@ -643,11 +506,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
         destructiveHint: false,
         idempotentHint: true,
       },
-      inputSchema: {
-        id: z.number().int().positive()
-          .describe("Session id (the canonical key returned by session_capture)"),
-        status: z.enum(SESSION_STATUSES),
-      },
+      inputSchema: sessionUpdateStatusShape,
     },
     async ({ id, status }) => {
       try {
