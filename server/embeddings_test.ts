@@ -2,13 +2,11 @@
 // Hermetic: fetch returns headers immediately, then a signal-aware body stream
 // stalls until the production AbortController fires. No real network is used.
 
+import { assert } from "@std/assert";
+
 const FETCH_TIMEOUT_MS = 40;
 const ASSERTION_DEADLINE_MS = 250;
 const OLLAMA_URL = "http://ollama.invalid";
-
-function assert(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
 
 const ENV_KEYS = [
   "DB_PASSWORD",

@@ -12,9 +12,9 @@
 local_dont_track/
 
 # Agent ticket workflow scratch files (never commit)
-TICKET.md
-PLAN.md
-FINDINGS.md
+/TICKET.md
+/PLAN.md
+/FINDINGS.md
 
 # Backups and exports
 *.sql.gz

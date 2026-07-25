@@ -676,6 +676,7 @@
   },
   "workspace": {
     "dependencies": [
+      "jsr:@std/assert@1",
       "jsr:@std/toml@1.0.4",
       "npm:@hono/mcp@0.1.1",
       "npm:@modelcontextprotocol/sdk@1.24.3",
