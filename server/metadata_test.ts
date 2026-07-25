@@ -51,6 +51,19 @@ function chatErr(status: number): Response {
   return new Response(null, { status });
 }
 
+function validMetadata(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    type: "observation",
+    topics: ["metadata"],
+    people: [],
+    action_items: [],
+    dates_mentioned: [],
+    ...overrides,
+  };
+}
+
 Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
   const origEnv = new Map<string, string | undefined>(
     ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
@@ -200,6 +213,70 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
         "an array from the primary must not count as success",
       );
     });
+
+    const invalidMetadataCases: Array<{ name: string; value: unknown }> = [
+      { name: "missing required fields", value: {} },
+      {
+        name: "invalid type enum",
+        value: validMetadata({ type: "memo" }),
+      },
+      {
+        name: "wrong field type",
+        value: validMetadata({ people: "Dana" }),
+      },
+      {
+        name: "wrong array item type",
+        value: validMetadata({ action_items: [42] }),
+      },
+      {
+        name: "zero topics",
+        value: validMetadata({ topics: [] }),
+      },
+      {
+        name: "more than three topics",
+        value: validMetadata({ topics: ["one", "two", "three", "four"] }),
+      },
+      {
+        name: "additional property",
+        value: validMetadata({ confidence: 0.9 }),
+      },
+    ];
+
+    for (const { name, value } of invalidMetadataCases) {
+      await t.step(`schema-invalid primary (${name}) falls back`, async () => {
+        calls.length = 0;
+        const fallbackMetadata = validMetadata({
+          type: "idea",
+          topics: ["validated-fallback"],
+        });
+        responder = (c) =>
+          c.url.startsWith(PRIMARY_BASE)
+            ? chatOk(value)
+            : chatOk(fallbackMetadata);
+
+        const r = await extractMetadata("schema validation case");
+        assertEquals(r, fallbackMetadata);
+        assertEquals(
+          calls.map((c) => c.url),
+          [
+            `${PRIMARY_BASE}/chat/completions`,
+            `${FALLBACK_BASE}/chat/completions`,
+          ],
+        );
+      });
+    }
+
+    await t.step(
+      "schema-invalid primary and fallback outputs reach the stub",
+      async () => {
+        calls.length = 0;
+        responder = () => chatOk({});
+
+        const r = await extractMetadata("anything");
+        assertEquals(r, { topics: ["uncategorized"], type: "observation" });
+        assertEquals(calls.length, 2, "primary then fallback both attempted");
+      },
+    );
 
     await t.step(
       "both endpoints fail → minimal uncategorized stub",
