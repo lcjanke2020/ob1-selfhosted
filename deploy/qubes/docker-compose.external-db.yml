@@ -47,7 +47,11 @@ services:
       - bundled-db-disabled
 
   mcp:
-    # No local postgres to gate on; DB_HOST points elsewhere.
+    # No local postgres to gate on; DB_HOST points elsewhere. If the external
+    # DB is unreachable at boot, mcp exits with a clear `[db]` error line and
+    # `restart: unless-stopped` retries until it is back (see the boot probe
+    # wired in server/db.ts). mcp only — the log-ingester's pool is lazy and
+    # does not get the boot fail-fast.
     depends_on: !reset null
     environment:
       # Fail-fast: with the bundled `postgres` parked, an unset DB_HOST would
