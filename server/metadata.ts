@@ -104,8 +104,8 @@ interface ChatEndpoint {
 // One classification attempt against a single OpenAI-compatible endpoint.
 // Returns the parsed metadata object, or `null` on ANY failure (non-2xx,
 // timeout/abort, missing/non-string content, unparseable JSON, or a value that
-// violates THOUGHT_METADATA_SCHEMA) so the caller can move on to the next
-// endpoint or the stub. Never throws.
+// violates THOUGHT_METADATA_RUNTIME_SCHEMA) so the caller can move on to the
+// next endpoint or the stub. Never throws.
 async function classifyOnce(
   text: string,
   { base, key, model }: ChatEndpoint,
