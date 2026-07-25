@@ -5,7 +5,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { assert, assertEquals } from "@std/assert";
-import type { Pool } from "postgres";
+import { asPool, FAKE_VECTOR, FakePool, makeDeps } from "./api_test_support.ts";
 
 const ENV_KEYS = [
   "DB_PASSWORD",
@@ -15,7 +15,7 @@ const ENV_KEYS = [
   "AUTH0_AUDIENCE",
 ];
 
-Deno.test("MCP tools/list advertises non-empty strict provenance claims", async () => {
+Deno.test("MCP publishes and executes the thought provenance contracts", async () => {
   const origEnv = new Map<string, string | undefined>(
     ENV_KEYS.map((key) => [key, Deno.env.get(key)]),
   );
@@ -27,11 +27,30 @@ Deno.test("MCP tools/list advertises non-empty strict provenance claims", async 
 
   try {
     const { createMcpServer } = await import("./mcp-server.ts");
-    // tools/list only inspects registrations, so no pool method is invoked.
-    const server = createMcpServer({} as Pool, {
-      door: "tailnet",
-      sub: null,
+    let capturedSql = "";
+    let capturedParams: unknown[] = [];
+    const pool = new FakePool((sql, params) => {
+      if (sql.includes("FROM thoughts")) {
+        capturedSql = sql;
+        capturedParams = params;
+        return {
+          rows: [{
+            id: "uuid-1",
+            content: "release checklist",
+            metadata: {},
+            created_at: "2026-07-25T00:00:00Z",
+            similarity: "0.9",
+          }],
+        };
+      }
+      return undefined;
     });
+    const deps = makeDeps();
+    const server = createMcpServer(
+      asPool(pool),
+      { door: "tailnet", sub: null },
+      deps,
+    );
     const client = new Client({ name: "schema-test", version: "1.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport
       .createLinkedPair();
@@ -58,6 +77,84 @@ Deno.test("MCP tools/list advertises non-empty strict provenance claims", async 
           provenance.properties as Record<string, unknown>,
         ).sort(),
         ["agent", "author", "branch", "repo"],
+      );
+
+      const search = listed.tools.find((tool) =>
+        tool.name === "search_thoughts"
+      );
+      assert(search, "search_thoughts must be published");
+      const searchProperties = search.inputSchema.properties as
+        | Record<string, Record<string, unknown>>
+        | undefined;
+      assert(searchProperties, "search_thoughts must publish properties");
+      const filter = searchProperties.filter;
+      assert(filter, "search_thoughts must publish filter");
+      assertEquals(filter.type, "object");
+      assertEquals(filter.minProperties, 1);
+      assertEquals(filter.additionalProperties, false);
+      assertEquals(
+        Object.keys(filter.properties as Record<string, unknown>).sort(),
+        ["exclude", "include"],
+      );
+
+      const result = await client.callTool({
+        name: "search_thoughts",
+        arguments: {
+          query: "release checklist",
+          limit: 2,
+          threshold: 0.6,
+          filter: {
+            include: { repo: "example/open-brain" },
+            exclude: { author: "release engineering", agent: "codex" },
+          },
+        },
+      });
+      assertEquals(result.isError, undefined);
+      assertEquals(deps.embedCalls, ["release checklist"]);
+      assertEquals(capturedSql.includes("metadata @> $3::jsonb"), true);
+      assertEquals(
+        capturedSql.includes("NOT (metadata @> $4::jsonb)"),
+        true,
+      );
+      assertEquals(
+        capturedSql.includes("NOT (metadata @> $5::jsonb)"),
+        true,
+      );
+      assertEquals(capturedParams, [
+        `[${FAKE_VECTOR.join(",")}]`,
+        0.6,
+        JSON.stringify({
+          provenance: { caller_asserted: { repo: "example/open-brain" } },
+        }),
+        JSON.stringify({
+          provenance: {
+            caller_asserted: { author: "release engineering" },
+          },
+        }),
+        JSON.stringify({
+          provenance: { caller_asserted: { agent: "codex" } },
+        }),
+        2,
+      ]);
+
+      const invalidEnvelope = await client.callTool({
+        name: "search_thoughts",
+        arguments: {
+          query: "release checklist",
+          filters: { include: { author: "alice" } },
+        },
+      });
+      assertEquals(invalidEnvelope.isError, true);
+      const invalidContent = JSON.stringify(invalidEnvelope.content);
+      assert(
+        invalidContent.includes("Input validation error") &&
+          invalidContent.includes("filters"),
+        invalidContent,
+      );
+      assertEquals(
+        deps.embedCalls,
+        ["release checklist"],
+        "invalid MCP envelope must fail before embedding",
       );
     } finally {
       await client.close();

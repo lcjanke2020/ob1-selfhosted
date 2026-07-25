@@ -134,6 +134,28 @@ GROUP BY reason, middleware ORDER BY n DESC;
 
 Postgres only runs `db/` init scripts on a **fresh data directory** — schema changes after first deploy need manual application.
 
+Filtered provenance search requires pgvector `0.8.0` or newer. Before updating
+the MCP container against an existing data directory, check the installed
+extension version:
+
+```bash
+docker compose exec -T postgres \
+  psql -U postgres -d openbrain -tAc \
+  "SELECT extversion FROM pg_extension WHERE extname = 'vector';"
+```
+
+If the result is older than `0.8.0`, first update the pgvector package or
+Postgres image so it provides a current extension, then upgrade and verify the
+database extension before restarting MCP:
+
+```bash
+docker compose exec -T postgres \
+  psql -U postgres -d openbrain -c "ALTER EXTENSION vector UPDATE;"
+docker compose exec -T postgres \
+  psql -U postgres -d openbrain -tAc \
+  "SELECT extversion FROM pg_extension WHERE extname = 'vector';"
+```
+
 **New schema files** (observability, sessions) apply cleanly — both are idempotent:
 
 ```bash
@@ -163,6 +185,10 @@ docker compose exec -T postgres \
 ```
 
 A non-zero exit means a grant drifted. Prefer a targeted fix (e.g. `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). To re-sync wholesale, re-apply `01-schema.sql` → `02-observability.sql` → `03-grants-assertion.sql` **in order** — never `01` alone, since its REVOKE-all block strips observability grants until `02` restores them.
+
+To retire the unused historical thought-search RPC without a full schema replay,
+run `DROP FUNCTION IF EXISTS match_thoughts(vector, double precision, integer, jsonb);`
+as the database owner during the next maintenance window.
 
 ## Key rotation
 

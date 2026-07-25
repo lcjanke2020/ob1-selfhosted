@@ -134,6 +134,7 @@ Deno.test("search body: defaults applied", () => {
   assert(r.success);
   assertEquals(r.data.limit, 10);
   assertEquals(r.data.threshold, 0.5);
+  assertEquals(r.data.filter, undefined);
 });
 
 Deno.test("search body: bounds enforced", () => {
@@ -143,6 +144,67 @@ Deno.test("search body: bounds enforced", () => {
   assertFalse(
     searchThoughtsBody.safeParse({ query: "x", threshold: 1.5 }).success,
   );
+});
+
+Deno.test("search filter: include/exclude claims are strict, bounded, and trimmed", () => {
+  const r = searchThoughtsBody.safeParse({
+    query: "release checklist",
+    filter: {
+      include: {
+        author: "  release engineering  ",
+        repo: "  example/open-brain  ",
+      },
+      exclude: {
+        agent: "  codex  ",
+        branch: "  archived  ",
+      },
+    },
+  });
+  assert(r.success);
+  assertEquals(r.data.filter, {
+    include: {
+      author: "release engineering",
+      repo: "example/open-brain",
+    },
+    exclude: { agent: "codex", branch: "archived" },
+  });
+});
+
+Deno.test("search filter: optional, but every present object is strict and non-empty", () => {
+  assert(searchThoughtsBody.safeParse({ query: "legacy" }).success);
+  assert(
+    searchThoughtsBody.safeParse({
+      query: "included",
+      filter: { include: { author: "author-a" } },
+    }).success,
+  );
+  assert(
+    searchThoughtsBody.safeParse({
+      query: "excluded",
+      filter: { exclude: { agent: "agent-a" } },
+    }).success,
+  );
+
+  const invalidFilters = [
+    {},
+    { include: {} },
+    { exclude: {} },
+    { include: { author: "   " } },
+    { exclude: { agent: 42 } },
+    { include: { actor: "misspelled-author" } },
+    { allow: { author: "unknown-filter-side" } },
+    {
+      exclude: {
+        branch: "b".repeat(MAX_PROVENANCE_VALUE_CHARS + 1),
+      },
+    },
+  ];
+  for (const filter of invalidFilters) {
+    assertFalse(
+      searchThoughtsBody.safeParse({ query: "x", filter }).success,
+      `expected invalid filter: ${JSON.stringify(filter)}`,
+    );
+  }
 });
 
 Deno.test("list thoughts query: string values coerced, defaults applied", () => {

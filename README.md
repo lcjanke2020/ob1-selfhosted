@@ -66,7 +66,7 @@ In text: clients reach tailscaled's single Funnel listener on the ingress qube; 
 
 ## What's in the box
 
-- **`thoughts` memory** — capture, semantic search, listing, stats over a pgvector store. Dedupe by content fingerprint. Optional LLM metadata extraction (topics, people, action items, type) via any OpenAI-compatible endpoint, plus a [versioned provenance contract](docs/thought-provenance.md) for caller-asserted author/agent/repo/branch context that stays visibly separate from server-verified transport identity.
+- **`thoughts` memory** — capture, semantic search, listing, stats over a pgvector store. Dedupe by content fingerprint. Optional LLM metadata extraction (topics, people, action items, type) via any OpenAI-compatible endpoint, plus a [versioned provenance contract](docs/thought-provenance.md) for caller-asserted author/agent/repo/branch context that stays visibly separate from server-verified transport identity. Semantic search can require or exclude those claims in the same call.
 - **Session tracking** — five additional MCP tools (`session_capture`, `session_lookup`, `session_search`, `session_list`, `session_update_status`) that store structured *agent work sessions* alongside (not inside) `thoughts`. The OB1 Postgres `sessions` schema is the canonical store; TOML front matter is the interchange format accepted by `session_capture`. See [`skills/session-tracker/`](skills/session-tracker/SKILL.md) for the agent-facing usage contract.
 - **REST gateway (`/api/v1`)** — the same thoughts + sessions operations as structured-JSON HTTP endpoints, behind the same auth doors, for CLI/cron/dashboard consumers that don't speak MCP. Opt-in per deployment (`ENABLE_REST_API`): on by default in the docker-compose installs, deliberately absent from the Qubes install, and never served over the public Funnel. See [REST API](#rest-api-apiv1) below.
 - **Local embeddings** — Ollama (`nomic-embed-text`, 768-dim by default), in-stack or on another box.
@@ -165,7 +165,7 @@ The same operations the MCP tools expose, as plain HTTP + JSON for consumers tha
 | Method | Path | Body / query | Success |
 |---|---|---|---|
 | POST | `/api/v1/thoughts` | `{content, provenance?: {author?, agent?, repo?, branch?}}` | 201 `{id, metadata}` |
-| POST | `/api/v1/thoughts/search` | `{query, limit?, threshold?}` | 200 `{results}` |
+| POST | `/api/v1/thoughts/search` | `{query, limit?, threshold?, filter?: {include?: {author?, agent?, repo?, branch?}, exclude?: {author?, agent?, repo?, branch?}}}` | 200 `{results}` |
 | GET | `/api/v1/thoughts` | `?limit&type&topic&person&days` | 200 `{thoughts}` |
 | GET | `/api/v1/thoughts/stats` | — | 200 stats |
 | GET | `/api/v1/thoughts/:id` | UUID path param | 200 thought |
@@ -184,13 +184,18 @@ curl -s -X POST http://127.0.0.1:8787/api/v1/thoughts \
   -d '{"content":"REST smoke test","provenance":{"author":"release engineering","agent":"codex","repo":"example/open-brain","branch":"main"}}'
 # → {"id":"…","metadata":{…,"source":"rest","door":"tailnet","sub":null,
 #      "provenance":{"schema_version":1,"caller_asserted":{"author":"release engineering",…}}}}
+
+curl -s -X POST http://127.0.0.1:8787/api/v1/thoughts/search \
+  -H "x-brain-key: $MCP_ACCESS_KEY" -H "content-type: application/json" \
+  -d '{"query":"REST rollout","filter":{"include":{"repo":"example/open-brain"},"exclude":{"author":"release engineering","agent":"codex"}}}'
+# → semantic matches from that repo, excluding rows whose author OR agent matches
 ```
 
 `source`, `door`, and `sub` are stamped by the server. Values under
 `provenance.caller_asserted` are explicit claims from the authenticated caller,
 validated but not independently verified; omit unknown values rather than guessing.
-The full key schema, bounds, compatibility behavior, and agent-caller guidance are
-in [Thought provenance](docs/thought-provenance.md).
+The full key schema, search-filter semantics, compatibility behavior, and
+agent-caller guidance are in [Thought provenance](docs/thought-provenance.md).
 
 ## Quickstart
 

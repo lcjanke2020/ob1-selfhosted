@@ -152,6 +152,33 @@ jobs:
           fi
           echo "openbrain_monitor probes succeeded; thoughts access correctly denied"
 
+      - name: Smoke test — thought filters keep GIN and scope HNSW iteration
+        run: |
+          # The retired RPC must not survive a fresh/replayed schema. Search is
+          # owned by server/queries.ts for MCP, REST, and future hybrid legs.
+          retired=$(docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+            "SELECT to_regprocedure('public.match_thoughts(vector,double precision,integer,jsonb)') IS NULL")
+          test "$retired" = "t" || { echo "::error::retired match_thoughts RPC still exists"; exit 1; }
+
+          # The fixture asserts exact filter semantics, makes one positive term
+          # selective, verifies transaction-local HNSW iteration, and EXPLAINs
+          # both live vector+filter query shapes.
+          plan=$(docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            < db/search-filter-plan-smoke.sql)
+          grep -q 'idx_thoughts_metadata' <<< "$plan" || {
+            echo "::error::positive metadata containment did not select idx_thoughts_metadata"
+            echo "$plan"
+            exit 1
+          }
+          grep -q 'idx_thoughts_embedding_hnsw' <<< "$plan" || {
+            echo "::error::exclude-only vector search did not select idx_thoughts_embedding_hnsw"
+            echo "$plan"
+            exit 1
+          }
+          echo "positive filter selected metadata GIN; filtered search selected HNSW with scoped iteration"
+
       - name: Container logs on failure
         if: failure()
         run: docker logs pgci || true

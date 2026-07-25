@@ -52,37 +52,20 @@ CREATE TRIGGER thoughts_updated_at
   BEFORE UPDATE ON thoughts
   FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
--- ---------- Functions ------------------------------------------------------
+-- ---------- Retired functions ---------------------------------------------
 
-CREATE OR REPLACE FUNCTION match_thoughts(
-  query_embedding VECTOR(768),
-  match_threshold FLOAT DEFAULT 0.5,
-  match_count     INT   DEFAULT 10,
-  filter          JSONB DEFAULT '{}'::jsonb
-)
-RETURNS TABLE (
-  id         UUID,
-  content    TEXT,
-  metadata   JSONB,
-  similarity FLOAT,
-  created_at TIMESTAMPTZ
-)
-LANGUAGE plpgsql AS $$
-BEGIN
-  RETURN QUERY
-  SELECT
-    t.id,
-    t.content,
-    t.metadata,
-    (1 - (t.embedding <=> query_embedding))::FLOAT AS similarity,
-    t.created_at
-  FROM thoughts t
-  WHERE 1 - (t.embedding <=> query_embedding) >= match_threshold
-    AND (filter = '{}'::jsonb OR t.metadata @> filter)
-  ORDER BY t.embedding <=> query_embedding
-  LIMIT match_count;
-END;
-$$;
+-- Thought search lives in server/queries.ts, shared by MCP and REST. The old
+-- match_thoughts() RPC was never called by the server and supported only
+-- positive metadata containment, so retaining it created a second contract
+-- that could silently drift. Init scripts do not re-run automatically on an
+-- existing database: replay this schema in the documented 01 -> 02 -> 03 order
+-- or run this DROP directly during a maintenance window.
+DROP FUNCTION IF EXISTS match_thoughts(
+  VECTOR,
+  DOUBLE PRECISION,
+  INTEGER,
+  JSONB
+);
 
 -- Note: there used to be an `upsert_thought()` SQL function here, but it
 -- duplicated the dedupe logic that `server/queries.ts:captureThought` already

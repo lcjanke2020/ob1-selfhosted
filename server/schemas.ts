@@ -1,9 +1,9 @@
 // Shared Zod input validation for the MCP tools (mcp-server.ts) and the REST
-// gateway (api.ts). The MCP SDK's registerTool takes a RAW SHAPE (a plain
-// object of Zod fields), so the shared exports here are raw shapes; the REST
-// layer wraps them in z.object(...) — both transports validate byte-identically,
-// including defaults. REST-only derivations (query-string coercion, path-param
-// schemas) live at the bottom so every input bound is auditable in one file.
+// gateway (api.ts). Shared fields are raw shapes so both transports can compose
+// them. When envelope strictness is part of the contract, as it is for thought
+// search, both transports reuse the same assembled object schema. REST-only
+// derivations (query-string coercion, path-param schemas) live at the bottom so
+// every input bound is auditable in one file.
 
 import { z } from "zod";
 import { SESSION_ORDER_BY, SESSION_STATUSES } from "./session_toml.ts";
@@ -49,6 +49,15 @@ export function boundedUtf8String(field: string) {
 // their claims; the server owns this version so the stored contract cannot be
 // forged or drift independently across MCP and REST clients.
 export const THOUGHT_PROVENANCE_SCHEMA_VERSION = 1 as const;
+
+// Canonical order for the caller-asserted claim keys. Query construction uses
+// this list too so bound-parameter order cannot vary with JSON property order.
+export const THOUGHT_PROVENANCE_FIELDS = [
+  "author",
+  "agent",
+  "repo",
+  "branch",
+] as const;
 
 // Provenance values are labels/identifiers, not free-form notes. Bound each
 // value independently so an authenticated caller cannot bypass the thought
@@ -97,6 +106,24 @@ export type ThoughtProvenanceClaims = z.infer<
   typeof thoughtProvenanceClaimsSchema
 >;
 
+// Search deliberately exposes only the provenance claims the server already
+// owns as a versioned contract, not an open-ended JSONPath/query language over
+// every metadata key. Includes are conjunctive; exclusions are any-match deny
+// terms (the SQL layer emits one negative predicate per supplied field).
+export const thoughtSearchFilterSchema = z.object({
+  include: thoughtProvenanceClaimsSchema.optional().describe(
+    "Require every supplied caller-asserted provenance field",
+  ),
+  exclude: thoughtProvenanceClaimsSchema.optional().describe(
+    "Exclude a thought when any supplied caller-asserted provenance field matches",
+  ),
+}).strict().refine(
+  (filter) => filter.include !== undefined || filter.exclude !== undefined,
+  { message: "filter must specify include or exclude" },
+).meta({ minProperties: 1 });
+
+export type ThoughtSearchFilter = z.infer<typeof thoughtSearchFilterSchema>;
+
 export const captureThoughtShape = {
   content: boundedUtf8String("content").describe("The thought to capture"),
   provenance: thoughtProvenanceClaimsSchema.optional().describe(
@@ -108,6 +135,9 @@ export const searchThoughtsShape = {
   query: z.string().min(1).describe("What to search for"),
   limit: z.number().int().min(1).max(100).optional().default(10),
   threshold: z.number().min(0).max(1).optional().default(0.5),
+  filter: thoughtSearchFilterSchema.optional().describe(
+    "Optional caller-asserted provenance filter. Include fields are ANDed; a match on any exclude field rejects the thought.",
+  ),
 };
 
 export const listThoughtsShape = {
@@ -173,6 +203,11 @@ export const sessionUpdateStatusShape = {
   status: z.enum(SESSION_STATUSES),
 };
 
+// A typo in the top-level filter key would otherwise be stripped into an
+// unfiltered search. The MCP SDK accepts an assembled object schema here, so
+// REST and MCP can share the same fail-closed envelope as well as field shapes.
+export const searchThoughtsSchema = z.object(searchThoughtsShape).strict();
+
 // ---- REST bodies ------------------------------------------------------
 // z.object(...) around the shared shapes, so a REST body and an MCP tool
 // call cannot drift apart in what they accept.
@@ -181,7 +216,9 @@ export const sessionUpdateStatusShape = {
 // whose extra fields were historically ignored. The new provenance envelope
 // is intentionally strict because misspelled identity claims must fail visibly.
 export const captureThoughtBody = z.object(captureThoughtShape);
-export const searchThoughtsBody = z.object(searchThoughtsShape);
+// Search filters narrow or exclude returned memory, so a misspelled envelope
+// key must fail visibly instead of being stripped into an unfiltered search.
+export const searchThoughtsBody = searchThoughtsSchema;
 export const sessionCaptureBody = z.object(sessionCaptureShape);
 export const sessionSearchBody = z.object(sessionSearchShape);
 // The session id arrives via the URL path on REST (PATCH /sessions/:id/status),

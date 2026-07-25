@@ -268,6 +268,112 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
     });
 
     await t.step(
+      "POST /thoughts/search: provenance filter reaches canonical SQL",
+      async () => {
+        let capturedSql = "";
+        let capturedParams: unknown[] = [];
+        const api = makeApi((sql, params) => {
+          if (sql.includes("FROM thoughts")) {
+            capturedSql = sql;
+            capturedParams = params;
+            return { rows: [] };
+          }
+          return undefined;
+        });
+        const res = await api.request(
+          "/thoughts/search",
+          authed({
+            method: "POST",
+            body: JSON.stringify({
+              query: "release checklist",
+              limit: 2,
+              threshold: 0.65,
+              filter: {
+                include: { repo: "example/open-brain" },
+                exclude: {
+                  author: "release engineering",
+                  agent: "codex",
+                },
+              },
+            }),
+          }),
+        );
+        assertEquals(res.status, 200);
+        assertEquals(await res.json(), { results: [] });
+        assertEquals(capturedSql.includes("metadata @> $3::jsonb"), true);
+        assertEquals(
+          capturedSql.includes("NOT (metadata @> $4::jsonb)"),
+          true,
+        );
+        assertEquals(
+          capturedSql.includes("NOT (metadata @> $5::jsonb)"),
+          true,
+        );
+        assertEquals(capturedParams.slice(1), [
+          0.65,
+          JSON.stringify({
+            provenance: {
+              caller_asserted: { repo: "example/open-brain" },
+            },
+          }),
+          JSON.stringify({
+            provenance: {
+              caller_asserted: { author: "release engineering" },
+            },
+          }),
+          JSON.stringify({
+            provenance: { caller_asserted: { agent: "codex" } },
+          }),
+          2,
+        ]);
+      },
+    );
+
+    await t.step(
+      "POST /thoughts/search: malformed filter → 400 before embedding or DB",
+      async () => {
+        const deps = makeDeps();
+        const api = makeApi(() => undefined, deps);
+        const res = await api.request(
+          "/thoughts/search",
+          authed({
+            method: "POST",
+            body: JSON.stringify({ query: "x", filter: {} }),
+          }),
+        );
+        assertEquals(res.status, 400);
+        assertEquals((await res.json()).error.code, "validation_error");
+        assertEquals(deps.embedCalls, []);
+      },
+    );
+
+    await t.step(
+      "POST /thoughts/search: unknown envelope key → 400 instead of widening",
+      async () => {
+        const deps = makeDeps();
+        const api = makeApi(() => undefined, deps);
+        const res = await api.request(
+          "/thoughts/search",
+          authed({
+            method: "POST",
+            body: JSON.stringify({
+              query: "x",
+              filters: { include: { author: "alice" } },
+            }),
+          }),
+        );
+        assertEquals(res.status, 400);
+        const body = await res.json();
+        assertEquals(body.error.code, "validation_error");
+        assertEquals(
+          body.error.message.includes('Unrecognized key: "filters"'),
+          true,
+        );
+        assertEquals(deps.embedCalls, []);
+      },
+    );
+
+    await t.step(
       "GET /thoughts: query coercion flows into SQL params",
       async () => {
         let captured: unknown[] = [];

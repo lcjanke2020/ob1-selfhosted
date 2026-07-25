@@ -250,6 +250,133 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
+    await t.step(
+      "thought search: include and any-match exclusions reach canonical SQL",
+      async () => {
+        let capturedSql = "";
+        let capturedParams: unknown[] = [];
+        const statements: string[] = [];
+        const pool = new FakePool((sql, params) => {
+          statements.push(sql.trim());
+          if (sql.includes("FROM thoughts")) {
+            capturedSql = sql;
+            capturedParams = params;
+            return { rows: [] };
+          }
+          return undefined;
+        });
+        const deps = makeDeps();
+        await searchThoughtsByQuery(
+          asPool(pool),
+          {
+            query: "release checklist",
+            limit: 4,
+            threshold: 0.6,
+            filter: {
+              include: {
+                author: "  release engineering  ",
+                repo: "  example/open-brain  ",
+              },
+              exclude: { agent: "  codex  ", branch: "  archived  " },
+            },
+          },
+          deps,
+        );
+
+        assertEquals(deps.embedCalls, ["release checklist"]);
+        assertEquals(statements[1], "BEGIN");
+        assertEquals(
+          statements[2],
+          "SET LOCAL hnsw.iterative_scan = strict_order",
+        );
+        assertEquals(statements[statements.length - 1], "COMMIT");
+        assertEquals(capturedParams, [
+          `[${FAKE_VECTOR.join(",")}]`,
+          0.6,
+          JSON.stringify({
+            provenance: {
+              caller_asserted: {
+                author: "release engineering",
+                repo: "example/open-brain",
+              },
+            },
+          }),
+          JSON.stringify({
+            provenance: { caller_asserted: { agent: "codex" } },
+          }),
+          JSON.stringify({
+            provenance: { caller_asserted: { branch: "archived" } },
+          }),
+          4,
+        ]);
+        assertEquals(capturedSql.includes("metadata @> $3::jsonb"), true);
+        assertEquals(
+          capturedSql.includes("NOT (metadata @> $4::jsonb)"),
+          true,
+        );
+        assertEquals(
+          capturedSql.includes("NOT (metadata @> $5::jsonb)"),
+          true,
+        );
+        assertEquals(capturedSql.includes("LIMIT $6"), true);
+        assertEquals(capturedSql.includes("match_thoughts"), false);
+      },
+    );
+
+    await t.step(
+      "thought search: filtered query failures roll back the local HNSW setting",
+      async () => {
+        const statements: string[] = [];
+        const pool = new FakePool((sql) => {
+          statements.push(sql.trim());
+          return undefined;
+        });
+
+        await assertRejects(
+          () =>
+            searchThoughtsByQuery(
+              asPool(pool),
+              {
+                query: "release checklist",
+                filter: { exclude: { author: "blocked" } },
+              },
+              makeDeps(),
+            ),
+          Error,
+          "unscripted queryObject",
+        );
+        assertEquals(statements.includes("BEGIN"), true);
+        assertEquals(
+          statements.includes(
+            "SET LOCAL hnsw.iterative_scan = strict_order",
+          ),
+          true,
+        );
+        assertEquals(statements.includes("ROLLBACK"), true);
+        assertEquals(statements.includes("COMMIT"), false);
+      },
+    );
+
+    await t.step(
+      "thought search: direct callers fail malformed filters before embedding",
+      async () => {
+        const pool = new FakePool(() => undefined);
+        const deps = makeDeps();
+        await assertRejects(
+          () =>
+            searchThoughtsByQuery(
+              asPool(pool),
+              { query: "x", filter: {} as never },
+              deps,
+            ),
+          ValidationError,
+          "filter must specify include or exclude",
+        );
+        assertEquals(deps.embedCalls, []);
+        assertEquals(pool.connectCalls, 0);
+      },
+    );
+
     await t.step("session search: embed failure → UpstreamError", async () => {
       const pool = new FakePool(() => undefined);
       const { deps, message } = makeEmbedDownDeps();
