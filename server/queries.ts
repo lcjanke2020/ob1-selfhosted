@@ -5,20 +5,71 @@ import { Pool } from "postgres";
 import { getClient } from "./db_pool.ts";
 import type { ThoughtMatch, ThoughtRecord } from "./db.ts";
 import { toVectorLiteral } from "./embeddings.ts";
+import {
+  THOUGHT_PROVENANCE_FIELDS,
+  type ThoughtProvenanceClaims,
+  type ThoughtSearchFilter,
+} from "./schemas.ts";
 
 export type SearchOptions = {
   query: string;
   embedding: number[];
   limit?: number;
   threshold?: number;
+  filter?: ThoughtSearchFilter;
 };
+
+function provenanceMetadataFragment(
+  claims: ThoughtProvenanceClaims,
+): string {
+  return JSON.stringify({
+    provenance: { caller_asserted: claims },
+  });
+}
+
+// Shared predicate builder for every thought-retrieval leg. A future vector +
+// FTS query can call this once per leg so filtering happens before ranking and
+// fusion without re-specifying its boolean or placeholder semantics.
+function appendThoughtSearchFilter(
+  conditions: string[],
+  params: unknown[],
+  filter: ThoughtSearchFilter | undefined,
+): void {
+  // Keep the positive terms in one top-level JSONB containment predicate.
+  // PostgreSQL's default jsonb GIN operator class supports @>, so selective
+  // includes can use idx_thoughts_metadata. Omit the predicate entirely for
+  // unfiltered callers instead of hiding it behind a parameterized OR.
+  if (filter?.include) {
+    params.push(provenanceMetadataFragment(filter.include));
+    conditions.push(`metadata @> $${params.length}::jsonb`);
+  }
+
+  // Exclusions are any-match deny terms. One NOT-containment predicate per
+  // canonical field makes the boolean rule explicit: matching any supplied
+  // value rejects the row. A missing claim yields @> false and therefore
+  // survives, which keeps legacy/unclaimed rows in exclude-only searches.
+  if (filter?.exclude) {
+    for (const field of THOUGHT_PROVENANCE_FIELDS) {
+      const value = filter.exclude[field];
+      if (value === undefined) continue;
+      params.push(provenanceMetadataFragment({ [field]: value }));
+      conditions.push(`NOT (metadata @> $${params.length}::jsonb)`);
+    }
+  }
+}
 
 export async function searchThoughts(
   pool: Pool,
   opts: SearchOptions,
 ): Promise<ThoughtMatch[]> {
-  const { embedding, limit = 10, threshold = 0.5 } = opts;
+  const { embedding, limit = 10, threshold = 0.5, filter } = opts;
   const embStr = toVectorLiteral(embedding);
+  const conditions = [`1 - (embedding <=> $1::vector) >= $2`];
+  const params: unknown[] = [embStr, threshold];
+  appendThoughtSearchFilter(conditions, params, filter);
+
+  params.push(limit);
+  const limitParam = params.length;
   const client = await getClient(pool);
   try {
     // The distance expression decodes as text (same driver behavior
@@ -30,10 +81,10 @@ export async function searchThoughts(
       `SELECT id, content, metadata, created_at,
               1 - (embedding <=> $1::vector) AS similarity
        FROM thoughts
-       WHERE 1 - (embedding <=> $1::vector) >= $2
+       WHERE ${conditions.join("\n         AND ")}
        ORDER BY embedding <=> $1::vector
-       LIMIT $3`,
-      [embStr, threshold, limit],
+       LIMIT $${limitParam}`,
+      params,
     );
     return result.rows.map((row) => ({
       ...row,

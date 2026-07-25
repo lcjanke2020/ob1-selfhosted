@@ -96,13 +96,56 @@ old readers continue to interpret every existing key correctly.
   capture context, not a history of every contributor who submitted identical
   content.
 
-Filtering by these keys, including negation, is a separate API concern. Version
-1 deliberately keeps claims at this stable nested JSONB path: the existing
-metadata GIN index supports the stored shape, while the follow-on filter work
-can add expression indexes if its concrete query plans require them. The claims
-are not promoted to columns in this capture change. Consumers that inspect
-metadata directly should treat a missing `provenance` key as "unclaimed/legacy",
-never as a match for an arbitrary author or repository.
+The claims are not promoted to columns. Consumers that inspect metadata
+directly should treat a missing `provenance` key as "unclaimed/legacy", never
+as a match for an arbitrary author or repository.
+
+## Search filtering
+
+MCP `search_thoughts` and REST `POST /api/v1/thoughts/search` accept the same
+optional `filter` object:
+
+```json
+{
+  "query": "release checklist",
+  "filter": {
+    "include": {
+      "repo": "example/open-brain",
+      "branch": "main"
+    },
+    "exclude": {
+      "author": "release engineering",
+      "agent": "codex"
+    }
+  }
+}
+```
+
+`include` and `exclude` accept the same four fields and bounds as capture-time
+claims. Every object that is present must contain at least one field; unknown
+fields are rejected. Comparisons are exact and case-sensitive after input
+values are trimmed.
+
+The boolean contract is deliberately asymmetric:
+
+- all supplied `include` fields must match the same thought;
+- a match on **any** supplied `exclude` field rejects the thought;
+- an unclaimed/legacy row fails every include filter;
+- an unclaimed/legacy row survives an exclude-only filter because a missing
+  field does not equal the excluded value.
+
+The positive side compiles to one nested `metadata @> ...` containment
+predicate, which the existing `idx_thoughts_metadata` GIN index supports.
+Negative predicates are applied as residual filters; a negated JSONB predicate
+alone is not expected to use that index. The search implementation emits no
+metadata predicate when `filter` is absent, preserving the historical
+unfiltered path.
+
+This filter is intentionally limited to the versioned provenance keys instead
+of exposing an open-ended JSON query language. Future workspace/project and
+visibility scoping is a separate fail-closed partitioning concern; hybrid
+vector/full-text search must apply this same filter contract to every retrieval
+leg before ranking and fusion.
 
 ## Agent caller policy
 

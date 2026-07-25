@@ -18,6 +18,8 @@ import {
   THOUGHT_PROVENANCE_SCHEMA_VERSION,
   type ThoughtProvenanceClaims,
   thoughtProvenanceClaimsSchema,
+  type ThoughtSearchFilter,
+  thoughtSearchFilterSchema,
 } from "./schemas.ts";
 import {
   getSessionContentHash,
@@ -49,6 +51,19 @@ function validateThoughtProvenance(
 ): ThoughtProvenanceClaims | undefined {
   if (provenance === undefined) return undefined;
   const parsed = thoughtProvenanceClaimsSchema.safeParse(provenance);
+  if (!parsed.success) {
+    throw new ValidationError(
+      parsed.error.issues.map((issue) => issue.message).join("; "),
+    );
+  }
+  return parsed.data;
+}
+
+function validateThoughtSearchFilter(
+  filter: ThoughtSearchFilter | undefined,
+): ThoughtSearchFilter | undefined {
+  if (filter === undefined) return undefined;
+  const parsed = thoughtSearchFilterSchema.safeParse(filter);
   if (!parsed.success) {
     throw new ValidationError(
       parsed.error.issues.map((issue) => issue.message).join("; "),
@@ -141,15 +156,25 @@ export async function captureThoughtWithMetadata(
 
 export async function searchThoughtsByQuery(
   pool: Pool,
-  opts: { query: string; limit?: number; threshold?: number },
+  opts: {
+    query: string;
+    limit?: number;
+    threshold?: number;
+    filter?: ThoughtSearchFilter;
+  },
   deps: ServiceDeps = defaultDeps,
 ): Promise<ThoughtMatch[]> {
+  // MCP and REST validate before this shared seam, but exported service calls
+  // receive the same fail-fast contract and cannot trigger embedding work with
+  // a malformed filter.
+  const filter = validateThoughtSearchFilter(opts.filter);
   const embedding = await embedOrUpstreamError(deps.embed, opts.query);
   return await searchThoughts(pool, {
     query: opts.query,
     embedding,
     limit: opts.limit,
     threshold: opts.threshold,
+    filter,
   });
 }
 

@@ -50,6 +50,15 @@ export function boundedUtf8String(field: string) {
 // forged or drift independently across MCP and REST clients.
 export const THOUGHT_PROVENANCE_SCHEMA_VERSION = 1 as const;
 
+// Canonical order for the caller-asserted claim keys. Query construction uses
+// this list too so bound-parameter order cannot vary with JSON property order.
+export const THOUGHT_PROVENANCE_FIELDS = [
+  "author",
+  "agent",
+  "repo",
+  "branch",
+] as const;
+
 // Provenance values are labels/identifiers, not free-form notes. Bound each
 // value independently so an authenticated caller cannot bypass the thought
 // content cap by stuffing a large payload into JSONB metadata. 1024 characters
@@ -97,6 +106,24 @@ export type ThoughtProvenanceClaims = z.infer<
   typeof thoughtProvenanceClaimsSchema
 >;
 
+// Search deliberately exposes only the provenance claims the server already
+// owns as a versioned contract, not an open-ended JSONPath/query language over
+// every metadata key. Includes are conjunctive; exclusions are any-match deny
+// terms (the SQL layer emits one negative predicate per supplied field).
+export const thoughtSearchFilterSchema = z.object({
+  include: thoughtProvenanceClaimsSchema.optional().describe(
+    "Require every supplied caller-asserted provenance field",
+  ),
+  exclude: thoughtProvenanceClaimsSchema.optional().describe(
+    "Exclude a thought when any supplied caller-asserted provenance field matches",
+  ),
+}).strict().refine(
+  (filter) => filter.include !== undefined || filter.exclude !== undefined,
+  { message: "filter must include include or exclude" },
+).meta({ minProperties: 1 });
+
+export type ThoughtSearchFilter = z.infer<typeof thoughtSearchFilterSchema>;
+
 export const captureThoughtShape = {
   content: boundedUtf8String("content").describe("The thought to capture"),
   provenance: thoughtProvenanceClaimsSchema.optional().describe(
@@ -108,6 +135,9 @@ export const searchThoughtsShape = {
   query: z.string().min(1).describe("What to search for"),
   limit: z.number().int().min(1).max(100).optional().default(10),
   threshold: z.number().min(0).max(1).optional().default(0.5),
+  filter: thoughtSearchFilterSchema.optional().describe(
+    "Optional caller-asserted provenance filter. Include fields are ANDed; a match on any exclude field rejects the thought.",
+  ),
 };
 
 export const listThoughtsShape = {

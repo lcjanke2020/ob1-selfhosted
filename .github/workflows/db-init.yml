@@ -152,6 +152,27 @@ jobs:
           fi
           echo "openbrain_monitor probes succeeded; thoughts access correctly denied"
 
+      - name: Smoke test — thought filter has one path and keeps metadata GIN
+        run: |
+          # The retired RPC must not survive a fresh/replayed schema. Search is
+          # owned by server/queries.ts for MCP, REST, and future hybrid legs.
+          retired=$(docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+            "SELECT to_regprocedure('public.match_thoughts(vector,double precision,integer,jsonb)') IS NULL")
+          test "$retired" = "t" || { echo "::error::retired match_thoughts RPC still exists"; exit 1; }
+
+          # The fixture makes one positive provenance term selective, flushes
+          # the GIN pending list, and EXPLAINs the live vector+filter query shape.
+          plan=$(docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            < db/search-filter-plan-smoke.sql)
+          grep -q 'Bitmap Index Scan on idx_thoughts_metadata' <<< "$plan" || {
+            echo "::error::positive metadata containment did not select idx_thoughts_metadata"
+            echo "$plan"
+            exit 1
+          }
+          echo "positive thought filter selected idx_thoughts_metadata"
+
       - name: Container logs on failure
         if: failure()
         run: docker logs pgci || true

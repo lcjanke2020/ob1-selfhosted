@@ -28,8 +28,10 @@ import {
 import {
   captureSessionFromToml,
   captureThoughtWithMetadata,
+  defaultDeps,
   searchSessionsByQuery,
   searchThoughtsByQuery,
+  type ServiceDeps,
 } from "./services.ts";
 
 function thoughtTitle(content: string, createdAt?: string): string {
@@ -141,7 +143,11 @@ title = "Tool inventory"
 // natural enclosing scope to read door + sub from without an ALS hop.
 export type RequestAuth = { door: "funnel" | "tailnet"; sub: string | null };
 
-export function createMcpServer(pool: Pool, auth: RequestAuth): McpServer {
+export function createMcpServer(
+  pool: Pool,
+  auth: RequestAuth,
+  deps: ServiceDeps = defaultDeps,
+): McpServer {
   const server = new McpServer({
     name: "open-brain-homelab",
     // Bump on behavior changes — this is the serverInfo version a client
@@ -158,7 +164,9 @@ export function createMcpServer(pool: Pool, auth: RequestAuth): McpServer {
     // 1.5.0: capture_thought accepts bounded author/agent/repo/branch claims
     // and persists them in the versioned metadata.provenance contract while
     // retaining server-verified source/door/sub compatibility keys.
-    version: "1.5.0",
+    // 1.6.0: search_thoughts accepts strict positive and negative provenance
+    // filters shared byte-for-byte with the REST search body.
+    version: "1.6.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -178,7 +186,7 @@ export function createMcpServer(pool: Pool, auth: RequestAuth): McpServer {
     },
     async ({ query }) => {
       try {
-        const rows = await searchThoughtsByQuery(pool, { query });
+        const rows = await searchThoughtsByQuery(pool, { query }, deps);
         const results = rows.map((t) => ({
           id: t.id,
           title: thoughtTitle(t.content, t.created_at),
@@ -229,17 +237,18 @@ export function createMcpServer(pool: Pool, auth: RequestAuth): McpServer {
     {
       title: "Search Thoughts",
       description:
-        "Search captured thoughts by meaning. Use when the user asks about a topic, person, or idea they've previously captured.",
+        "Search captured thoughts by meaning, optionally requiring or excluding caller-asserted author/agent/repo/branch provenance in the same call.",
       annotations: { readOnlyHint: true },
       inputSchema: searchThoughtsShape,
     },
-    async ({ query, limit, threshold }) => {
+    async ({ query, limit, threshold, filter }) => {
       try {
         const rows = await searchThoughtsByQuery(pool, {
           query,
           limit,
           threshold,
-        });
+          filter,
+        }, deps);
         if (!rows.length) return text(`No thoughts found matching "${query}".`);
         const lines = rows.map((t, i) => {
           const m = t.metadata || {};
@@ -366,6 +375,7 @@ export function createMcpServer(pool: Pool, auth: RequestAuth): McpServer {
         const { id, metadata: meta } = await captureThoughtWithMetadata(
           pool,
           { content, provenance, auth, via: "mcp" },
+          deps,
         );
 
         const parts: string[] = [`Captured as ${meta.type ?? "thought"}`];
@@ -419,10 +429,14 @@ export function createMcpServer(pool: Pool, auth: RequestAuth): McpServer {
         // server-side provenance stamping live in services.ts, shared with
         // the REST gateway. Error messages are unchanged (the typed errors
         // it throws carry the exact pre-extraction text).
-        const res = await captureSessionFromToml(pool, {
-          tomlText: toml_text,
-          auth,
-        });
+        const res = await captureSessionFromToml(
+          pool,
+          {
+            tomlText: toml_text,
+            auth,
+          },
+          deps,
+        );
         return text(JSON.stringify({
           id: res.id,
           session_id: res.session_id,
@@ -475,7 +489,7 @@ export function createMcpServer(pool: Pool, auth: RequestAuth): McpServer {
           status,
           repo_url,
           tag,
-        });
+        }, deps);
         return text(JSON.stringify(rows));
       } catch (e) {
         return err((e as Error).message);
