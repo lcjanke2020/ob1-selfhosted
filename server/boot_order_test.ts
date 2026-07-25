@@ -15,7 +15,9 @@
 // binds before the probe settles).
 //
 // Requires --allow-run=deno in the test task (the only binary spawned is
-// Deno, resolved through PATH so the command-name permission stays portable).
+// Deno). Keep the command name: on package-managed installs Deno.execPath()
+// can resolve to a versioned Cellar path that does not match the name-based
+// grant. setup-deno CI installs a plain binary, so it cannot catch a revert.
 
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 
