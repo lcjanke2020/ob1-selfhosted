@@ -86,7 +86,7 @@ export async function probeDbAtBoot(
         `the network path (tailnet up? firewall open? DB host booted?)`,
     );
   }, slowWarnAfterMs);
-  let deadlineTimer: number | undefined;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     let outcome: "ok" | "deadline";
     try {

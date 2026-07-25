@@ -7,7 +7,7 @@
 # docker-compose.pattern-b.yml). Pattern A doesn't run Caddy, so the access
 # log files don't exist and there'd be nothing to ingest.
 
-FROM denoland/deno:2.3.3
+FROM denoland/deno:2.9.4
 
 WORKDIR /app
 
@@ -58,7 +58,7 @@ USER deno
 #              but the driver still calls `Deno.env.get()` on the full
 #              PG* family at construction (see `getPgEnv()` in the
 #              driver's connection_params.ts). It catches the legacy
-#              `Deno.errors.PermissionDenied`, but Deno 2.3.x raises
+#              `Deno.errors.PermissionDenied`, but Deno 2.x raises
 #              `Deno.errors.NotCapable` (the rename) — the catch
 #              doesn't match and the error re-throws, crashing the
 #              container at startup.

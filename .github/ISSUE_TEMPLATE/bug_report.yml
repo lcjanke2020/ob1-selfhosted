@@ -37,7 +37,7 @@ body:
     id: versions
     attributes:
       label: Versions
-      placeholder: e.g. Deno 2.3.x / Docker 27.x / Compose 2.2x / Tailscale 1.8x — as applicable
+      placeholder: e.g. Deno 2.x / Docker 27.x / Compose 2.2x / Tailscale 1.8x — as applicable
   - type: checkboxes
     id: redaction
     attributes:
