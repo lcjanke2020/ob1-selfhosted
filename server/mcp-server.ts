@@ -150,7 +150,12 @@ export function createMcpServer(auth: RequestAuth): McpServer {
     // 1.3.0: retired the file/Syncthing model — session_update_status returns
     // {id, status} (dropped needs_file_sync), and ingested_path/needs_file_sync
     // are gone from the TOML schema resource.
-    version: "1.3.0",
+    // 1.4.0: opt-in REST gateway (/api/v1) alongside the MCP transport, so
+    // captures now carry a `source` of "mcp" or "rest"; extractor output is
+    // validated against the metadata schema at runtime (schema-invalid output
+    // falls through to the fallback endpoint or the stub instead of reaching
+    // the corpus); the embedding fetch timeout now covers the response body.
+    version: "1.4.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
