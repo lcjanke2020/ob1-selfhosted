@@ -10,11 +10,13 @@ import {
   listSessionsQuery,
   listThoughtsQuery,
   MAX_CONTENT_BYTES,
+  MAX_PROVENANCE_VALUE_CHARS,
   searchThoughtsBody,
   sessionCaptureBody,
   sessionIdParam,
   sessionLookupQuery,
   sessionUpdateStatusBody,
+  THOUGHT_PROVENANCE_SCHEMA_VERSION,
   thoughtIdParam,
 } from "./schemas.ts";
 
@@ -48,6 +50,69 @@ Deno.test("byte cap: multi-byte content under the code-unit cap but over the byt
 
 Deno.test("byte cap: empty content rejected", () => {
   assertFalse(captureThoughtBody.safeParse({ content: "" }).success);
+});
+
+Deno.test("thought provenance: full caller claim set is accepted and trimmed", () => {
+  const r = captureThoughtBody.safeParse({
+    content: "provenance smoke",
+    provenance: {
+      author: "  release engineer  ",
+      agent: "  codex/gpt  ",
+      repo: "  example/open-brain  ",
+      branch: "  feature/provenance  ",
+    },
+  });
+  assert(r.success);
+  assertEquals(THOUGHT_PROVENANCE_SCHEMA_VERSION, 1);
+  assertEquals(r.data.provenance, {
+    author: "release engineer",
+    agent: "codex/gpt",
+    repo: "example/open-brain",
+    branch: "feature/provenance",
+  });
+});
+
+Deno.test("thought provenance: optional, but strict and non-empty when present", () => {
+  assert(captureThoughtBody.safeParse({ content: "legacy capture" }).success);
+  assert(
+    captureThoughtBody.safeParse({
+      content: "partial",
+      provenance: { agent: "codex" },
+    }).success,
+  );
+  assertFalse(
+    captureThoughtBody.safeParse({ content: "x", provenance: {} }).success,
+  );
+  assertFalse(
+    captureThoughtBody.safeParse({
+      content: "x",
+      provenance: { author: "   " },
+    }).success,
+  );
+  assertFalse(
+    captureThoughtBody.safeParse({
+      content: "x",
+      provenance: { author: 42 },
+    }).success,
+  );
+  assertFalse(
+    captureThoughtBody.safeParse({
+      content: "x",
+      provenance: { actor: "misspelled-author" },
+    }).success,
+  );
+  assertFalse(
+    captureThoughtBody.safeParse({
+      content: "x",
+      provenance: { author: "caller", schema_version: 99 },
+    }).success,
+  );
+  assertFalse(
+    captureThoughtBody.safeParse({
+      content: "x",
+      provenance: { branch: "b".repeat(MAX_PROVENANCE_VALUE_CHARS + 1) },
+    }).success,
+  );
 });
 
 Deno.test("byte cap: toml_text carries its own field name in the message", () => {

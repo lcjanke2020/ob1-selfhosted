@@ -15,6 +15,10 @@ import { embed as defaultEmbed } from "./embeddings.ts";
 import { extractMetadata as defaultExtractMetadata } from "./metadata.ts";
 import { captureThought, searchThoughts } from "./queries.ts";
 import {
+  THOUGHT_PROVENANCE_SCHEMA_VERSION,
+  type ThoughtProvenanceClaims,
+} from "./schemas.ts";
+import {
   getSessionContentHash,
   searchSessions,
   type SessionSearchRow,
@@ -65,23 +69,42 @@ async function embedOrUpstreamError(
 
 export async function captureThoughtWithMetadata(
   pool: Pool,
-  input: { content: string; auth: AuthContext; via: "mcp" | "rest" },
+  input: {
+    content: string;
+    provenance?: ThoughtProvenanceClaims;
+    auth: AuthContext;
+    via: "mcp" | "rest";
+  },
   deps: ServiceDeps = defaultDeps,
 ): Promise<{ id: string; metadata: Record<string, unknown> }> {
   const [embedding, extracted] = await Promise.all([
     embedOrUpstreamError(deps.embed, input.content),
     deps.extractMetadata(input.content),
   ]);
-  // Stamp the door of origin (and JWT sub on the OAuth path) into the
-  // persisted metadata so the source-attribution "mobile-originated writes"
-  // dashboard tile can discriminate Funnel/mobile captures from tailnet
-  // captures. `door` is populated unconditionally by `requireAuth` (and
-  // validated by the transport-side guard before this code runs); `sub` is
-  // the verified JWT `sub` claim on Funnel captures and null on tailnet
-  // captures (shared x-brain-key has no per-user identity). `source` records
-  // the transport ("mcp" | "rest"). JSONB column needs no schema change.
+  // Treat these keys as reserved even though metadata.ts's strict runtime
+  // schema already excludes them. This defense keeps injected test/custom
+  // extractors from impersonating server stamps or caller claims.
+  const classified = { ...extracted };
+  for (const reserved of ["source", "door", "sub", "provenance"]) {
+    delete classified[reserved];
+  }
+
+  // `provenance` is deliberately emitted only when the caller supplied at
+  // least one validated claim. On a content-fingerprint conflict, queries.ts
+  // performs a shallow JSONB merge: omitting this optional key therefore does
+  // not erase claims from an earlier capture, while explicit new claims replace
+  // the prior versioned object. The top-level compatibility keys remain the
+  // server-verified transport identity used by existing consumers.
   const metadata: Record<string, unknown> = {
-    ...extracted,
+    ...classified,
+    ...(input.provenance
+      ? {
+        provenance: {
+          schema_version: THOUGHT_PROVENANCE_SCHEMA_VERSION,
+          caller_asserted: input.provenance,
+        },
+      }
+      : {}),
     source: input.via,
     door: input.auth.door,
     sub: input.auth.sub,

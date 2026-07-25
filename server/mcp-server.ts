@@ -155,7 +155,10 @@ export function createMcpServer(auth: RequestAuth): McpServer {
     // validated against the metadata schema at runtime (schema-invalid output
     // falls through to the fallback endpoint or the stub instead of reaching
     // the corpus); the embedding fetch timeout now covers the response body.
-    version: "1.4.0",
+    // 1.5.0: capture_thought accepts bounded author/agent/repo/branch claims
+    // and persists them in the versioned metadata.provenance contract while
+    // retaining server-verified source/door/sub compatibility keys.
+    version: "1.5.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -344,7 +347,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
     {
       title: "Capture Thought",
       description:
-        "Save a new thought. Generates an embedding via Ollama and (if configured) extracts metadata.",
+        "Save a new thought. Generates an embedding via Ollama and (if configured) extracts metadata. When known, provide provenance author/agent/repo/branch values by default; they are stored as caller assertions, separately from server-verified transport identity. Omit unknown values rather than guessing.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
@@ -355,14 +358,14 @@ export function createMcpServer(auth: RequestAuth): McpServer {
       // schemas.ts — the REST gateway validates the identical bound.
       inputSchema: captureThoughtShape,
     },
-    async ({ content }) => {
+    async ({ content, provenance }) => {
       try {
         // Embed + extract + door/sub stamping live in services.ts, shared
         // with the REST gateway; via: "mcp" keeps persisted rows identical
         // to the pre-extraction behavior (metadata.source === "mcp").
         const { id, metadata: meta } = await captureThoughtWithMetadata(
           pool,
-          { content, auth, via: "mcp" },
+          { content, provenance, auth, via: "mcp" },
         );
 
         const parts: string[] = [`Captured as ${meta.type ?? "thought"}`];
