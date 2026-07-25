@@ -15,7 +15,9 @@
 // binds before the probe settles).
 //
 // Requires --allow-run=deno in the test task (the only binary spawned is
-// the running Deno itself, via Deno.execPath()).
+// Deno). Keep the command name: on package-managed installs Deno.execPath()
+// can resolve to a versioned Cellar path that does not match the name-based
+// grant. setup-deno CI installs a plain binary, so it cannot catch a revert.
 
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 
@@ -23,7 +25,7 @@ import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 const REFUSED_DB = { DB_HOST: "127.0.0.1", DB_PORT: "59999" };
 
 Deno.test("boot order: unreachable DB → [db] error + exit 1 before the port binds", async () => {
-  const command = new Deno.Command(Deno.execPath(), {
+  const command = new Deno.Command("deno", {
     args: [
       "run",
       "--frozen",
