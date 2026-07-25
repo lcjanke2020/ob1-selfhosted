@@ -49,20 +49,35 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
   try {
     // ─── captureThoughtWithMetadata ───────────────────────────────────
     await t.step(
-      "thought capture: stamps {source: via, door, sub} over extractor fields",
+      "thought capture: persists versioned caller assertions beside verified transport stamps",
       async () => {
         let captured: unknown[] = [];
         const pool = new FakePool((sql, params) => {
           if (sql.includes("INSERT INTO thoughts")) {
             captured = params;
-            return { rows: [{ id: "uuid-1" }] };
+            return {
+              rows: [{
+                id: "uuid-1",
+                metadata: JSON.parse(params[2] as string),
+              }],
+            };
           }
           return undefined;
         });
         const deps = makeDeps();
         const out = await captureThoughtWithMetadata(
           asPool(pool),
-          { content: "rest smoke", auth: AUTH, via: "rest" },
+          {
+            content: "rest smoke",
+            provenance: {
+              author: "release engineer",
+              agent: "codex/gpt",
+              repo: "example/open-brain",
+              branch: "feature/provenance",
+            },
+            auth: AUTH,
+            via: "rest",
+          },
           deps,
         );
         assertEquals(out.id, "uuid-1");
@@ -70,13 +85,21 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         assertEquals(out.metadata.door, "tailnet");
         assertEquals(out.metadata.sub, null);
         assertEquals(out.metadata.type, "observation");
+        assertEquals(out.metadata.provenance, {
+          schema_version: 1,
+          caller_asserted: {
+            author: "release engineer",
+            agent: "codex/gpt",
+            repo: "example/open-brain",
+            branch: "feature/provenance",
+          },
+        });
         assertEquals(deps.embedCalls, ["rest smoke"]);
         assertEquals(deps.extractCalls, ["rest smoke"]);
         // Persisted row got the same stamped metadata ($3) and the vector ($2).
-        assertEquals(
-          JSON.parse(captured[2] as string).source,
-          "rest",
-        );
+        const persisted = JSON.parse(captured[2] as string);
+        assertEquals(persisted.source, "rest");
+        assertEquals(persisted.provenance, out.metadata.provenance);
         assertEquals(captured[1], `[${FAKE_VECTOR.join(",")}]`);
       },
     );
@@ -84,9 +107,14 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
     await t.step(
       "thought capture: via 'mcp' persists source 'mcp' (MCP rows byte-identical to pre-refactor)",
       async () => {
-        const pool = new FakePool((sql) =>
+        const pool = new FakePool((sql, params) =>
           sql.includes("INSERT INTO thoughts")
-            ? { rows: [{ id: "uuid-2" }] }
+            ? {
+              rows: [{
+                id: "uuid-2",
+                metadata: JSON.parse(params[2] as string),
+              }],
+            }
             : undefined
         );
         const out = await captureThoughtWithMetadata(
@@ -101,6 +129,74 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         assertEquals(out.metadata.source, "mcp");
         assertEquals(out.metadata.door, "funnel");
         assertEquals(out.metadata.sub, "auth0|abc");
+        assertEquals(out.metadata.provenance, undefined);
+      },
+    );
+
+    await t.step(
+      "thought capture: reserved metadata keys cannot be forged by an extractor",
+      async () => {
+        const pool = new FakePool((sql, params) =>
+          sql.includes("INSERT INTO thoughts")
+            ? {
+              rows: [{
+                id: "uuid-3",
+                metadata: JSON.parse(params[2] as string),
+              }],
+            }
+            : undefined
+        );
+        const deps = makeDeps({
+          extractMetadata: () =>
+            Promise.resolve({
+              type: "observation",
+              source: "forged-source",
+              door: "forged-door",
+              sub: "forged-sub",
+              provenance: { forged: true },
+            }),
+        });
+        const out = await captureThoughtWithMetadata(
+          asPool(pool),
+          {
+            content: "x",
+            provenance: { author: "caller claim" },
+            auth: { door: "funnel", sub: "verified-sub" },
+            via: "mcp",
+          },
+          deps,
+        );
+        assertEquals(out.metadata.source, "mcp");
+        assertEquals(out.metadata.door, "funnel");
+        assertEquals(out.metadata.sub, "verified-sub");
+        assertEquals(out.metadata.provenance, {
+          schema_version: 1,
+          caller_asserted: { author: "caller claim" },
+        });
+      },
+    );
+
+    await t.step(
+      "thought capture: direct service callers cannot persist empty provenance",
+      async () => {
+        const pool = new FakePool(() => {
+          throw new Error("database must not be reached");
+        });
+        for (const provenance of [{}, { author: undefined }]) {
+          const deps = makeDeps();
+          await assertRejects(
+            () =>
+              captureThoughtWithMetadata(
+                asPool(pool),
+                { content: "x", provenance, auth: AUTH, via: "rest" },
+                deps,
+              ),
+            ValidationError,
+            "provenance must include at least one",
+          );
+          assertEquals(deps.embedCalls, []);
+          assertEquals(deps.extractCalls, []);
+        }
       },
     );
 

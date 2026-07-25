@@ -197,10 +197,13 @@ export function createApiRouter(
   // — no query-string coercion divergence between the two transports.
 
   api.post("/thoughts", async (c) => {
-    const { content } = parseOr400(captureThoughtBody, await readJsonBody(c));
+    const { content, provenance } = parseOr400(
+      captureThoughtBody,
+      await readJsonBody(c),
+    );
     const out = await captureThoughtWithMetadata(
       pool,
-      { content, auth: authOr500(c), via: "rest" },
+      { content, provenance, auth: authOr500(c), via: "rest" },
       deps,
     );
     // captureThought upserts by content fingerprint, so a re-capture of

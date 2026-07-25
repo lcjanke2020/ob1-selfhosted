@@ -5,10 +5,10 @@
 // finding #4: "module-scoped McpServer with per-request reconnection").
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Pool } from "postgres";
 import { z } from "zod";
 
 import { CITATION_BASE_URL } from "./config.ts";
-import { pool } from "./db.ts";
 import { fetchThought, getStats, listThoughts } from "./queries.ts";
 import {
   listSessions,
@@ -141,7 +141,7 @@ title = "Tool inventory"
 // natural enclosing scope to read door + sub from without an ALS hop.
 export type RequestAuth = { door: "funnel" | "tailnet"; sub: string | null };
 
-export function createMcpServer(auth: RequestAuth): McpServer {
+export function createMcpServer(pool: Pool, auth: RequestAuth): McpServer {
   const server = new McpServer({
     name: "open-brain-homelab",
     // Bump on behavior changes — this is the serverInfo version a client
@@ -155,7 +155,10 @@ export function createMcpServer(auth: RequestAuth): McpServer {
     // validated against the metadata schema at runtime (schema-invalid output
     // falls through to the fallback endpoint or the stub instead of reaching
     // the corpus); the embedding fetch timeout now covers the response body.
-    version: "1.4.0",
+    // 1.5.0: capture_thought accepts bounded author/agent/repo/branch claims
+    // and persists them in the versioned metadata.provenance contract while
+    // retaining server-verified source/door/sub compatibility keys.
+    version: "1.5.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -344,7 +347,7 @@ export function createMcpServer(auth: RequestAuth): McpServer {
     {
       title: "Capture Thought",
       description:
-        "Save a new thought. Generates an embedding via Ollama and (if configured) extracts metadata.",
+        "Save a new thought. Generates an embedding via Ollama and (if configured) extracts metadata. When known, provide provenance author/agent/repo/branch values by default; they are stored as caller assertions, separately from server-verified transport identity. Omit unknown values rather than guessing.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
@@ -355,14 +358,14 @@ export function createMcpServer(auth: RequestAuth): McpServer {
       // schemas.ts — the REST gateway validates the identical bound.
       inputSchema: captureThoughtShape,
     },
-    async ({ content }) => {
+    async ({ content, provenance }) => {
       try {
         // Embed + extract + door/sub stamping live in services.ts, shared
         // with the REST gateway; via: "mcp" keeps persisted rows identical
         // to the pre-extraction behavior (metadata.source === "mcp").
         const { id, metadata: meta } = await captureThoughtWithMetadata(
           pool,
-          { content, auth, via: "mcp" },
+          { content, provenance, auth, via: "mcp" },
         );
 
         const parts: string[] = [`Captured as ${meta.type ?? "thought"}`];

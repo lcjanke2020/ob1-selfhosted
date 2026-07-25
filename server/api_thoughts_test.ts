@@ -56,16 +56,32 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
 
   try {
     await t.step(
-      "POST /thoughts → 201 with id + stamped metadata",
+      "POST /thoughts → 201 with versioned claims + verified metadata",
       async () => {
-        const api = makeApi((sql) =>
+        const api = makeApi((sql, params) =>
           sql.includes("INSERT INTO thoughts")
-            ? { rows: [{ id: "uuid-1" }] }
+            ? {
+              rows: [{
+                id: "uuid-1",
+                metadata: JSON.parse(params[2] as string),
+              }],
+            }
             : undefined
         );
         const res = await api.request(
           "/thoughts",
-          authed({ method: "POST", body: JSON.stringify({ content: "hi" }) }),
+          authed({
+            method: "POST",
+            body: JSON.stringify({
+              content: "hi",
+              provenance: {
+                author: "release engineer",
+                agent: "codex/gpt",
+                repo: "example/open-brain",
+                branch: "feature/provenance",
+              },
+            }),
+          }),
         );
         assertEquals(res.status, 201);
         const body = await res.json();
@@ -73,6 +89,72 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
         assertEquals(body.metadata.source, "rest");
         assertEquals(body.metadata.door, "tailnet");
         assertEquals(body.metadata.sub, null);
+        assertEquals(body.metadata.provenance, {
+          schema_version: 1,
+          caller_asserted: {
+            author: "release engineer",
+            agent: "codex/gpt",
+            repo: "example/open-brain",
+            branch: "feature/provenance",
+          },
+        });
+      },
+    );
+
+    await t.step(
+      "POST /thoughts duplicates return omit-preserved and explicit-replaced provenance",
+      async () => {
+        let persistedMetadata: Record<string, unknown> = {};
+        const api = makeApi((sql, params) => {
+          if (!sql.includes("INSERT INTO thoughts")) return undefined;
+          assert(sql.includes("RETURNING id, metadata"));
+          const incoming = JSON.parse(params[2] as string) as Record<
+            string,
+            unknown
+          >;
+          // Model PostgreSQL's top-level JSONB merge on a fingerprint conflict.
+          persistedMetadata = { ...persistedMetadata, ...incoming };
+          return {
+            rows: [{
+              id: "uuid-dedupe",
+              metadata: { ...persistedMetadata },
+            }],
+          };
+        });
+        const post = async (provenance?: Record<string, string>) => {
+          const res = await api.request(
+            "/thoughts",
+            authed({
+              method: "POST",
+              body: JSON.stringify({
+                content: "same content",
+                ...(provenance ? { provenance } : {}),
+              }),
+            }),
+          );
+          assertEquals(res.status, 201);
+          return await res.json();
+        };
+
+        const first = await post({
+          author: "release engineer",
+          agent: "codex",
+          repo: "example/open-brain",
+          branch: "feature/provenance",
+        });
+        const original = first.metadata.provenance;
+
+        const omitted = await post();
+        assertEquals(omitted.id, "uuid-dedupe");
+        assertEquals(omitted.metadata.provenance, original);
+        assertEquals(omitted.metadata, persistedMetadata);
+
+        const replaced = await post({ agent: "different-agent" });
+        assertEquals(replaced.metadata.provenance, {
+          schema_version: 1,
+          caller_asserted: { agent: "different-agent" },
+        });
+        assertEquals(replaced.metadata, persistedMetadata);
       },
     );
 
@@ -89,6 +171,33 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
         assertEquals(body.error.code, "validation_error");
         assert(Array.isArray(body.error.details));
         assertEquals(body.error.details[0].path, "content");
+      },
+    );
+
+    await t.step(
+      "POST /thoughts: invalid provenance → 400 before persistence",
+      async () => {
+        // An unscripted queryObject throws. A 400 therefore also proves the
+        // invalid caller claim did not reach the DB path.
+        const api = makeApi(() => undefined);
+        const res = await api.request(
+          "/thoughts",
+          authed({
+            method: "POST",
+            body: JSON.stringify({
+              content: "x",
+              provenance: { actor: "misspelled-author" },
+            }),
+          }),
+        );
+        assertEquals(res.status, 400);
+        const body = await res.json();
+        assertEquals(body.error.code, "validation_error");
+        assert(
+          body.error.details.some((issue: { path: string }) =>
+            issue.path === "provenance"
+          ),
+        );
       },
     );
 

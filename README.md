@@ -66,7 +66,7 @@ In text: clients reach tailscaled's single Funnel listener on the ingress qube; 
 
 ## What's in the box
 
-- **`thoughts` memory** — capture, semantic search, listing, stats over a pgvector store. Dedupe by content fingerprint. Optional LLM metadata extraction (topics, people, action items, type) via any OpenAI-compatible endpoint.
+- **`thoughts` memory** — capture, semantic search, listing, stats over a pgvector store. Dedupe by content fingerprint. Optional LLM metadata extraction (topics, people, action items, type) via any OpenAI-compatible endpoint, plus a [versioned provenance contract](docs/thought-provenance.md) for caller-asserted author/agent/repo/branch context that stays visibly separate from server-verified transport identity.
 - **Session tracking** — five additional MCP tools (`session_capture`, `session_lookup`, `session_search`, `session_list`, `session_update_status`) that store structured *agent work sessions* alongside (not inside) `thoughts`. The OB1 Postgres `sessions` schema is the canonical store; TOML front matter is the interchange format accepted by `session_capture`. See [`skills/session-tracker/`](skills/session-tracker/SKILL.md) for the agent-facing usage contract.
 - **REST gateway (`/api/v1`)** — the same thoughts + sessions operations as structured-JSON HTTP endpoints, behind the same auth doors, for CLI/cron/dashboard consumers that don't speak MCP. Opt-in per deployment (`ENABLE_REST_API`): on by default in the docker-compose installs, deliberately absent from the Qubes install, and never served over the public Funnel. See [REST API](#rest-api-apiv1) below.
 - **Local embeddings** — Ollama (`nomic-embed-text`, 768-dim by default), in-stack or on another box.
@@ -164,7 +164,7 @@ The same operations the MCP tools expose, as plain HTTP + JSON for consumers tha
 
 | Method | Path | Body / query | Success |
 |---|---|---|---|
-| POST | `/api/v1/thoughts` | `{content}` | 201 `{id, metadata}` |
+| POST | `/api/v1/thoughts` | `{content, provenance?: {author?, agent?, repo?, branch?}}` | 201 `{id, metadata}` |
 | POST | `/api/v1/thoughts/search` | `{query, limit?, threshold?}` | 200 `{results}` |
 | GET | `/api/v1/thoughts` | `?limit&type&topic&person&days` | 200 `{thoughts}` |
 | GET | `/api/v1/thoughts/stats` | — | 200 stats |
@@ -181,9 +181,16 @@ Notes: thought capture upserts by content fingerprint, so re-posting identical c
 ```sh
 curl -s -X POST http://127.0.0.1:8787/api/v1/thoughts \
   -H "x-brain-key: $MCP_ACCESS_KEY" -H "content-type: application/json" \
-  -d '{"content": "REST smoke test"}'
-# → {"id":"…","metadata":{…,"source":"rest","door":"tailnet","sub":null}}
+  -d '{"content":"REST smoke test","provenance":{"author":"release engineering","agent":"codex","repo":"example/open-brain","branch":"main"}}'
+# → {"id":"…","metadata":{…,"source":"rest","door":"tailnet","sub":null,
+#      "provenance":{"schema_version":1,"caller_asserted":{"author":"release engineering",…}}}}
 ```
+
+`source`, `door`, and `sub` are stamped by the server. Values under
+`provenance.caller_asserted` are explicit claims from the authenticated caller,
+validated but not independently verified; omit unknown values rather than guessing.
+The full key schema, bounds, compatibility behavior, and agent-caller guidance are
+in [Thought provenance](docs/thought-provenance.md).
 
 ## Quickstart
 
@@ -215,7 +222,7 @@ And what the observability stack is for — one week of real data from a live de
 
 ## Trust model, in one paragraph
 
-On the **local single-box install**, anyone who can present your `x-brain-key` (loopback, your LAN, or your tailnet if you front it with `tailscale serve`) gets full read/write to your memory store — treat the key like a database password. On any **Funnel or Qubes** deployment there is no static key at all: anyone on the public internet with a valid RS256 JWT from your OAuth tenant gets full read/write — identity rests on your tenant's user management, and the Anthropic-egress IP allowlist restricts the door to Anthropic's published range before auth is even attempted. There is no per-user row-level security yet; the JWT `sub` is recorded on every write but is informational. The longer version, including what each container is allowed to do after a hypothetical compromise, is in [`docs/security-model.md`](docs/security-model.md). The assembled one-page view — assets, attacker entry points, defense layers, residual risks — is in [`docs/threat-model.md`](docs/threat-model.md).
+On the **local single-box install**, anyone who can present your `x-brain-key` (loopback, your LAN, or your tailnet if you front it with `tailscale serve`) gets full read/write to your memory store — treat the key like a database password. On any **Funnel or Qubes** deployment there is no static key at all: anyone on the public internet with a valid RS256 JWT from your OAuth tenant gets full read/write — identity rests on your tenant's user management, and the Anthropic-egress IP allowlist restricts the door to Anthropic's published range before auth is even attempted. There is no per-user row-level security yet; the JWT `sub` is recorded on every write but is informational. Thought `author` / `agent` / `repo` / `branch` provenance is a caller assertion, not authenticated identity. The longer version, including what each container is allowed to do after a hypothetical compromise, is in [`docs/security-model.md`](docs/security-model.md). The assembled one-page view — assets, attacker entry points, defense layers, residual risks — is in [`docs/threat-model.md`](docs/threat-model.md).
 
 ## Status & roadmap
 

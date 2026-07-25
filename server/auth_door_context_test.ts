@@ -1,7 +1,7 @@
 // Tests for the door + sub Hono context vars that `requireAuth`
 // sets on each successful auth branch. Downstream tool handlers read these
-// (indirectly, via the createMcpServer({door,sub}) factory closure in
-// mcp-server.ts) and stamp them into thoughts.metadata so a
+// (indirectly, via the createMcpServer(pool, { door, sub }) factory closure
+// in mcp-server.ts) and stamp them into thoughts.metadata so a
 // "mobile-originated writes" dashboard tile can discriminate
 // Funnel/mobile captures from tailnet captures.
 //

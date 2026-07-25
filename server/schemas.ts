@@ -45,8 +45,63 @@ export function boundedUtf8String(field: string) {
 
 // ---- thoughts ---------------------------------------------------------
 
+// Version of the persisted `metadata.provenance` object. Callers submit only
+// their claims; the server owns this version so the stored contract cannot be
+// forged or drift independently across MCP and REST clients.
+export const THOUGHT_PROVENANCE_SCHEMA_VERSION = 1 as const;
+
+// Provenance values are labels/identifiers, not free-form notes. Bound each
+// value independently so an authenticated caller cannot bypass the thought
+// content cap by stuffing a large payload into JSONB metadata. 1024 characters
+// leaves ample room for repository URLs and long generated branch names.
+export const MAX_PROVENANCE_VALUE_CHARS = 1024;
+
+const provenanceValue = (field: string) =>
+  z.string().trim().min(1, `${field} must not be empty`).max(
+    MAX_PROVENANCE_VALUE_CHARS,
+    `${field} must be at most ${MAX_PROVENANCE_VALUE_CHARS} characters`,
+  );
+
+// These are caller ASSERTIONS, not authenticated identity. `.strict()` makes
+// misspelled/future fields fail visibly instead of being silently discarded;
+// the refine prevents a meaningless `{provenance: {}}` envelope. The service
+// wraps validated values in the versioned persisted shape and separately
+// stamps the server-verified source/door/sub keys.
+export const thoughtProvenanceClaimsSchema = z.object({
+  author: provenanceValue("author").optional().describe(
+    "Caller-asserted human or role identity behind the thought",
+  ),
+  agent: provenanceValue("agent").optional().describe(
+    "Caller-asserted agent tool or model that wrote the thought",
+  ),
+  repo: provenanceValue("repo").optional().describe(
+    "Caller-asserted repository URL, slug, or local identifier",
+  ),
+  branch: provenanceValue("branch").optional().describe(
+    "Caller-asserted branch or work-context ref",
+  ),
+}).strict().refine(
+  (claims) => Object.values(claims).some((value) => value !== undefined),
+  {
+    message:
+      "provenance must include at least one of author, agent, repo, or branch",
+  },
+).meta({
+  // Zod refinements enforce runtime validation but are not representable in
+  // generated JSON Schema. Publish the equivalent standard keyword so MCP
+  // tools/list clients see the same non-empty-object contract.
+  minProperties: 1,
+});
+
+export type ThoughtProvenanceClaims = z.infer<
+  typeof thoughtProvenanceClaimsSchema
+>;
+
 export const captureThoughtShape = {
   content: boundedUtf8String("content").describe("The thought to capture"),
+  provenance: thoughtProvenanceClaimsSchema.optional().describe(
+    "Optional caller-asserted author/agent/repo/branch context. Supply known values and omit unknowns; the server stores claims separately from verified transport identity.",
+  ),
 };
 
 export const searchThoughtsShape = {
@@ -122,6 +177,9 @@ export const sessionUpdateStatusShape = {
 // z.object(...) around the shared shapes, so a REST body and an MCP tool
 // call cannot drift apart in what they accept.
 
+// Keep the top-level body non-strict for compatibility with existing callers
+// whose extra fields were historically ignored. The new provenance envelope
+// is intentionally strict because misspelled identity claims must fail visibly.
 export const captureThoughtBody = z.object(captureThoughtShape);
 export const searchThoughtsBody = z.object(searchThoughtsShape);
 export const sessionCaptureBody = z.object(sessionCaptureShape);

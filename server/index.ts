@@ -115,7 +115,7 @@ app.all("/mcp", requireAuth, async (c) => {
   const auth = authContextOr500(c);
   if (auth instanceof Response) return auth;
   const transport = new StreamableHTTPTransport();
-  const server = createMcpServer(auth);
+  const server = createMcpServer(pool, auth);
   await server.connect(transport);
   return transport.handleRequest(c);
 });
@@ -126,7 +126,7 @@ app.all("/", requireAuth, async (c) => {
   const auth = authContextOr500(c);
   if (auth instanceof Response) return auth;
   const transport = new StreamableHTTPTransport();
-  const server = createMcpServer(auth);
+  const server = createMcpServer(pool, auth);
   await server.connect(transport);
   return transport.handleRequest(c);
 });

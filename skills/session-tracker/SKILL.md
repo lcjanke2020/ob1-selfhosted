@@ -26,6 +26,13 @@ design sketch — author to *this*.
 (this skill). `thoughts` capture is *free-form memory* (notes, facts, ideas). Don't put
 session data into `thoughts`, and don't log free-form memories as sessions.
 
+**Thought provenance stays separate.** This skill calls `session_*` tools and does not
+populate `capture_thought` provenance from session fields. When an agent independently
+captures a reusable thought during a session, that separate call should provide the
+known caller-asserted `author` / `agent` / `repo` / `branch` values and omit unknowns;
+the server keeps them distinct from verified transport identity. See
+[`docs/thought-provenance.md`](../../docs/thought-provenance.md).
+
 ## Mental model
 
 - The **OB1 Postgres `sessions` store is canonical** — there is no second on-disk
