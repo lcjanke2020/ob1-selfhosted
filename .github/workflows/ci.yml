@@ -9,7 +9,7 @@
 # workflow edits means changes here (Deno version bump, ref-expression
 # tweak, etc.) get exercised on the PR that introduces them.
 #
-# Deno version pinned to match server/Dockerfile (FROM denoland/deno:2.3.3)
+# Deno version pinned to match server/Dockerfile (FROM denoland/deno:2.9.4)
 # so the CI runtime matches what ships.
 
 name: CI
@@ -49,7 +49,7 @@ jobs:
       - name: Setup Deno
         uses: denoland/setup-deno@v2
         with:
-          deno-version: v2.3.3
+          deno-version: v2.9.4
 
       - name: Run unit tests
         working-directory: server
@@ -68,7 +68,7 @@ jobs:
       - name: Setup Deno
         uses: denoland/setup-deno@v2
         with:
-          deno-version: v2.3.3
+          deno-version: v2.9.4
 
       - name: Run check-allow-env
         working-directory: server

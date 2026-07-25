@@ -57,7 +57,7 @@ Five roles, least privilege, with drift detection:
 
 ### Supply chain / process
 
-- Base images pinned by version (`pgvector/pgvector:pg16`, `denoland/deno:2.3.3`, `caddy:2.11.3-alpine` with `pull: true` so a stale local cache can't feed an older base into the perimeter image; `ollama/ollama` pinned, not `:latest`).
+- Base images pinned by version (`pgvector/pgvector:pg16`, `denoland/deno:2.9.4`, `caddy:2.11.3-alpine` with `pull: true` so a stale local cache can't feed an older base into the perimeter image; `ollama/ollama` pinned, not `:latest`).
 - A CI guard (`server/scripts/check_allow_env.ts`) keeps the Dockerfile's `--allow-env` list in lockstep with every `Deno.env.get` in the code — drift here is a silent boot failure.
 - A leak-gate CI job greps every push for credential patterns and private-infrastructure identifiers.
 
