@@ -9,6 +9,7 @@ import {
   FALLBACK_CHAT_API_KEY,
   FALLBACK_CHAT_MODEL,
 } from "./config.ts";
+import { z } from "zod";
 
 const SYSTEM_PROMPT =
   `You extract structured metadata from one captured thought. Return ONLY a JSON object with:
@@ -42,10 +43,31 @@ const METADATA_STUB = {
   type: "observation",
 } as const;
 
+const THOUGHT_TYPES = [
+  "observation",
+  "task",
+  "idea",
+  "reference",
+  "person_note",
+] as const;
+
+// Serving stacks do not all enforce response_format.json_schema, so validate
+// the model's parsed response locally before it can reach the corpus. `.strict`
+// mirrors additionalProperties:false; the remaining constraints mirror the
+// required fields and array bounds in THOUGHT_METADATA_SCHEMA below.
+const THOUGHT_METADATA_RUNTIME_SCHEMA = z.object({
+  type: z.enum(THOUGHT_TYPES),
+  topics: z.array(z.string()).min(1).max(3),
+  people: z.array(z.string()),
+  action_items: z.array(z.string()),
+  dates_mentioned: z.array(z.string()),
+}).strict();
+
 // Strict JSON-schema for structured output. A schema-constrained model returns
 // a valid object far more reliably than prompt-only `json_object` mode, which
 // could emit a runaway or partial generation. Enforcement is serving-stack
-// dependent, so the JSON.parse + shape guards in classifyOnce stay load-bearing.
+// dependent, so the JSON.parse + runtime validation in classifyOnce stays
+// load-bearing.
 // The shape is the OpenAI `response_format: { type: "json_schema", json_schema }`
 // envelope, which local ollama / LM Studio `/v1` endpoints accept identically.
 const THOUGHT_METADATA_SCHEMA = {
@@ -58,7 +80,7 @@ const THOUGHT_METADATA_SCHEMA = {
     properties: {
       type: {
         type: "string",
-        enum: ["observation", "task", "idea", "reference", "person_note"],
+        enum: THOUGHT_TYPES,
       },
       topics: {
         type: "array",
@@ -81,9 +103,9 @@ interface ChatEndpoint {
 
 // One classification attempt against a single OpenAI-compatible endpoint.
 // Returns the parsed metadata object, or `null` on ANY failure (non-2xx,
-// timeout/abort, missing/non-string content, unparseable or non-object JSON —
-// including a JSON array) so the caller can move on to the next endpoint or the
-// stub. Never throws.
+// timeout/abort, missing/non-string content, unparseable JSON, or a value that
+// violates THOUGHT_METADATA_SCHEMA) so the caller can move on to the next
+// endpoint or the stub. Never throws.
 async function classifyOnce(
   text: string,
   { base, key, model }: ChatEndpoint,
@@ -125,14 +147,8 @@ async function classifyOnce(
     const content = d?.choices?.[0]?.message?.content;
     if (typeof content !== "string") return null;
     const parsed = JSON.parse(content);
-    // typeof [] === "object", so arrays would otherwise slip through and flow
-    // downstream as metadata; reject them along with null/non-objects.
-    if (
-      typeof parsed !== "object" || parsed === null || Array.isArray(parsed)
-    ) {
-      return null;
-    }
-    return parsed as Record<string, unknown>;
+    const validated = THOUGHT_METADATA_RUNTIME_SCHEMA.safeParse(parsed);
+    return validated.success ? validated.data : null;
   } catch {
     // Includes AbortError on timeout — treat as a failed attempt.
     return null;
