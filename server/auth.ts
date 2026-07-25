@@ -4,9 +4,10 @@ import { createRemoteJWKSet, type JWTPayload, jwtVerify } from "jose";
 // Hono request-context variables set by `requireAuth` after a
 // successful authentication. Downstream handlers read these to attribute
 // captures to the door of origin and (for OAuth) the JWT subject. Tool
-// handlers receive them as a closure argument via createMcpServer({door,sub})
-// rather than via Hono context directly, because the @modelcontextprotocol/sdk
-// tool callbacks are not Hono-context-aware.
+// handlers receive them as the auth closure argument via
+// createMcpServer(pool, { door, sub }) rather than via Hono context directly,
+// because the @modelcontextprotocol/sdk tool callbacks are not
+// Hono-context-aware.
 //   - door:  "tailnet" when authenticated via x-brain-key;
 //            "funnel"  when authenticated via Auth0 Bearer (JWT).
 //   - sub:   null on x-brain-key (shared tailnet credential, no per-user id);
