@@ -53,6 +53,9 @@ services:
       - no-new-privileges:true
     # No `depends_on`: the database is on the dedicated db qube, not in this
     # compose project — there is no local postgres health-gate to wait on.
+    # If the db qube is unreachable at boot, mcp exits with a clear `[db]`
+    # error line and `restart: unless-stopped` retries until it is back
+    # (see the boot probe wired in server/db.ts).
     environment:
       # The canonical Postgres lives on the dedicated DB qube. DB_HOST is
       # MANDATORY here (no `postgres` service to fall back to): `:?` makes
@@ -66,6 +69,8 @@ services:
       # fails at `docker compose config` time, not as a runtime DB-auth error.
       DB_PASSWORD: ${OPENBRAIN_APP_PASSWORD:?set OPENBRAIN_APP_PASSWORD (the app role mcp connects as)}
       DB_POOL_SIZE: "10"
+      # Boot-probe deadline; see server/config.ts DB_BOOT_PROBE_TIMEOUT_MS.
+      DB_BOOT_PROBE_TIMEOUT_MS: ${DB_BOOT_PROBE_TIMEOUT_MS:-30000}
       OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       EMBED_DIM: ${EMBED_DIM:-768}
