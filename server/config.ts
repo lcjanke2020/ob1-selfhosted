@@ -231,3 +231,18 @@ export const JWKS_FETCH_TIMEOUT_MS = requiredInt(
   "JWKS_FETCH_TIMEOUT_MS",
   10_000,
 );
+
+// Overall deadline for the boot-time Postgres reachability probe (wired in
+// db.ts, implemented in db_boot_probe.ts). Needed because deno-postgres has
+// no client-side connect timeout: against an endpoint that accepts TCP but
+// never completes the handshake, the pool's init promise never settles, and
+// without this cap the top-level-awaited probe would hang boot forever — a
+// state the compose restart policy cannot see (it reacts to exits, not
+// hangs). On deadline the server exits 1 with the same operator guidance as
+// a refused connection. Keep this above the probe's 10s slow-connect warning
+// so the warning retains a window to fire. Raise it for databases that are
+// legitimately slow to accept connections at boot.
+export const DB_BOOT_PROBE_TIMEOUT_MS = requiredInt(
+  "DB_BOOT_PROBE_TIMEOUT_MS",
+  30_000,
+);

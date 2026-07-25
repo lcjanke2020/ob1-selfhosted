@@ -124,6 +124,8 @@ services:
       DB_USER: openbrain_app
       DB_PASSWORD: ${OPENBRAIN_APP_PASSWORD}
       DB_POOL_SIZE: "10"
+      # Boot-probe deadline; see server/config.ts DB_BOOT_PROBE_TIMEOUT_MS.
+      DB_BOOT_PROBE_TIMEOUT_MS: ${DB_BOOT_PROBE_TIMEOUT_MS:-30000}
       OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       EMBED_DIM: ${EMBED_DIM:-768}

@@ -106,7 +106,9 @@ Deno.test("probeDbAtBoot: hung connect warns after slowWarnAfterMs, then resolve
     warns.push(args.join(" "));
   };
   try {
-    const probe = probeDbAtBoot(fakePool, "db.example:5432", 20);
+    const probe = probeDbAtBoot(fakePool, "db.example:5432", {
+      slowWarnAfterMs: 20,
+    });
     await delay(60);
     assert(
       warns.some((w) =>
@@ -122,6 +124,26 @@ Deno.test("probeDbAtBoot: hung connect warns after slowWarnAfterMs, then resolve
   }
 });
 
+Deno.test("probeDbAtBoot: hung connect rejects at deadlineMs with operator guidance", async () => {
+  // Connect never settles — models an endpoint that accepts TCP but never
+  // completes the handshake (the driver has no client-side connect timeout,
+  // so without the deadline this would await forever).
+  const fakePool = {
+    connect: () => new Promise(() => {}),
+  } as unknown as Pool;
+
+  const err = await assertRejects(
+    () =>
+      probeDbAtBoot(fakePool, "db.example:5432", {
+        slowWarnAfterMs: 10_000, // must not fire during this test
+        deadlineMs: 40,
+      }),
+    Error,
+  );
+  assertStringIncludes(err.message, "db.example:5432");
+  assertStringIncludes(err.message, "DB_BOOT_PROBE_TIMEOUT_MS");
+});
+
 Deno.test("probeDbAtBoot: fast success never emits the slow-connect warning", async () => {
   const warns: string[] = [];
   const origWarn = console.warn;
@@ -132,7 +154,7 @@ Deno.test("probeDbAtBoot: fast success never emits the slow-connect warning", as
     const fakePool = {
       connect: () => Promise.resolve(new FakeClient()),
     } as unknown as Pool;
-    await probeDbAtBoot(fakePool, "db:5432", 20);
+    await probeDbAtBoot(fakePool, "db:5432", { slowWarnAfterMs: 20 });
     await delay(60); // would fire by now if the timer weren't cleared
     assertEquals(warns, []);
   } finally {

@@ -1,5 +1,6 @@
 import { Pool } from "postgres";
 import {
+  DB_BOOT_PROBE_TIMEOUT_MS,
   DB_HOST,
   DB_NAME,
   DB_PASSWORD,
@@ -41,16 +42,25 @@ export const pool = new Pool(
   DB_POOL_SIZE,
 );
 
-probeDbAtBoot(pool, `${DB_HOST}:${DB_PORT}`).then(
-  () => console.log(`[db] postgres reachable at ${DB_HOST}:${DB_PORT}`),
-  (e) => {
-    console.error(e instanceof Error ? e.message : String(e));
-    console.error(
-      "[db] exiting; the deploy supervisor (compose restart policy) will retry",
-    );
-    Deno.exit(1);
-  },
-);
+// Top-level await: the probe is a STARTUP GATE, not a background check.
+// Module evaluation (and therefore index.ts — posture lines, Deno.serve)
+// cannot proceed until the probe settles, exactly like auth.ts's awaited
+// JWKS probe; the two top-level awaits evaluate concurrently, so boot
+// latency is max(probes), not the sum. The deadline bounds the await —
+// without it, a connect that hangs (driver has no client-side connect
+// timeout) would hang boot forever, a state the restart policy can't see.
+try {
+  await probeDbAtBoot(pool, `${DB_HOST}:${DB_PORT}`, {
+    deadlineMs: DB_BOOT_PROBE_TIMEOUT_MS,
+  });
+  console.log(`[db] postgres reachable at ${DB_HOST}:${DB_PORT}`);
+} catch (e) {
+  console.error(e instanceof Error ? e.message : String(e));
+  console.error(
+    "[db] exiting; the deploy supervisor (compose restart policy) will retry",
+  );
+  Deno.exit(1);
+}
 
 export type ThoughtRecord = {
   id: string;

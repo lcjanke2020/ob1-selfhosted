@@ -69,6 +69,8 @@ services:
       # fails at `docker compose config` time, not as a runtime DB-auth error.
       DB_PASSWORD: ${OPENBRAIN_APP_PASSWORD:?set OPENBRAIN_APP_PASSWORD (the app role mcp connects as)}
       DB_POOL_SIZE: "10"
+      # Boot-probe deadline; see server/config.ts DB_BOOT_PROBE_TIMEOUT_MS.
+      DB_BOOT_PROBE_TIMEOUT_MS: ${DB_BOOT_PROBE_TIMEOUT_MS:-30000}
       OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       EMBED_DIM: ${EMBED_DIM:-768}
