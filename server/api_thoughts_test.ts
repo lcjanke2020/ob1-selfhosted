@@ -243,6 +243,36 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
     });
 
     await t.step(
+      "unknown path (authed) → 404 with the JSON error shape",
+      async () => {
+        // The advertised contract is JSON errors everywhere — the terminal
+        // catch-all must beat Hono's default text/plain 404 (round-1
+        // review finding).
+        const api = makeApi(() => undefined);
+        const res = await api.request("/does-not-exist", authed());
+        assertEquals(res.status, 404);
+        assertEquals(
+          res.headers.get("content-type")?.startsWith("application/json"),
+          true,
+        );
+        assertEquals((await res.json()).error.code, "not_found");
+      },
+    );
+
+    await t.step(
+      "unsupported method (authed POST /thoughts/stats) → 404 JSON",
+      async () => {
+        const api = makeApi(() => undefined);
+        const res = await api.request(
+          "/thoughts/stats",
+          authed({ method: "POST", body: JSON.stringify({}) }),
+        );
+        assertEquals(res.status, 404);
+        assertEquals((await res.json()).error.code, "not_found");
+      },
+    );
+
+    await t.step(
       "GET /thoughts/:id → 400 on malformed id (no DB hit)",
       async () => {
         // An unscripted handler would reject any queryObject — reaching the DB

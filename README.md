@@ -176,7 +176,7 @@ The same operations the MCP tools expose, as plain HTTP + JSON for consumers tha
 | GET | `/api/v1/sessions/:id` | integer path param | 200 session record |
 | PATCH | `/api/v1/sessions/:id/status` | `{status}` | 200 `{id, status}` |
 
-Notes: thought capture upserts by content fingerprint, so re-posting identical content returns the existing id (still 201). Session capture mirrors `session_capture`: omit `id` in the TOML to create (201), include it to refresh the same row (200); an unknown `id` is a 404, and an unchanged content hash skips the re-embed (`reembedded: false` in the response).
+Notes: thought capture upserts by content fingerprint, so re-posting identical content returns the existing id (still 201). Session capture mirrors `session_capture`: omit `id` in the TOML to create (201), include it to refresh the same row (200); an unknown `id` is a 404, and an unchanged content hash skips the re-embed (`reembedded: false` in the response). No CORS headers are served — intended consumers are server-side (curl, scripts, cron, backends); a browser-based cross-origin dashboard would need its own CORS-terminating layer in front.
 
 ```sh
 curl -s -X POST http://127.0.0.1:8787/api/v1/thoughts \

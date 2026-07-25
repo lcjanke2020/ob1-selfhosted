@@ -94,6 +94,9 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
       async () => {
         const toml = 'id = 7\ntitle = "same"';
         const hash = await computeContentHash(parseSessionToml(toml).session);
+        // deps must be the SAME object the router uses, or the
+        // embedCalls assertion below is vacuous (round-1 review finding).
+        const deps = makeDeps();
         const api = makeApi((sql) => {
           if (sql.includes("SELECT content_hash")) {
             return { rows: [{ content_hash: hash }] };
@@ -102,8 +105,7 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
             return { rows: [{ id: 7n, session_id: null, status: "done" }] };
           }
           return undefined;
-        });
-        const deps = makeDeps();
+        }, deps);
         const res = await api.request(
           "/sessions",
           authed({ method: "POST", body: JSON.stringify({ toml_text: toml }) }),

@@ -15,7 +15,11 @@ import type { Pool } from "postgres";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { z } from "zod";
 
-import { type AppVariables, requireAuth } from "./auth.ts";
+import {
+  type AppVariables,
+  requireAuth,
+  UNAUTHORIZED_MESSAGE,
+} from "./auth.ts";
 import { fetchThought, getStats, listThoughts } from "./queries.ts";
 import {
   getSession,
@@ -93,10 +97,7 @@ const restifyAuthFailure: MiddlewareHandler<{ Variables: AppVariables }> =
     }
     c.res = new Response(
       JSON.stringify({
-        error: {
-          code: "unauthorized",
-          message: "Unauthorized: missing or invalid authentication.",
-        },
+        error: { code: "unauthorized", message: UNAUTHORIZED_MESSAGE },
       }),
       { status: 401, headers },
     );
@@ -285,6 +286,16 @@ export function createApiRouter(
     if (!row) throw new NotFoundError(`No session found for id ${id}.`);
     return c.json(row);
   });
+
+  // Terminal catch-all, registered LAST: an authenticated request for an
+  // unknown path or an unsupported method must still get the JSON error
+  // shape, not Hono's default text/plain 404. A route (not api.notFound)
+  // because a sub-app's notFound handler does not travel through
+  // app.route() mounting — a catch-all route does. Matched routes above
+  // return without calling next(), so this never shadows them; an
+  // unauthenticated probe never reaches it (requireAuth short-circuits
+  // into the uniform 401 first).
+  api.all("*", (c) => errorJson(c, 404, "not_found", "No such API route."));
 
   return api;
 }

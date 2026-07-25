@@ -80,6 +80,16 @@ Deno.test("REST /api/v1 — auth failure shapes", async (t) => {
     );
 
     await t.step(
+      "unknown path without credentials → uniform 401, not 404",
+      async () => {
+        // Auth is checked before the catch-all, so an unauthenticated
+        // probe can't distinguish real routes from non-routes.
+        const res = await api.request("/does-not-exist");
+        await assertRest401(res);
+      },
+    );
+
+    await t.step(
       "wrong x-brain-key → 401 (requireAuth's 200-envelope is rewritten)",
       async () => {
         // On /mcp this exact request would get HTTP 200 + a JSON-RPC error
