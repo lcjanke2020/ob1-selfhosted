@@ -15,7 +15,7 @@
 // binds before the probe settles).
 //
 // Requires --allow-run=deno in the test task (the only binary spawned is
-// the running Deno itself, via Deno.execPath()).
+// Deno, resolved through PATH so the command-name permission stays portable).
 
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 
@@ -23,7 +23,7 @@ import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 const REFUSED_DB = { DB_HOST: "127.0.0.1", DB_PORT: "59999" };
 
 Deno.test("boot order: unreachable DB → [db] error + exit 1 before the port binds", async () => {
-  const command = new Deno.Command(Deno.execPath(), {
+  const command = new Deno.Command("deno", {
     args: [
       "run",
       "--frozen",
