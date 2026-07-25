@@ -86,7 +86,12 @@ export const thoughtProvenanceClaimsSchema = z.object({
     message:
       "provenance must include at least one of author, agent, repo, or branch",
   },
-);
+).meta({
+  // Zod refinements enforce runtime validation but are not representable in
+  // generated JSON Schema. Publish the equivalent standard keyword so MCP
+  // tools/list clients see the same non-empty-object contract.
+  minProperties: 1,
+});
 
 export type ThoughtProvenanceClaims = z.infer<
   typeof thoughtProvenanceClaimsSchema
@@ -172,6 +177,9 @@ export const sessionUpdateStatusShape = {
 // z.object(...) around the shared shapes, so a REST body and an MCP tool
 // call cannot drift apart in what they accept.
 
+// Keep the top-level body non-strict for compatibility with existing callers
+// whose extra fields were historically ignored. The new provenance envelope
+// is intentionally strict because misspelled identity claims must fail visibly.
 export const captureThoughtBody = z.object(captureThoughtShape);
 export const searchThoughtsBody = z.object(searchThoughtsShape);
 export const sessionCaptureBody = z.object(sessionCaptureShape);

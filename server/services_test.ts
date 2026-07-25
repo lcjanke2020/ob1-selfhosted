@@ -55,7 +55,12 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         const pool = new FakePool((sql, params) => {
           if (sql.includes("INSERT INTO thoughts")) {
             captured = params;
-            return { rows: [{ id: "uuid-1" }] };
+            return {
+              rows: [{
+                id: "uuid-1",
+                metadata: JSON.parse(params[2] as string),
+              }],
+            };
           }
           return undefined;
         });
@@ -102,9 +107,14 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
     await t.step(
       "thought capture: via 'mcp' persists source 'mcp' (MCP rows byte-identical to pre-refactor)",
       async () => {
-        const pool = new FakePool((sql) =>
+        const pool = new FakePool((sql, params) =>
           sql.includes("INSERT INTO thoughts")
-            ? { rows: [{ id: "uuid-2" }] }
+            ? {
+              rows: [{
+                id: "uuid-2",
+                metadata: JSON.parse(params[2] as string),
+              }],
+            }
             : undefined
         );
         const out = await captureThoughtWithMetadata(
@@ -126,9 +136,14 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
     await t.step(
       "thought capture: reserved metadata keys cannot be forged by an extractor",
       async () => {
-        const pool = new FakePool((sql) =>
+        const pool = new FakePool((sql, params) =>
           sql.includes("INSERT INTO thoughts")
-            ? { rows: [{ id: "uuid-3" }] }
+            ? {
+              rows: [{
+                id: "uuid-3",
+                metadata: JSON.parse(params[2] as string),
+              }],
+            }
             : undefined
         );
         const deps = makeDeps({

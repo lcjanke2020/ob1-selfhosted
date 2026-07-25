@@ -26,7 +26,8 @@ All four fields are optional, but an object that is present must contain at
 least one of them. Values are trimmed, must be non-empty strings, and are
 limited to 1,024 characters each. Unknown fields are rejected rather than
 silently dropped. The server does not accept a schema version, transport, auth
-door, or subject from the caller.
+door, or subject from the caller. When no claim is known, omit `provenance`
+entirely; `null` and an empty object are not accepted.
 
 | Input field | Meaning                                        | Trust            |
 | ----------- | ---------------------------------------------- | ---------------- |
@@ -95,9 +96,13 @@ old readers continue to interpret every existing key correctly.
   capture context, not a history of every contributor who submitted identical
   content.
 
-Filtering by these keys, including negation, is a separate API concern.
-Consumers that inspect metadata directly should treat a missing `provenance` key
-as "unclaimed/legacy", never as a match for an arbitrary author or repository.
+Filtering by these keys, including negation, is a separate API concern. Version
+1 deliberately keeps claims at this stable nested JSONB path: the existing
+metadata GIN index supports the stored shape, while the follow-on filter work
+can add expression indexes if its concrete query plans require them. The claims
+are not promoted to columns in this capture change. Consumers that inspect
+metadata directly should treat a missing `provenance` key as "unclaimed/legacy",
+never as a match for an arbitrary author or repository.
 
 ## Agent caller policy
 
@@ -109,6 +114,9 @@ omit unknowns rather than infer them from thought content:
 - identify the writing tool/model in `agent` at the precision available to the
   caller;
 - read repository and branch from the live checkout when applicable;
+- on a duplicate capture with any explicit claim, resend the full set of known
+  claims rather than only the fields that changed, because the supplied nested
+  claim object replaces the previous one;
 - never derive any of these values with the thought metadata classifier.
 
 The session-tracker skill does **not** populate thought provenance. Sessions are

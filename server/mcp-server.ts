@@ -5,10 +5,10 @@
 // finding #4: "module-scoped McpServer with per-request reconnection").
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Pool } from "postgres";
 import { z } from "zod";
 
 import { CITATION_BASE_URL } from "./config.ts";
-import { pool } from "./db.ts";
 import { fetchThought, getStats, listThoughts } from "./queries.ts";
 import {
   listSessions,
@@ -141,7 +141,7 @@ title = "Tool inventory"
 // natural enclosing scope to read door + sub from without an ALS hop.
 export type RequestAuth = { door: "funnel" | "tailnet"; sub: string | null };
 
-export function createMcpServer(auth: RequestAuth): McpServer {
+export function createMcpServer(pool: Pool, auth: RequestAuth): McpServer {
   const server = new McpServer({
     name: "open-brain-homelab",
     // Bump on behavior changes — this is the serverInfo version a client

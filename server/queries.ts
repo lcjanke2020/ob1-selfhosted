@@ -117,6 +117,11 @@ export type CaptureInput = {
   metadata: Record<string, unknown>;
 };
 
+export type CaptureOutcome = {
+  id: string;
+  metadata: Record<string, unknown>;
+};
+
 // Upsert by content fingerprint. The fingerprint is a SHA256 of the
 // trimmed/lowercased/whitespace-collapsed content, computed inline so dedupe
 // happens via the partial unique index on content_fingerprint. On conflict
@@ -125,11 +130,11 @@ export type CaptureInput = {
 export async function captureThought(
   pool: Pool,
   input: CaptureInput,
-): Promise<{ id: string }> {
+): Promise<CaptureOutcome> {
   const embStr = toVectorLiteral(input.embedding);
   const client = await getClient(pool);
   try {
-    const result = await client.queryObject<{ id: string }>(
+    const result = await client.queryObject<CaptureOutcome>(
       `INSERT INTO thoughts (content, embedding, metadata, content_fingerprint)
        VALUES (
          $1,
@@ -147,7 +152,7 @@ export async function captureThought(
          embedding = EXCLUDED.embedding,
          metadata = thoughts.metadata || COALESCE(EXCLUDED.metadata, '{}'::jsonb),
          updated_at = now()
-       RETURNING id`,
+       RETURNING id, metadata`,
       [input.content, embStr, JSON.stringify(input.metadata)],
     );
     return result.rows[0];

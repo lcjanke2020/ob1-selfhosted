@@ -109,12 +109,15 @@ export async function captureThoughtWithMetadata(
     door: input.auth.door,
     sub: input.auth.sub,
   };
-  const { id } = await captureThought(pool, {
+  const { id, metadata: persistedMetadata } = await captureThought(pool, {
     content: input.content,
     embedding,
     metadata,
   });
-  return { id, metadata };
+  // The upsert may preserve top-level keys omitted by this capture (notably
+  // provenance on a duplicate). Return PostgreSQL's final merged row so REST
+  // and MCP never report metadata that disagrees with durable state.
+  return { id, metadata: persistedMetadata };
 }
 
 export async function searchThoughtsByQuery(

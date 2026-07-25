@@ -84,6 +84,9 @@ Deno.test("thought provenance: optional, but strict and non-empty when present",
     captureThoughtBody.safeParse({ content: "x", provenance: {} }).success,
   );
   assertFalse(
+    captureThoughtBody.safeParse({ content: "x", provenance: null }).success,
+  );
+  assertFalse(
     captureThoughtBody.safeParse({
       content: "x",
       provenance: { author: "   " },

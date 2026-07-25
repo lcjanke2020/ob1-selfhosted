@@ -58,9 +58,14 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
     await t.step(
       "POST /thoughts → 201 with versioned claims + verified metadata",
       async () => {
-        const api = makeApi((sql) =>
+        const api = makeApi((sql, params) =>
           sql.includes("INSERT INTO thoughts")
-            ? { rows: [{ id: "uuid-1" }] }
+            ? {
+              rows: [{
+                id: "uuid-1",
+                metadata: JSON.parse(params[2] as string),
+              }],
+            }
             : undefined
         );
         const res = await api.request(
@@ -93,6 +98,63 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
             branch: "feature/provenance",
           },
         });
+      },
+    );
+
+    await t.step(
+      "POST /thoughts duplicates return omit-preserved and explicit-replaced provenance",
+      async () => {
+        let persistedMetadata: Record<string, unknown> = {};
+        const api = makeApi((sql, params) => {
+          if (!sql.includes("INSERT INTO thoughts")) return undefined;
+          assert(sql.includes("RETURNING id, metadata"));
+          const incoming = JSON.parse(params[2] as string) as Record<
+            string,
+            unknown
+          >;
+          // Model PostgreSQL's top-level JSONB merge on a fingerprint conflict.
+          persistedMetadata = { ...persistedMetadata, ...incoming };
+          return {
+            rows: [{
+              id: "uuid-dedupe",
+              metadata: { ...persistedMetadata },
+            }],
+          };
+        });
+        const post = async (provenance?: Record<string, string>) => {
+          const res = await api.request(
+            "/thoughts",
+            authed({
+              method: "POST",
+              body: JSON.stringify({
+                content: "same content",
+                ...(provenance ? { provenance } : {}),
+              }),
+            }),
+          );
+          assertEquals(res.status, 201);
+          return await res.json();
+        };
+
+        const first = await post({
+          author: "release engineer",
+          agent: "codex",
+          repo: "example/open-brain",
+          branch: "feature/provenance",
+        });
+        const original = first.metadata.provenance;
+
+        const omitted = await post();
+        assertEquals(omitted.id, "uuid-dedupe");
+        assertEquals(omitted.metadata.provenance, original);
+        assertEquals(omitted.metadata, persistedMetadata);
+
+        const replaced = await post({ agent: "different-agent" });
+        assertEquals(replaced.metadata.provenance, {
+          schema_version: 1,
+          caller_asserted: { agent: "different-agent" },
+        });
+        assertEquals(replaced.metadata, persistedMetadata);
       },
     );
 
