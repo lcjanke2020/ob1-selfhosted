@@ -53,6 +53,9 @@ services:
       - no-new-privileges:true
     # No `depends_on`: the database is on the dedicated db qube, not in this
     # compose project — there is no local postgres health-gate to wait on.
+    # If the db qube is unreachable at boot, mcp exits with a clear `[db]`
+    # error line and `restart: unless-stopped` retries until it is back
+    # (see the boot probe wired in server/db.ts).
     environment:
       # The canonical Postgres lives on the dedicated DB qube. DB_HOST is
       # MANDATORY here (no `postgres` service to fall back to): `:?` makes
