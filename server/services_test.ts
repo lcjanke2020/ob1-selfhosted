@@ -177,6 +177,30 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
     );
 
     await t.step(
+      "thought capture: direct service callers cannot persist empty provenance",
+      async () => {
+        const pool = new FakePool(() => {
+          throw new Error("database must not be reached");
+        });
+        for (const provenance of [{}, { author: undefined }]) {
+          const deps = makeDeps();
+          await assertRejects(
+            () =>
+              captureThoughtWithMetadata(
+                asPool(pool),
+                { content: "x", provenance, auth: AUTH, via: "rest" },
+                deps,
+              ),
+            ValidationError,
+            "provenance must include at least one",
+          );
+          assertEquals(deps.embedCalls, []);
+          assertEquals(deps.extractCalls, []);
+        }
+      },
+    );
+
+    await t.step(
       "thought capture: embed failure → UpstreamError with the original message",
       async () => {
         const pool = new FakePool(() => undefined);

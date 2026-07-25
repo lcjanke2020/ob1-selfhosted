@@ -17,6 +17,7 @@ import { captureThought, searchThoughts } from "./queries.ts";
 import {
   THOUGHT_PROVENANCE_SCHEMA_VERSION,
   type ThoughtProvenanceClaims,
+  thoughtProvenanceClaimsSchema,
 } from "./schemas.ts";
 import {
   getSessionContentHash,
@@ -42,6 +43,19 @@ export type AuthContext = { door: "funnel" | "tailnet"; sub: string | null };
 export class ValidationError extends Error {}
 export class NotFoundError extends Error {}
 export class UpstreamError extends Error {}
+
+function validateThoughtProvenance(
+  provenance: ThoughtProvenanceClaims | undefined,
+): ThoughtProvenanceClaims | undefined {
+  if (provenance === undefined) return undefined;
+  const parsed = thoughtProvenanceClaimsSchema.safeParse(provenance);
+  if (!parsed.success) {
+    throw new ValidationError(
+      parsed.error.issues.map((issue) => issue.message).join("; "),
+    );
+  }
+  return parsed.data;
+}
 
 export type ServiceDeps = {
   embed: (text: string) => Promise<number[]>;
@@ -77,6 +91,11 @@ export async function captureThoughtWithMetadata(
   },
   deps: ServiceDeps = defaultDeps,
 ): Promise<{ id: string; metadata: Record<string, unknown> }> {
+  // Transport handlers already validate this shape, but the shared service is
+  // exported and can be called directly. Re-validate before any upstream work
+  // so internal callers cannot persist an empty or otherwise invalid claims
+  // envelope by bypassing the MCP/REST schemas.
+  const provenance = validateThoughtProvenance(input.provenance);
   const [embedding, extracted] = await Promise.all([
     embedOrUpstreamError(deps.embed, input.content),
     deps.extractMetadata(input.content),
@@ -97,11 +116,11 @@ export async function captureThoughtWithMetadata(
   // server-verified transport identity used by existing consumers.
   const metadata: Record<string, unknown> = {
     ...classified,
-    ...(input.provenance
+    ...(provenance
       ? {
         provenance: {
           schema_version: THOUGHT_PROVENANCE_SCHEMA_VERSION,
-          caller_asserted: input.provenance,
+          caller_asserted: provenance,
         },
       }
       : {}),
