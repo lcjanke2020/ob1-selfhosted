@@ -147,7 +147,10 @@ sequenceDiagram
 │   ├── compose-tailnet/       Install path 2 — Pattern B overlay, Caddyfile, caddy image
 │   └── qubes/                 Install path 3 — Qubes runbook + three-qube design doc
 ├── scripts/                   Daily observability summary, existing-deployment upgrades
-├── skills/session-tracker/    Agent-facing skill: how to use the session_* tools
+├── skills/                    Agent-facing usage and testing procedures
+│   ├── session-tracker/       How to use the session_* tools
+│   └── test-approximate-search-invariants/
+│                              Stable CI boundaries for ANN search behavior
 ├── docs/                      Threat model (one page), security model, Funnel-as-MCP-
 │                              perimeter guide, "why not Cloudflare?" rationale,
 │                              Codex-over-OAuth client setup
