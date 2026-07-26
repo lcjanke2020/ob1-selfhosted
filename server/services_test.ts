@@ -5,7 +5,7 @@
 // (services.ts transitively imports config.ts, which validates env at module
 // load — same pattern as auth_brainkey_test.ts).
 
-import { assertEquals, assertRejects } from "jsr:@std/assert@1";
+import { assertEquals, assertRejects } from "@std/assert";
 import {
   asPool,
   FAKE_VECTOR,
@@ -233,6 +233,8 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
                 metadata: {},
                 created_at: "2026-07-24T00:00:00Z",
                 similarity: 0.9,
+                vector_rank: 1,
+                lexical_rank: null,
               }],
             };
           }
@@ -246,7 +248,14 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         );
         assertEquals(rows.length, 1);
         assertEquals(deps.embedCalls, ["find me"]);
-        assertEquals(captured, [`[${FAKE_VECTOR.join(",")}]`, 0.7, 3]);
+        assertEquals(captured, [
+          `[${FAKE_VECTOR.join(",")}]`,
+          0.7,
+          "find me",
+          "find me",
+          50,
+        ]);
+        assertEquals(rows[0].rrf_score, 1 / 61);
       },
     );
 
@@ -293,6 +302,8 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         assertEquals(capturedParams, [
           `[${FAKE_VECTOR.join(",")}]`,
           0.6,
+          "release checklist",
+          "release checklist",
           JSON.stringify({
             provenance: {
               caller_asserted: {
@@ -307,18 +318,18 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           JSON.stringify({
             provenance: { caller_asserted: { branch: "archived" } },
           }),
-          4,
+          50,
         ]);
-        assertEquals(capturedSql.includes("metadata @> $3::jsonb"), true);
+        assertEquals(capturedSql.includes("metadata @> $5::jsonb"), true);
         assertEquals(
-          capturedSql.includes("NOT (metadata @> $4::jsonb)"),
+          capturedSql.includes("NOT (metadata @> $6::jsonb)"),
           true,
         );
         assertEquals(
-          capturedSql.includes("NOT (metadata @> $5::jsonb)"),
+          capturedSql.includes("NOT (metadata @> $7::jsonb)"),
           true,
         );
-        assertEquals(capturedSql.includes("LIMIT $6"), true);
+        assertEquals(capturedSql.includes("LIMIT $8::int"), true);
         assertEquals(capturedSql.includes("match_thoughts"), false);
       },
     );

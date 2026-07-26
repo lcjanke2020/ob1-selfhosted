@@ -70,4 +70,10 @@ export type ThoughtRecord = {
   updated_at?: string | null;
 };
 
-export type ThoughtMatch = ThoughtRecord & { similarity: number };
+export type ThoughtMatch = ThoughtRecord & {
+  // Cosine similarity is retained for compatibility and diagnostics. Hybrid
+  // ordering is driven by rrf_score, so a lexical-only hit may be returned
+  // even when this value is below the vector-leg threshold.
+  similarity: number;
+  rrf_score: number;
+};

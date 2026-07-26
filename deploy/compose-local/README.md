@@ -52,7 +52,7 @@ docker compose up -d
 docker compose logs -f mcp
 ```
 
-You should see `open-brain-homelab listening on :8787`. The Postgres init scripts (roles, pgvector schema, observability tables, sessions schema) run on the first startup only.
+You should see `open-brain-homelab listening on :8787`. The Postgres init scripts (roles, pgvector schema, observability tables, sessions schema, hybrid-search indexes) run on the first startup only.
 
 ### 4. Smoke-test
 
@@ -105,9 +105,28 @@ After a client restart, the connector should list **eleven tools**: `capture_tho
 4. The same connection rejects `INSERT` (`permission denied`) — the read-only role works.
 5. `curl http://127.0.0.1:8787/health` returns `{"ok":true,...}`.
 6. Capture a thought from your client; `SELECT id, vector_dims(embedding) FROM thoughts` shows `768` (or your `EMBED_DIM`).
-7. Ask the client "what have I captured?" — semantic search returns the thought.
+7. Ask the client "what have I captured?" — hybrid search returns the thought by meaning or exact text.
 8. Capture the *same* text again — the row count stays at 1 (dedupe by `content_fingerprint`).
 9. `docker compose restart` — thoughts survive.
+
+## Upgrading an existing database for hybrid search
+
+Postgres init files run only when the data directory is first created. Before
+deploying a server version that uses hybrid thought search, apply the idempotent
+lexical-search migration as the database owner:
+
+```bash
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/05-hybrid-search.sql
+docker compose build mcp
+docker compose up -d --no-deps mcp
+```
+
+The migration backfills a stored `tsvector` and builds two regular GIN indexes,
+which briefly block captures on a large `thoughts` table. Use a maintenance
+window; re-running the file is safe. Details and query semantics are in
+[`docs/hybrid-search.md`](../../docs/hybrid-search.md).
 
 ## Common gotchas
 

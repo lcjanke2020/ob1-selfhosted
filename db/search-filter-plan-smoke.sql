@@ -101,9 +101,9 @@ CROSS JOIN constant_vector;
 
 VACUUM ANALYZE thoughts;
 
--- Mirrors the live queries.ts shape: vector threshold + positive JSONB
--- containment + vector ordering + limit. The selective repo term should make
--- PostgreSQL choose the metadata GIN index before sorting the candidate set.
+-- Mirrors hybrid queries.ts's vector candidate leg: vector threshold +
+-- positive JSONB containment + vector ordering + limit. The selective repo
+-- term should make PostgreSQL choose the metadata GIN index before sorting.
 EXPLAIN
 SELECT id, content, metadata, created_at,
        1 - (
@@ -123,11 +123,11 @@ ORDER BY embedding <=> (
 )::vector
 LIMIT 10;
 
--- Mirrors queries.ts's filtered-search transaction. Approximate-index recall
--- is deliberately not asserted: HNSW graph construction and traversal are not
--- deterministic guarantees. This smoke instead verifies the guarantees the
--- application owns: transaction-local configuration, filter correctness, and
--- the HNSW plan shape. The exact boolean semantics are asserted above.
+-- Mirrors queries.ts's filtered vector-leg transaction. Approximate-index
+-- recall is deliberately not asserted: HNSW graph construction and traversal
+-- are not deterministic guarantees. This smoke instead verifies the
+-- guarantees the application owns: transaction-local configuration, filter
+-- correctness, and the HNSW plan shape. Exact semantics are asserted above.
 SELECT current_setting('hnsw.iterative_scan') AS hnsw_before \gset
 
 BEGIN;

@@ -5,7 +5,7 @@
 // pattern as auth_brainkey_test.ts). Auth is exercised for real: requests
 // carry a valid x-brain-key; the failure shapes live in api_auth_test.ts.
 
-import { assert, assertEquals } from "jsr:@std/assert@1";
+import { assert, assertEquals } from "@std/assert";
 import {
   asPool,
   FakePool,
@@ -252,6 +252,8 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
               metadata: { type: "observation" },
               created_at: "2026-07-24T00:00:00Z",
               similarity: "0.91",
+              vector_rank: 1,
+              lexical_rank: 1,
             }],
           }
           : undefined
@@ -265,6 +267,7 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
       assertEquals(body.results.length, 1);
       assertEquals(body.results[0].id, "uuid-1");
       assertEquals(body.results[0].similarity, 0.91);
+      assertEquals(body.results[0].rrf_score, 2 / 61);
     });
 
     await t.step(
@@ -300,17 +303,19 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
         );
         assertEquals(res.status, 200);
         assertEquals(await res.json(), { results: [] });
-        assertEquals(capturedSql.includes("metadata @> $3::jsonb"), true);
+        assertEquals(capturedSql.includes("metadata @> $5::jsonb"), true);
         assertEquals(
-          capturedSql.includes("NOT (metadata @> $4::jsonb)"),
+          capturedSql.includes("NOT (metadata @> $6::jsonb)"),
           true,
         );
         assertEquals(
-          capturedSql.includes("NOT (metadata @> $5::jsonb)"),
+          capturedSql.includes("NOT (metadata @> $7::jsonb)"),
           true,
         );
         assertEquals(capturedParams.slice(1), [
           0.65,
+          "release checklist",
+          "release checklist",
           JSON.stringify({
             provenance: {
               caller_asserted: { repo: "example/open-brain" },
@@ -324,7 +329,7 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
           JSON.stringify({
             provenance: { caller_asserted: { agent: "codex" } },
           }),
-          2,
+          50,
         ]);
       },
     );

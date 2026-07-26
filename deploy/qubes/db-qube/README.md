@@ -123,8 +123,9 @@ sudo -u postgres psql -c "CREATE DATABASE openbrain;"
 sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
 # then create the openbrain_app / openbrain_ingester / openbrain_readonly /
 # openbrain_monitor roles and load the schema — see db/00-roles.sh and
-# db/01-schema.sql for the exact, up-to-date statements (Pattern A vs B,
-# passwords, grants; ingester + monitor are optional).
+# db/01-schema.sql through db/05-hybrid-search.sql for the exact, up-to-date
+# statements (Pattern A vs B, passwords, grants; ingester + monitor are
+# optional).
 ```
 
 Apply `pg_hba.snippet.conf` and `postgresql.local.conf` after the roles exist,
@@ -141,6 +142,16 @@ an existing deployment, run
 If the result is older, first install a pgvector package that provides `0.8.0`
 or newer, run `ALTER EXTENSION vector UPDATE;` as the database owner, and verify
 the version again before restarting the app-side MCP service.
+
+Hybrid thought search additionally requires the idempotent
+[`db/05-hybrid-search.sql`](../../../db/05-hybrid-search.sql) migration. Apply it
+as the database owner from this qube's local socket or the existing
+tailnet-restricted remote-admin path *before* updating the MCP service. Adding
+the stored `content_tsv` column backfills existing thoughts and the regular GIN
+index builds briefly block captures, so use a maintenance window on a large
+corpus. The migration also installs `pg_trgm`; the native Postgres package must
+include that contrib extension. See
+[Hybrid thought search](../../../docs/hybrid-search.md) for the full contract.
 
 ## Template note
 

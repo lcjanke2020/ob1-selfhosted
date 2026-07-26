@@ -132,9 +132,13 @@ export const captureThoughtShape = {
 };
 
 export const searchThoughtsShape = {
-  query: z.string().min(1).describe("What to search for"),
+  query: z.string().min(1).describe(
+    "Natural-language or literal text to search for. The lexical leg supports quoted phrases, OR, and -term web-search syntax.",
+  ),
   limit: z.number().int().min(1).max(100).optional().default(10),
-  threshold: z.number().min(0).max(1).optional().default(0.5),
+  threshold: z.number().min(0).max(1).optional().default(0.5).describe(
+    "Minimum cosine similarity for admission through the vector leg. Exact lexical hits may still be returned below this value.",
+  ),
   filter: thoughtSearchFilterSchema.optional().describe(
     "Optional caller-asserted provenance filter. Include fields are ANDed; a match on any exclude field rejects the thought.",
   ),

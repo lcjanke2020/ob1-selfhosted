@@ -19,6 +19,67 @@ export type SearchOptions = {
   filter?: ThoughtSearchFilter;
 };
 
+// RRF is intentionally rank-only: vector cosine and ts_rank_cd use unrelated
+// scales, while rank positions can be combined without normalization. k=60 is
+// the conventional conservative default; at least 50 candidates per leg keeps
+// exact lexical hits available without turning final LIMIT into an unbounded
+// scan. Requests above 50 raise the per-leg depth to preserve their limit.
+export const DEFAULT_RRF_K = 60;
+export const MIN_HYBRID_CANDIDATES_PER_LEG = 50;
+
+export type HybridCandidate = Omit<ThoughtMatch, "similarity" | "rrf_score"> & {
+  similarity: string | number | null;
+  vector_rank: string | number | bigint | null;
+  lexical_rank: string | number | bigint | null;
+};
+
+function positiveRank(value: HybridCandidate["vector_rank"]): number | null {
+  if (value === null || value === undefined) return null;
+  const rank = Number(value);
+  return Number.isFinite(rank) && rank > 0 ? rank : null;
+}
+
+function finiteNumber(value: string | number | null): number {
+  if (value === null) return 0;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+// Production fusion is kept pure so the scale-free ranking contract can be
+// exercised hermetically. PostgreSQL returns only a bounded union of candidate
+// rows and their per-leg ranks; this helper computes RRF, sorts, and applies the
+// caller's final limit. ID is a neutral deterministic tie-break for equal RRF.
+export function fuseHybridCandidates(
+  candidates: HybridCandidate[],
+  limit: number,
+  k = DEFAULT_RRF_K,
+): ThoughtMatch[] {
+  const safeK = Number.isFinite(k) && k > 0 ? k : DEFAULT_RRF_K;
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 0;
+
+  return candidates.map((candidate) => {
+    const vectorRank = positiveRank(candidate.vector_rank);
+    const lexicalRank = positiveRank(candidate.lexical_rank);
+    const rrfScore = (vectorRank === null ? 0 : 1 / (safeK + vectorRank)) +
+      (lexicalRank === null ? 0 : 1 / (safeK + lexicalRank));
+    const { vector_rank: _vectorRank, lexical_rank: _lexicalRank, ...thought } =
+      candidate;
+    return {
+      ...thought,
+      similarity: finiteNumber(candidate.similarity),
+      rrf_score: rrfScore,
+    };
+  }).filter((thought) => thought.rrf_score > 0)
+    .sort((a, b) => b.rrf_score - a.rrf_score || a.id.localeCompare(b.id))
+    .slice(0, safeLimit);
+}
+
+// Escape ILIKE wildcards so the trigram fallback matches the caller's query as
+// a literal substring, not a pattern. Backslash is the SQL ESCAPE character.
+export function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (character) => `\\${character}`);
+}
+
 function provenanceMetadataFragment(
   claims: ThoughtProvenanceClaims,
 ): string {
@@ -27,9 +88,9 @@ function provenanceMetadataFragment(
   });
 }
 
-// Shared predicate builder for every thought-retrieval leg. A future vector +
-// FTS query can call this once per leg so filtering happens before ranking and
-// fusion without re-specifying its boolean or placeholder semantics.
+// Shared predicate builder for every thought-retrieval leg. Hybrid search
+// builds this once and applies it to vector and lexical candidates before
+// ranking/fusion, without duplicating boolean or placeholder semantics.
 function appendThoughtSearchFilter(
   conditions: string[],
   params: unknown[],
@@ -62,14 +123,19 @@ export async function searchThoughts(
   pool: Pool,
   opts: SearchOptions,
 ): Promise<ThoughtMatch[]> {
-  const { embedding, limit = 10, threshold = 0.5, filter } = opts;
+  const { query, embedding, limit = 10, threshold = 0.5, filter } = opts;
   const embStr = toVectorLiteral(embedding);
-  const conditions = [`1 - (embedding <=> $1::vector) >= $2`];
-  const params: unknown[] = [embStr, threshold];
-  appendThoughtSearchFilter(conditions, params, filter);
+  const vectorConditions = [`1 - (embedding <=> $1::vector) >= $2`];
+  const lexicalConditions = [`btrim($3::text) <> ''`];
+  const params: unknown[] = [embStr, threshold, query, escapeLike(query)];
+  const filterConditions: string[] = [];
+  appendThoughtSearchFilter(filterConditions, params, filter);
+  vectorConditions.push(...filterConditions);
+  lexicalConditions.push(...filterConditions);
 
-  params.push(limit);
-  const limitParam = params.length;
+  const candidateLimit = Math.max(MIN_HYBRID_CANDIDATES_PER_LEG, limit);
+  params.push(candidateLimit);
+  const candidateLimitParam = params.length;
   const client = await getClient(pool);
   let transactionOpen = false;
   try {
@@ -86,28 +152,69 @@ export async function searchThoughts(
       );
     }
 
-    // The distance expression decodes as text (same driver behavior
-    // session_queries.ts narrows `score` for); type it honestly and expose a
-    // JS number so JSON consumers don't receive `similarity` as a string.
-    const result = await client.queryObject<
-      Omit<ThoughtMatch, "similarity"> & { similarity: string | number }
-    >(
-      `SELECT id, content, metadata, created_at,
-              1 - (embedding <=> $1::vector) AS similarity
-       FROM thoughts
-       WHERE ${conditions.join("\n         AND ")}
-       ORDER BY embedding <=> $1::vector
-       LIMIT $${limitParam}`,
+    // Each leg first takes a bounded, index-friendly candidate set. The outer
+    // window functions rank those small sets without compromising the inner
+    // HNSW/GIN access paths. Literal matches sort behind true FTS hits and only
+    // fill the lexical candidate budget, matching upstream's fallback intent.
+    const result = await client.queryObject<HybridCandidate>(
+      `WITH query_input AS (
+         SELECT websearch_to_tsquery('simple', $3::text) AS ts_query
+       ),
+       vector_candidates AS MATERIALIZED (
+         SELECT id, embedding <=> $1::vector AS distance
+         FROM thoughts
+         WHERE ${vectorConditions.join("\n           AND ")}
+         ORDER BY embedding <=> $1::vector
+         LIMIT $${candidateLimitParam}::int
+       ),
+       vector_hits AS (
+         SELECT id,
+                ROW_NUMBER() OVER (ORDER BY distance, id) AS vector_rank
+         FROM vector_candidates
+       ),
+       lexical_candidates AS MATERIALIZED (
+         SELECT id,
+                CASE WHEN content_tsv @@ query_input.ts_query THEN 0 ELSE 1 END
+                  AS source_priority,
+                ts_rank_cd(content_tsv, query_input.ts_query) AS lexical_score,
+                created_at
+         FROM thoughts
+         CROSS JOIN query_input
+         WHERE ${lexicalConditions.join("\n           AND ")}
+           AND (
+             content_tsv @@ query_input.ts_query
+             OR content ILIKE '%' || $4::text || '%' ESCAPE '\\'
+           )
+         ORDER BY source_priority, lexical_score DESC, created_at DESC, id
+         LIMIT $${candidateLimitParam}::int
+       ),
+       lexical_hits AS (
+         SELECT id,
+                ROW_NUMBER() OVER (
+                  ORDER BY source_priority, lexical_score DESC, created_at DESC, id
+                ) AS lexical_rank
+         FROM lexical_candidates
+       ),
+       candidates AS (
+         SELECT COALESCE(vector_hits.id, lexical_hits.id) AS id,
+                vector_hits.vector_rank,
+                lexical_hits.lexical_rank
+         FROM vector_hits
+         FULL OUTER JOIN lexical_hits USING (id)
+       )
+       SELECT thoughts.id, thoughts.content, thoughts.metadata,
+              thoughts.created_at,
+              1 - (thoughts.embedding <=> $1::vector) AS similarity,
+              candidates.vector_rank, candidates.lexical_rank
+       FROM candidates
+       JOIN thoughts USING (id)`,
       params,
     );
     if (transactionOpen) {
       await client.queryArray("COMMIT");
       transactionOpen = false;
     }
-    return result.rows.map((row) => ({
-      ...row,
-      similarity: Number(row.similarity),
-    }));
+    return fuseHybridCandidates(result.rows, limit);
   } catch (e) {
     if (transactionOpen) {
       try {
