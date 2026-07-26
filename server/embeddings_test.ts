@@ -11,6 +11,7 @@ const OLLAMA_URL = "http://ollama.invalid";
 const ENV_KEYS = [
   "DB_PASSWORD",
   "MCP_ACCESS_KEY",
+  "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
@@ -78,6 +79,7 @@ Deno.test("embed: timeout covers response body consumption", async (t) => {
 
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
+  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   Deno.env.delete("AUTH0_ISSUER");
   Deno.env.delete("AUTH0_JWKS_URI");
   Deno.env.delete("AUTH0_AUDIENCE");

@@ -5,12 +5,16 @@
 // which hands the whole document to `parseSessionToml`. It maps the front
 // matter onto the sessions.session columns and the `[[artifacts]]`
 // array-of-tables onto sessions.artifact rows. The parser reads a fixed
-// allowlist of known top-level fields from the parsed document, so unknown or
-// legacy keys (e.g. the retired ingested_path/needs_file_sync) are silently
-// ignored. Provenance fields (source/source_node) are deliberately NOT read
-// from the TOML — they are stamped server-side from the transport.
+// allowlist of known top-level fields from the parsed document. Unknown keys
+// are rejected: silently dropping a misspelled workspace would widen the write
+// to the default workspace. Provenance/owner fields are deliberately NOT
+// authorable — they are stamped server-side from verified request context.
 
 import { parse } from "@std/toml";
+import {
+  MEMORY_VISIBILITIES,
+  type MemoryVisibility,
+} from "./scope_contract.ts";
 
 // Single source of truth for the lifecycle enum, shared by the zod input
 // schemas (mcp-server.ts) and the DB enum (db/04-sessions.sql).
@@ -70,6 +74,9 @@ export type ParsedSession = {
   blockers: string[];
   resume_context: string | null;
   summary: string | null;
+  workspace_id: string | null;
+  project_id: string | null;
+  visibility: MemoryVisibility | null;
 };
 
 export type ParsedArtifact = {
@@ -82,6 +89,38 @@ export type ParsedArtifact = {
 // The only field names a `[[artifacts]]` entry may carry. Unknown keys (e.g. the
 // legacy `ref`/`note`, or a typo) are rejected loudly rather than dropped.
 const ARTIFACT_KEYS = new Set(["kind", "title", "detail"]);
+
+const SESSION_KEYS = new Set([
+  "id",
+  "session_id",
+  "title",
+  "session_date",
+  "goal",
+  "agent",
+  "agent_version",
+  "harness",
+  "machine",
+  "working_dir",
+  "repo_url",
+  "branch",
+  "head",
+  "worktree",
+  "started_at",
+  "last_update",
+  "ended_at",
+  "status",
+  "tags",
+  "linked_issues",
+  "related_sessions",
+  "next_actions",
+  "blockers",
+  "resume_context",
+  "summary",
+  "workspace_id",
+  "project_id",
+  "visibility",
+  "artifacts",
+]);
 
 export type ParsedSessionDoc = {
   session: ParsedSession;
@@ -99,15 +138,47 @@ function toPositiveIntOrNull(v: unknown): number | null {
   if (v === null || v === undefined) return null;
   const n = typeof v === "number"
     ? v
-    : (typeof v === "string" && /^[0-9]+$/.test(v.trim()) ? Number(v.trim()) : NaN);
+    : (typeof v === "string" && /^[0-9]+$/.test(v.trim())
+      ? Number(v.trim())
+      : NaN);
   if (Number.isSafeInteger(n) && n > 0) return n;
-  throw new Error(`id ${JSON.stringify(v)} must be a positive integer below 2^53`);
+  throw new Error(
+    `id ${JSON.stringify(v)} must be a positive integer below 2^53`,
+  );
 }
 
 function toStrOrNull(v: unknown): string | null {
   if (v === null || v === undefined) return null;
   if (typeof v === "string") return v;
   return String(v);
+}
+
+function toScopeIdOrNull(field: string, v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v !== "string") {
+    throw new Error(`${field} must be a string`);
+  }
+  const value = v.trim();
+  if (!value) throw new Error(`${field} must not be empty`);
+  if (value.length > 128) {
+    throw new Error(`${field} must be at most 128 characters`);
+  }
+  return value;
+}
+
+function parseVisibility(v: unknown): MemoryVisibility | null {
+  if (v === null || v === undefined) return null;
+  if (
+    typeof v === "string" &&
+    (MEMORY_VISIBILITIES as readonly string[]).includes(v)
+  ) {
+    return v as MemoryVisibility;
+  }
+  throw new Error(
+    `invalid visibility ${JSON.stringify(v)}; must be one of ${
+      MEMORY_VISIBILITIES.join(" | ")
+    }`,
+  );
 }
 
 // TOML date/datetime values parse to Date; keep ISO strings so the value is
@@ -158,6 +229,20 @@ function extractToml(input: string): string {
 export function parseSessionToml(tomlText: string): ParsedSessionDoc {
   const doc = parse(extractToml(tomlText)) as Record<string, unknown>;
 
+  if (doc.owner_subject !== undefined) {
+    throw new Error("owner_subject is server-stamped and cannot be authored");
+  }
+  const unknownTopLevel = Object.keys(doc).filter((key) =>
+    !SESSION_KEYS.has(key) && key !== "artifact"
+  );
+  if (unknownTopLevel.length > 0) {
+    throw new Error(
+      `session TOML has unknown top-level field(s) ${
+        unknownTopLevel.join(", ")
+      }`,
+    );
+  }
+
   const title = toStrOrNull(doc.title);
   if (!title || !title.trim()) {
     throw new Error("session TOML is missing required field 'title'");
@@ -191,6 +276,9 @@ export function parseSessionToml(tomlText: string): ParsedSessionDoc {
     blockers: toStringArray(doc.blockers),
     resume_context: toStrOrNull(doc.resume_context),
     summary: toStrOrNull(doc.summary),
+    workspace_id: toScopeIdOrNull("workspace_id", doc.workspace_id),
+    project_id: toScopeIdOrNull("project_id", doc.project_id),
+    visibility: parseVisibility(doc.visibility),
   };
 
   // Canonical artifact block is `[[artifacts]]` (plural), matching the concept

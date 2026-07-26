@@ -5,11 +5,16 @@ import { Pool } from "postgres";
 import { getClient } from "./db_pool.ts";
 import type { ThoughtMatch, ThoughtRecord } from "./db.ts";
 import { toVectorLiteral } from "./embeddings.ts";
+import { withScopeClient } from "./scoped_db.ts";
 import {
   THOUGHT_PROVENANCE_FIELDS,
   type ThoughtProvenanceClaims,
   type ThoughtSearchFilter,
 } from "./schemas.ts";
+import type {
+  ResolvedReadScope,
+  ResolvedWriteScope,
+} from "./scope_contract.ts";
 
 export type SearchOptions = {
   query: string;
@@ -17,6 +22,7 @@ export type SearchOptions = {
   limit?: number;
   threshold?: number;
   filter?: ThoughtSearchFilter;
+  scope: ResolvedReadScope;
 };
 
 // RRF is intentionally rank-only: vector cosine and ts_rank_cd use unrelated
@@ -107,182 +113,97 @@ export function hasIndexableLiteralTrigram(value: string): boolean {
   return /[\p{L}\p{N}]{3}/u.test(value);
 }
 
-function provenanceMetadataFragment(
+function provenanceMetadataFilter(
   claims: ThoughtProvenanceClaims,
-): string {
-  return JSON.stringify({
+): Record<string, unknown> {
+  return {
     provenance: { caller_asserted: claims },
-  });
+  };
 }
 
-// Shared predicate builder for every thought-retrieval leg. Hybrid search
-// builds this once and applies it to vector and lexical candidates before
-// ranking/fusion, without duplicating boolean or placeholder semantics.
-function appendThoughtSearchFilter(
-  conditions: string[],
-  params: unknown[],
+function serializedThoughtSearchFilters(
   filter: ThoughtSearchFilter | undefined,
-): void {
-  // Keep the positive terms in one top-level JSONB containment predicate.
-  // PostgreSQL's default jsonb GIN operator class supports @>, so selective
-  // includes can use idx_thoughts_metadata. Omit the predicate entirely for
-  // unfiltered callers instead of hiding it behind a parameterized OR.
-  if (filter?.include) {
-    params.push(provenanceMetadataFragment(filter.include));
-    conditions.push(`metadata @> $${params.length}::jsonb`);
-  }
-
-  // Exclusions are any-match deny terms. One NOT-containment predicate per
-  // canonical field makes the boolean rule explicit: matching any supplied
-  // value rejects the row. A missing claim yields @> false and therefore
-  // survives, which keeps legacy/unclaimed rows in exclude-only searches.
+): { include: string | null; excludes: string } {
+  const excludeFilters: Record<string, unknown>[] = [];
   if (filter?.exclude) {
     for (const field of THOUGHT_PROVENANCE_FIELDS) {
       const value = filter.exclude[field];
       if (value === undefined) continue;
-      params.push(provenanceMetadataFragment({ [field]: value }));
-      conditions.push(`NOT (metadata @> $${params.length}::jsonb)`);
+      excludeFilters.push(provenanceMetadataFilter({ [field]: value }));
     }
   }
+  return {
+    include: filter?.include
+      ? JSON.stringify(provenanceMetadataFilter(filter.include))
+      : null,
+    excludes: JSON.stringify(excludeFilters),
+  };
 }
 
 export async function searchThoughts(
   pool: Pool,
   opts: SearchOptions,
 ): Promise<ThoughtMatch[]> {
-  const { query, embedding, limit = 10, threshold = 0.5, filter } = opts;
+  const { query, embedding, limit = 10, threshold = 0.5, filter, scope } = opts;
   const embStr = toVectorLiteral(embedding);
-  const vectorConditions = [`1 - (embedding <=> $1::vector) >= $2`];
-  const lexicalConditions = [`query_input.has_indexable_query`];
+  const serializedFilters = serializedThoughtSearchFilters(filter);
+  const candidateLimit = Math.max(MIN_HYBRID_CANDIDATES_PER_LEG, limit);
   const params: unknown[] = [
     embStr,
     threshold,
     query,
     escapeLike(query),
     hasIndexableLiteralTrigram(query),
+    serializedFilters.include,
+    serializedFilters.excludes,
+    candidateLimit,
   ];
-  const filterConditions: string[] = [];
-  appendThoughtSearchFilter(filterConditions, params, filter);
-  vectorConditions.push(...filterConditions);
-  lexicalConditions.push(...filterConditions);
-
-  const candidateLimit = Math.max(MIN_HYBRID_CANDIDATES_PER_LEG, limit);
-  params.push(candidateLimit);
-  const candidateLimitParam = params.length;
-  const client = await getClient(pool);
-  let transactionOpen = false;
-  try {
+  return await withScopeClient(pool, scope, async (client) => {
     // hnsw.ef_search defaults to 40, which would silently cap an unfiltered
     // vector leg below the documented minimum of 50 candidates. Scope the
     // per-request depth to this transaction; set_config accepts a bound value
     // where SET LOCAL cannot. db/search-filter-plan-smoke.sql exercises the
     // same transaction-local settings against the deployed pgvector version.
-    await client.queryArray("BEGIN");
-    transactionOpen = true;
     await client.queryArray(
       "SELECT set_config('hnsw.ef_search', $1::text, true)",
       [String(candidateLimit)],
     );
 
-    if (filter !== undefined) {
-      // pgvector applies WHERE predicates after an approximate HNSW candidate
-      // scan. Without an iterative scan, a metadata filter can discard the
-      // initial candidate batch and return fewer than LIMIT even when eligible
-      // rows remain. SET LOCAL keeps the fix scoped to this transaction so a
-      // pooled connection cannot leak it into later unfiltered searches.
-      await client.queryArray(
-        "SET LOCAL hnsw.iterative_scan = strict_order",
-      );
-    }
+    // RLS audience predicates are residual filters on every request, just like
+    // an optional provenance filter. Iterative HNSW scanning is therefore
+    // required even for an otherwise-unfiltered default-workspace query.
+    await client.queryArray(
+      "SET LOCAL hnsw.iterative_scan = strict_order",
+    );
 
-    // Each leg first takes a bounded, index-friendly candidate set. The outer
-    // window functions rank those small sets without compromising the inner
-    // HNSW/GIN access paths. Literal matches sort behind true FTS hits. The
-    // literal branch is disabled for parsed negation and patterns without an
-    // extractable trigram; unindexable/pure-negative FTS queries skip this leg
-    // rather than scanning the corpus.
+    // FORCE RLS keeps every ordinary table path fail-closed, but PostgreSQL
+    // deliberately will not push non-leakproof FTS/trigram/JSONB operators
+    // ahead of an RLS barrier. The narrow SECURITY DEFINER function applies
+    // the same audience predicate internally so those indexes remain usable
+    // and returns IDs/ranks only. This outer join rechecks every ID through the
+    // RLS-protected table before content can leave PostgreSQL.
     const result = await client.queryObject<HybridCandidate>(
-      `WITH parsed_query AS (
-         SELECT websearch_to_tsquery('simple', $3::text) AS ts_query
-       ),
-       query_input AS (
-         SELECT ts_query,
-                querytree(ts_query) NOT IN ('', 'T') AS has_indexable_query,
-                $5::boolean
-                  AND ts_query::text !~ '(^|[ (])!' AS use_literal_fallback
-         FROM parsed_query
-       ),
-       vector_candidates AS MATERIALIZED (
-         SELECT id, embedding <=> $1::vector AS distance
-         FROM thoughts
-         WHERE ${vectorConditions.join("\n           AND ")}
-         ORDER BY embedding <=> $1::vector
-         LIMIT $${candidateLimitParam}::int
-       ),
-       vector_hits AS (
-         SELECT id,
-                ROW_NUMBER() OVER (ORDER BY distance, id) AS vector_rank
-         FROM vector_candidates
-       ),
-       lexical_candidates AS MATERIALIZED (
-         SELECT id,
-                CASE WHEN content_tsv @@ query_input.ts_query THEN 0 ELSE 1 END
-                  AS source_priority,
-                ts_rank_cd(content_tsv, query_input.ts_query) AS lexical_score,
-                created_at
-         FROM thoughts
-         CROSS JOIN query_input
-         WHERE ${lexicalConditions.join("\n           AND ")}
-           AND (
-             content_tsv @@ query_input.ts_query
-             OR (
-               query_input.use_literal_fallback
-               AND content ILIKE '%' || $4::text || '%' ESCAPE '\\'
-             )
-           )
-         ORDER BY source_priority, lexical_score DESC, created_at DESC, id
-         LIMIT $${candidateLimitParam}::int
-       ),
-       lexical_hits AS (
-         SELECT id,
-                source_priority AS lexical_source_priority,
-                ROW_NUMBER() OVER (
-                  ORDER BY source_priority, lexical_score DESC, created_at DESC, id
-                ) AS lexical_rank
-         FROM lexical_candidates
-       ),
-       candidates AS (
-         SELECT COALESCE(vector_hits.id, lexical_hits.id) AS id,
-                vector_hits.vector_rank,
-                lexical_hits.lexical_rank,
-                lexical_hits.lexical_source_priority
-         FROM vector_hits
-         FULL OUTER JOIN lexical_hits USING (id)
-       )
-       SELECT thoughts.id, thoughts.content, thoughts.metadata,
+      `SELECT thoughts.id, thoughts.content, thoughts.metadata,
+              thoughts.workspace_id, thoughts.project_id, thoughts.visibility,
               thoughts.created_at,
               1 - (thoughts.embedding <=> $1::vector) AS similarity,
               candidates.vector_rank, candidates.lexical_rank,
               candidates.lexical_source_priority
-       FROM candidates
-       JOIN thoughts USING (id)`,
+       FROM memory_scope.search_thought_candidates(
+         $1::vector,
+         $2::double precision,
+         $3::text,
+         $4::text,
+         $5::boolean,
+         $6::jsonb,
+         $7::jsonb,
+         $8::int
+       ) AS candidates
+       JOIN thoughts ON thoughts.id = candidates.candidate_id`,
       params,
     );
-    if (transactionOpen) {
-      await client.queryArray("COMMIT");
-      transactionOpen = false;
-    }
     return fuseHybridCandidates(result.rows, limit);
-  } catch (e) {
-    if (transactionOpen) {
-      try {
-        await client.queryArray("ROLLBACK");
-      } catch { /* surface the original query/transaction error */ }
-    }
-    throw e;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export type ListOptions = {
@@ -296,6 +217,7 @@ export type ListOptions = {
 export async function listThoughts(
   pool: Pool,
   opts: ListOptions,
+  scope: ResolvedReadScope,
 ): Promise<ThoughtRecord[]> {
   const { limit = 10, type, topic, person, days } = opts;
   const conditions: string[] = [];
@@ -319,10 +241,10 @@ export async function listThoughts(
   }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
-  const client = await getClient(pool);
-  try {
+  return await withScopeClient(pool, scope, async (client) => {
     const result = await client.queryObject<ThoughtRecord>(
-      `SELECT id, content, metadata, created_at, updated_at
+      `SELECT id, content, metadata, workspace_id, project_id, visibility,
+              created_at, updated_at
        FROM thoughts
        ${where}
        ORDER BY created_at DESC
@@ -330,37 +252,38 @@ export async function listThoughts(
       [...params, limit],
     );
     return result.rows;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export async function fetchThought(
   pool: Pool,
   id: string,
+  scope: ResolvedReadScope,
 ): Promise<ThoughtRecord | null> {
-  const client = await getClient(pool);
-  try {
+  return await withScopeClient(pool, scope, async (client) => {
     const result = await client.queryObject<ThoughtRecord>(
-      `SELECT id, content, metadata, created_at, updated_at
+      `SELECT id, content, metadata, workspace_id, project_id, visibility,
+              created_at, updated_at
        FROM thoughts WHERE id = $1 LIMIT 1`,
       [id],
     );
     return result.rows[0] ?? null;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export type CaptureInput = {
   content: string;
   embedding: number[];
   metadata: Record<string, unknown>;
+  scope: ResolvedWriteScope;
 };
 
 export type CaptureOutcome = {
   id: string;
   metadata: Record<string, unknown>;
+  workspace_id: string;
+  project_id: string | null;
+  visibility: "personal" | "project" | "workspace";
 };
 
 // Upsert by content fingerprint. The fingerprint is a SHA256 of the
@@ -373,10 +296,12 @@ export async function captureThought(
   input: CaptureInput,
 ): Promise<CaptureOutcome> {
   const embStr = toVectorLiteral(input.embedding);
-  const client = await getClient(pool);
-  try {
+  return await withScopeClient(pool, input.scope, async (client) => {
     const result = await client.queryObject<CaptureOutcome>(
-      `INSERT INTO thoughts (content, embedding, metadata, content_fingerprint)
+      `INSERT INTO thoughts (
+         content, embedding, metadata, content_fingerprint,
+         workspace_id, project_id, visibility, owner_subject
+       )
        VALUES (
          $1,
          $2::vector,
@@ -386,20 +311,30 @@ export async function captureThought(
              convert_to(lower(trim(regexp_replace($1, '\\s+', ' ', 'g'))), 'UTF8')
            ),
            'hex'
-         )
+         ),
+         $4, $5, $6::memory_scope.visibility, $7
        )
-       ON CONFLICT (content_fingerprint) WHERE content_fingerprint IS NOT NULL
+       ON CONFLICT (
+         workspace_id, project_id, visibility, owner_subject,
+         content_fingerprint
+       ) WHERE content_fingerprint IS NOT NULL
        DO UPDATE SET
          embedding = EXCLUDED.embedding,
          metadata = thoughts.metadata || COALESCE(EXCLUDED.metadata, '{}'::jsonb),
          updated_at = now()
-       RETURNING id, metadata`,
-      [input.content, embStr, JSON.stringify(input.metadata)],
+       RETURNING id, metadata, workspace_id, project_id, visibility`,
+      [
+        input.content,
+        embStr,
+        JSON.stringify(input.metadata),
+        input.scope.workspaceId,
+        input.scope.projectId,
+        input.scope.visibility,
+        input.scope.ownerSubject,
+      ],
     );
     return result.rows[0];
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export type Stats = {
@@ -413,9 +348,11 @@ export type Stats = {
 
 // Aggregation runs entirely in Postgres so memory cost stays constant as the
 // thoughts table grows — previously this pulled every row to JS.
-export async function getStats(pool: Pool): Promise<Stats> {
-  const client = await getClient(pool);
-  try {
+export async function getStats(
+  pool: Pool,
+  scope: ResolvedReadScope,
+): Promise<Stats> {
+  return await withScopeClient(pool, scope, async (client) => {
     const summaryRes = await client.queryObject<{
       count: number;
       earliest: string | null;
@@ -479,9 +416,7 @@ export async function getStats(pool: Pool): Promise<Stats> {
       topics: topicsRes.rows.map((r) => [r.k, r.c]),
       people: peopleRes.rows.map((r) => [r.k, r.c]),
     };
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export async function pingDb(pool: Pool): Promise<boolean> {

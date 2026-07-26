@@ -20,17 +20,11 @@ import {
   requireAuth,
   UNAUTHORIZED_MESSAGE,
 } from "./auth.ts";
-import { fetchThought, getStats, listThoughts } from "./queries.ts";
-import {
-  getSession,
-  listSessions,
-  resumeSession,
-  updateSessionStatus,
-} from "./session_queries.ts";
 import {
   captureThoughtBody,
   listSessionsQuery,
   listThoughtsQuery,
+  scopeQuery,
   searchThoughtsBody,
   sessionCaptureBody,
   sessionIdParam,
@@ -44,10 +38,17 @@ import {
   captureSessionFromToml,
   captureThoughtWithMetadata,
   defaultDeps,
+  fetchThoughtInScope,
+  getSessionInScope,
+  getThoughtStatsInScope,
+  listSessionsInScope,
+  listThoughtsInScope,
+  lookupSessionInScope,
   NotFoundError,
   searchSessionsByQuery,
   searchThoughtsByQuery,
   type ServiceDeps,
+  updateSessionStatusInScope,
   UpstreamError,
   ValidationError,
 } from "./services.ts";
@@ -197,13 +198,13 @@ export function createApiRouter(
   // — no query-string coercion divergence between the two transports.
 
   api.post("/thoughts", async (c) => {
-    const { content, provenance } = parseOr400(
+    const { content, provenance, scope } = parseOr400(
       captureThoughtBody,
       await readJsonBody(c),
     );
     const out = await captureThoughtWithMetadata(
       pool,
-      { content, provenance, auth: authOr500(c), via: "rest" },
+      { content, provenance, scope, auth: authOr500(c), via: "rest" },
       deps,
     );
     // captureThought upserts by content fingerprint, so a re-capture of
@@ -214,25 +215,46 @@ export function createApiRouter(
 
   api.post("/thoughts/search", async (c) => {
     const opts = parseOr400(searchThoughtsBody, await readJsonBody(c));
-    const results = await searchThoughtsByQuery(pool, opts, deps);
+    const results = await searchThoughtsByQuery(
+      pool,
+      { ...opts, auth: authOr500(c) },
+      deps,
+    );
     return c.json({ results });
   });
 
   // Static routes registered before /thoughts/:id so the intent is obvious
   // (Hono's router prefers static matches regardless, but explicit is free).
   api.get("/thoughts/stats", async (c) => {
-    return c.json(await getStats(pool));
+    const scope = parseOr400(scopeQuery, c.req.query());
+    return c.json(
+      await getThoughtStatsInScope(pool, { scope, auth: authOr500(c) }),
+    );
   });
 
   api.get("/thoughts", async (c) => {
     const opts = parseOr400(listThoughtsQuery, c.req.query());
-    const thoughts = await listThoughts(pool, opts);
+    const {
+      workspace_id,
+      project_id,
+      visibility,
+      ...filters
+    } = opts;
+    const thoughts = await listThoughtsInScope(pool, {
+      ...filters,
+      scope: { workspace_id, project_id, visibility },
+      auth: authOr500(c),
+    });
     return c.json({ thoughts });
   });
 
   api.get("/thoughts/:id", async (c) => {
     const id = parseOr400(thoughtIdParam, c.req.param("id"));
-    const t = await fetchThought(pool, id);
+    const scope = parseOr400(scopeQuery, c.req.query());
+    const t = await fetchThoughtInScope(pool, id, {
+      scope,
+      auth: authOr500(c),
+    });
     if (!t) throw new NotFoundError(`No thought found for ID ${id}.`);
     return c.json(t);
   });
@@ -253,13 +275,26 @@ export function createApiRouter(
 
   api.post("/sessions/search", async (c) => {
     const opts = parseOr400(sessionSearchBody, await readJsonBody(c));
-    const results = await searchSessionsByQuery(pool, opts, deps);
+    const results = await searchSessionsByQuery(
+      pool,
+      { ...opts, auth: authOr500(c) },
+      deps,
+    );
     return c.json({ results });
   });
 
   api.get("/sessions/lookup", async (c) => {
     const q = parseOr400(sessionLookupQuery, c.req.query());
-    const rec = await resumeSession(pool, { id: q.id, branch: q.branch });
+    const rec = await lookupSessionInScope(pool, {
+      id: q.id,
+      branch: q.branch,
+      scope: {
+        workspace_id: q.workspace_id,
+        project_id: q.project_id,
+        visibility: q.visibility,
+      },
+      auth: authOr500(c),
+    });
     if (!rec) {
       throw new NotFoundError("No session matched the given id/branch.");
     }
@@ -268,24 +303,41 @@ export function createApiRouter(
 
   api.get("/sessions", async (c) => {
     const opts = parseOr400(listSessionsQuery, c.req.query());
-    const sessions = await listSessions(pool, opts);
+    const {
+      workspace_id,
+      project_id,
+      visibility,
+      ...filters
+    } = opts;
+    const sessions = await listSessionsInScope(pool, {
+      ...filters,
+      scope: { workspace_id, project_id, visibility },
+      auth: authOr500(c),
+    });
     return c.json({ sessions });
   });
 
   api.get("/sessions/:id", async (c) => {
     const id = parseOr400(sessionIdParam, c.req.param("id"));
-    const rec = await getSession(pool, id);
+    const scope = parseOr400(scopeQuery, c.req.query());
+    const rec = await getSessionInScope(pool, id, {
+      scope,
+      auth: authOr500(c),
+    });
     if (!rec) throw new NotFoundError(`No session found for id ${id}.`);
     return c.json(rec);
   });
 
   api.patch("/sessions/:id/status", async (c) => {
     const id = parseOr400(sessionIdParam, c.req.param("id"));
-    const { status } = parseOr400(
+    const { status, scope } = parseOr400(
       sessionUpdateStatusBody,
       await readJsonBody(c),
     );
-    const row = await updateSessionStatus(pool, id, status);
+    const row = await updateSessionStatusInScope(pool, id, status, {
+      scope,
+      auth: authOr500(c),
+    });
     if (!row) throw new NotFoundError(`No session found for id ${id}.`);
     return c.json(row);
   });

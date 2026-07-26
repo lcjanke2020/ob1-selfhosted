@@ -19,6 +19,7 @@ import { assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 const ENV_KEYS = [
   "DB_PASSWORD",
   "MCP_ACCESS_KEY",
+  "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
@@ -43,6 +44,7 @@ Deno.test(
     Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
     // The weak literal the ticket calls out. 8 chars < 32 → must throw.
     Deno.env.set("MCP_ACCESS_KEY", "password");
+    Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
 
     try {
       let threw = false;

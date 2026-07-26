@@ -32,7 +32,7 @@
 
 import type { Pool } from "postgres";
 
-class HybridSearchSchemaError extends Error {}
+class RequiredSchemaError extends Error {}
 
 // A refused connection rejects near-instantly, but a hung connect sits
 // silent — warn once so the operator sees what boot is stuck on before the
@@ -48,6 +48,8 @@ export interface ProbeDbAtBootOptions {
   slowWarnAfterMs?: number;
   /** Give up and reject after this long, even if the connect is still in flight. */
   deadlineMs?: number;
+  /** Configured omitted-scope workspace; must exist before the server boots. */
+  defaultWorkspaceId?: string;
 }
 
 /**
@@ -66,6 +68,7 @@ export async function probeDbAtBoot(
   {
     slowWarnAfterMs = DEFAULT_SLOW_WARN_AFTER_MS,
     deadlineMs = DEFAULT_DEADLINE_MS,
+    defaultWorkspaceId = "default",
   }: ProbeDbAtBootOptions = {},
 ): Promise<void> {
   // Started synchronously so `pool.connect()` adopts the constructor's init
@@ -74,21 +77,172 @@ export async function probeDbAtBoot(
     const client = await pool.connect();
     try {
       await client.queryArray("SELECT 1");
-      const schema = await client.queryArray<[boolean, boolean]>(
+      const schema = await client.queryArray<[
+        boolean,
+        boolean,
+        boolean,
+        boolean,
+        boolean,
+        boolean,
+        boolean,
+        boolean,
+      ]>(
         `SELECT
            to_regclass('public.idx_thoughts_content_tsv') IS NOT NULL,
-           to_regclass('public.idx_thoughts_content_trgm') IS NOT NULL`,
+           to_regclass('public.idx_thoughts_content_trgm') IS NOT NULL,
+           to_regclass('memory_scope.workspace') IS NOT NULL
+             AND to_regclass('memory_scope.project') IS NOT NULL
+             AND EXISTS (
+               SELECT 1 FROM memory_scope.workspace
+               WHERE id = 'default'
+                 AND default_visibility = 'workspace'
+                 AND NOT personal_only
+             )
+             AND EXISTS (
+               SELECT 1 FROM memory_scope.workspace
+               WHERE id = 'sensitive'
+                 AND default_visibility = 'personal'
+                 AND personal_only
+             ),
+           (
+             SELECT count(*) = 4 FROM information_schema.columns
+             WHERE table_schema = 'public' AND table_name = 'thoughts'
+               AND column_name = ANY (ARRAY[
+                 'workspace_id', 'project_id', 'visibility', 'owner_subject'
+               ])
+           ),
+           (
+             SELECT count(*) = 4 FROM information_schema.columns
+             WHERE table_schema = 'sessions' AND table_name = 'session'
+               AND column_name = ANY (ARRAY[
+                 'workspace_id', 'project_id', 'visibility', 'owner_subject'
+               ])
+           ),
+           to_regclass('public.idx_thoughts_scope_audience') IS NOT NULL
+             AND to_regclass('sessions.idx_session_scope_audience') IS NOT NULL
+             AND EXISTS (
+               SELECT 1 FROM pg_indexes
+               WHERE schemaname = 'public'
+                 AND indexname = 'idx_thoughts_fingerprint'
+                 AND indexdef LIKE '%workspace_id%'
+                 AND indexdef LIKE '%NULLS NOT DISTINCT%'
+             ),
+           to_regprocedure(
+             'memory_scope.search_thought_candidates(vector,double precision,text,text,boolean,jsonb,jsonb,integer)'
+           ) IS NOT NULL,
+           EXISTS (
+             SELECT 1
+             FROM pg_class thoughts
+             JOIN pg_namespace thoughts_ns ON thoughts_ns.oid = thoughts.relnamespace
+             JOIN pg_class session_rel ON true
+             JOIN pg_namespace session_ns ON session_ns.oid = session_rel.relnamespace
+             JOIN pg_class artifact_rel ON true
+             JOIN pg_namespace artifact_ns ON artifact_ns.oid = artifact_rel.relnamespace
+             WHERE thoughts_ns.nspname = 'public'
+               AND thoughts.relname = 'thoughts'
+               AND thoughts.relrowsecurity AND thoughts.relforcerowsecurity
+               AND session_ns.nspname = 'sessions'
+               AND session_rel.relname = 'session'
+               AND session_rel.relrowsecurity AND session_rel.relforcerowsecurity
+               AND artifact_ns.nspname = 'sessions'
+               AND artifact_rel.relname = 'artifact'
+               AND artifact_rel.relrowsecurity AND artifact_rel.relforcerowsecurity
+               AND EXISTS (
+                 SELECT 1 FROM pg_policy
+                 WHERE polrelid = thoughts.oid
+                   AND polname = 'thoughts_app_audience'
+               )
+               AND EXISTS (
+                 SELECT 1 FROM pg_policy
+                 WHERE polrelid = thoughts.oid
+                   AND polname = 'thoughts_readonly_all'
+               )
+               AND EXISTS (
+                 SELECT 1 FROM pg_policy
+                 WHERE polrelid = session_rel.oid
+                   AND polname = 'session_app_audience'
+               )
+               AND EXISTS (
+                 SELECT 1 FROM pg_policy
+                 WHERE polrelid = session_rel.oid
+                   AND polname = 'session_readonly_all'
+               )
+               AND EXISTS (
+                 SELECT 1 FROM pg_policy
+                 WHERE polrelid = artifact_rel.oid
+                   AND polname = 'artifact_app_audience'
+               )
+               AND EXISTS (
+                 SELECT 1 FROM pg_policy
+                 WHERE polrelid = artifact_rel.oid
+                   AND polname = 'artifact_readonly_all'
+               )
+           )`,
       );
-      const [hasFtsIndex, hasTrigramIndex] = schema.rows[0] ?? [false, false];
+      const [
+        hasFtsIndex,
+        hasTrigramIndex,
+        hasWorkspaceRegistry,
+        hasThoughtScope,
+        hasSessionScope,
+        hasAudienceIndexes,
+        hasScopedSearch,
+        hasRlsEnforcement,
+      ] = schema.rows[0] ?? [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+      ];
       if (!hasFtsIndex || !hasTrigramIndex) {
         const missing = [
           ...(!hasFtsIndex ? ["idx_thoughts_content_tsv"] : []),
           ...(!hasTrigramIndex ? ["idx_thoughts_content_trgm"] : []),
         ].join(", ");
-        throw new HybridSearchSchemaError(
+        throw new RequiredSchemaError(
           `[db] Postgres at ${target} is missing hybrid-search schema ` +
             `(${missing}). Apply db/05-hybrid-search.sql as the database ` +
             `owner before starting this server version.`,
+        );
+      }
+      if (
+        !hasWorkspaceRegistry || !hasThoughtScope || !hasSessionScope ||
+        !hasAudienceIndexes || !hasScopedSearch || !hasRlsEnforcement
+      ) {
+        const missing = [
+          ...(!hasWorkspaceRegistry
+            ? ["workspace/project registry and reserved rows"]
+            : []),
+          ...(!hasThoughtScope ? ["thought audience columns"] : []),
+          ...(!hasSessionScope ? ["session audience columns"] : []),
+          ...(!hasAudienceIndexes ? ["audience-aware indexes"] : []),
+          ...(!hasScopedSearch
+            ? ["memory_scope.search_thought_candidates"]
+            : []),
+          ...(!hasRlsEnforcement ? ["forced audience RLS policies"] : []),
+        ].join(", ");
+        throw new RequiredSchemaError(
+          `[db] Postgres at ${target} is missing fail-closed spaces schema ` +
+            `(${missing}). Apply db/06-spaces.sql as the database owner before ` +
+            `starting this server version.`,
+        );
+      }
+      const configuredWorkspace = await client.queryArray<[boolean]>(
+        `SELECT EXISTS (
+           SELECT 1 FROM memory_scope.workspace WHERE id = $1
+         )`,
+        [defaultWorkspaceId],
+      );
+      if (configuredWorkspace.rows[0]?.[0] !== true) {
+        throw new RequiredSchemaError(
+          `[db] Postgres at ${target} has no configured default workspace ` +
+            `${JSON.stringify(defaultWorkspaceId)}. Register it in ` +
+            `memory_scope.workspace or fix DEFAULT_WORKSPACE_ID before starting ` +
+            `this server version.`,
         );
       }
     } finally {
@@ -118,7 +272,7 @@ export async function probeDbAtBoot(
         }),
       ]);
     } catch (e) {
-      if (e instanceof HybridSearchSchemaError) throw e;
+      if (e instanceof RequiredSchemaError) throw e;
       const reason = e instanceof Error ? e.message : String(e);
       throw new Error(
         `[db] Postgres at ${target} is unreachable or rejected the ` +

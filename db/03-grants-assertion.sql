@@ -18,7 +18,7 @@
 -- Putting the assertion in its own file solves both cases:
 --   1. Fresh init: the Compose/CI paths mount this source file as
 --      99-grants-assertion.sql, after every schema migration. Native
---      provisioning applies 01-, 02-, 04-, and 05-, then invokes this stable
+--      provisioning applies 01-, 02-, 04-, 05-, and 06-, then invokes this stable
 --      source path last. In both cases the assertion sees the completed
 --      catalog, so an init file that widens a protected role fails loudly.
 --   2. Drift check against a deployed DB: an operator can run this
@@ -31,6 +31,9 @@
 --   (a) `openbrain_app` must NOT have DELETE on `public.thoughts`.
 --   (b) `openbrain_app` MUST have SELECT, INSERT, UPDATE on
 --       `public.thoughts`.
+--   (c) the app may read but not mutate the memory-space registry, and only
+--       it may execute the two reviewed memory_scope helpers (never PUBLIC or
+--       the edge-resident monitor).
 --
 -- The openbrain_app check is deliberately scoped to thoughts:
 -- 02-observability.sql and 04-sessions.sql legitimately grant it access to
@@ -40,6 +43,20 @@
 
 DO $$
 BEGIN
+  IF (
+    SELECT rolsuper OR rolbypassrls
+    FROM pg_roles WHERE rolname = 'openbrain_app'
+  ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_app can bypass row-level security.';
+  END IF;
+  IF NOT COALESCE((
+    SELECT rolbypassrls
+    FROM pg_roles WHERE rolname = 'openbrain_readonly'
+  ), false) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_readonly lacks BYPASSRLS required by full pg_dump under FORCE RLS.';
+  END IF;
   IF has_table_privilege('openbrain_app', 'public.thoughts', 'DELETE') THEN
     RAISE EXCEPTION
       'grants assertion failed: openbrain_app still has DELETE on public.thoughts. '
@@ -51,6 +68,70 @@ BEGIN
     RAISE EXCEPTION
       'grants assertion failed: openbrain_app missing required SELECT/INSERT/UPDATE on public.thoughts.';
   END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Spaces add a registry plus two privileged helper functions. The app may
+-- read (not administer) the registry and execute exactly the helpers it needs;
+-- neither function may retain PostgreSQL's default PUBLIC execute grant.
+DO $$
+DECLARE
+  audience_fn oid := to_regprocedure(
+    'memory_scope.audience_matches(text,text,memory_scope.visibility,text)'
+  );
+  search_fn oid := to_regprocedure(
+    'memory_scope.search_thought_candidates(vector,double precision,text,text,boolean,jsonb,jsonb,integer)'
+  );
+  fn oid;
+BEGIN
+  IF audience_fn IS NULL OR search_fn IS NULL THEN
+    RAISE EXCEPTION
+      'grants assertion failed: memory_scope helper functions are missing; apply db/06-spaces.sql first.';
+  END IF;
+
+  IF NOT has_schema_privilege('openbrain_app', 'memory_scope', 'USAGE')
+     OR NOT has_table_privilege(
+       'openbrain_app', 'memory_scope.workspace', 'SELECT'
+     )
+     OR NOT has_table_privilege(
+       'openbrain_app', 'memory_scope.project', 'SELECT'
+     ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_app is missing read/usage access to the memory_scope registry.';
+  END IF;
+  IF has_table_privilege(
+       'openbrain_app', 'memory_scope.workspace',
+       'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+     )
+     OR has_table_privilege(
+       'openbrain_app', 'memory_scope.project',
+       'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+     ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_app can mutate the memory_scope registry.';
+  END IF;
+
+  FOREACH fn IN ARRAY ARRAY[audience_fn, search_fn] LOOP
+    IF NOT has_function_privilege('openbrain_app', fn, 'EXECUTE') THEN
+      RAISE EXCEPTION
+        'grants assertion failed: openbrain_app cannot execute required function %.',
+        fn::regprocedure;
+    END IF;
+    IF EXISTS (
+      SELECT 1
+      FROM pg_proc p
+      CROSS JOIN LATERAL aclexplode(
+        COALESCE(p.proacl, acldefault('f', p.proowner))
+      ) acl
+      WHERE p.oid = fn
+        AND acl.grantee = 0
+        AND acl.privilege_type = 'EXECUTE'
+    ) THEN
+      RAISE EXCEPTION
+        'grants assertion failed: PUBLIC can execute privileged function %.',
+        fn::regprocedure;
+    END IF;
+  END LOOP;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -84,10 +165,11 @@ $$ LANGUAGE plpgsql;
 -- all in scope. Table-like relations and sequences are checked; ownership is
 -- also access and therefore rejected outside the allowlist.
 --
--- This is deliberately a relation invariant, not proof that every callable
--- database object is safe. PostgreSQL grants EXECUTE on new functions to
--- PUBLIC by default, so any future SECURITY DEFINER routine must revoke that
--- default and receive a separate security review before deployment.
+-- The two reviewed memory_scope functions receive explicit checks above. This
+-- still is not generic proof that every future callable object is safe:
+-- PostgreSQL grants EXECUTE on new functions to PUBLIC by default, so every
+-- future SECURITY DEFINER routine must revoke that default, extend the
+-- assertion, and receive a separate security review before deployment.
 --
 -- The allowed SELECT on the two observability tables must also be plain —
 -- WITH GRANT OPTION is rejected, or the monitor could re-grant its own
@@ -116,6 +198,21 @@ BEGIN
 
   SELECT oid INTO monitor_oid
     FROM pg_roles WHERE rolname = 'openbrain_monitor';
+
+  IF has_schema_privilege(monitor_oid, 'memory_scope', 'USAGE')
+     OR has_function_privilege(
+       monitor_oid,
+       'memory_scope.audience_matches(text,text,memory_scope.visibility,text)',
+       'EXECUTE'
+     )
+     OR has_function_privilege(
+       monitor_oid,
+       'memory_scope.search_thought_candidates(vector,double precision,text,text,boolean,jsonb,jsonb,integer)',
+       'EXECUTE'
+     ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_monitor can use the memory_scope schema or its privileged functions.';
+  END IF;
 
   -- No role memberships: everything below reasons about direct grants, and
   -- membership would smuggle in another role's privileges wholesale.

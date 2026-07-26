@@ -44,7 +44,8 @@ The vector and lexical legs each inspect at least 50 candidates, or the
 requested final `limit` when it is larger. Each search raises transaction-local
 `hnsw.ef_search` to that candidate depth; filtered searches also enable
 `hnsw.iterative_scan = strict_order`. Both legs apply the same provenance
-include/exclude predicates *before* assigning ranks. The production fusion is:
+include/exclude predicates and the same resolved memory-space audience *before*
+assigning ranks. The production fusion is:
 
 ```text
 rrf_score = sum(1 / (60 + rank_in_leg))
@@ -72,7 +73,7 @@ as the reason it matched, while preserving RRF order.
 
 The production query boundary is [`server/queries.ts`](../server/queries.ts).
 [`db/hybrid-search-smoke.sql`](../db/hybrid-search-smoke.sql) exercises exact-reference
-and hybrid-fusion behavior, while
+and hybrid-fusion behavior, including audience and provenance exclusion, while
 [`db/search-filter-plan-smoke.sql`](../db/search-filter-plan-smoke.sql) provides the
 larger filtered-ANN and planner fixture. When changing full-text/literal composition,
 fallback gating, or lexical candidate plans, follow
@@ -121,6 +122,16 @@ tailnet-restricted database-owner connection described by that deployment's
 runbook. No live database is migrated merely by updating the repository:
 `docker-entrypoint-initdb.d` runs only for a fresh data directory.
 
+Fail-closed spaces add a second required migration,
+[`db/06-spaces.sql`](../db/06-spaces.sql), after this one. PostgreSQL's RLS
+security barrier keeps non-leakproof full-text, trigram, and JSONB predicates
+from being pushed into the protected table scan. The spaces migration therefore
+installs one narrowly granted, fixed-SQL `SECURITY DEFINER` function that applies
+the resolved audience before candidate limits and returns only IDs and ranks.
+The server joins those candidates back through the RLS-protected `thoughts`
+table before returning content. See [Memory spaces](spaces.md#enforcement-and-search)
+for the security and migration contract.
+
 ## Lineage
 
 The lexical shape follows upstream Open Brain's FSL-1.1-MIT
@@ -129,3 +140,7 @@ token-preserving `websearch_to_tsquery` plus a pg_trgm-backed literal fallback.
 The RRF helper was written for this repository from the standard SIGIR 2009
 algorithm cited above. The implementation keeps both legs in the single
 `server/queries.ts` path shared by MCP and REST.
+
+[MihaiBuilds/memory-vault](https://github.com/MihaiBuilds/memory-vault) also
+helped inspire parts of this project's search improvements, alongside its more
+direct influence on [memory spaces](spaces.md#inspiration-and-lineage).

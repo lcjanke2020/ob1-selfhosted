@@ -18,6 +18,7 @@ const KEY = "k".repeat(64);
 const ENV_KEYS = [
   "DB_PASSWORD",
   "MCP_ACCESS_KEY",
+  "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
@@ -45,6 +46,20 @@ function sessionRow(id: bigint) {
     status: "active",
     branch: "main",
     last_update: "2026-07-24T00:00:00Z",
+    workspace_id: "default",
+    project_id: null,
+    visibility: "workspace",
+  };
+}
+
+function capturedSessionRow(status = "active") {
+  return {
+    id: 7n,
+    session_id: null,
+    status,
+    workspace_id: "default",
+    project_id: null,
+    visibility: "workspace",
   };
 }
 
@@ -58,6 +73,7 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
   Deno.env.delete("AUTH0_AUDIENCE");
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", KEY);
+  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
 
   const { createApiRouter } = await import("./api.ts");
@@ -69,7 +85,7 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
     await t.step("POST /sessions (fresh) → 201 created", async () => {
       const api = makeApi((sql) =>
         sql.includes("INSERT INTO sessions.session")
-          ? { rows: [{ id: 7n, session_id: null, status: "active" }] }
+          ? { rows: [capturedSessionRow()] }
           : undefined
       );
       const res = await api.request(
@@ -85,6 +101,9 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
         session_id: null,
         status: "active",
         created: true,
+        workspace_id: "default",
+        project_id: null,
+        visibility: "workspace",
         reembedded: true,
       });
     });
@@ -102,7 +121,7 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
             return { rows: [{ content_hash: hash }] };
           }
           if (sql.includes("UPDATE sessions.session SET")) {
-            return { rows: [{ id: 7n, session_id: null, status: "done" }] };
+            return { rows: [capturedSessionRow("done")] };
           }
           return undefined;
         }, deps);

@@ -67,6 +67,7 @@ In text: clients reach tailscaled's single Funnel listener on the ingress qube; 
 ## What's in the box
 
 - **`thoughts` memory** — capture, [hybrid vector + full-text search](docs/hybrid-search.md), listing, stats over a pgvector store. Reciprocal rank fusion (RRF) makes both semantic paraphrases and exact identifiers durable; dedupe is by content fingerprint. Optional LLM metadata extraction (topics, people, action items, type) via any OpenAI-compatible endpoint, plus a [versioned provenance contract](docs/thought-provenance.md) for caller-asserted author/agent/repo/branch context that stays visibly separate from server-verified transport identity. Both search legs can require or exclude those claims in the same call.
+- **Fail-closed memory spaces** — thoughts and sessions carry a registered workspace, optional project, and `personal | project | workspace` visibility enforced by PostgreSQL RLS. Omitted scope selects one configured default, never every workspace. The seeded personal-only `sensitive` space is for particularly sensitive thoughts and work logs; see [Memory spaces](docs/spaces.md).
 - **Session tracking** — five additional MCP tools (`session_capture`, `session_lookup`, `session_search`, `session_list`, `session_update_status`) that store structured *agent work sessions* alongside (not inside) `thoughts`. The OB1 Postgres `sessions` schema is the canonical store; TOML front matter is the interchange format accepted by `session_capture`. See [`skills/session-tracker/`](skills/session-tracker/SKILL.md) for the agent-facing usage contract.
 - **REST gateway (`/api/v1`)** — the same thoughts + sessions operations as structured-JSON HTTP endpoints, behind the same auth doors, for CLI/cron/dashboard consumers that don't speak MCP. Opt-in per deployment (`ENABLE_REST_API`): on by default in the docker-compose installs, deliberately absent from the Qubes install, and never served over the public Funnel. See [REST API](#rest-api-apiv1) below.
 - **Local embeddings** — Ollama (`nomic-embed-text`, 768-dim by default), in-stack or on another box.
@@ -141,7 +142,8 @@ sequenceDiagram
 │                              (/api/v1), unit tests, Dockerfiles for mcp and
 │                              the log-ingester sidecar
 ├── db/                        Postgres init: roles, pgvector + lexical-search schema,
-│                              observability, grants assertion, sessions, daily rollup
+│                              observability, sessions, fail-closed spaces, grants
+│                              assertion, daily rollup
 ├── deploy/
 │   ├── compose-local/         Install path 1 — base docker-compose.yml + .env.example
 │   ├── compose-tailnet/       Install path 2 — Pattern B overlay, Caddyfile, caddy image
@@ -153,7 +155,7 @@ sequenceDiagram
 │   │                          Lexical fallback semantics and planner review
 │   └── test-approximate-search-invariants/
 │                              Stable CI boundaries for ANN search behavior
-├── docs/                      Threat model (one page), security model, Funnel-as-MCP-
+├── docs/                      Memory spaces, threat/security models, Funnel-as-MCP-
 │                              perimeter guide, "why not Cloudflare?" rationale,
 │                              Codex-over-OAuth client setup
 └── .github/workflows/         CI (deno tests, --allow-env drift guard) + leak gate
@@ -169,20 +171,24 @@ The same operations the MCP tools expose, as plain HTTP + JSON for consumers tha
 
 | Method | Path | Body / query | Success |
 |---|---|---|---|
-| POST | `/api/v1/thoughts` | `{content, provenance?: {author?, agent?, repo?, branch?}}` | 201 `{id, metadata}` |
-| POST | `/api/v1/thoughts/search` | `{query, limit?, threshold?, filter?: {include?: {author?, agent?, repo?, branch?}, exclude?: {author?, agent?, repo?, branch?}}}` | 200 `{results}` ordered by `rrf_score` (`similarity` retained) |
-| GET | `/api/v1/thoughts` | `?limit&type&topic&person&days` | 200 `{thoughts}` |
-| GET | `/api/v1/thoughts/stats` | — | 200 stats |
-| GET | `/api/v1/thoughts/:id` | UUID path param | 200 thought |
+| POST | `/api/v1/thoughts` | `{content, provenance?: {...}, scope?: {workspace_id?, project_id?, visibility?}}` | 201 `{id, metadata, workspace_id, project_id, visibility}` |
+| POST | `/api/v1/thoughts/search` | `{query, limit?, threshold?, filter?: {...}, scope?: {...}}` | 200 `{results}` ordered by `rrf_score` (`similarity` retained) |
+| GET | `/api/v1/thoughts` | `?limit&type&topic&person&days&workspace_id&project_id&visibility` | 200 `{thoughts}` |
+| GET | `/api/v1/thoughts/stats` | `?workspace_id&project_id&visibility` | 200 stats |
+| GET | `/api/v1/thoughts/:id` | UUID path param + optional scope query | 200 thought |
 | POST | `/api/v1/sessions` | `{toml_text}` (session TOML) | 201 created / 200 updated |
-| POST | `/api/v1/sessions/search` | `{query, limit?, status?, repo_url?, tag?}` | 200 `{results}` |
-| GET | `/api/v1/sessions` | `?status&repo_url&branch&agent&tag&linked_issue&since&until&order_by&limit` | 200 `{sessions}` |
-| GET | `/api/v1/sessions/lookup` | `?id` or `?branch` | 200 session record |
-| GET | `/api/v1/sessions/:id` | integer path param | 200 session record |
-| PATCH | `/api/v1/sessions/:id/status` | `{status}` | 200 `{id, status}` |
+| POST | `/api/v1/sessions/search` | `{query, limit?, status?, repo_url?, tag?, scope?: {...}}` | 200 `{results}` |
+| GET | `/api/v1/sessions` | filters plus optional `workspace_id`, `project_id`, `visibility` | 200 `{sessions}` |
+| GET | `/api/v1/sessions/lookup` | `?id` or `?branch`, plus optional scope | 200 session record |
+| GET | `/api/v1/sessions/:id` | integer path param + optional scope query | 200 session record |
+| PATCH | `/api/v1/sessions/:id/status` | `{status, scope?: {...}}` | 200 `{id, status}` |
 
 Notes: thought capture upserts by content fingerprint, so re-posting identical
-content returns the existing id (still 201).
+content returns the existing id (still 201) only inside the same exact audience.
+POST/PATCH bodies use a nested `scope`; GET routes use the three flat query
+parameters. Omitted scope selects `DEFAULT_WORKSPACE_ID`, never all workspaces.
+The complete union, principal, and seeded `sensitive` semantics are in
+[Memory spaces](docs/spaces.md).
 
 Session capture mirrors `session_capture`: omit `id` in the TOML to create
 (201), or include it to refresh the same row (200); `title` remains required on
@@ -211,6 +217,15 @@ curl -s -X POST http://127.0.0.1:8787/api/v1/thoughts/search \
   -H "x-brain-key: $MCP_ACCESS_KEY" -H "content-type: application/json" \
   -d '{"query":"REST rollout","filter":{"include":{"repo":"example/open-brain"},"exclude":{"author":"release engineering","agent":"codex"}}}'
 # → hybrid semantic/exact-text matches from that repo, excluding rows whose author OR agent matches
+```
+
+With `MCP_ACCESS_KEY_PRINCIPAL` configured on a local shared-key deployment, a
+particularly sensitive capture is explicit and personal:
+
+```sh
+curl -s -X POST http://127.0.0.1:8787/api/v1/thoughts \
+  -H "x-brain-key: $MCP_ACCESS_KEY" -H "content-type: application/json" \
+  -d '{"content":"A particularly sensitive thought","scope":{"workspace_id":"sensitive","visibility":"personal"}}'
 ```
 
 `source`, `door`, and `sub` are stamped by the server. Values under
@@ -249,7 +264,7 @@ And what the observability stack is for — one week of real data from a live de
 
 ## Trust model, in one paragraph
 
-On the **local single-box install**, anyone who can present your `x-brain-key` (loopback, your LAN, or your tailnet if you front it with `tailscale serve`) gets full read/write to your memory store — treat the key like a database password. On any **Funnel or Qubes** deployment there is no static key at all: anyone on the public internet with a valid RS256 JWT from your OAuth tenant gets full read/write — identity rests on your tenant's user management, and the Anthropic-egress IP allowlist restricts the door to Anthropic's published range before auth is even attempted. There is no per-user row-level security yet; the JWT `sub` is recorded on every write but is informational. Thought `author` / `agent` / `repo` / `branch` provenance is a caller assertion, not authenticated identity. The longer version, including what each container is allowed to do after a hypothetical compromise, is in [`docs/security-model.md`](docs/security-model.md). The assembled one-page view — assets, attacker entry points, defense layers, residual risks — is in [`docs/threat-model.md`](docs/threat-model.md).
+On the **local single-box install**, anyone who can present your `x-brain-key` (loopback, your LAN, or your tailnet if you front it with `tailscale serve`) enters the same shared-key trust boundary — treat the key like a database password. Personal spaces are disabled on that door unless the operator deliberately binds it to one deployment-wide `MCP_ACCESS_KEY_PRINCIPAL`. On any **Funnel or Qubes** deployment there is no static key at all: a valid RS256 JWT supplies a verified `sub`, and PostgreSQL RLS partitions personal rows by that subject while workspace/project rows follow the requested registered scope. The Anthropic-egress IP allowlist still restricts the public door before auth. Thought `author` / `agent` / `repo` / `branch` provenance remains a caller assertion, not authenticated identity. The longer version is in [`docs/security-model.md`](docs/security-model.md), with the scope contract in [`docs/spaces.md`](docs/spaces.md).
 
 ## Status & roadmap
 
@@ -263,3 +278,9 @@ Contributions are welcome — [`docs/why-not-cloudflare.md`](docs/why-not-cloudf
 ## License & attribution
 
 This project is a self-hosted derivative of [Open Brain (OB1)](https://github.com/NateBJones-Projects/OB1) by Nate B. Jones. It began as a private working fork of OB1 (the *OB1-homelab* line, since retired) and deliberately keeps a smaller footprint than upstream — no web dashboard, no Supabase, just the memory layer and its perimeter. It is licensed under the same **FSL-1.1-MIT** terms (see [LICENSE.md](LICENSE.md)): free for any non-competing use, converting to MIT two years after release. The `thoughts` table layout stays compatible with upstream OB1, so schema extensions from that community work here too.
+
+[MihaiBuilds/memory-vault](https://github.com/MihaiBuilds/memory-vault) was also
+inspirational to this project's memory-spaces work and parts of its search
+improvements. That design influence is gratefully acknowledged; the
+fail-closed RLS and hybrid-search implementation here was written for Open
+Brain's own contract and deployment model.

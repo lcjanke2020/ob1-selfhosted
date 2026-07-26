@@ -156,7 +156,7 @@ docker compose exec -T postgres \
   "SELECT extversion FROM pg_extension WHERE extname = 'vector';"
 ```
 
-**New schema files** (observability, sessions, hybrid search) apply cleanly —
+**New schema files** (observability, sessions, hybrid search, spaces) apply cleanly —
 all are idempotent:
 
 ```bash
@@ -165,6 +165,8 @@ bash ../../scripts/upgrade-add-ingester-role.sh
 docker compose exec -T postgres psql -U postgres -d openbrain < ../../db/02-observability.sql
 docker compose exec -T postgres psql -U postgres -d openbrain < ../../db/04-sessions.sql
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/05-hybrid-search.sql
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/06-spaces.sql
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
 docker compose build mcp && docker compose up -d
 ```
 
@@ -176,6 +178,13 @@ plus both indexes, and apply it before starting the hybrid-query server. The
 updated server's boot probe refuses to start until both indexes exist.
 See [Hybrid thought search](../../docs/hybrid-search.md) for the index and
 threshold contracts.
+
+`06-spaces.sql` backfills existing thoughts/sessions into the `default`
+workspace, rebuilds fingerprint uniqueness per audience, and forces RLS. It
+also takes table locks, so keep the maintenance window active through it and
+apply it before starting the scoped server. The boot probe checks the registry,
+columns, indexes, policies, forced-RLS flags, and scoped search function. See
+[Memory spaces](../../docs/spaces.md).
 
 Optional: the SELECT-only role for the host-side funnel monitor follows the same shape —
 set `OPENBRAIN_MONITOR_PASSWORD` in `.env`, run `bash ../../scripts/upgrade-add-monitor-role.sh`,
@@ -196,7 +205,7 @@ docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
 ```
 
-A non-zero exit means a grant drifted. Prefer a targeted fix (e.g. `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). To re-sync wholesale, re-apply `01-schema.sql` → `02-observability.sql`, apply any pending later schema migrations (`04`, `05`, and future files), then run `03-grants-assertion.sql` **last** — never `01` alone, since its REVOKE-all block strips observability grants until `02` restores them.
+A non-zero exit means a grant drifted. Prefer a targeted fix (e.g. `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). To re-sync wholesale, re-apply `01-schema.sql` → `02-observability.sql`, apply any pending later schema migrations (`04`, `05`, `06`, and future files), then run `03-grants-assertion.sql` **last** — never `01` alone, since its REVOKE-all block strips observability grants until `02` restores them.
 
 To retire the unused historical thought-search RPC without a full schema replay,
 run `DROP FUNCTION IF EXISTS match_thoughts(vector, double precision, integer, jsonb);`

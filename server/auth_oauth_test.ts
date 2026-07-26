@@ -41,6 +41,7 @@ const WRONG_AUDIENCE = "https://test.invalid:8443/different-resource";
 const ENV_KEYS = [
   "DB_PASSWORD",
   "MCP_ACCESS_KEY",
+  "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
@@ -138,6 +139,7 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
   // Required env BEFORE the dynamic import.
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", BRAIN_KEY);
+  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   Deno.env.set("AUTH0_ISSUER", ISSUER);
   Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
   Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);

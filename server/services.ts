@@ -1,20 +1,32 @@
 // Transport-agnostic orchestration shared by the MCP tools (mcp-server.ts)
-// and the REST gateway (api.ts). Only flows that fan out beyond a single
-// query live here — embed + extract + merge on thought capture, and the
-// parse → hash → fail-fast → conditional-embed pipeline on session capture.
-// Single-query operations don't need this layer: both transports call
-// queries.ts / session_queries.ts directly.
+// and the REST gateway (api.ts). Every operation passes through this layer so
+// workspace/project/visibility is validated and resolved before a database
+// transaction installs its fail-closed audience context. Multi-stage capture
+// flows also coordinate embedding, extraction, hashing, and persistence here.
 //
 // Ollama calls are injectable (ServiceDeps) so the api/services tests stay
 // hermetic — no database, no network — with hand-rolled fakes, matching the
 // rest of the suite.
 
 import type { Pool } from "postgres";
-import type { ThoughtMatch } from "./db.ts";
+import type { ThoughtMatch, ThoughtRecord } from "./db.ts";
 import { embed as defaultEmbed } from "./embeddings.ts";
+export { NotFoundError, UpstreamError, ValidationError } from "./errors.ts";
+import { NotFoundError, UpstreamError, ValidationError } from "./errors.ts";
 import { extractMetadata as defaultExtractMetadata } from "./metadata.ts";
-import { captureThought, searchThoughts } from "./queries.ts";
 import {
+  type CaptureOutcome,
+  captureThought,
+  fetchThought,
+  getStats,
+  type ListOptions,
+  listThoughts,
+  searchThoughts,
+  type Stats,
+} from "./queries.ts";
+import {
+  type MemoryScopeInput,
+  memoryScopeSchema,
   THOUGHT_PROVENANCE_SCHEMA_VERSION,
   type ThoughtProvenanceClaims,
   thoughtProvenanceClaimsSchema,
@@ -23,12 +35,19 @@ import {
   thoughtSearchQuerySchema,
 } from "./schemas.ts";
 import {
+  getSession,
   getSessionContentHash,
+  listSessions,
+  resumeSession,
   searchSessions,
+  type SessionListRow,
+  type SessionRecord,
   type SessionSearchRow,
+  updateSessionStatus,
   type UpsertOutcome,
   upsertSession,
 } from "./session_queries.ts";
+import { resolveReadScope, resolveWriteScope } from "./scope.ts";
 import {
   computeContentHash,
   embedSource,
@@ -39,13 +58,6 @@ import {
 // Same shape as auth.ts AppVariables / mcp-server.ts RequestAuth; declared
 // standalone so this module depends on neither transport layer.
 export type AuthContext = { door: "funnel" | "tailnet"; sub: string | null };
-
-// Error taxonomy the REST layer maps to HTTP status codes (400/404/502 in
-// api.ts onError). The MCP layer only reads .message, so wrapping preserves
-// the exact tool-facing error text these paths produced before extraction.
-export class ValidationError extends Error {}
-export class NotFoundError extends Error {}
-export class UpstreamError extends Error {}
 
 function validateThoughtProvenance(
   provenance: ThoughtProvenanceClaims | undefined,
@@ -83,6 +95,19 @@ function validateThoughtSearchQuery(query: string): string {
   return parsed.data;
 }
 
+function validateMemoryScope(
+  scope: MemoryScopeInput | undefined,
+): MemoryScopeInput | undefined {
+  if (scope === undefined) return undefined;
+  const parsed = memoryScopeSchema.safeParse(scope);
+  if (!parsed.success) {
+    throw new ValidationError(
+      parsed.error.issues.map((issue) => issue.message).join("; "),
+    );
+  }
+  return parsed.data;
+}
+
 export type ServiceDeps = {
   embed: (text: string) => Promise<number[]>;
   extractMetadata: (text: string) => Promise<Record<string, unknown>>;
@@ -112,16 +137,21 @@ export async function captureThoughtWithMetadata(
   input: {
     content: string;
     provenance?: ThoughtProvenanceClaims;
+    scope?: MemoryScopeInput;
     auth: AuthContext;
     via: "mcp" | "rest";
   },
   deps: ServiceDeps = defaultDeps,
-): Promise<{ id: string; metadata: Record<string, unknown> }> {
+): Promise<CaptureOutcome> {
   // Transport handlers already validate this shape, but the shared service is
   // exported and can be called directly. Re-validate before any upstream work
   // so internal callers cannot persist an empty or otherwise invalid claims
   // envelope by bypassing the MCP/REST schemas.
   const provenance = validateThoughtProvenance(input.provenance);
+  const scopeInput = validateMemoryScope(input.scope);
+  // Unknown/misspelled registry targets and missing personal principals fail
+  // before content reaches either the embedder or metadata extractor.
+  const scope = await resolveWriteScope(pool, scopeInput, input.auth);
   const [embedding, extracted] = await Promise.all([
     embedOrUpstreamError(deps.embed, input.content),
     deps.extractMetadata(input.content),
@@ -154,15 +184,16 @@ export async function captureThoughtWithMetadata(
     door: input.auth.door,
     sub: input.auth.sub,
   };
-  const { id, metadata: persistedMetadata } = await captureThought(pool, {
+  const persisted = await captureThought(pool, {
     content: input.content,
     embedding,
     metadata,
+    scope,
   });
   // The upsert may preserve top-level keys omitted by this capture (notably
   // provenance on a duplicate). Return PostgreSQL's final merged row so REST
   // and MCP never report metadata that disagrees with durable state.
-  return { id, metadata: persistedMetadata };
+  return persisted;
 }
 
 export async function searchThoughtsByQuery(
@@ -172,6 +203,8 @@ export async function searchThoughtsByQuery(
     limit?: number;
     threshold?: number;
     filter?: ThoughtSearchFilter;
+    scope?: MemoryScopeInput;
+    auth: AuthContext;
   },
   deps: ServiceDeps = defaultDeps,
 ): Promise<ThoughtMatch[]> {
@@ -180,6 +213,8 @@ export async function searchThoughtsByQuery(
   // an oversized query or malformed filter.
   const query = validateThoughtSearchQuery(opts.query);
   const filter = validateThoughtSearchFilter(opts.filter);
+  const scopeInput = validateMemoryScope(opts.scope);
+  const scope = await resolveReadScope(pool, scopeInput, opts.auth);
   const embedding = await embedOrUpstreamError(deps.embed, query);
   return await searchThoughts(pool, {
     query,
@@ -187,7 +222,49 @@ export async function searchThoughtsByQuery(
     limit: opts.limit,
     threshold: opts.threshold,
     filter,
+    scope,
   });
+}
+
+export async function listThoughtsInScope(
+  pool: Pool,
+  opts: ListOptions & {
+    scope?: MemoryScopeInput;
+    auth: AuthContext;
+  },
+): Promise<ThoughtRecord[]> {
+  const { scope: requested, auth, ...filters } = opts;
+  const scope = await resolveReadScope(
+    pool,
+    validateMemoryScope(requested),
+    auth,
+  );
+  return await listThoughts(pool, filters, scope);
+}
+
+export async function fetchThoughtInScope(
+  pool: Pool,
+  id: string,
+  input: { scope?: MemoryScopeInput; auth: AuthContext },
+): Promise<ThoughtRecord | null> {
+  const scope = await resolveReadScope(
+    pool,
+    validateMemoryScope(input.scope),
+    input.auth,
+  );
+  return await fetchThought(pool, id, scope);
+}
+
+export async function getThoughtStatsInScope(
+  pool: Pool,
+  input: { scope?: MemoryScopeInput; auth: AuthContext },
+): Promise<Stats> {
+  const scope = await resolveReadScope(
+    pool,
+    validateMemoryScope(input.scope),
+    input.auth,
+  );
+  return await getStats(pool, scope);
 }
 
 export async function searchSessionsByQuery(
@@ -198,9 +275,16 @@ export async function searchSessionsByQuery(
     status?: string;
     repo_url?: string;
     tag?: string;
+    scope?: MemoryScopeInput;
+    auth: AuthContext;
   },
   deps: ServiceDeps = defaultDeps,
 ): Promise<SessionSearchRow[]> {
+  const scope = await resolveReadScope(
+    pool,
+    validateMemoryScope(opts.scope),
+    opts.auth,
+  );
   const embedding = await embedOrUpstreamError(deps.embed, opts.query);
   return await searchSessions(pool, {
     embedding,
@@ -208,7 +292,7 @@ export async function searchSessionsByQuery(
     status: opts.status,
     repo_url: opts.repo_url,
     tag: opts.tag,
-  });
+  }, scope);
 }
 
 export async function captureSessionFromToml(
@@ -223,13 +307,22 @@ export async function captureSessionFromToml(
     throw new ValidationError((e as Error).message);
   }
   const { session, artifacts, rawToml } = parsed;
+  const scope = await resolveWriteScope(
+    pool,
+    {
+      workspace_id: session.workspace_id ?? undefined,
+      project_id: session.project_id,
+      visibility: session.visibility ?? undefined,
+    },
+    input.auth,
+  );
   const contentHash = await computeContentHash(session);
   // On the update path (id present), look the row up first so a stale or
   // unknown id errors HERE — before paying for an embedding. A fresh
   // capture (no id) has no existing hash, so it always (re)embeds.
   let existingHash: string | null = null;
   if (session.id != null) {
-    const cur = await getSessionContentHash(pool, session.id);
+    const cur = await getSessionContentHash(pool, session.id, scope);
     if (cur === null) {
       throw new NotFoundError(`No session found for id ${session.id}.`);
     }
@@ -256,6 +349,77 @@ export async function captureSessionFromToml(
       sourceNode: input.auth.sub,
     },
     rawToml,
+    scope,
   });
   return { ...res, reembedded };
+}
+
+export async function getSessionInScope(
+  pool: Pool,
+  id: number,
+  input: { scope?: MemoryScopeInput; auth: AuthContext },
+): Promise<SessionRecord | null> {
+  const scope = await resolveReadScope(
+    pool,
+    validateMemoryScope(input.scope),
+    input.auth,
+  );
+  return await getSession(pool, id, scope);
+}
+
+export async function lookupSessionInScope(
+  pool: Pool,
+  opts: {
+    id?: number | null;
+    branch?: string | null;
+    scope?: MemoryScopeInput;
+    auth: AuthContext;
+  },
+): Promise<SessionRecord | null> {
+  const scope = await resolveReadScope(
+    pool,
+    validateMemoryScope(opts.scope),
+    opts.auth,
+  );
+  return await resumeSession(pool, { id: opts.id, branch: opts.branch }, scope);
+}
+
+export async function listSessionsInScope(
+  pool: Pool,
+  opts: {
+    status?: string;
+    repo_url?: string;
+    branch?: string;
+    agent?: string;
+    tag?: string;
+    linked_issue?: string;
+    since?: string;
+    until?: string;
+    order_by?: string;
+    limit?: number;
+    scope?: MemoryScopeInput;
+    auth: AuthContext;
+  },
+): Promise<SessionListRow[]> {
+  const { scope: requested, auth, ...filters } = opts;
+  const scope = await resolveReadScope(
+    pool,
+    validateMemoryScope(requested),
+    auth,
+  );
+  return await listSessions(pool, filters, scope);
+}
+
+export async function updateSessionStatusInScope(
+  pool: Pool,
+  id: number,
+  status: string,
+  input: { scope?: MemoryScopeInput; auth: AuthContext },
+): Promise<{ id: number; status: string } | null> {
+  const scope = await resolveReadScope(
+    pool,
+    validateMemoryScope(input.scope),
+    input.auth,
+  );
+  return await updateSessionStatus(pool, id, status, scope);
 }

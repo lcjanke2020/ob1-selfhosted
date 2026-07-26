@@ -33,6 +33,7 @@ const TEST_BODY_READ_TIMEOUT_MS = "150";
 const ENV_KEYS = [
   "DB_PASSWORD",
   "MCP_ACCESS_KEY",
+  "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
@@ -106,6 +107,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
   Deno.env.delete("AUTH0_AUDIENCE");
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", KEY);
+  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   // disable audit emission so unauthorized() doesn't try to open
   // a DB connection. auth_audit reads this at module load, so it MUST be
   // set before the dynamic-import of auth.ts below.

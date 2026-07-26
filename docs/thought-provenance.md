@@ -95,6 +95,9 @@ old readers continue to interpret every existing key correctly.
 - One deduplicated thought row therefore records the most recent explicit
   capture context, not a history of every contributor who submitted identical
   content.
+- Deduplication is audience-safe: byte-identical content in a different
+  workspace/project/visibility/owner audience is a separate row. The
+  last-writer-wins statements above apply only inside one exact audience.
 
 The claims are not promoted to columns. Consumers that inspect metadata
 directly should treat a missing `provenance` key as "unclaimed/legacy", never
@@ -149,8 +152,11 @@ initial candidate batch that the provenance filter rejects. Both settings
 revert at commit or rollback instead of leaking through the connection pool.
 The lexical leg applies the same filter before its full-text/trigram candidate
 limit, so a row excluded from one retrieval method cannot re-enter through the
-other. Iterative HNSW scans require pgvector 0.8.0 or newer. See
-[Hybrid thought search](hybrid-search.md) for ranking and threshold semantics.
+other. The fail-closed scoped candidate function applies the same resolved
+memory audience before both candidate limits, so a row cannot cross a space
+through either retrieval leg. Iterative HNSW scans require pgvector 0.8.0 or
+newer. See [Hybrid thought search](hybrid-search.md) for ranking and threshold
+semantics and [Memory spaces](spaces.md) for audience rules.
 
 Before rolling filtered search out against an existing database, check the
 installed extension version:
@@ -164,10 +170,10 @@ that provides `0.8.0` or newer, then run `ALTER EXTENSION vector UPDATE;` as the
 database owner. Re-run the version query before starting the updated MCP server.
 
 This filter is intentionally limited to the versioned provenance keys instead
-of exposing an open-ended JSON query language. Future workspace/project and
-visibility scoping is a separate fail-closed partitioning concern; hybrid
-vector/full-text search must apply this same filter contract to every retrieval
-leg before ranking and fusion.
+of exposing an open-ended JSON query language. Workspace/project/visibility is
+a separate, current fail-closed partitioning concern; the hybrid candidate
+function applies both contracts to every retrieval leg before ranking and
+fusion.
 
 ## Agent caller policy
 

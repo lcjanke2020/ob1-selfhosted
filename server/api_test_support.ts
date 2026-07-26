@@ -26,6 +26,18 @@ export class FakeClient {
 
   queryObject(sql: string, params?: unknown[]): Promise<{ rows: unknown[] }> {
     const r = this.handler(sql, params ?? []);
+    // Every scoped service resolves the registry before doing work. Keep the
+    // default legacy workspace implicit in existing hermetic tests; focused
+    // scope tests can override by returning their own row (or `{rows: []}`).
+    if (!r && sql.includes("FROM memory_scope.workspace AS w")) {
+      return Promise.resolve({
+        rows: [{
+          default_visibility: "workspace",
+          personal_only: false,
+          project_exists: true,
+        }],
+      });
+    }
     if (!r) {
       return Promise.reject(
         new Error(

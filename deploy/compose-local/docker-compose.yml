@@ -79,6 +79,7 @@ services:
       - ../../db/02-observability.sql:/docker-entrypoint-initdb.d/02-observability.sql:ro
       - ../../db/04-sessions.sql:/docker-entrypoint-initdb.d/04-sessions.sql:ro
       - ../../db/05-hybrid-search.sql:/docker-entrypoint-initdb.d/05-hybrid-search.sql:ro
+      - ../../db/06-spaces.sql:/docker-entrypoint-initdb.d/06-spaces.sql:ro
       # Keep the stable source filename, but run the catalog assertion last so
       # later/future schemas are covered by its monitor relation allowlist.
       - ../../db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro
@@ -129,6 +130,8 @@ services:
       DB_POOL_SIZE: "10"
       # Boot-probe deadline; see server/config.ts DB_BOOT_PROBE_TIMEOUT_MS.
       DB_BOOT_PROBE_TIMEOUT_MS: ${DB_BOOT_PROBE_TIMEOUT_MS:-30000}
+      # Omitted request scope resolves to this one registered workspace.
+      DEFAULT_WORKSPACE_ID: ${DEFAULT_WORKSPACE_ID:-default}
       OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       EMBED_DIM: ${EMBED_DIM:-768}
@@ -157,6 +160,9 @@ services:
       # x-brain-key door for this single-box install. Empty disables it; set it
       # (or all three AUTH0_* below) — at least one auth door is required.
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY:-}
+      # Optional stable identity for this single-user shared-key deployment.
+      # Required to use personal visibility, including the sensitive space.
+      MCP_ACCESS_KEY_PRINCIPAL: ${MCP_ACCESS_KEY_PRINCIPAL:-}
       CITATION_BASE_URL: ${CITATION_BASE_URL:-https://openbrain.local/thoughts}
       # Auth0 OAuth resource-server config. Leave all three empty to keep
       # x-brain-key as the only auth. Set all three to ALSO enable the

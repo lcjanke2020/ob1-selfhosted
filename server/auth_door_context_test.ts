@@ -35,6 +35,7 @@ const JWKS_URL = "https://test.invalid/.well-known/jwks.json";
 const ENV_KEYS = [
   "DB_PASSWORD",
   "MCP_ACCESS_KEY",
+  "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
@@ -99,6 +100,7 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
 
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", BRAIN_KEY);
+  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   Deno.env.set("AUTH0_ISSUER", ISSUER);
   Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
   Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);

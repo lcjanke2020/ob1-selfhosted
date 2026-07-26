@@ -19,6 +19,7 @@ const KEY = "k".repeat(64);
 const ENV_KEYS = [
   "DB_PASSWORD",
   "MCP_ACCESS_KEY",
+  "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
@@ -47,6 +48,7 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
   Deno.env.delete("AUTH0_AUDIENCE");
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", KEY);
+  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
 
   const { createApiRouter } = await import("./api.ts");
@@ -64,6 +66,9 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
               rows: [{
                 id: "uuid-1",
                 metadata: JSON.parse(params[2] as string),
+                workspace_id: "default",
+                project_id: null,
+                visibility: "workspace",
               }],
             }
             : undefined
@@ -89,6 +94,9 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
         assertEquals(body.metadata.source, "rest");
         assertEquals(body.metadata.door, "tailnet");
         assertEquals(body.metadata.sub, null);
+        assertEquals(body.workspace_id, "default");
+        assertEquals(body.project_id, null);
+        assertEquals(body.visibility, "workspace");
         assertEquals(body.metadata.provenance, {
           schema_version: 1,
           caller_asserted: {
@@ -98,6 +106,74 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
             branch: "feature/provenance",
           },
         });
+      },
+    );
+
+    await t.step(
+      "POST /thoughts: sensitive requires a verified/configured principal before embedding",
+      async () => {
+        const deps = makeDeps();
+        const api = makeApi((sql, params) => {
+          if (
+            sql.includes("FROM memory_scope.workspace AS w") &&
+            params[0] === "sensitive"
+          ) {
+            return {
+              rows: [{
+                default_visibility: "personal",
+                personal_only: true,
+                project_exists: true,
+              }],
+            };
+          }
+          return undefined;
+        }, deps);
+        const res = await api.request(
+          "/thoughts",
+          authed({
+            method: "POST",
+            body: JSON.stringify({
+              content: "particularly sensitive",
+              scope: { workspace_id: "sensitive" },
+            }),
+          }),
+        );
+        assertEquals(res.status, 400);
+        const body = await res.json();
+        assertEquals(body.error.code, "validation_error");
+        assert(body.error.message.includes("principal"));
+        assertEquals(deps.embedCalls, []);
+        assertEquals(deps.extractCalls, []);
+      },
+    );
+
+    await t.step(
+      "POST /thoughts: unknown workspace fails before embedding",
+      async () => {
+        const deps = makeDeps();
+        const api = makeApi(
+          (sql) =>
+            sql.includes("FROM memory_scope.workspace AS w")
+              ? { rows: [] }
+              : undefined,
+          deps,
+        );
+        const res = await api.request(
+          "/thoughts",
+          authed({
+            method: "POST",
+            body: JSON.stringify({
+              content: "must stay local",
+              scope: { workspace_id: "misspelled" },
+            }),
+          }),
+        );
+        assertEquals(res.status, 400);
+        assert(
+          (await res.json()).error.message.includes("Unknown workspace_id"),
+        );
+        assertEquals(deps.embedCalls, []);
+        assertEquals(deps.extractCalls, []);
       },
     );
 
@@ -244,12 +320,15 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
       // similarity decodes as text at the driver layer (like session score);
       // the query layer must narrow it so REST JSON carries a number.
       const api = makeApi((sql) =>
-        sql.includes("FROM thoughts")
+        sql.includes("search_thought_candidates")
           ? {
             rows: [{
               id: "uuid-1",
               content: "hit",
               metadata: { type: "observation" },
+              workspace_id: "default",
+              project_id: null,
+              visibility: "workspace",
               created_at: "2026-07-24T00:00:00Z",
               similarity: "0.91",
               vector_rank: 1,
@@ -277,7 +356,7 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
         let capturedSql = "";
         let capturedParams: unknown[] = [];
         const api = makeApi((sql, params) => {
-          if (sql.includes("FROM thoughts")) {
+          if (sql.includes("search_thought_candidates")) {
             capturedSql = sql;
             capturedParams = params;
             return { rows: [] };
@@ -304,13 +383,8 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
         );
         assertEquals(res.status, 200);
         assertEquals(await res.json(), { results: [] });
-        assertEquals(capturedSql.includes("metadata @> $6::jsonb"), true);
         assertEquals(
-          capturedSql.includes("NOT (metadata @> $7::jsonb)"),
-          true,
-        );
-        assertEquals(
-          capturedSql.includes("NOT (metadata @> $8::jsonb)"),
+          capturedSql.includes("memory_scope.search_thought_candidates("),
           true,
         );
         assertEquals(capturedParams.slice(1), [
@@ -323,14 +397,16 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
               caller_asserted: { repo: "example/open-brain" },
             },
           }),
-          JSON.stringify({
-            provenance: {
-              caller_asserted: { author: "release engineering" },
+          JSON.stringify([
+            {
+              provenance: {
+                caller_asserted: { author: "release engineering" },
+              },
             },
-          }),
-          JSON.stringify({
-            provenance: { caller_asserted: { agent: "codex" } },
-          }),
+            {
+              provenance: { caller_asserted: { agent: "codex" } },
+            },
+          ]),
           50,
         ]);
       },

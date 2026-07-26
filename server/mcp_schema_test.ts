@@ -10,6 +10,7 @@ import { asPool, FAKE_VECTOR, FakePool, makeDeps } from "./api_test_support.ts";
 const ENV_KEYS = [
   "DB_PASSWORD",
   "MCP_ACCESS_KEY",
+  "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
@@ -24,13 +25,14 @@ Deno.test("MCP publishes and executes the thought provenance contracts", async (
   Deno.env.delete("AUTH0_AUDIENCE");
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
+  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
 
   try {
     const { createMcpServer } = await import("./mcp-server.ts");
     let capturedSql = "";
     let capturedParams: unknown[] = [];
     const pool = new FakePool((sql, params) => {
-      if (sql.includes("FROM thoughts")) {
+      if (sql.includes("search_thought_candidates")) {
         capturedSql = sql;
         capturedParams = params;
         return {
@@ -38,6 +40,9 @@ Deno.test("MCP publishes and executes the thought provenance contracts", async (
             id: "uuid-1",
             content: "release checklist",
             metadata: {},
+            workspace_id: "default",
+            project_id: null,
+            visibility: "workspace",
             created_at: "2026-07-25T00:00:00Z",
             similarity: "0.2",
             vector_rank: null,
@@ -81,6 +86,14 @@ Deno.test("MCP publishes and executes the thought provenance contracts", async (
         ).sort(),
         ["agent", "author", "branch", "repo"],
       );
+      const captureScope = properties.scope;
+      assert(captureScope, "capture_thought must publish scope");
+      assertEquals(captureScope.type, "object");
+      assertEquals(captureScope.additionalProperties, false);
+      assertEquals(
+        Object.keys(captureScope.properties as Record<string, unknown>).sort(),
+        ["project_id", "visibility", "workspace_id"],
+      );
 
       const search = listed.tools.find((tool) =>
         tool.name === "search_thoughts"
@@ -118,13 +131,8 @@ Deno.test("MCP publishes and executes the thought provenance contracts", async (
         "below-threshold lexical results must not be labeled by cosine score",
       );
       assertEquals(deps.embedCalls, ["release checklist"]);
-      assertEquals(capturedSql.includes("metadata @> $6::jsonb"), true);
       assertEquals(
-        capturedSql.includes("NOT (metadata @> $7::jsonb)"),
-        true,
-      );
-      assertEquals(
-        capturedSql.includes("NOT (metadata @> $8::jsonb)"),
+        capturedSql.includes("memory_scope.search_thought_candidates("),
         true,
       );
       assertEquals(capturedParams, [
@@ -136,14 +144,16 @@ Deno.test("MCP publishes and executes the thought provenance contracts", async (
         JSON.stringify({
           provenance: { caller_asserted: { repo: "example/open-brain" } },
         }),
-        JSON.stringify({
-          provenance: {
-            caller_asserted: { author: "release engineering" },
+        JSON.stringify([
+          {
+            provenance: {
+              caller_asserted: { author: "release engineering" },
+            },
           },
-        }),
-        JSON.stringify({
-          provenance: { caller_asserted: { agent: "codex" } },
-        }),
+          {
+            provenance: { caller_asserted: { agent: "codex" } },
+          },
+        ]),
         50,
       ]);
 
@@ -165,6 +175,23 @@ Deno.test("MCP publishes and executes the thought provenance contracts", async (
         deps.embedCalls,
         ["release checklist"],
         "invalid MCP envelope must fail before embedding",
+      );
+
+      const misspelledScope = await client.callTool({
+        name: "search_thoughts",
+        arguments: {
+          query: "release checklist",
+          scop: { workspace_id: "sensitive" },
+        },
+      });
+      assertEquals(misspelledScope.isError, true);
+      assert(
+        JSON.stringify(misspelledScope.content).includes("scop"),
+      );
+      assertEquals(
+        deps.embedCalls,
+        ["release checklist"],
+        "misspelled scope must fail before embedding",
       );
     } finally {
       await client.close();

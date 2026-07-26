@@ -33,6 +33,10 @@ services:
       # which omits the variable entirely. (An empty key sets ENABLE_BRAIN_KEY
       # false, so the server ignores any presented x-brain-key.)
       MCP_ACCESS_KEY: ""
+      # The base compose may inherit a local single-user principal binding.
+      # Clear it together with the key or config.ts correctly refuses the
+      # otherwise-unused binding on this OAuth-only public deployment.
+      MCP_ACCESS_KEY_PRINCIPAL: ""
 
   # Caddy access log ingester.
   #
