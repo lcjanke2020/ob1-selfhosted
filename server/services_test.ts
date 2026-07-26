@@ -516,6 +516,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       async () => {
         let storedStatus = "active";
         let storedContentHash: string | null = null;
+        // SQL placeholders are 1-based: $17 = status; $28 = content_hash.
         const pool = new FakePool((sql, params) => {
           if (sql.includes("SELECT content_hash")) {
             return { rows: [{ content_hash: storedContentHash }] };

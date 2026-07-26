@@ -107,13 +107,22 @@ Each entry:
 A singular \`[[artifact]]\` block, or any other field name inside an entry, is
 **rejected** (it used to be silently dropped).
 
+## Refresh semantics
+A refresh (\`id\` present) replaces the authorable session document and its
+entire artifact set; it is not a patch. \`title\` remains required. Apart from
+\`session_id\` and \`status\`, which are preserved when omitted, omitted optional
+scalars are stored as null, omitted arrays as empty arrays, and omitting all
+\`[[artifacts]]\` removes previously stored artifacts. Re-send every field and
+artifact you intend to retain, using the current structured record and live
+context to assemble fresh TOML.
+
 ## Lookup and historical input
 \`session_lookup\` returns the current structured fields plus \`raw_toml\`.
 \`raw_toml\` is the verbatim document supplied to the most recent
-\`session_capture\`; it is historical input, not canonical state, and may lag
-structured fields changed by \`session_update_status\`. Treat the structured
-fields as authoritative. Never use \`raw_toml\` as a recapture template; assemble
-recapture TOML fresh from live context.
+\`session_capture\`; it is historical input, not canonical state, and may differ
+from current structured fields (for example, after \`session_update_status\`).
+Treat the structured fields as authoritative. Never use \`raw_toml\` as a
+recapture template; assemble recapture TOML fresh from live context.
 
 ## Server-stamped — do NOT author by hand
 \`source\`, \`source_node\`, \`content_hash\`, \`created_at\`, \`updated_at\` are set
@@ -469,7 +478,7 @@ export function createMcpServer(
     {
       title: "Look up Session",
       description:
-        "Retrieve a stored session record by id or branch — this does NOT resume execution, it fetches the record. Returns the full record (resume_context, next_actions, blockers, artifacts, raw_toml), or null if no match. Structured fields are authoritative; raw_toml is the verbatim input from the last session_capture, may lag fields changed by session_update_status, and must not be used as a recapture template. On a branch tie the most-recently-updated session wins.",
+        "Retrieve a stored session record by id or branch — this does NOT resume execution, it fetches the record. Returns the full record (resume_context, next_actions, blockers, artifacts, raw_toml), or null if no match. Structured fields are authoritative; raw_toml is the verbatim input from the last session_capture, may differ from current structured fields (for example, after session_update_status), and must not be used as a recapture template. On a branch tie the most-recently-updated session wins.",
       annotations: { readOnlyHint: true },
       inputSchema: sessionLookupShape,
     },
@@ -535,7 +544,7 @@ export function createMcpServer(
     {
       title: "Update Session Status",
       description:
-        "Lightweight lifecycle flip (e.g. mark 'done' after a PR merges), usable from any surface with no repo checkout — writes straight to the canonical store. Returns {id, status}.",
+        "Lightweight lifecycle flip (e.g. mark 'done' after a PR merges), usable from any surface with no repo checkout — updates the structured status in the canonical store and leaves historical raw_toml unchanged. Returns {id, status}.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
