@@ -45,7 +45,8 @@ the server keeps them distinct from verified transport identity. See
   verbatim document supplied to the most recent `session_capture`, but it may differ
   from current structured fields (for example, after `session_update_status`). Treat
   the structured fields as authoritative and never use `raw_toml` as a recapture
-  template; assemble recapture TOML fresh from live context.
+  template; assemble recapture TOML fresh from `session_lookup`'s current structured
+  record plus live context.
 - **Where the `id` lives between sessions.** With no file to hold it, the returned integer
   `id` still needs a home so a later capture *updates* the same row instead of minting a
   duplicate. The primary path is re-discovery: `session_lookup(branch="…")` or
@@ -222,8 +223,10 @@ title = "Benchmark: sliding-window vs token-bucket"
    artifact set, not a patch. `title` remains required. Apart from `session_id` and
    `status`, which are preserved when omitted, omitted optional scalars become null,
    omitted arrays become empty, and omitting all `[[artifacts]]` blocks deletes stored
-   artifacts. Re-send every field and artifact you intend to retain. **Omit `status`
-   unless you are deliberately changing lifecycle state.**
+   artifacts. Re-send every field and artifact you intend to retain, taking stored
+   values from `session_lookup`'s structured record and updating them from live
+   context where applicable. **Omit `status` unless you are deliberately changing
+   lifecycle state.**
 2. Assemble the TOML in memory (no on-disk file needed).
 3. Call `session_capture(toml_text)`. It returns `{id, session_id, status, created, reembedded}`.
 4. **First capture only:** the front matter has no `id`, so the server **mints
