@@ -39,7 +39,10 @@ Deno.test("MCP publishes and executes the thought provenance contracts", async (
             content: "release checklist",
             metadata: {},
             created_at: "2026-07-25T00:00:00Z",
-            similarity: "0.9",
+            similarity: "0.2",
+            vector_rank: null,
+            lexical_rank: 1,
+            lexical_source_priority: 0,
           }],
         };
       }
@@ -110,19 +113,26 @@ Deno.test("MCP publishes and executes the thought provenance contracts", async (
         },
       });
       assertEquals(result.isError, undefined);
+      assert(
+        JSON.stringify(result.content).includes("exact-text match"),
+        "below-threshold lexical results must not be labeled by cosine score",
+      );
       assertEquals(deps.embedCalls, ["release checklist"]);
-      assertEquals(capturedSql.includes("metadata @> $3::jsonb"), true);
+      assertEquals(capturedSql.includes("metadata @> $6::jsonb"), true);
       assertEquals(
-        capturedSql.includes("NOT (metadata @> $4::jsonb)"),
+        capturedSql.includes("NOT (metadata @> $7::jsonb)"),
         true,
       );
       assertEquals(
-        capturedSql.includes("NOT (metadata @> $5::jsonb)"),
+        capturedSql.includes("NOT (metadata @> $8::jsonb)"),
         true,
       );
       assertEquals(capturedParams, [
         `[${FAKE_VECTOR.join(",")}]`,
         0.6,
+        "release checklist",
+        "release checklist",
+        true,
         JSON.stringify({
           provenance: { caller_asserted: { repo: "example/open-brain" } },
         }),
@@ -134,7 +144,7 @@ Deno.test("MCP publishes and executes the thought provenance contracts", async (
         JSON.stringify({
           provenance: { caller_asserted: { agent: "codex" } },
         }),
-        2,
+        50,
       ]);
 
       const invalidEnvelope = await client.callTool({

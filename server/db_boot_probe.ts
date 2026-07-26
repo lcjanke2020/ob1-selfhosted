@@ -1,4 +1,4 @@
-// Boot-time DB reachability probe.
+// Boot-time DB reachability and required-schema probe.
 //
 // deno-postgres's Pool constructor starts connecting every client at
 // construction time as a fire-and-forget promise (`#ready = #initialize()`).
@@ -32,6 +32,8 @@
 
 import type { Pool } from "postgres";
 
+class HybridSearchSchemaError extends Error {}
+
 // A refused connection rejects near-instantly, but a hung connect sits
 // silent — warn once so the operator sees what boot is stuck on before the
 // deadline fires.
@@ -49,8 +51,10 @@ export interface ProbeDbAtBootOptions {
 }
 
 /**
- * Borrow one client from `pool` and validate it with `SELECT 1`, surfacing
- * any boot-time connection failure as a rejection the caller owns.
+ * Borrow one client from `pool`, validate it with `SELECT 1`, and verify the
+ * hybrid-search indexes expected by this server version are installed.
+ * Surfaces any boot-time connection or schema failure as a rejection the
+ * caller owns.
  *
  * `target` is the human-readable `host:port` used in messages. Resolves on
  * success; rejects with operator guidance on driver failure OR when
@@ -70,6 +74,23 @@ export async function probeDbAtBoot(
     const client = await pool.connect();
     try {
       await client.queryArray("SELECT 1");
+      const schema = await client.queryArray<[boolean, boolean]>(
+        `SELECT
+           to_regclass('public.idx_thoughts_content_tsv') IS NOT NULL,
+           to_regclass('public.idx_thoughts_content_trgm') IS NOT NULL`,
+      );
+      const [hasFtsIndex, hasTrigramIndex] = schema.rows[0] ?? [false, false];
+      if (!hasFtsIndex || !hasTrigramIndex) {
+        const missing = [
+          ...(!hasFtsIndex ? ["idx_thoughts_content_tsv"] : []),
+          ...(!hasTrigramIndex ? ["idx_thoughts_content_trgm"] : []),
+        ].join(", ");
+        throw new HybridSearchSchemaError(
+          `[db] Postgres at ${target} is missing hybrid-search schema ` +
+            `(${missing}). Apply db/05-hybrid-search.sql as the database ` +
+            `owner before starting this server version.`,
+        );
+      }
     } finally {
       client.release();
     }
@@ -97,6 +118,7 @@ export async function probeDbAtBoot(
         }),
       ]);
     } catch (e) {
+      if (e instanceof HybridSearchSchemaError) throw e;
       const reason = e instanceof Error ? e.message : String(e);
       throw new Error(
         `[db] Postgres at ${target} is unreachable or rejected the ` +

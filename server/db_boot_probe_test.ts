@@ -58,8 +58,15 @@ class FakeClient {
   queryCalls: string[] = [];
   releaseCalls = 0;
 
+  constructor(
+    private hybridSchema: [boolean, boolean] = [true, true],
+  ) {}
+
   queryArray(sql: string): Promise<{ rows: unknown[] }> {
     this.queryCalls.push(sql);
+    if (sql.includes("to_regclass")) {
+      return Promise.resolve({ rows: [this.hybridSchema] });
+    }
     return Promise.resolve({ rows: [[1]] });
   }
 
@@ -68,14 +75,32 @@ class FakeClient {
   }
 }
 
-Deno.test("probeDbAtBoot: success path validates with SELECT 1 and releases the client", async () => {
+Deno.test("probeDbAtBoot: success path validates connectivity and hybrid schema", async () => {
   const client = new FakeClient();
   const fakePool = {
     connect: () => Promise.resolve(client),
   } as unknown as Pool;
 
   await probeDbAtBoot(fakePool, "db:5432");
-  assertEquals(client.queryCalls, ["SELECT 1"]);
+  assertEquals(client.queryCalls.length, 2);
+  assertEquals(client.queryCalls[0], "SELECT 1");
+  assert(client.queryCalls[1].includes("idx_thoughts_content_tsv"));
+  assert(client.queryCalls[1].includes("idx_thoughts_content_trgm"));
+  assertEquals(client.releaseCalls, 1);
+});
+
+Deno.test("probeDbAtBoot: missing hybrid schema rejects with migration guidance", async () => {
+  const client = new FakeClient([true, false]);
+  const fakePool = {
+    connect: () => Promise.resolve(client),
+  } as unknown as Pool;
+
+  const err = await assertRejects(
+    () => probeDbAtBoot(fakePool, "db:5432"),
+    Error,
+  );
+  assertStringIncludes(err.message, "idx_thoughts_content_trgm");
+  assertStringIncludes(err.message, "db/05-hybrid-search.sql");
   assertEquals(client.releaseCalls, 1);
 });
 

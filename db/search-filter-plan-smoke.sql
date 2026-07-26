@@ -101,9 +101,9 @@ CROSS JOIN constant_vector;
 
 VACUUM ANALYZE thoughts;
 
--- Mirrors the live queries.ts shape: vector threshold + positive JSONB
--- containment + vector ordering + limit. The selective repo term should make
--- PostgreSQL choose the metadata GIN index before sorting the candidate set.
+-- Exercises the same indexable predicates and ordering as queries.ts's vector
+-- candidate leg (the application wraps this access path in bounded CTEs). The
+-- selective repo term should choose the metadata GIN index before sorting.
 EXPLAIN
 SELECT id, content, metadata, created_at,
        1 - (
@@ -123,14 +123,16 @@ ORDER BY embedding <=> (
 )::vector
 LIMIT 10;
 
--- Mirrors queries.ts's filtered-search transaction. Approximate-index recall
--- is deliberately not asserted: HNSW graph construction and traversal are not
--- deterministic guarantees. This smoke instead verifies the guarantees the
--- application owns: transaction-local configuration, filter correctness, and
--- the HNSW plan shape. The exact boolean semantics are asserted above.
+-- Exercises queries.ts's vector-leg transaction settings. Approximate-index
+-- recall is deliberately not asserted: HNSW graph construction and traversal
+-- are not deterministic guarantees. This smoke instead verifies the
+-- guarantees the application owns: transaction-local configuration, filter
+-- correctness, and the HNSW plan shape. Exact semantics are asserted above.
 SELECT current_setting('hnsw.iterative_scan') AS hnsw_before \gset
+SELECT current_setting('hnsw.ef_search') AS hnsw_ef_before \gset
 
 BEGIN;
+SELECT set_config('hnsw.ef_search', '50', true);
 SET LOCAL hnsw.iterative_scan = strict_order;
 
 DO $$
@@ -139,6 +141,9 @@ DECLARE
 BEGIN
   IF current_setting('hnsw.iterative_scan') <> 'strict_order' THEN
     RAISE EXCEPTION 'filtered search did not enable strict HNSW iteration';
+  END IF;
+  IF current_setting('hnsw.ef_search') <> '50' THEN
+    RAISE EXCEPTION 'search did not raise HNSW candidate depth to 50';
   END IF;
 
   FOR returned_metadata IN
@@ -194,6 +199,14 @@ SELECT current_setting('hnsw.iterative_scan') = :'hnsw_before'
 \if :hnsw_restored
 \else
   \echo 'hnsw.iterative_scan did not restore after COMMIT'
+  \quit 1
+\endif
+
+SELECT current_setting('hnsw.ef_search') = :'hnsw_ef_before'
+  AS hnsw_ef_restored \gset
+\if :hnsw_ef_restored
+\else
+  \echo 'hnsw.ef_search did not restore after COMMIT'
   \quit 1
 \endif
 

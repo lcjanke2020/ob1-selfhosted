@@ -137,17 +137,20 @@ The boolean contract is deliberately asymmetric:
 The positive side compiles to one nested `metadata @> ...` containment
 predicate, which the existing `idx_thoughts_metadata` GIN index supports.
 Negative predicates are applied as residual filters; a negated JSONB predicate
-alone is not expected to use that index. The search implementation emits no
-metadata predicate when `filter` is absent, preserving the historical
-unfiltered path.
+alone is not expected to use that index. The query builder emits the same bound
+predicate in both the vector and lexical candidate legs *before* either leg is
+ranked and fused. It emits no metadata predicate when `filter` is absent.
 
 pgvector applies residual predicates after an approximate HNSW candidate scan.
-Every filtered search therefore enables `hnsw.iterative_scan = strict_order`
-with `SET LOCAL` inside a transaction, allowing HNSW to scan beyond an initial
-candidate batch that the provenance filter rejects. The setting reverts at
-commit or rollback instead of leaking through the connection pool. Iteration
-continues until enough rows pass or pgvector reaches its configured scan bound.
-Iterative HNSW scans require pgvector 0.8.0 or newer.
+Every search raises transaction-local `hnsw.ef_search` to the hybrid candidate
+depth (at least 50), and every filtered search additionally enables
+`hnsw.iterative_scan = strict_order`, allowing the vector leg to scan beyond an
+initial candidate batch that the provenance filter rejects. Both settings
+revert at commit or rollback instead of leaking through the connection pool.
+The lexical leg applies the same filter before its full-text/trigram candidate
+limit, so a row excluded from one retrieval method cannot re-enter through the
+other. Iterative HNSW scans require pgvector 0.8.0 or newer. See
+[Hybrid thought search](hybrid-search.md) for ranking and threshold semantics.
 
 Before rolling filtered search out against an existing database, check the
 installed extension version:

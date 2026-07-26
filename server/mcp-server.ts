@@ -24,6 +24,7 @@ import {
   sessionLookupShape,
   sessionSearchShape,
   sessionUpdateStatusShape,
+  thoughtSearchQuerySchema,
 } from "./schemas.ts";
 import {
   captureSessionFromToml,
@@ -166,7 +167,9 @@ export function createMcpServer(
     // retaining server-verified source/door/sub compatibility keys.
     // 1.6.0: search_thoughts accepts strict positive and negative provenance
     // filters shared byte-for-byte with the REST search body.
-    version: "1.6.0",
+    // 1.7.0: thought search fuses bounded pgvector and token-preserving
+    // full-text/literal candidate legs with reciprocal rank fusion (RRF).
+    version: "1.7.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -176,10 +179,10 @@ export function createMcpServer(
     {
       title: "Search Open Brain",
       description:
-        "Search Open Brain memories by meaning. Read-only compatibility tool for ChatGPT-style search/fetch consumers.",
+        "Search Open Brain memories by meaning and exact text. Read-only compatibility tool for ChatGPT-style search/fetch consumers.",
       annotations: { readOnlyHint: true },
       inputSchema: {
-        query: z.string().min(1).describe(
+        query: thoughtSearchQuerySchema.describe(
           "The search query to run against Open Brain",
         ),
       },
@@ -237,7 +240,7 @@ export function createMcpServer(
     {
       title: "Search Thoughts",
       description:
-        "Search captured thoughts by meaning, optionally requiring or excluding caller-asserted author/agent/repo/branch provenance in the same call.",
+        "Hybrid-search captured thoughts by meaning and exact text, optionally requiring or excluding caller-asserted author/agent/repo/branch provenance in the same call.",
       annotations: { readOnlyHint: true },
       inputSchema: searchThoughtsSchema,
     },
@@ -252,10 +255,11 @@ export function createMcpServer(
         if (!rows.length) return text(`No thoughts found matching "${query}".`);
         const lines = rows.map((t, i) => {
           const m = t.metadata || {};
+          const matchLabel = t.similarity < (threshold ?? 0.5)
+            ? "exact-text match"
+            : `${(t.similarity * 100).toFixed(1)}% semantic similarity`;
           const parts = [
-            `--- Result ${i + 1} (${
-              (t.similarity * 100).toFixed(1)
-            }% match) ---`,
+            `--- Result ${i + 1} (${matchLabel}) ---`,
             `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
             `Type: ${m.type ?? "unknown"}`,
           ];

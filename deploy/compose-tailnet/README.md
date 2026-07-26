@@ -156,15 +156,26 @@ docker compose exec -T postgres \
   "SELECT extversion FROM pg_extension WHERE extname = 'vector';"
 ```
 
-**New schema files** (observability, sessions) apply cleanly — both are idempotent:
+**New schema files** (observability, sessions, hybrid search) apply cleanly —
+all are idempotent:
 
 ```bash
 # Set OPENBRAIN_INGESTER_PASSWORD in .env first (openssl rand -hex 24), then:
 bash ../../scripts/upgrade-add-ingester-role.sh
 docker compose exec -T postgres psql -U postgres -d openbrain < ../../db/02-observability.sql
 docker compose exec -T postgres psql -U postgres -d openbrain < ../../db/04-sessions.sql
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/05-hybrid-search.sql
 docker compose build mcp && docker compose up -d
 ```
+
+`05-hybrid-search.sql` backfills a stored text-search column under an
+access-exclusive lock that is held through both regular GIN index builds until
+commit, blocking searches and captures for the migration's duration. Use a full
+application maintenance window on a large corpus, budget disk for the column
+plus both indexes, and apply it before starting the hybrid-query server. The
+updated server's boot probe refuses to start until both indexes exist.
+See [Hybrid thought search](../../docs/hybrid-search.md) for the index and
+threshold contracts.
 
 Optional: the SELECT-only role for the host-side funnel monitor follows the same shape —
 set `OPENBRAIN_MONITOR_PASSWORD` in `.env`, run `bash ../../scripts/upgrade-add-monitor-role.sh`,
