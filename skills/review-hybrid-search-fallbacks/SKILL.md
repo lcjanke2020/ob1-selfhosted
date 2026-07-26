@@ -21,10 +21,11 @@ trusting escaping, indexes, or a final candidate limit.
 
 Use [`server/queries.ts`](../../server/queries.ts) as the production query
 boundary. [`server/queries_hybrid_test.ts`](../../server/queries_hybrid_test.ts)
-pins statement shape, parameter order, shared filters, and RRF behavior.
-[`db/hybrid-search-smoke.sql`](../../db/hybrid-search-smoke.sql) exercises the
-parser/fallback truth table and production-shape plans, while
-[`db/search-filter-plan-smoke.sql`](../../db/search-filter-plan-smoke.sql)
+pins statement shape, parameter order, shared filters, and RRF behavior; its
+unit cases also cover literal escaping and indexable-trigram boundaries.
+[`db/hybrid-search-smoke.sql`](../../db/hybrid-search-smoke.sql) contains the
+current parser/fallback worked examples and production-shape `EXPLAIN` probes,
+while [`db/search-filter-plan-smoke.sql`](../../db/search-filter-plan-smoke.sql)
 supplies the larger planner fixture. Read
 [`docs/hybrid-search.md`](../../docs/hybrid-search.md) for the user-facing query
 and cost contract.
@@ -66,7 +67,8 @@ and cost contract.
 
 5. **Probe indexability at its boundaries.** An index declaration is not proof
    that the production predicate can use it. For PostgreSQL `pg_trgm`, patterns
-   without an extractable trigram commonly lose the trigram plan; a
+   without an extractable trigram can make an index scan degenerate into a
+   full-index scan or lead the planner to prefer a sequential scan. A
    pure-negative `tsquery` has no positive posting list to drive a GIN scan. An
    `OR` with one unindexable branch can turn the whole lexical predicate into a
    sequential scan even when the other branch has a valid GIN index.
