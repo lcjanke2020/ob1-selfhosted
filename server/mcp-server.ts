@@ -89,6 +89,8 @@ to \`session_capture\`. The schema is **flat** — do NOT use nested
 - \`session_date\` (date), \`started_at\`, \`last_update\`, \`ended_at\`
   (date or RFC-3339 datetime; a date is expanded to midnight UTC)
 - \`status\` — one of: active | awaiting_review | blocked | done | abandoned
+  (defaults to active on first capture; on a refresh, omit it unless deliberately
+  changing lifecycle state so the stored status is preserved)
 
 ## Optional arrays
 - \`tags\`, \`linked_issues\`, \`related_sessions\`, \`next_actions\`, \`blockers\`
@@ -104,6 +106,14 @@ Each entry:
 
 A singular \`[[artifact]]\` block, or any other field name inside an entry, is
 **rejected** (it used to be silently dropped).
+
+## Lookup and historical input
+\`session_lookup\` returns the current structured fields plus \`raw_toml\`.
+\`raw_toml\` is the verbatim document supplied to the most recent
+\`session_capture\`; it is historical input, not canonical state, and may lag
+structured fields changed by \`session_update_status\`. Treat the structured
+fields as authoritative. Never use \`raw_toml\` as a recapture template; assemble
+recapture TOML fresh from live context.
 
 ## Server-stamped — do NOT author by hand
 \`source\`, \`source_node\`, \`content_hash\`, \`created_at\`, \`updated_at\` are set
@@ -459,7 +469,7 @@ export function createMcpServer(
     {
       title: "Look up Session",
       description:
-        "Retrieve a stored session record by id or branch — this does NOT resume execution, it fetches the record. Returns the full record (resume_context, next_actions, blockers, artifacts, raw_toml), or null if no match. On a branch tie the most-recently-updated session wins.",
+        "Retrieve a stored session record by id or branch — this does NOT resume execution, it fetches the record. Returns the full record (resume_context, next_actions, blockers, artifacts, raw_toml), or null if no match. Structured fields are authoritative; raw_toml is the verbatim input from the last session_capture, may lag fields changed by session_update_status, and must not be used as a recapture template. On a branch tie the most-recently-updated session wins.",
       annotations: { readOnlyHint: true },
       inputSchema: sessionLookupShape,
     },

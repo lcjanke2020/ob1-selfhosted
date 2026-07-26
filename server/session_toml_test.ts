@@ -48,7 +48,7 @@ title = "server/x.ts"
   assertEquals(session.summary, "Did stuff");
   assertEquals(session.resume_context, "Pick up at step 3");
 
-  // raw_toml is the verbatim input (lets the DB hand back the canonical doc).
+  // raw_toml is the verbatim historical input; structured columns are canonical.
   assertEquals(rawToml, toml);
 
   // Artifacts keep authoring order via position; missing detail → null.
