@@ -16,11 +16,11 @@
 -- in-file drift of the GRANT list itself.
 --
 -- Putting the assertion in its own file solves both cases:
---   1. Fresh init: the supported Compose/CI paths mount this source file as
---      99-grants-assertion.sql, after every schema migration. 01- establishes
---      grants, 02- adds observability grants, later files add their schemas,
---      and 99- asserts the completed catalog. If any init file accidentally
---      widens a protected role, init fails loudly.
+--   1. Fresh init: the Compose/CI paths mount this source file as
+--      99-grants-assertion.sql, after every schema migration. Native
+--      provisioning applies 01-, 02-, 04-, and 05-, then invokes this stable
+--      source path last. In both cases the assertion sees the completed
+--      catalog, so an init file that widens a protected role fails loudly.
 --   2. Drift check against a deployed DB: an operator can run this
 --      file standalone (`psql -f db/03-grants-assertion.sql`) against
 --      a live DB and the assertion exercises the LIVE catalog state
@@ -84,6 +84,11 @@ $$ LANGUAGE plpgsql;
 -- all in scope. Table-like relations and sequences are checked; ownership is
 -- also access and therefore rejected outside the allowlist.
 --
+-- This is deliberately a relation invariant, not proof that every callable
+-- database object is safe. PostgreSQL grants EXECUTE on new functions to
+-- PUBLIC by default, so any future SECURITY DEFINER routine must revoke that
+-- default and receive a separate security review before deployment.
+--
 -- The allowed SELECT on the two observability tables must also be plain —
 -- WITH GRANT OPTION is rejected, or the monitor could re-grant its own
 -- access (e.g. to PUBLIC) and the widened grant would sit outside this
@@ -122,15 +127,69 @@ BEGIN
       'standalone role (membership would bypass the per-table checks).', bad;
   END IF;
 
+  -- Default ACLs are standing instructions, not observed relation grants. A
+  -- snapshot-only scan would pass until the next object materialized the
+  -- privilege, so reject relation/sequence defaults aimed at the monitor or
+  -- PUBLIC before they can create that delayed drift.
+  SELECT string_agg(default_grant.description, ', ' ORDER BY default_grant.description)
+    INTO bad
+    FROM (
+      SELECT DISTINCT format(
+        '%s on future %s in %s (owner %I, granted to %s)',
+        a.privilege_type,
+        CASE d.defaclobjtype WHEN 'S' THEN 'sequences' ELSE 'relations' END,
+        CASE
+          WHEN d.defaclnamespace = 0 THEN 'all schemas'
+          ELSE format('schema %I', n.nspname)
+        END,
+        owner_role.rolname,
+        CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE 'openbrain_monitor' END
+      ) AS description
+      FROM pg_default_acl d
+      JOIN pg_roles owner_role ON owner_role.oid = d.defaclrole
+      LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace
+      CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+      WHERE d.defaclobjtype IN ('r', 'S')
+        AND (a.grantee = monitor_oid OR a.grantee = 0)
+        AND (
+          d.defaclnamespace = 0
+          OR (n.nspname <> 'information_schema' AND n.nspname !~ '^pg_')
+        )
+    ) default_grant;
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION
+      'grants assertion failed: default privileges would grant future relations '
+      'or sequences to openbrain_monitor or PUBLIC: %. Revoke the standing '
+      'default grant before deploying.', bad;
+  END IF;
+
   -- Enumerate every non-system relation the monitor can touch, then subtract
   -- the allowlist. Direct ACL checks are future-proof for new privilege types;
-  -- the effective checks cover PUBLIC/inherited semantics for today's types.
-  -- Membership is forbidden above, so no transitive role can hide an unknown
-  -- effective privilege from the direct scans.
+  -- the effective checks independently cross-check today's named privilege
+  -- types. Membership is forbidden above, so no transitive role can hide an
+  -- unknown effective privilege from the direct scans.
   SELECT string_agg(unexpected.qualified_name, ', ' ORDER BY unexpected.qualified_name)
     INTO bad
     FROM (
-      SELECT format('%I.%I', n.nspname, c.relname) AS qualified_name
+      SELECT format(
+        '%I.%I%s',
+        n.nspname,
+        c.relname,
+        CASE
+          WHEN EXISTS (
+            SELECT 1
+            FROM aclexplode(c.relacl) public_acl
+            WHERE public_acl.grantee = 0
+          ) OR EXISTS (
+            SELECT 1
+            FROM pg_attribute att
+            CROSS JOIN LATERAL aclexplode(att.attacl) public_acl
+            WHERE att.attrelid = c.oid
+              AND public_acl.grantee = 0
+          ) THEN ' (via PUBLIC)'
+          ELSE ''
+        END
+      ) AS qualified_name
       FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')

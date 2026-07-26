@@ -122,11 +122,20 @@ once per cluster:
 sudo -u postgres psql -c "CREATE DATABASE openbrain;"
 sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
 # then create the openbrain_app / openbrain_ingester / openbrain_readonly /
-# openbrain_monitor roles and load the schema — see db/00-roles.sh and
-# db/01-schema.sql through db/05-hybrid-search.sql for the exact, up-to-date
+# openbrain_monitor roles — see db/00-roles.sh for the exact, up-to-date
 # statements (Pattern A vs B, passwords, grants; ingester + monitor are
-# optional).
+# optional) — and apply the SQL files in this order:
+#   db/01-schema.sql
+#   db/02-observability.sql
+#   db/04-sessions.sql
+#   db/05-hybrid-search.sql
+#   db/03-grants-assertion.sql  # always last
 ```
+
+Do not load `db/*.sql` in filename order: `03-grants-assertion.sql` is a
+read-only completed-catalog check, not the third schema migration. Run it last
+during native provisioning, and rerun it after every later schema migration so
+new relations are covered by the monitor allowlist invariant.
 
 Apply `pg_hba.snippet.conf` and `postgresql.local.conf` after the roles exist,
 then reload/restart so the network listener and host lines take effect.
