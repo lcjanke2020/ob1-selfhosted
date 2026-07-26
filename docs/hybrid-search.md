@@ -68,6 +68,16 @@ behavior change from vector-only search. MCP prose labels a below-threshold
 lexical result as an exact-text match instead of presenting its low cosine score
 as the reason it matched, while preserving RRF order.
 
+## Testing
+
+The production query boundary is [`server/queries.ts`](../server/queries.ts).
+[`db/hybrid-search-smoke.sql`](../db/hybrid-search-smoke.sql) exercises exact-reference
+and hybrid-fusion behavior, while
+[`db/search-filter-plan-smoke.sql`](../db/search-filter-plan-smoke.sql) provides the
+larger filtered-ANN and planner fixture. When adding approximate-index assertions or
+changing search settings, follow the deterministic-versus-statistical split in
+[`test-approximate-search-invariants`](../skills/test-approximate-search-invariants/SKILL.md).
+
 ## Database migration
 
 Fresh compose installs run [`db/05-hybrid-search.sql`](../db/05-hybrid-search.sql)

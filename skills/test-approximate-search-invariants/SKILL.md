@@ -18,6 +18,15 @@ recall quality in a seeded, statistical benchmark.
 - An application-level search contract must be separated from raw-engine recall
   behavior and search-quality measurement.
 
+## In this repository
+
+Use [`server/queries.ts`](../../server/queries.ts) as the production query boundary.
+[`db/hybrid-search-smoke.sql`](../../db/hybrid-search-smoke.sql) and
+[`db/search-filter-plan-smoke.sql`](../../db/search-filter-plan-smoke.sql) are worked
+fixtures for exact-reference semantics, filtered ANN validity, and planner behavior.
+See [`docs/hybrid-search.md`](../../docs/hybrid-search.md) for the user-facing search
+contract.
+
 ## Core distinction
 
 Treat these as deterministic when the application or database contract makes them
@@ -74,13 +83,20 @@ Treat these as statistical unless the engine explicitly guarantees otherwise:
 
    ```text
    before = read_setting()
-   begin
-   set_local(approximate_scan_option)
-   assert read_setting() == requested_value
-   run_filtered_search()
-   commit
-   assert read_setting() == before
+   for force_failure in [false, true]:
+       begin
+       set_local(approximate_scan_option)
+       assert read_setting() == requested_value
+       try:
+           run_filtered_search(force_failure=force_failure)
+           commit
+       catch:
+           rollback
+       assert read_setting() == before
    ```
+
+   Exercise rollback through the application's actual failure path when it owns the
+   transaction; a standalone `ROLLBACK` smoke does not prove exception cleanup.
 
 5. **Separate raw ANN validity from application cardinality.** At the raw ANN
    boundary, assert that every returned row satisfies required inclusion,
