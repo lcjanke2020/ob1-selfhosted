@@ -33,6 +33,13 @@ CROSS JOIN LATERAL (
     )
 ) AS fixture(content, embedding, metadata);
 
+-- HNSW is approximate, so its recall is not a deterministic functional-test
+-- contract (especially for a three-row index populated in this transaction).
+-- Prove the candidate-union semantics with an exact heap scan here; the
+-- separate EXPLAIN section below proves that production shapes can use HNSW.
+SET LOCAL enable_indexscan = off;
+SET LOCAL enable_seqscan = on;
+
 DO $$
 DECLARE
   generated_kind TEXT;
@@ -162,6 +169,7 @@ $$;
 
 -- Small fixtures make sequential scans rational. Disable them locally only to
 -- prove PostgreSQL can select both indexes for the production predicates.
+SET LOCAL enable_indexscan = on;
 SET LOCAL enable_seqscan = off;
 
 EXPLAIN
