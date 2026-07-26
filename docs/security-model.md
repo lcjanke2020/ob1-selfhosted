@@ -41,7 +41,7 @@ Five roles, least privilege, with drift detection:
 | `openbrain_monitor` | SELECT on `funnel_access_log` + `mcp_auth_events` only | host-side funnel monitor ([`scripts/funnel_monitor.sh`](../scripts/funnel_monitor.sh)) — its credential sits on the internet-adjacent edge, so it reads request metadata but can never reach a thought. Optional, like the ingester |
 | `openbrain_readonly` | SELECT on everything | humans with psql/DBeaver |
 
-`db/01-schema.sql` actively REVOKEs historical broad grants (idempotent, safe on live DBs), and `db/03-grants-assertion.sql` is a read-only invariant check you can run any time — because init scripts only run on a fresh data directory, a tightened grant **does not** reach an existing deployment by itself. The assertion is how you notice.
+`db/01-schema.sql` actively REVOKEs historical broad grants (idempotent, safe on live DBs), and `db/03-grants-assertion.sql` is a read-only invariant check you can run any time — because init scripts only run on a fresh data directory, a tightened grant **does not** reach an existing deployment by itself. Its monitor check scans every non-system application relation across schemas and permits only the two observability tables, so future relation grants fail closed without extending a denylist. The assertion is how you notice.
 
 ### Container layer
 

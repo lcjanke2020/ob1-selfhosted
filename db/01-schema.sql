@@ -127,8 +127,9 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
   GRANT SELECT ON SEQUENCES TO openbrain_readonly;
 
--- The grants-invariant assertion lives in 03-grants-assertion.sql so it
--- runs after both 01-schema.sql AND 02-observability.sql, AND can be
--- invoked standalone against a deployed DB to check for drift without
--- the REVOKE+GRANT block above wiping that drift first. See that file's
--- doc-comment for the rationale.
+-- The grants-invariant assertion lives at db/03-grants-assertion.sql; the
+-- supported init paths mount it as 99-grants-assertion.sql so it runs after
+-- this file, 02-observability.sql, and every later schema migration. Its
+-- stable source path can also be invoked standalone against a deployed DB to
+-- check for drift without the REVOKE+GRANT block above wiping that drift
+-- first. See that file's doc-comment for the rationale.

@@ -7,6 +7,11 @@
 # That is exactly what silently broke the nightly backup once the sessions PK
 # became an identity column.
 #
+# The same completed init is also the integration fixture for the edge monitor
+# allowlist. The assertion is mounted last, then deliberately re-run after a
+# direct grant on sessions.session and a PUBLIC grant on a new non-public-schema
+# table; each drift must fail without changing the assertion's allowlist.
+#
 # Rather than enumerate privileges in a static assertion (which lags the next
 # new object type, and can't see an object created later by a different
 # superuser), this job exercises the REAL init path on a throwaway pgvector
@@ -90,9 +95,9 @@ jobs:
             -v "$GITHUB_WORKSPACE/db/00-roles.sh:/docker-entrypoint-initdb.d/00-roles.sh:ro" \
             -v "$GITHUB_WORKSPACE/db/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/02-observability.sql:/docker-entrypoint-initdb.d/02-observability.sql:ro" \
-            -v "$GITHUB_WORKSPACE/db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/03-grants-assertion.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/04-sessions.sql:/docker-entrypoint-initdb.d/04-sessions.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/05-hybrid-search.sql:/docker-entrypoint-initdb.d/05-hybrid-search.sql:ro" \
+            -v "$GITHUB_WORKSPACE/db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro" \
             "$PG_IMAGE"
 
       - name: Wait for init to finish (TCP ready == initdb.d complete)
@@ -119,6 +124,62 @@ jobs:
           docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
             "SELECT 1 FROM information_schema.schemata WHERE schema_name='sessions'" | grep -q 1
+
+      - name: Smoke test — monitor relation allowlist rejects grant drift
+        run: |
+          run_assertion() {
+            docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+              psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+              -v ON_ERROR_STOP=1 < db/03-grants-assertion.sql
+          }
+          expect_rejected() {
+            label=$1
+            relation=$2
+            if output=$(run_assertion 2>&1); then
+              echo "::error::$label did not fail the monitor grants assertion"
+              return 1
+            fi
+            if ! grep -Fq "$relation" <<< "$output"; then
+              echo "::error::$label failed without identifying $relation"
+              echo "$output"
+              return 1
+            fi
+          }
+
+          # The completed clean schema is valid, including relations created
+          # after 02-observability.sql.
+          run_assertion >/dev/null
+
+          # Existing relation, direct role grant, schema outside public.
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -c \
+            "GRANT SELECT ON sessions.session TO openbrain_monitor"
+          expect_rejected "direct monitor grant" "sessions.session"
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -c \
+            "REVOKE SELECT ON sessions.session FROM openbrain_monitor"
+
+          # A future table and a PUBLIC grant must be caught generically. Put
+          # it in another schema to cover schema-qualified catalog scanning.
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -c \
+            "CREATE SCHEMA monitor_assertion_probe;
+             CREATE TABLE monitor_assertion_probe.future_table (id integer);
+             GRANT USAGE ON SCHEMA monitor_assertion_probe TO PUBLIC;
+             GRANT SELECT ON monitor_assertion_probe.future_table TO PUBLIC"
+          expect_rejected "future-table PUBLIC grant" "monitor_assertion_probe.future_table"
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -c \
+            "REVOKE SELECT ON monitor_assertion_probe.future_table FROM PUBLIC;
+             REVOKE USAGE ON SCHEMA monitor_assertion_probe FROM PUBLIC;
+             DROP SCHEMA monitor_assertion_probe CASCADE"
+
+          run_assertion >/dev/null
+          echo "monitor allowlist accepted the clean catalog and rejected both drift fixtures"
 
       - name: Smoke test — openbrain_readonly can run a full pg_dump
         run: |

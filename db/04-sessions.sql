@@ -8,8 +8,8 @@
 -- system.
 --
 -- Lives in its own `sessions` schema. `public.thoughts` is untouched, so
--- upstream `thoughts` merges stay clean and the grants invariant
--- (03-grants-assertion.sql, scoped to public.thoughts) is unaffected.
+-- upstream `thoughts` merges stay clean. The monitor relation allowlist in
+-- 03-grants-assertion.sql deliberately scans this schema too.
 --
 -- Embedding dimension is 768 to match nomic-embed-text (EMBED_DIM). It is NOT
 -- pinned independently of OB — if EMBED_MODEL/EMBED_DIM change ),
@@ -286,9 +286,9 @@ CREATE TRIGGER session_updated_at
 -- DELETE is granted on the sessions tables (unlike public.thoughts, where the
 -- grants invariant forbids it) because session_capture reconciles artifact
 -- children with a qualified delete-and-reinsert. The grants assertion in
--- 03-grants-assertion.sql is scoped to public.thoughts only, so this grant
--- does not affect it. Precedent: 02-observability.sql grants DML on its own
--- app-owned tables.
+-- 03-grants-assertion.sql applies its schema-wide negative only to
+-- openbrain_monitor, so these openbrain_app grants do not affect it.
+-- Precedent: 02-observability.sql grants DML on its own app-owned tables.
 
 -- No sequence USAGE grant is needed here: sessions.artifact.id and
 -- sessions.session.id are both GENERATED ALWAYS AS IDENTITY, whose sequences are

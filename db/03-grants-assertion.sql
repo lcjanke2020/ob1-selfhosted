@@ -1,5 +1,6 @@
 -- invariant assertions for role grants: openbrain_app on public.thoughts,
--- and (when the role exists) the SELECT-only openbrain_monitor.
+-- and (when the role exists) the relation allowlist for the SELECT-only
+-- openbrain_monitor.
 --
 -- Why this is its own file:
 --
@@ -15,11 +16,11 @@
 -- in-file drift of the GRANT list itself.
 --
 -- Putting the assertion in its own file solves both cases:
---   1. Fresh init: docker-entrypoint-initdb.d runs files in lexical
---      order. 01- establishes grants, 02- adds observability grants,
---      03- asserts. If a future change to 02-observability.sql (or
---      any later file) accidentally widens openbrain_app's grants on
---      `public.thoughts`, init fails loudly.
+--   1. Fresh init: the supported Compose/CI paths mount this source file as
+--      99-grants-assertion.sql, after every schema migration. 01- establishes
+--      grants, 02- adds observability grants, later files add their schemas,
+--      and 99- asserts the completed catalog. If any init file accidentally
+--      widens a protected role, init fails loudly.
 --   2. Drift check against a deployed DB: an operator can run this
 --      file standalone (`psql -f db/03-grants-assertion.sql`) against
 --      a live DB and the assertion exercises the LIVE catalog state
@@ -31,9 +32,11 @@
 --   (b) `openbrain_app` MUST have SELECT, INSERT, UPDATE on
 --       `public.thoughts`.
 --
--- We don't try to enforce a schema-wide invariant — 02-observability.sql
--- legitimately grants additional tables to openbrain_app and we don't
--- want to couple this file to that one's grant list.
+-- The openbrain_app check is deliberately scoped to thoughts:
+-- 02-observability.sql and 04-sessions.sql legitimately grant it access to
+-- other application tables. The monitor check below is deliberately the
+-- inverse: it permits one small relation allowlist and rejects everything
+-- else in every non-system schema.
 
 DO $$
 BEGIN
@@ -54,11 +57,9 @@ $$ LANGUAGE plpgsql;
 -- openbrain_monitor invariants (checked only when the role exists — it is
 -- optional, created by 00-roles.sh when OPENBRAIN_MONITOR_PASSWORD is set).
 -- This credential lives on the internet-adjacent ingress qube, so the
--- invariant that matters is a NEGATIVE one:
---   (a) NO privilege of any kind on `public.thoughts` — a popped edge must
---       not be able to read (or touch) memories with the monitor credential;
---   (b) read-only on its two metadata tables: SELECT on funnel_access_log
---       and mcp_auth_events, and nothing else.
+-- invariant that matters is a NEGATIVE one: the monitor has plain SELECT on
+-- its two metadata relations and no privilege on any other application
+-- relation, including relations outside `public` and ones added later.
 --
 -- Enforcement is deliberately belt-and-braces, because each mechanism has a
 -- blind spot the other covers:
@@ -78,19 +79,38 @@ $$ LANGUAGE plpgsql;
 --     monitor is designed as a standalone LOGIN role, so ANY membership is
 --     drift (e.g. GRANT openbrain_readonly TO openbrain_monitor would hand it
 --     thoughts without touching an ACL this file scans).
+-- System catalogs are excluded: PostgreSQL intentionally exposes many of
+-- those through PUBLIC. User/application schemas (including `sessions`) are
+-- all in scope. Table-like relations and sequences are checked; ownership is
+-- also access and therefore rejected outside the allowlist.
+--
 -- The allowed SELECT on the two observability tables must also be plain —
 -- WITH GRANT OPTION is rejected, or the monitor could re-grant its own
 -- access (e.g. to PUBLIC) and the widened grant would sit outside this
 -- file's per-role reasoning.
 DO $$
 DECLARE
-  tbl  text;
-  bad  text;
+  allowed_relations oid[];
+  monitor_oid   oid;
+  rel_oid       oid;
+  relation_name text;
+  bad           text;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'openbrain_monitor') THEN
     RAISE NOTICE 'openbrain_monitor role missing; skipping monitor grants assertion';
     RETURN;
   END IF;
+
+  -- The monitor relation allowlist. State it once; both the global negative
+  -- scan and the required-grant checks below consume these same OIDs. Resolve
+  -- it only after the optional-role guard so monitor-free installs still skip.
+  allowed_relations := ARRAY[
+    'public.funnel_access_log'::regclass::oid,
+    'public.mcp_auth_events'::regclass::oid
+  ];
+
+  SELECT oid INTO monitor_oid
+    FROM pg_roles WHERE rolname = 'openbrain_monitor';
 
   -- No role memberships: everything below reasons about direct grants, and
   -- membership would smuggle in another role's privileges wholesale.
@@ -102,47 +122,81 @@ BEGIN
       'standalone role (membership would bypass the per-table checks).', bad;
   END IF;
 
-  -- (a) public.thoughts: zero ACL entries of any kind, table or column level,
-  --     to the monitor OR to PUBLIC (grantee oid 0 — implicit for every role)…
-  IF EXISTS (
-       SELECT 1 FROM pg_class c
-       CROSS JOIN LATERAL aclexplode(c.relacl) a
-       WHERE c.oid = 'public.thoughts'::regclass
-         AND (a.grantee = 'openbrain_monitor'::regrole OR a.grantee = 0))
-     OR EXISTS (
-       SELECT 1 FROM pg_attribute att
-       CROSS JOIN LATERAL aclexplode(att.attacl) a
-       WHERE att.attrelid = 'public.thoughts'::regclass
-         AND (a.grantee = 'openbrain_monitor'::regrole OR a.grantee = 0)) THEN
+  -- Enumerate every non-system relation the monitor can touch, then subtract
+  -- the allowlist. Direct ACL checks are future-proof for new privilege types;
+  -- the effective checks cover PUBLIC/inherited semantics for today's types.
+  -- Membership is forbidden above, so no transitive role can hide an unknown
+  -- effective privilege from the direct scans.
+  SELECT string_agg(unexpected.qualified_name, ', ' ORDER BY unexpected.qualified_name)
+    INTO bad
+    FROM (
+      SELECT format('%I.%I', n.nspname, c.relname) AS qualified_name
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+        AND n.nspname <> 'information_schema'
+        AND n.nspname !~ '^pg_'
+        AND NOT (c.oid = ANY (allowed_relations))
+        AND (
+          c.relowner = monitor_oid
+          OR EXISTS (
+            SELECT 1
+            FROM aclexplode(c.relacl) a
+            WHERE a.grantee = monitor_oid OR a.grantee = 0
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM pg_attribute att
+            CROSS JOIN LATERAL aclexplode(att.attacl) a
+            WHERE att.attrelid = c.oid
+              AND (a.grantee = monitor_oid OR a.grantee = 0)
+          )
+          OR CASE
+            WHEN c.relkind = 'S' THEN
+              has_sequence_privilege(monitor_oid, c.oid, 'USAGE, SELECT, UPDATE')
+            ELSE
+              has_table_privilege(
+                monitor_oid,
+                c.oid,
+                'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+              )
+          END
+          OR (
+            c.relkind <> 'S'
+            AND has_any_column_privilege(
+              monitor_oid,
+              c.oid,
+              'SELECT, INSERT, UPDATE, REFERENCES'
+            )
+          )
+        )
+    ) unexpected;
+  IF bad IS NOT NULL THEN
     RAISE EXCEPTION
-      'grants assertion failed: public.thoughts has a direct grant (table- or '
-      'column-level) to openbrain_monitor or to PUBLIC. The edge-resident monitor '
-      'credential must never reach thought content.';
-  END IF;
-  -- …and no effective privilege either (catches routes the ACL scan cannot see).
-  IF has_table_privilege('openbrain_monitor', 'public.thoughts',
-       'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
-     OR has_any_column_privilege('openbrain_monitor', 'public.thoughts',
-       'SELECT, INSERT, UPDATE, REFERENCES') THEN
-    RAISE EXCEPTION
-      'grants assertion failed: openbrain_monitor has an effective privilege on '
-      'public.thoughts. The edge-resident monitor credential must never reach '
-      'thought content.';
+      'grants assertion failed: openbrain_monitor has a direct or effective '
+      'privilege on relation(s) outside its allowlist: %. The edge-resident '
+      'monitor credential must reach only its two observability relations.', bad;
   END IF;
 
-  -- (b) the two observability tables: SELECT present, and nothing but SELECT.
-  FOREACH tbl IN ARRAY ARRAY['public.funnel_access_log', 'public.mcp_auth_events'] LOOP
-    IF NOT has_table_privilege('openbrain_monitor', tbl, 'SELECT') THEN
+  -- The two allowlisted observability relations: SELECT present, and nothing
+  -- but SELECT. The same array powered the negative scan above.
+  FOREACH rel_oid IN ARRAY allowed_relations LOOP
+    SELECT format('%I.%I', n.nspname, c.relname) INTO relation_name
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.oid = rel_oid;
+
+    IF NOT has_table_privilege(monitor_oid, rel_oid, 'SELECT') THEN
       RAISE EXCEPTION
         'grants assertion failed: openbrain_monitor missing SELECT on % '
-        '(did 02-observability.sql run after the role was created?).', tbl;
+        '(did 02-observability.sql run after the role was created?).', relation_name;
     END IF;
-    IF has_table_privilege('openbrain_monitor', tbl,
+    IF has_table_privilege(monitor_oid, rel_oid,
          'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
-       OR has_table_privilege('openbrain_monitor', tbl, 'SELECT WITH GRANT OPTION') THEN
+       OR has_table_privilege(monitor_oid, rel_oid, 'SELECT WITH GRANT OPTION') THEN
       RAISE EXCEPTION
         'grants assertion failed: openbrain_monitor has an effective non-SELECT '
-        '(or grantable-SELECT) privilege on %; it must stay plain SELECT-only.', tbl;
+        '(or grantable-SELECT) privilege on %; it must stay plain SELECT-only.', relation_name;
     END IF;
     -- Direct entries to the monitor or PUBLIC that are anything other than a
     -- plain, non-grantable SELECT.
@@ -151,22 +205,22 @@ BEGIN
              ', ') INTO bad
       FROM pg_class c
       CROSS JOIN LATERAL aclexplode(c.relacl) a
-      WHERE c.oid = tbl::regclass
-        AND (a.grantee = 'openbrain_monitor'::regrole OR a.grantee = 0)
+      WHERE c.oid = rel_oid
+        AND (a.grantee = monitor_oid OR a.grantee = 0)
         AND (a.privilege_type <> 'SELECT' OR a.is_grantable);
     IF bad IS NOT NULL THEN
       RAISE EXCEPTION
         'grants assertion failed: % has direct grants beyond plain SELECT to '
-        'openbrain_monitor or PUBLIC (%) — the monitor must stay plain SELECT-only.', tbl, bad;
+        'openbrain_monitor or PUBLIC (%) — the monitor must stay plain SELECT-only.', relation_name, bad;
     END IF;
     IF EXISTS (
          SELECT 1 FROM pg_attribute att
          CROSS JOIN LATERAL aclexplode(att.attacl) a
-         WHERE att.attrelid = tbl::regclass
-           AND (a.grantee = 'openbrain_monitor'::regrole OR a.grantee = 0)) THEN
+         WHERE att.attrelid = rel_oid
+           AND (a.grantee = monitor_oid OR a.grantee = 0)) THEN
       RAISE EXCEPTION
         'grants assertion failed: % has column-level grants to openbrain_monitor '
-        'or PUBLIC — only a plain table-level SELECT is expected.', tbl;
+        'or PUBLIC — only a plain table-level SELECT is expected.', relation_name;
     END IF;
   END LOOP;
 END;

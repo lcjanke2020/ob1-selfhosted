@@ -77,9 +77,11 @@ services:
       - ../../db/00-roles.sh:/docker-entrypoint-initdb.d/00-roles.sh:ro
       - ../../db/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
       - ../../db/02-observability.sql:/docker-entrypoint-initdb.d/02-observability.sql:ro
-      - ../../db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/03-grants-assertion.sql:ro
       - ../../db/04-sessions.sql:/docker-entrypoint-initdb.d/04-sessions.sql:ro
       - ../../db/05-hybrid-search.sql:/docker-entrypoint-initdb.d/05-hybrid-search.sql:ro
+      # Keep the stable source filename, but run the catalog assertion last so
+      # later/future schemas are covered by its monitor relation allowlist.
+      - ../../db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro
     # Bind to localhost only by default; expose to the tailnet only via the
     # mcp service. If you want DBeaver/TablePlus to reach Postgres directly
     # via the tailnet, change this to "0.0.0.0:5432:5432" — Tailscale ACLs
