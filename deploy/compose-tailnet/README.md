@@ -179,7 +179,8 @@ threshold contracts.
 
 Optional: the SELECT-only role for the host-side funnel monitor follows the same shape —
 set `OPENBRAIN_MONITOR_PASSWORD` in `.env`, run `bash ../../scripts/upgrade-add-monitor-role.sh`,
-then re-apply `db/02-observability.sql` as above for its grants.
+then re-apply `db/02-observability.sql` as above for its grants and run
+`db/03-grants-assertion.sql` last to verify the completed catalog.
 
 The full `up -d` matters on the upgrade path: it creates services newly defined since the
 last deploy (e.g. `log-ingester`) as well as recreating changed ones.
@@ -195,7 +196,7 @@ docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
 ```
 
-A non-zero exit means a grant drifted. Prefer a targeted fix (e.g. `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). To re-sync wholesale, re-apply `01-schema.sql` → `02-observability.sql` → `03-grants-assertion.sql` **in order** — never `01` alone, since its REVOKE-all block strips observability grants until `02` restores them.
+A non-zero exit means a grant drifted. Prefer a targeted fix (e.g. `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). To re-sync wholesale, re-apply `01-schema.sql` → `02-observability.sql`, apply any pending later schema migrations (`04`, `05`, and future files), then run `03-grants-assertion.sql` **last** — never `01` alone, since its REVOKE-all block strips observability grants until `02` restores them.
 
 To retire the unused historical thought-search RPC without a full schema replay,
 run `DROP FUNCTION IF EXISTS match_thoughts(vector, double precision, integer, jsonb);`
