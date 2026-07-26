@@ -41,6 +41,12 @@ the server keeps them distinct from verified transport identity. See
 - **TOML front matter is the input format** to `session_capture`: a flat TOML document
   wrapped in `+++` delimiter lines (a `+++` before and after the TOML). Assemble it from
   the live working context and capture it — you do **not** need to keep it on disk.
+- **`raw_toml` is historical input, not canonical state.** `session_lookup` returns the
+  verbatim document supplied to the most recent `session_capture`, but it may differ
+  from current structured fields (for example, after `session_update_status`). Treat
+  the structured fields as authoritative and never use `raw_toml` as a recapture
+  template; assemble recapture TOML fresh from `session_lookup`'s current structured
+  record plus live context.
 - **Where the `id` lives between sessions.** With no file to hold it, the returned integer
   `id` still needs a home so a later capture *updates* the same row instead of minting a
   duplicate. The primary path is re-discovery: `session_lookup(branch="…")` or
@@ -211,7 +217,16 @@ title = "Benchmark: sliding-window vs token-bucket"
 1. Populate the front matter from the **live working context** — read `repo_url`,
    `branch`, `head` from the actual checkout (`git rev-parse`, `git branch --show-current`),
    `machine` / `working_dir` from the host, and the resumable `session_id` per *The
-   resumable handle* above — not from memory.
+   resumable handle* above — not from memory or a returned `raw_toml`.
+
+   A recapture (`id` present) is a full replacement of the authorable document and
+   artifact set, not a patch. `title` remains required. Apart from `session_id` and
+   `status`, which are preserved when omitted, omitted optional scalars become null,
+   omitted arrays become empty, and omitting all `[[artifacts]]` blocks deletes stored
+   artifacts. Re-send every field and artifact you intend to retain, taking stored
+   values from `session_lookup`'s structured record and updating them from live
+   context where applicable. **Omit `status` unless you are deliberately changing
+   lifecycle state.**
 2. Assemble the TOML in memory (no on-disk file needed).
 3. Call `session_capture(toml_text)`. It returns `{id, session_id, status, created, reembedded}`.
 4. **First capture only:** the front matter has no `id`, so the server **mints
@@ -242,6 +257,9 @@ title = "Benchmark: sliding-window vs token-bucket"
   - fuzzy ("the session where I chased the flaky invoice test") → `session_search(query=…)`,
     then `session_lookup` the best hit.
 - `session_lookup` *fetches* the stored record; it does not resume execution.
+- Read current state from the structured fields. The returned `raw_toml` is only the
+  verbatim input of the last capture, may lag later lifecycle updates, and is not a safe
+  recapture template.
 - **Read `resume_context` + `next_actions` + `blockers` before acting.** Reconstruct the
   working state from `repo_url` / `branch` / `head` rather than guessing.
 
@@ -286,8 +304,8 @@ was reconstructed from the session record.
 
 - Quick transitions (e.g. mark `done` after a PR merges, or `blocked` when stuck) →
   `session_update_status(id, status)`. Usable from any surface with no checkout; it writes
-  the new `status` straight to the canonical store and returns `{id, status}`. There is no
-  file to reconcile.
+  the new structured `status` straight to the canonical store and returns `{id, status}`.
+  It intentionally does not rewrite historical `raw_toml`. There is no file to reconcile.
 
 ## Honesty guardrails
 
@@ -307,6 +325,10 @@ These directly counter the "agent asserts success about its own state" failure p
 - Don't shove session data into `thoughts` (or free-form memories into sessions).
 - Don't mutate sessions with raw SQL against the `sessions` schema — go through
   `session_capture` / `session_update_status`.
+- Don't recapture a session's returned `raw_toml`; it is historical input and may differ
+  from current structured state. Build a fresh document, include the server-issued `id`,
+  re-send every field and artifact you intend to retain, and omit `status` unless
+  intentionally changing it.
 - Don't omit `id` when re-capturing (you'll mint a duplicate).
 - Don't stamp `session_id` from `CLAUDE_CODE_SESSION_ID` unchecked — confirm a
   `<session_id>.jsonl` transcript exists first (glob `~/.claude/projects/*/`); an id with no

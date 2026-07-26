@@ -46,6 +46,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
     UpstreamError,
     ValidationError,
   } = await import("./services.ts");
+  const { updateSessionStatus } = await import("./session_queries.ts");
 
   try {
     // ─── captureThoughtWithMetadata ───────────────────────────────────
@@ -507,6 +508,74 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           "No session found for id 42.",
         );
         assertEquals(deps.embedCalls.length, 0, "embed must not be called");
+      },
+    );
+
+    await t.step(
+      "session lifecycle status survives recapture when status is omitted",
+      async () => {
+        let storedStatus = "active";
+        let storedContentHash: string | null = null;
+        // SQL placeholders are 1-based: $17 = status; $28 = content_hash.
+        const pool = new FakePool((sql, params) => {
+          if (sql.includes("SELECT content_hash")) {
+            return { rows: [{ content_hash: storedContentHash }] };
+          }
+          if (sql.includes("INSERT INTO sessions.session")) {
+            assertEquals(params[16], "active");
+            storedStatus = params[16] as string;
+            storedContentHash = params[27] as string;
+            return {
+              rows: [{ id: 7n, session_id: null, status: storedStatus }],
+            };
+          }
+          if (sql.includes("SET status = $2::sessions.session_status")) {
+            storedStatus = params[1] as string;
+            return { rows: [{ id: 7n, status: storedStatus }] };
+          }
+          if (sql.includes("UPDATE sessions.session SET")) {
+            assertEquals(
+              sql.includes(
+                "status = COALESCE($17::sessions.session_status, sessions.session.status)",
+              ),
+              true,
+            );
+            assertEquals(params[16], null, "omitted status must remain null");
+            storedContentHash = params[27] as string;
+            return {
+              rows: [{ id: 7n, session_id: null, status: storedStatus }],
+            };
+          }
+          return undefined;
+        });
+        const deps = makeDeps();
+
+        const created = await captureSessionFromToml(
+          asPool(pool),
+          {
+            tomlText: 'title = "lifecycle"\nstatus = "active"',
+            auth: AUTH,
+          },
+          deps,
+        );
+        assertEquals(created.status, "active");
+
+        assertEquals(
+          await updateSessionStatus(asPool(pool), created.id, "done"),
+          { id: 7, status: "done" },
+        );
+
+        const recaptured = await captureSessionFromToml(
+          asPool(pool),
+          {
+            tomlText: 'id = 7\ntitle = "lifecycle"',
+            auth: AUTH,
+          },
+          deps,
+        );
+        assertEquals(recaptured.status, "done");
+        assertEquals(recaptured.reembedded, false);
+        assertEquals(deps.embedCalls.length, 1);
       },
     );
 

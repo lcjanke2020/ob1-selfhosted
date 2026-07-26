@@ -102,7 +102,9 @@ CREATE TABLE IF NOT EXISTS sessions.session (
   source            TEXT,
   source_node       TEXT,
 
-  -- canonical doc + change detection
+  -- Historical capture input + change detection. raw_toml is the verbatim
+  -- document from the last session_capture and may differ from current structured
+  -- fields (for example, after lifecycle tools); the columns above are canonical.
   raw_toml          TEXT,
   content_hash      TEXT,
 
