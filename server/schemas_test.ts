@@ -11,6 +11,7 @@ import {
   listThoughtsQuery,
   MAX_CONTENT_BYTES,
   MAX_PROVENANCE_VALUE_CHARS,
+  MAX_SEARCH_QUERY_BYTES,
   searchThoughtsBody,
   sessionCaptureBody,
   sessionIdParam,
@@ -139,6 +140,22 @@ Deno.test("search body: defaults applied", () => {
 
 Deno.test("search body: bounds enforced", () => {
   assertFalse(searchThoughtsBody.safeParse({ query: "" }).success);
+  assertFalse(searchThoughtsBody.safeParse({ query: "   " }).success);
+  assert(
+    searchThoughtsBody.safeParse({
+      query: "x".repeat(MAX_SEARCH_QUERY_BYTES),
+    }).success,
+  );
+  assertFalse(
+    searchThoughtsBody.safeParse({
+      query: "x".repeat(MAX_SEARCH_QUERY_BYTES + 1),
+    }).success,
+  );
+  assertFalse(
+    searchThoughtsBody.safeParse({
+      query: "é".repeat(MAX_SEARCH_QUERY_BYTES / 2 + 1),
+    }).success,
+  );
   assertFalse(searchThoughtsBody.safeParse({ query: "x", limit: 0 }).success);
   assertFalse(searchThoughtsBody.safeParse({ query: "x", limit: 101 }).success);
   assertFalse(

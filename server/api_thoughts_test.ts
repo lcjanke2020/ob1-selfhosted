@@ -254,6 +254,7 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
               similarity: "0.91",
               vector_rank: 1,
               lexical_rank: 1,
+              lexical_source_priority: 0,
             }],
           }
           : undefined
@@ -303,19 +304,20 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
         );
         assertEquals(res.status, 200);
         assertEquals(await res.json(), { results: [] });
-        assertEquals(capturedSql.includes("metadata @> $5::jsonb"), true);
+        assertEquals(capturedSql.includes("metadata @> $6::jsonb"), true);
         assertEquals(
-          capturedSql.includes("NOT (metadata @> $6::jsonb)"),
+          capturedSql.includes("NOT (metadata @> $7::jsonb)"),
           true,
         );
         assertEquals(
-          capturedSql.includes("NOT (metadata @> $7::jsonb)"),
+          capturedSql.includes("NOT (metadata @> $8::jsonb)"),
           true,
         );
         assertEquals(capturedParams.slice(1), [
           0.65,
           "release checklist",
           "release checklist",
+          true,
           JSON.stringify({
             provenance: {
               caller_asserted: { repo: "example/open-brain" },

@@ -168,9 +168,12 @@ docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain
 docker compose build mcp && docker compose up -d
 ```
 
-`05-hybrid-search.sql` backfills a stored text-search column and builds two
-regular GIN indexes. Those operations briefly block captures on a large corpus;
-apply it during a maintenance window before starting the hybrid-query server.
+`05-hybrid-search.sql` backfills a stored text-search column under an
+access-exclusive lock that is held through both regular GIN index builds until
+commit, blocking searches and captures for the migration's duration. Use a full
+application maintenance window on a large corpus, budget disk for the column
+plus both indexes, and apply it before starting the hybrid-query server. The
+updated server's boot probe refuses to start until both indexes exist.
 See [Hybrid thought search](../../docs/hybrid-search.md) for the index and
 threshold contracts.
 

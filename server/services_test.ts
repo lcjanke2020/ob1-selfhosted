@@ -13,6 +13,7 @@ import {
   makeDeps,
   makeEmbedDownDeps,
 } from "./api_test_support.ts";
+import { MAX_SEARCH_QUERY_BYTES } from "./schemas.ts";
 import { computeContentHash, parseSessionToml } from "./session_toml.ts";
 
 const ENV_KEYS = [
@@ -235,6 +236,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
                 similarity: 0.9,
                 vector_rank: 1,
                 lexical_rank: null,
+                lexical_source_priority: null,
               }],
             };
           }
@@ -253,6 +255,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           0.7,
           "find me",
           "find me",
+          true,
           50,
         ]);
         assertEquals(rows[0].rrf_score, 1 / 61);
@@ -296,6 +299,10 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         assertEquals(statements[1], "BEGIN");
         assertEquals(
           statements[2],
+          "SELECT set_config('hnsw.ef_search', $1::text, true)",
+        );
+        assertEquals(
+          statements[3],
           "SET LOCAL hnsw.iterative_scan = strict_order",
         );
         assertEquals(statements[statements.length - 1], "COMMIT");
@@ -304,6 +311,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           0.6,
           "release checklist",
           "release checklist",
+          true,
           JSON.stringify({
             provenance: {
               caller_asserted: {
@@ -320,16 +328,16 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           }),
           50,
         ]);
-        assertEquals(capturedSql.includes("metadata @> $5::jsonb"), true);
-        assertEquals(
-          capturedSql.includes("NOT (metadata @> $6::jsonb)"),
-          true,
-        );
+        assertEquals(capturedSql.includes("metadata @> $6::jsonb"), true);
         assertEquals(
           capturedSql.includes("NOT (metadata @> $7::jsonb)"),
           true,
         );
-        assertEquals(capturedSql.includes("LIMIT $8::int"), true);
+        assertEquals(
+          capturedSql.includes("NOT (metadata @> $8::jsonb)"),
+          true,
+        );
+        assertEquals(capturedSql.includes("LIMIT $9::int"), true);
         assertEquals(capturedSql.includes("match_thoughts"), false);
       },
     );
@@ -359,6 +367,12 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         assertEquals(statements.includes("BEGIN"), true);
         assertEquals(
           statements.includes(
+            "SELECT set_config('hnsw.ef_search', $1::text, true)",
+          ),
+          true,
+        );
+        assertEquals(
+          statements.includes(
             "SET LOCAL hnsw.iterative_scan = strict_order",
           ),
           true,
@@ -382,6 +396,26 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
             ),
           ValidationError,
           "filter must specify include or exclude",
+        );
+        assertEquals(deps.embedCalls, []);
+        assertEquals(pool.connectCalls, 0);
+      },
+    );
+
+    await t.step(
+      "thought search: direct callers reject oversized queries before embedding",
+      async () => {
+        const pool = new FakePool(() => undefined);
+        const deps = makeDeps();
+        await assertRejects(
+          () =>
+            searchThoughtsByQuery(
+              asPool(pool),
+              { query: "x".repeat(MAX_SEARCH_QUERY_BYTES + 1) },
+              deps,
+            ),
+          ValidationError,
+          "query must be at most",
         );
         assertEquals(deps.embedCalls, []);
         assertEquals(pool.connectCalls, 0);

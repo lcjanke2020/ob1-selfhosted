@@ -112,8 +112,12 @@ After a client restart, the connector should list **eleven tools**: `capture_tho
 ## Upgrading an existing database for hybrid search
 
 Postgres init files run only when the data directory is first created. Before
-deploying a server version that uses hybrid thought search, apply the idempotent
-lexical-search migration as the database owner:
+deploying a server version that uses hybrid thought search, verify pgvector is
+0.8.0 or newer with
+`SELECT extversion FROM pg_extension WHERE extname = 'vector';` and apply the
+idempotent lexical-search migration as the database owner. If the extension is
+older, update the pinned pgvector image/package and run
+`ALTER EXTENSION vector UPDATE;` before the migration:
 
 ```bash
 docker compose exec -T postgres \
@@ -123,9 +127,14 @@ docker compose build mcp
 docker compose up -d --no-deps mcp
 ```
 
-The migration backfills a stored `tsvector` and builds two regular GIN indexes,
-which briefly block captures on a large `thoughts` table. Use a maintenance
-window; re-running the file is safe. Details and query semantics are in
+The migration backfills a stored `tsvector` under an access-exclusive lock that
+is held through both regular GIN index builds until commit, blocking searches
+and captures for the migration's duration. Use a full application maintenance
+window on a large `thoughts` table and budget disk for the column plus both
+indexes.
+The updated server refuses to boot until both hybrid-search indexes exist, so
+apply the migration before recreating MCP. Re-running the file is safe. Details
+and query semantics are in
 [`docs/hybrid-search.md`](../../docs/hybrid-search.md).
 
 ## Common gotchas

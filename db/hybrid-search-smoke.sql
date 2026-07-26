@@ -30,6 +30,11 @@ CROSS JOIN LATERAL (
       'The search_thoughts_v2 symbol keeps underscores and a version suffix',
       vectors.far,
       '{"_ci_hybrid_search_fixture":true,"kind":"literal"}'::jsonb
+    ),
+    (
+      'foo -bar appears literally but the negated token must still exclude it',
+      vectors.far,
+      '{"_ci_hybrid_search_fixture":true,"kind":"negation"}'::jsonb
     )
 ) AS fixture(content, embedding, metadata);
 
@@ -47,6 +52,9 @@ DECLARE
   literal_count INTEGER;
   exact_token_vector_count INTEGER;
   hybrid_count INTEGER;
+  negation_leak_count INTEGER;
+  identifier_literal_enabled BOOLEAN;
+  pure_negative_disabled BOOLEAN;
 BEGIN
   SELECT is_generated INTO generated_kind
   FROM information_schema.columns
@@ -83,8 +91,52 @@ BEGIN
       )::vector
     ) >= 0.5;
 
-  WITH query_input AS (
+  -- The literal OR must not re-admit a row that web-search syntax excluded.
+  -- `foo -bar` has an indexable positive query tree, so this specifically
+  -- proves parsed negation disables only the literal branch while FTS remains.
+  WITH parsed_query AS (
+    SELECT websearch_to_tsquery('simple', 'foo -bar') AS ts_query
+  ),
+  query_input AS (
+    SELECT ts_query,
+           querytree(ts_query) NOT IN ('', 'T') AS has_indexable_query,
+           ts_query::text !~ '(^|[ (])!' AS use_literal_fallback
+    FROM parsed_query
+  )
+  SELECT count(*) INTO negation_leak_count
+  FROM thoughts
+  CROSS JOIN query_input
+  WHERE metadata @> '{"_ci_hybrid_search_fixture":true,"kind":"negation"}'::jsonb
+    AND query_input.has_indexable_query
+    AND (
+      content_tsv @@ query_input.ts_query
+      OR (
+        query_input.use_literal_fallback
+        AND content ILIKE '%' || 'foo -bar' || '%' ESCAPE '\'
+      )
+    );
+
+  -- An internal hyphen is an identifier token, not a parsed NOT operator.
+  -- Keep the literal path available for ticket IDs such as OPS-275.
+  SELECT
+    querytree(ts_query) NOT IN ('', 'T')
+      AND ts_query::text !~ '(^|[ (])!'
+  INTO identifier_literal_enabled
+  FROM (
     SELECT websearch_to_tsquery('simple', 'OPS-275') AS ts_query
+  ) AS parsed_query;
+
+  SELECT querytree(websearch_to_tsquery('simple', '-bar')) = 'T'
+  INTO pure_negative_disabled;
+
+  WITH parsed_query AS (
+    SELECT websearch_to_tsquery('simple', 'OPS-275') AS ts_query
+  ),
+  query_input AS (
+    SELECT ts_query,
+           querytree(ts_query) NOT IN ('', 'T') AS has_indexable_query,
+           ts_query::text !~ '(^|[ (])!' AS use_literal_fallback
+    FROM parsed_query
   ),
   vector_candidates AS MATERIALIZED (
     SELECT id,
@@ -115,17 +167,21 @@ BEGIN
            created_at
     FROM thoughts
     CROSS JOIN query_input
-    WHERE btrim('OPS-275') <> ''
+    WHERE query_input.has_indexable_query
       AND metadata @> '{"_ci_hybrid_search_fixture":true}'::jsonb
       AND (
         content_tsv @@ query_input.ts_query
-        OR content ILIKE '%' || 'OPS-275' || '%' ESCAPE '\'
+        OR (
+          query_input.use_literal_fallback
+          AND content ILIKE '%' || 'OPS-275' || '%' ESCAPE '\'
+        )
       )
     ORDER BY source_priority, lexical_score DESC, created_at DESC, id
     LIMIT 50
   ),
   lexical_hits AS (
     SELECT id,
+           source_priority AS lexical_source_priority,
            ROW_NUMBER() OVER (
              ORDER BY source_priority, lexical_score DESC, created_at DESC, id
            ) AS lexical_rank
@@ -134,7 +190,8 @@ BEGIN
   candidates AS (
     SELECT COALESCE(vector_hits.id, lexical_hits.id) AS id,
            vector_hits.vector_rank,
-           lexical_hits.lexical_rank
+           lexical_hits.lexical_rank,
+           lexical_hits.lexical_source_priority
     FROM vector_hits
     FULL OUTER JOIN lexical_hits USING (id)
   ),
@@ -146,7 +203,8 @@ BEGIN
              )::vector
            ) AS similarity,
            candidates.vector_rank,
-           candidates.lexical_rank
+           candidates.lexical_rank,
+           candidates.lexical_source_priority
     FROM candidates
     JOIN thoughts USING (id)
   )
@@ -160,6 +218,15 @@ BEGIN
   END IF;
   IF exact_token_vector_count <> 0 THEN
     RAISE EXCEPTION 'exact-token fixture unexpectedly passed vector threshold';
+  END IF;
+  IF negation_leak_count <> 0 THEN
+    RAISE EXCEPTION 'literal fallback re-admitted % negation-excluded rows', negation_leak_count;
+  END IF;
+  IF identifier_literal_enabled IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'hyphenated identifier unexpectedly disabled literal fallback';
+  END IF;
+  IF pure_negative_disabled IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'pure-negative query unexpectedly has an indexable lexical tree';
   END IF;
   IF hybrid_count <> 2 THEN
     RAISE EXCEPTION 'hybrid candidate union returned %, expected 2 rows', hybrid_count;
@@ -205,8 +272,14 @@ WHERE content ILIKE '%' || 'search\_thoughts\_v2' || '%' ESCAPE '\';
 -- Exact lexical-candidate shape from queries.ts: PostgreSQL may combine the
 -- two GIN indexes with a BitmapOr before sorting the bounded candidate set.
 EXPLAIN
-WITH query_input AS (
+WITH parsed_query AS (
   SELECT websearch_to_tsquery('simple', 'OPS-275') AS ts_query
+),
+query_input AS (
+  SELECT ts_query,
+         querytree(ts_query) NOT IN ('', 'T') AS has_indexable_query,
+         ts_query::text !~ '(^|[ (])!' AS use_literal_fallback
+  FROM parsed_query
 )
 SELECT id,
        CASE WHEN content_tsv @@ query_input.ts_query THEN 0 ELSE 1 END
@@ -215,10 +288,13 @@ SELECT id,
        created_at
 FROM thoughts
 CROSS JOIN query_input
-WHERE btrim('OPS-275') <> ''
+WHERE query_input.has_indexable_query
   AND (
     content_tsv @@ query_input.ts_query
-    OR content ILIKE '%' || 'OPS-275' || '%' ESCAPE '\'
+    OR (
+      query_input.use_literal_fallback
+      AND content ILIKE '%' || 'OPS-275' || '%' ESCAPE '\'
+    )
   )
 ORDER BY source_priority, lexical_score DESC, created_at DESC, id
 LIMIT 50;

@@ -53,7 +53,9 @@ try {
   await probeDbAtBoot(pool, `${DB_HOST}:${DB_PORT}`, {
     deadlineMs: DB_BOOT_PROBE_TIMEOUT_MS,
   });
-  console.log(`[db] postgres reachable at ${DB_HOST}:${DB_PORT}`);
+  console.log(
+    `[db] postgres reachable and hybrid-search schema ready at ${DB_HOST}:${DB_PORT}`,
+  );
 } catch (e) {
   console.error(e instanceof Error ? e.message : String(e));
   console.error(

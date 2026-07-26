@@ -19,6 +19,7 @@ const {
   DEFAULT_RRF_K,
   escapeLike,
   fuseHybridCandidates,
+  hasIndexableLiteralTrigram,
   MIN_HYBRID_CANDIDATES_PER_LEG,
   searchThoughts,
 } = await import("./queries.ts");
@@ -28,6 +29,7 @@ function candidate(
   vectorRank: number | null,
   lexicalRank: number | null,
   similarity: string | number | null = 0.5,
+  lexicalSourcePriority: number | null = lexicalRank === null ? null : 1,
 ): HybridCandidate {
   return {
     id,
@@ -37,6 +39,7 @@ function candidate(
     similarity,
     vector_rank: vectorRank,
     lexical_rank: lexicalRank,
+    lexical_source_priority: lexicalSourcePriority,
   };
 }
 
@@ -57,6 +60,17 @@ Deno.test("RRF fusion: cross-leg consensus ties A and C at the top", () => {
   assertEquals(fused[0].similarity, 0.91);
   assertEquals("vector_rank" in fused[0], false);
   assertEquals("lexical_rank" in fused[0], false);
+  assertEquals("lexical_source_priority" in fused[0], false);
+});
+
+Deno.test("RRF fusion: a true full-text hit wins an equal cross-leg rank", () => {
+  const fused = fuseHybridCandidates([
+    candidate("a-vector", 1, null),
+    candidate("z-full-text", null, 1, 0.1, 0),
+  ], 2);
+
+  assertEquals(fused.map((row) => row.id), ["z-full-text", "a-vector"]);
+  assertAlmostEquals(fused[0].rrf_score, fused[1].rrf_score);
 });
 
 Deno.test("RRF fusion: final limit and invalid numeric values are bounded", () => {
@@ -81,11 +95,22 @@ Deno.test("escapeLike: trigram fallback treats wildcard characters literally", (
   );
 });
 
+Deno.test("literal fallback: only indexable trigram patterns are admitted", () => {
+  assert(hasIndexableLiteralTrigram("OPS-275"));
+  assert(hasIndexableLiteralTrigram("search_thoughts_v2"));
+  assert(hasIndexableLiteralTrigram("猫猫猫"));
+  assertEquals(hasIndexableLiteralTrigram("ab"), false);
+  assertEquals(hasIndexableLiteralTrigram("a-b"), false);
+  assertEquals(hasIndexableLiteralTrigram("---"), false);
+});
+
 Deno.test("searchThoughts: emits bounded vector and lexical candidate legs", async () => {
   let capturedSql = "";
   let capturedParams: unknown[] = [];
+  const statements: string[] = [];
   const pool = new FakePool((sql, params) => {
-    if (!sql.includes("WITH query_input")) return undefined;
+    statements.push(sql.trim());
+    if (!sql.includes("WITH parsed_query")) return undefined;
     capturedSql = sql;
     capturedParams = params;
     return {
@@ -109,8 +134,17 @@ Deno.test("searchThoughts: emits bounded vector and lexical candidate legs", asy
     0.7,
     query,
     "OPS-275\\_search\\%\\\\path",
+    true,
     MIN_HYBRID_CANDIDATES_PER_LEG,
   ]);
+  assertEquals(statements.includes("BEGIN"), true);
+  assertEquals(
+    statements.includes(
+      "SELECT set_config('hnsw.ef_search', $1::text, true)",
+    ),
+    true,
+  );
+  assertEquals(statements[statements.length - 1], "COMMIT");
   assertStringIncludes(capturedSql, "ORDER BY embedding <=> $1::vector");
   assertStringIncludes(
     capturedSql,
@@ -120,8 +154,11 @@ Deno.test("searchThoughts: emits bounded vector and lexical candidate legs", asy
     capturedSql,
     "websearch_to_tsquery('simple', $3::text)",
   );
+  assertStringIncludes(capturedSql, "querytree(ts_query) NOT IN ('', 'T')");
+  assertStringIncludes(capturedSql, "ts_query::text !~ '(^|[ (])!'");
+  assertStringIncludes(capturedSql, "query_input.use_literal_fallback");
   assertStringIncludes(capturedSql, "content ILIKE '%' || $4::text || '%'");
-  assertStringIncludes(capturedSql, "LIMIT $5::int");
+  assertStringIncludes(capturedSql, "LIMIT $6::int");
   assertEquals(rows.map((row) => row.id), ["consensus", "lexical"]);
   assertEquals(rows[1].similarity, 0.12);
   assert(rows[1].rrf_score > 0, "lexical-only hit must survive fusion");
@@ -133,7 +170,7 @@ Deno.test("searchThoughts: one bound provenance predicate is applied to both leg
   const statements: string[] = [];
   const pool = new FakePool((sql, params) => {
     statements.push(sql.trim());
-    if (sql.includes("WITH query_input")) {
+    if (sql.includes("WITH parsed_query")) {
       capturedSql = sql;
       capturedParams = params;
       return { rows: [] };
@@ -153,6 +190,12 @@ Deno.test("searchThoughts: one bound provenance predicate is applied to both leg
 
   assertEquals(statements.includes("BEGIN"), true);
   assertEquals(
+    statements.includes(
+      "SELECT set_config('hnsw.ef_search', $1::text, true)",
+    ),
+    true,
+  );
+  assertEquals(
     statements.includes("SET LOCAL hnsw.iterative_scan = strict_order"),
     true,
   );
@@ -162,6 +205,7 @@ Deno.test("searchThoughts: one bound provenance predicate is applied to both leg
     0.5,
     "release checklist",
     "release checklist",
+    true,
     JSON.stringify({
       provenance: { caller_asserted: { repo: "example/open-brain" } },
     }),
@@ -170,10 +214,10 @@ Deno.test("searchThoughts: one bound provenance predicate is applied to both leg
     }),
     75,
   ]);
-  assertEquals(capturedSql.match(/metadata @> \$5::jsonb/g)?.length, 2);
+  assertEquals(capturedSql.match(/metadata @> \$6::jsonb/g)?.length, 2);
   assertEquals(
-    capturedSql.match(/NOT \(metadata @> \$6::jsonb\)/g)?.length,
+    capturedSql.match(/NOT \(metadata @> \$7::jsonb\)/g)?.length,
     2,
   );
-  assertStringIncludes(capturedSql, "LIMIT $7::int");
+  assertStringIncludes(capturedSql, "LIMIT $8::int");
 });

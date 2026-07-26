@@ -24,6 +24,7 @@ import {
   sessionLookupShape,
   sessionSearchShape,
   sessionUpdateStatusShape,
+  thoughtSearchQuerySchema,
 } from "./schemas.ts";
 import {
   captureSessionFromToml,
@@ -181,7 +182,7 @@ export function createMcpServer(
         "Search Open Brain memories by meaning and exact text. Read-only compatibility tool for ChatGPT-style search/fetch consumers.",
       annotations: { readOnlyHint: true },
       inputSchema: {
-        query: z.string().min(1).describe(
+        query: thoughtSearchQuerySchema.describe(
           "The search query to run against Open Brain",
         ),
       },
@@ -254,10 +255,11 @@ export function createMcpServer(
         if (!rows.length) return text(`No thoughts found matching "${query}".`);
         const lines = rows.map((t, i) => {
           const m = t.metadata || {};
+          const matchLabel = t.similarity < (threshold ?? 0.5)
+            ? "exact-text match"
+            : `${(t.similarity * 100).toFixed(1)}% semantic similarity`;
           const parts = [
-            `--- Result ${i + 1} (${
-              (t.similarity * 100).toFixed(1)
-            }% semantic similarity) ---`,
+            `--- Result ${i + 1} (${matchLabel}) ---`,
             `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
             `Type: ${m.type ?? "unknown"}`,
           ];

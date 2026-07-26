@@ -147,10 +147,14 @@ Hybrid thought search additionally requires the idempotent
 [`db/05-hybrid-search.sql`](../../../db/05-hybrid-search.sql) migration. Apply it
 as the database owner from this qube's local socket or the existing
 tailnet-restricted remote-admin path *before* updating the MCP service. Adding
-the stored `content_tsv` column backfills existing thoughts and the regular GIN
-index builds briefly block captures, so use a maintenance window on a large
-corpus. The migration also installs `pg_trgm`; the native Postgres package must
-include that contrib extension. See
+the stored `content_tsv` column backfills existing thoughts under an
+access-exclusive lock that is held through both regular GIN index builds until
+commit, blocking searches and captures for the migration's duration. Use a full
+application maintenance window on a large corpus and budget disk for the column
+plus both indexes. The updated app-side server refuses to boot until both
+indexes exist.
+The migration also installs `pg_trgm`; the native Postgres package must include
+that contrib extension. See
 [Hybrid thought search](../../../docs/hybrid-search.md) for the full contract.
 
 ## Template note

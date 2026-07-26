@@ -31,6 +31,7 @@ export type HybridCandidate = Omit<ThoughtMatch, "similarity" | "rrf_score"> & {
   similarity: string | number | null;
   vector_rank: string | number | bigint | null;
   lexical_rank: string | number | bigint | null;
+  lexical_source_priority: string | number | null;
 };
 
 function positiveRank(value: HybridCandidate["vector_rank"]): number | null {
@@ -48,7 +49,9 @@ function finiteNumber(value: string | number | null): number {
 // Production fusion is kept pure so the scale-free ranking contract can be
 // exercised hermetically. PostgreSQL returns only a bounded union of candidate
 // rows and their per-leg ranks; this helper computes RRF, sorts, and applies the
-// caller's final limit. ID is a neutral deterministic tie-break for equal RRF.
+// caller's final limit. A true full-text hit wins a cross-leg rank tie before
+// ID supplies the final deterministic ordering; otherwise an unrelated vector
+// row at rank N could beat an identifier hit at lexical rank N by UUID alone.
 export function fuseHybridCandidates(
   candidates: HybridCandidate[],
   limit: number,
@@ -62,22 +65,46 @@ export function fuseHybridCandidates(
     const lexicalRank = positiveRank(candidate.lexical_rank);
     const rrfScore = (vectorRank === null ? 0 : 1 / (safeK + vectorRank)) +
       (lexicalRank === null ? 0 : 1 / (safeK + lexicalRank));
-    const { vector_rank: _vectorRank, lexical_rank: _lexicalRank, ...thought } =
-      candidate;
+    const fullTextMatch = lexicalRank !== null &&
+      candidate.lexical_source_priority !== null &&
+      candidate.lexical_source_priority !== undefined &&
+      Number(candidate.lexical_source_priority) === 0;
+    const {
+      vector_rank: _vectorRank,
+      lexical_rank: _lexicalRank,
+      lexical_source_priority: _lexicalSourcePriority,
+      ...thought
+    } = candidate;
     return {
-      ...thought,
-      similarity: finiteNumber(candidate.similarity),
-      rrf_score: rrfScore,
+      thought: {
+        ...thought,
+        similarity: finiteNumber(candidate.similarity),
+        rrf_score: rrfScore,
+      },
+      fullTextMatch,
     };
-  }).filter((thought) => thought.rrf_score > 0)
-    .sort((a, b) => b.rrf_score - a.rrf_score || a.id.localeCompare(b.id))
-    .slice(0, safeLimit);
+  }).filter(({ thought }) => thought.rrf_score > 0)
+    .sort((a, b) =>
+      b.thought.rrf_score - a.thought.rrf_score ||
+      Number(b.fullTextMatch) - Number(a.fullTextMatch) ||
+      a.thought.id.localeCompare(b.thought.id)
+    )
+    .slice(0, safeLimit)
+    .map(({ thought }) => thought);
 }
 
 // Escape ILIKE wildcards so the trigram fallback matches the caller's query as
 // a literal substring, not a pattern. Backslash is the SQL ESCAPE character.
 export function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, (character) => `\\${character}`);
+}
+
+// A leading-and-trailing-wildcard pg_trgm search needs at least one complete
+// alphanumeric trigram. Short word fragments otherwise have no extractable
+// trigram and degenerate to a full-index scan. Punctuation splits words in
+// pg_trgm, so count a contiguous run rather than total query length.
+export function hasIndexableLiteralTrigram(value: string): boolean {
+  return /[\p{L}\p{N}]{3}/u.test(value);
 }
 
 function provenanceMetadataFragment(
@@ -126,8 +153,14 @@ export async function searchThoughts(
   const { query, embedding, limit = 10, threshold = 0.5, filter } = opts;
   const embStr = toVectorLiteral(embedding);
   const vectorConditions = [`1 - (embedding <=> $1::vector) >= $2`];
-  const lexicalConditions = [`btrim($3::text) <> ''`];
-  const params: unknown[] = [embStr, threshold, query, escapeLike(query)];
+  const lexicalConditions = [`query_input.has_indexable_query`];
+  const params: unknown[] = [
+    embStr,
+    threshold,
+    query,
+    escapeLike(query),
+    hasIndexableLiteralTrigram(query),
+  ];
   const filterConditions: string[] = [];
   appendThoughtSearchFilter(filterConditions, params, filter);
   vectorConditions.push(...filterConditions);
@@ -139,14 +172,24 @@ export async function searchThoughts(
   const client = await getClient(pool);
   let transactionOpen = false;
   try {
+    // hnsw.ef_search defaults to 40, which would silently cap an unfiltered
+    // vector leg below the documented minimum of 50 candidates. Scope the
+    // per-request depth to this transaction; set_config accepts a bound value
+    // where SET LOCAL cannot. db/search-filter-plan-smoke.sql exercises the
+    // same transaction-local settings against the deployed pgvector version.
+    await client.queryArray("BEGIN");
+    transactionOpen = true;
+    await client.queryArray(
+      "SELECT set_config('hnsw.ef_search', $1::text, true)",
+      [String(candidateLimit)],
+    );
+
     if (filter !== undefined) {
       // pgvector applies WHERE predicates after an approximate HNSW candidate
       // scan. Without an iterative scan, a metadata filter can discard the
       // initial candidate batch and return fewer than LIMIT even when eligible
       // rows remain. SET LOCAL keeps the fix scoped to this transaction so a
       // pooled connection cannot leak it into later unfiltered searches.
-      await client.queryArray("BEGIN");
-      transactionOpen = true;
       await client.queryArray(
         "SET LOCAL hnsw.iterative_scan = strict_order",
       );
@@ -154,11 +197,20 @@ export async function searchThoughts(
 
     // Each leg first takes a bounded, index-friendly candidate set. The outer
     // window functions rank those small sets without compromising the inner
-    // HNSW/GIN access paths. Literal matches sort behind true FTS hits and only
-    // fill the lexical candidate budget, matching upstream's fallback intent.
+    // HNSW/GIN access paths. Literal matches sort behind true FTS hits. The
+    // literal branch is disabled for parsed negation and patterns without an
+    // extractable trigram; unindexable/pure-negative FTS queries skip this leg
+    // rather than scanning the corpus.
     const result = await client.queryObject<HybridCandidate>(
-      `WITH query_input AS (
+      `WITH parsed_query AS (
          SELECT websearch_to_tsquery('simple', $3::text) AS ts_query
+       ),
+       query_input AS (
+         SELECT ts_query,
+                querytree(ts_query) NOT IN ('', 'T') AS has_indexable_query,
+                $5::boolean
+                  AND ts_query::text !~ '(^|[ (])!' AS use_literal_fallback
+         FROM parsed_query
        ),
        vector_candidates AS MATERIALIZED (
          SELECT id, embedding <=> $1::vector AS distance
@@ -183,13 +235,17 @@ export async function searchThoughts(
          WHERE ${lexicalConditions.join("\n           AND ")}
            AND (
              content_tsv @@ query_input.ts_query
-             OR content ILIKE '%' || $4::text || '%' ESCAPE '\\'
+             OR (
+               query_input.use_literal_fallback
+               AND content ILIKE '%' || $4::text || '%' ESCAPE '\\'
+             )
            )
          ORDER BY source_priority, lexical_score DESC, created_at DESC, id
          LIMIT $${candidateLimitParam}::int
        ),
        lexical_hits AS (
          SELECT id,
+                source_priority AS lexical_source_priority,
                 ROW_NUMBER() OVER (
                   ORDER BY source_priority, lexical_score DESC, created_at DESC, id
                 ) AS lexical_rank
@@ -198,14 +254,16 @@ export async function searchThoughts(
        candidates AS (
          SELECT COALESCE(vector_hits.id, lexical_hits.id) AS id,
                 vector_hits.vector_rank,
-                lexical_hits.lexical_rank
+                lexical_hits.lexical_rank,
+                lexical_hits.lexical_source_priority
          FROM vector_hits
          FULL OUTER JOIN lexical_hits USING (id)
        )
        SELECT thoughts.id, thoughts.content, thoughts.metadata,
               thoughts.created_at,
               1 - (thoughts.embedding <=> $1::vector) AS similarity,
-              candidates.vector_rank, candidates.lexical_rank
+              candidates.vector_rank, candidates.lexical_rank,
+              candidates.lexical_source_priority
        FROM candidates
        JOIN thoughts USING (id)`,
       params,

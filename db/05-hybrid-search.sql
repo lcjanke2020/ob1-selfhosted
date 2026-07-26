@@ -7,8 +7,11 @@
 -- identifiers such as OPS-275 and search_thoughts recognizable.
 --
 -- Idempotent for both fresh init and an existing database. Adding the stored
--- generated column and building the two regular GIN indexes take locks on
--- `thoughts`; apply during a capture maintenance window on a large corpus.
+-- generated column takes an ACCESS EXCLUSIVE lock that is held through both
+-- regular GIN index builds until this transaction commits, blocking reads and
+-- writes for the migration's duration. Apply during a full application
+-- maintenance window on a large corpus and budget disk for the stored tsvector
+-- plus both indexes.
 -- The lexical shape follows upstream Open Brain's enhanced-thoughts and
 -- text-search-trgm schema contributions (FSL-1.1-MIT); RRF itself lives in
 -- server/queries.ts.

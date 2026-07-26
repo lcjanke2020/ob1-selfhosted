@@ -142,10 +142,11 @@ predicate in both the vector and lexical candidate legs *before* either leg is
 ranked and fused. It emits no metadata predicate when `filter` is absent.
 
 pgvector applies residual predicates after an approximate HNSW candidate scan.
-Every filtered search therefore enables `hnsw.iterative_scan = strict_order`
-with `SET LOCAL` inside a transaction, allowing the vector leg to scan beyond
-an initial candidate batch that the provenance filter rejects. The setting
-reverts at commit or rollback instead of leaking through the connection pool.
+Every search raises transaction-local `hnsw.ef_search` to the hybrid candidate
+depth (at least 50), and every filtered search additionally enables
+`hnsw.iterative_scan = strict_order`, allowing the vector leg to scan beyond an
+initial candidate batch that the provenance filter rejects. Both settings
+revert at commit or rollback instead of leaking through the connection pool.
 The lexical leg applies the same filter before its full-text/trigram candidate
 limit, so a row excluded from one retrieval method cannot re-enter through the
 other. Iterative HNSW scans require pgvector 0.8.0 or newer. See

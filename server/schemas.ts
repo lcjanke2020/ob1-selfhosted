@@ -17,6 +17,13 @@ import { SESSION_ORDER_BY, SESSION_STATUSES } from "./session_toml.ts";
 // the strict bound is measured in UTF-8 bytes, not JS UTF-16 code units.
 export const MAX_CONTENT_BYTES = 100_000;
 
+// Search text fans out to both the embedding backend and PostgreSQL's text
+// query parser. Keep it comfortably below PostgreSQL's tsquery complexity
+// limits so an authenticated caller cannot turn a search into an oversized
+// parser/planner workload. This is a UTF-8 byte bound for the same reason as
+// captured content: request cost follows bytes, not JavaScript code units.
+export const MAX_SEARCH_QUERY_BYTES = 8 * 1024;
+
 // Module-level shared TextEncoder so the byte-cap refine doesn't
 // allocate a fresh instance on every capture call.
 const UTF8_ENCODER = new TextEncoder();
@@ -32,14 +39,17 @@ const UTF8_ENCODER = new TextEncoder();
 // enforces the byte-accurate bound for inputs that pass the code-unit
 // pre-check (which would otherwise slip ~4× over budget for pure-non-ASCII
 // content under just `.max`).
-export function boundedUtf8String(field: string) {
+export function boundedUtf8String(
+  field: string,
+  maxBytes = MAX_CONTENT_BYTES,
+) {
   return z
     .string()
     .min(1)
-    .max(MAX_CONTENT_BYTES)
+    .max(maxBytes, `${field} must be at most ${maxBytes} UTF-8 bytes`)
     .refine(
-      (s) => UTF8_ENCODER.encode(s).length <= MAX_CONTENT_BYTES,
-      { message: `${field} must be at most ${MAX_CONTENT_BYTES} UTF-8 bytes` },
+      (s) => UTF8_ENCODER.encode(s).length <= maxBytes,
+      { message: `${field} must be at most ${maxBytes} UTF-8 bytes` },
     );
 }
 
@@ -131,8 +141,15 @@ export const captureThoughtShape = {
   ),
 };
 
+export const thoughtSearchQuerySchema = boundedUtf8String(
+  "query",
+  MAX_SEARCH_QUERY_BYTES,
+).refine((query) => query.trim().length > 0, {
+  message: "query must not be empty",
+});
+
 export const searchThoughtsShape = {
-  query: z.string().min(1).describe(
+  query: thoughtSearchQuerySchema.describe(
     "Natural-language or literal text to search for. The lexical leg supports quoted phrases, OR, and -term web-search syntax.",
   ),
   limit: z.number().int().min(1).max(100).optional().default(10),
