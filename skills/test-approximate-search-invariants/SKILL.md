@@ -159,5 +159,7 @@ Before accepting the test, confirm:
 
 ## Related
 
-This procedure complements ordinary service and SQL integration testing. It does not
-replace engine-specific tuning guidance or performance benchmarking.
+This procedure complements ordinary service and SQL integration testing. When a
+hybrid lexical leg includes a literal or trigram fallback, combine it with
+[`review-hybrid-search-fallbacks`](../review-hybrid-search-fallbacks/SKILL.md). Neither
+procedure replaces engine-specific tuning guidance or performance benchmarking.

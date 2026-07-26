@@ -149,6 +149,8 @@ sequenceDiagram
 ├── scripts/                   Daily observability summary, existing-deployment upgrades
 ├── skills/                    Agent-facing usage and testing procedures
 │   ├── session-tracker/       How to use the session_* tools
+│   ├── review-hybrid-search-fallbacks/
+│   │                          Lexical fallback semantics and planner review
 │   └── test-approximate-search-invariants/
 │                              Stable CI boundaries for ANN search behavior
 ├── docs/                      Threat model (one page), security model, Funnel-as-MCP-

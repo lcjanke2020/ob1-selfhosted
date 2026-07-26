@@ -74,8 +74,11 @@ The production query boundary is [`server/queries.ts`](../server/queries.ts).
 [`db/hybrid-search-smoke.sql`](../db/hybrid-search-smoke.sql) exercises exact-reference
 and hybrid-fusion behavior, while
 [`db/search-filter-plan-smoke.sql`](../db/search-filter-plan-smoke.sql) provides the
-larger filtered-ANN and planner fixture. When adding approximate-index assertions or
-changing search settings, follow the deterministic-versus-statistical split in
+larger filtered-ANN and planner fixture. When changing full-text/literal composition,
+fallback gating, or lexical candidate plans, follow
+[`review-hybrid-search-fallbacks`](../skills/review-hybrid-search-fallbacks/SKILL.md).
+When adding approximate-index assertions or changing search settings, follow the
+deterministic-versus-statistical split in
 [`test-approximate-search-invariants`](../skills/test-approximate-search-invariants/SKILL.md).
 
 ## Database migration
