@@ -354,6 +354,96 @@ jobs:
           }
           echo "late 31-day-old row summarized before deletion; re-run idempotent"
 
+      - name: Smoke test — concurrent insert survives the rollup/retention transaction
+        run: |
+          # The snapshot race behind summarize_funnel.sql's REPEATABLE READ:
+          # under default READ COMMITTED, a raw row committed while the
+          # rollup transaction is mid-flight is invisible to the aggregation
+          # snapshot but visible to the later retention DELETE — deleted
+          # without ever being summarized. Choreography: hold a FOR UPDATE
+          # lock on the summary row the rollup's upsert will conflict on
+          # (so the rollup blocks AFTER taking its snapshot), commit a
+          # concurrent raw row for the same day, release the lock, and
+          # assert the concurrent row survived for a later run.
+          PSQL_SUPER=(docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            -v ON_ERROR_STOP=1)
+
+          # Seed: a delete-eligible raw row + its summary row (lock target).
+          # tailnet/2xx keeps this disjoint from the previous step's rows.
+          "${PSQL_SUPER[@]}" -c \
+            "INSERT INTO funnel_access_log (ts, socket, status, user_agent)
+             VALUES (now() - interval '31 days', 'tailnet', 200, 'rr-seed');
+             INSERT INTO funnel_access_summary
+               (day, socket, status_class, request_count, unique_ips,
+                top_paths, top_user_agents, computed_at)
+             VALUES ((now() AT TIME ZONE 'UTC')::date - 31, 'tailnet', '2xx',
+                     0, 0, '[]'::jsonb, '[]'::jsonb, now())" >/dev/null
+
+          # Locker session: take the row lock, then hold the transaction
+          # open reading from a FIFO until we release it.
+          ctl=$(mktemp -u); mkfifo "$ctl"
+          { echo "BEGIN;
+                  SELECT 1 FROM funnel_access_summary
+                  WHERE day = (now() AT TIME ZONE 'UTC')::date - 31
+                    AND socket = 'tailnet' AND status_class = '2xx'
+                  FOR UPDATE;"; cat "$ctl"; } | \
+            docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+              psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+              -v ON_ERROR_STOP=1 >/dev/null &
+          locker=$!
+
+          # Wait until the locker's transaction holds the lock (its backend
+          # parks idle-in-transaction once FOR UPDATE returns).
+          n=0
+          for i in $(seq 1 30); do
+            n=$("${PSQL_SUPER[@]}" -tAc \
+              "SELECT COUNT(*) FROM pg_stat_activity WHERE state = 'idle in transaction'")
+            [ "$n" -ge 1 ] && break; sleep 1
+          done
+          [ "$n" -ge 1 ] || { echo "::error::locker never took the lock"; exit 1; }
+
+          # Rollup in the background: takes its snapshot, computes, then
+          # blocks on the locked summary row.
+          docker exec -i -e PGPASSWORD="$OPENBRAIN_APP_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_app -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/summarize_funnel.sql >/dev/null &
+          rollup=$!
+
+          # Wait until the rollup is genuinely lock-blocked.
+          b=0
+          for i in $(seq 1 30); do
+            b=$("${PSQL_SUPER[@]}" -tAc \
+              "SELECT COUNT(*) FROM pg_stat_activity
+               WHERE wait_event_type = 'Lock' AND query LIKE '%funnel_access_summary%'")
+            [ "$b" -ge 1 ] && break; sleep 1
+          done
+          [ "$b" -ge 1 ] || { echo "::error::rollup never blocked on the summary lock"; exit 1; }
+
+          # The concurrent row: commits after the rollup's snapshot.
+          "${PSQL_SUPER[@]}" -c \
+            "INSERT INTO funnel_access_log (ts, socket, status, user_agent)
+             VALUES (now() - interval '31 days', 'tailnet', 200, 'rr-concurrent')" >/dev/null
+
+          # Release the lock; let the rollup complete.
+          echo "COMMIT;" > "$ctl"
+          wait "$rollup" || { echo "::error::rollup transaction failed"; exit 1; }
+          wait "$locker" || true
+          rm -f "$ctl"
+
+          verdict=$("${PSQL_SUPER[@]}" -tAc \
+            "SELECT
+               (SELECT COUNT(*) FROM funnel_access_log WHERE user_agent = 'rr-concurrent'),
+               (SELECT COUNT(*) FROM funnel_access_log WHERE user_agent = 'rr-seed'),
+               (SELECT request_count FROM funnel_access_summary
+                 WHERE day = (now() AT TIME ZONE 'UTC')::date - 31
+                   AND socket = 'tailnet' AND status_class = '2xx')")
+          test "$verdict" = "1|0|1" || {
+            echo "::error::concurrent row lost to the snapshot race (concurrent|seed|count=$verdict, want 1|0|1)"
+            exit 1
+          }
+          echo "concurrent insert survived the rollup transaction; seed summarized+retired (1|0|1)"
+
       - name: Container logs on failure
         if: failure()
         run: docker logs pgci || true

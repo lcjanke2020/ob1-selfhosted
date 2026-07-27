@@ -28,7 +28,18 @@
 -- idempotency; a midnight-aligned cron (e.g. 00:30) still lands yesterday
 -- in the summary on its first eligible run.
 
-BEGIN;
+-- REPEATABLE READ so the rollup INSERT and the retention DELETEs share one
+-- snapshot. Under the default READ COMMITTED, each statement takes its own
+-- snapshot: a raw row committed between the aggregation and the delete is
+-- invisible to the rollup yet visible to — and removed by — the delete,
+-- silently dropping it from the summary (reproduced deterministically in
+-- review). With a single transaction snapshot, a concurrently committed row
+-- is invisible to both statements: it survives untouched and is handled by
+-- a later run. Serialization failures are a non-issue here — the ingester
+-- only inserts, and this job is the sole writer of summary rows and sole
+-- deleter of raw rows; if one ever fires, ON_ERROR_STOP aborts cleanly and
+-- the next scheduled run covers the same window (idempotent by design).
+BEGIN ISOLATION LEVEL REPEATABLE READ;
 
 -- ---------- 1. Roll up raw rows into the summary table -------------------
 -- ON CONFLICT means a re-run for the same day overwrites cleanly. The
