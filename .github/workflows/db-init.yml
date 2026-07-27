@@ -444,6 +444,27 @@ jobs:
           }
           echo "concurrent insert survived the rollup transaction; seed summarized+retired (1|0|1)"
 
+          # Eventual accounting: the survivor's day is already finalized, so
+          # the next run must MERGE it into the existing summary — the
+          # cumulative total counts both rows — and retire the raw row.
+          # (A replace-style recompute would shrink the total back to 1:
+          # the seed's raw evidence is gone.)
+          docker exec -i -e PGPASSWORD="$OPENBRAIN_APP_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_app -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/summarize_funnel.sql >/dev/null
+          verdict2=$("${PSQL_SUPER[@]}" -tAc \
+            "SELECT
+               (SELECT COUNT(*) FROM funnel_access_log
+                 WHERE user_agent IN ('rr-seed', 'rr-concurrent')),
+               (SELECT request_count FROM funnel_access_summary
+                 WHERE day = (now() AT TIME ZONE 'UTC')::date - 31
+                   AND socket = 'tailnet' AND status_class = '2xx')")
+          test "$verdict2" = "0|2" || {
+            echo "::error::survivor was not merged into the finalized summary (raw|count=$verdict2, want 0|2)"
+            exit 1
+          }
+          echo "next run merged the survivor additively into the finalized day (0|2)"
+
       - name: Container logs on failure
         if: failure()
         run: docker logs pgci || true
