@@ -13,7 +13,7 @@
 //   2. The patched stack class directly, for the recovery-and-waiter
 //      semantics a dead TCP port can't exercise deterministically.
 
-import { assert, assertEquals, assertRejects } from "jsr:@std/assert@1";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import { Pool } from "postgres";
 import { getClient } from "./db_pool.ts";
 import { DeferredAccessStack } from "./postgres_deferred_patched.ts";

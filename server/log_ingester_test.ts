@@ -13,11 +13,14 @@
 // share the single cached module instance, so the override below must
 // run BEFORE the first dynamic import — hence module scope, not a
 // per-test env dance. Tests use distinct log-file basenames because the
-// cursor filename derives from the basename alone.
+// cursor filename derives from the basename alone. The final
+// "cleanup" test below removes the temp dir and restores the env var
+// (Deno.test bodies run in declaration order, so it runs last).
+const ORIG_CURSOR_DIR = Deno.env.get("INGESTER_CURSOR_DIR");
 const CURSOR_TMP = await Deno.makeTempDir({ prefix: "log_ingester_cursors_" });
 Deno.env.set("INGESTER_CURSOR_DIR", CURSOR_TMP);
 
-import { assert, assertEquals, assertNotEquals } from "jsr:@std/assert@1";
+import { assert, assertEquals, assertNotEquals } from "@std/assert";
 
 const ENV_KEYS = [
   "DB_HOST",
@@ -249,4 +252,17 @@ Deno.test("cursor files: JSON round-trip, legacy offset-only, and garbage fallba
       ino: 7,
     });
   });
+});
+
+// Declared last so it runs after every test above: drop the shared
+// module-scope cursor temp dir and restore INGESTER_CURSOR_DIR to
+// whatever the process had before this file's module setup ran.
+Deno.test("cleanup: remove shared cursor temp dir and restore env", async () => {
+  try {
+    await Deno.remove(CURSOR_TMP, { recursive: true });
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+  if (ORIG_CURSOR_DIR === undefined) Deno.env.delete("INGESTER_CURSOR_DIR");
+  else Deno.env.set("INGESTER_CURSOR_DIR", ORIG_CURSOR_DIR);
 });

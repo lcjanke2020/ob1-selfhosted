@@ -298,35 +298,38 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
       },
     );
 
-    await t.step("Bearer: expired token → HTTP 401 with challenge", async () => {
-      // The PR55-AUTH-001 regression pin: an expired (locally
-      // signed RS256) token must be rejected at the TRANSPORT level —
-      // HTTP 401 with the WWW-Authenticate challenge — not HTTP 200 with
-      // only a JSON-RPC error body. OAuth-capable MCP clients key token
-      // refresh off the 401; suppressing it left the claude.ai connector
-      // disconnected after expiry until a human reauthenticated.
-      // Sign with an `exp` 1 hour in the past.
-      const past = Math.floor(Date.now() / 1000) - 3600;
-      const token = await new SignJWT({ sub: "user" })
-        .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-        .setIssuer(ISSUER)
-        .setAudience(AUDIENCE)
-        .setIssuedAt(past - 7200)
-        .setExpirationTime(past)
-        .sign(privateKey as CryptoKey);
-      const res = await app.request("/", {
-        headers: { "authorization": `Bearer ${token}` },
-      });
-      await assertUnauthorized401(res, null);
-      // The challenge must survive on the rejected-credential path so the
-      // client can rediscover the AS and refresh.
-      const wa = res.headers.get("www-authenticate");
-      assertNotEquals(wa, null);
-      assertMatch(
-        wa!,
-        /resource_metadata=".*\/\.well-known\/oauth-protected-resource\/mcp"/,
-      );
-    });
+    await t.step(
+      "Bearer: expired token → HTTP 401 with challenge",
+      async () => {
+        // The PR55-AUTH-001 regression pin: an expired (locally
+        // signed RS256) token must be rejected at the TRANSPORT level —
+        // HTTP 401 with the WWW-Authenticate challenge — not HTTP 200 with
+        // only a JSON-RPC error body. OAuth-capable MCP clients key token
+        // refresh off the 401; suppressing it left the claude.ai connector
+        // disconnected after expiry until a human reauthenticated.
+        // Sign with an `exp` 1 hour in the past.
+        const past = Math.floor(Date.now() / 1000) - 3600;
+        const token = await new SignJWT({ sub: "user" })
+          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
+          .setIssuer(ISSUER)
+          .setAudience(AUDIENCE)
+          .setIssuedAt(past - 7200)
+          .setExpirationTime(past)
+          .sign(privateKey as CryptoKey);
+        const res = await app.request("/", {
+          headers: { "authorization": `Bearer ${token}` },
+        });
+        await assertUnauthorized401(res, null);
+        // The challenge must survive on the rejected-credential path so the
+        // client can rediscover the AS and refresh.
+        const wa = res.headers.get("www-authenticate");
+        assertNotEquals(wa, null);
+        assertMatch(
+          wa!,
+          /resource_metadata=".*\/\.well-known\/oauth-protected-resource\/mcp"/,
+        );
+      },
+    );
 
     await t.step("Bearer: wrong issuer → 401", async () => {
       const token = await signToken({ issuer: WRONG_ISSUER });
