@@ -27,6 +27,17 @@
 // requests: every failed attempt evicts the dead client, so the pool is left
 // clean and the next borrow reconnects.
 //
+// That "next borrow reconnects" guarantee additionally depends on the
+// patched `DeferredAccessStack` (postgres_deferred_patched.ts, wired via
+// the deno.json import map): the stock v0.19.3 stack LEAKS the pool slot
+// when the reconnect inside `pop()` throws — during a sustained outage
+// each failed borrow permanently shrank the pool until every borrower
+// parked forever in the wait queue, surviving even the database's return
+// (audit finding PR55-SRV-001; bit the size-2 lazy auth-audit and
+// log-ingester pools after two failed first borrows). With the patch the
+// slot is restored on initialization failure, so borrows fail fast during
+// the outage and capacity is intact when PostgreSQL comes back.
+//
 // Validate-on-borrow (rather than retry-the-caller's-query) is deliberate:
 // the recovery happens on a throwaway probe, so callers never risk a
 // mutation running twice. The extra round-trip is negligible against a
