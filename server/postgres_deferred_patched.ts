@@ -3,11 +3,13 @@
 // Source: https://deno.land/x/postgres@v0.19.3/utils/deferred.ts
 // (denodrivers/postgres). Wired in via the import-map entry in deno.json
 // that remaps that exact URL to this file, so the driver's own `pool.ts`
-// import resolves here. Keep this file byte-identical to upstream EXCEPT
-// the marked patch in `DeferredAccessStack.pop()`; if the pinned driver
-// version changes, re-copy the new upstream file and re-apply the patch
-// (or drop both the file and the import-map entry if upstream has fixed
-// it).
+// import resolves here. The IMPLEMENTATION (everything from the first
+// `export` down) is byte-identical to upstream except the marked patch
+// in `DeferredAccessStack.pop()` — keep it that way, and diff against
+// upstream from the first export, since this header block is local. If
+// the pinned driver version changes, re-copy the new upstream file and
+// re-apply the patch (or drop both the file and the import-map entry if
+// upstream has fixed it).
 //
 // Upstream license (denodrivers/postgres @ v0.19.3, reproduced in full as
 // the MIT terms require for copies and substantial portions):

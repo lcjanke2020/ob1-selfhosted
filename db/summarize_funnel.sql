@@ -42,14 +42,20 @@
 --      non-finalized: exact for days whose raw is complete, but a day
 --      the old revision's instant-based retention partially purged gets
 --      recomputed from its remainder once — an undercount. When
---      upgrading such a database, either accept that one-time boundary
---      undercount or first mark past-horizon legacy summaries finalized:
+--      upgrading such a database, first mark strictly-past-horizon
+--      legacy summaries finalized:
 --        UPDATE funnel_access_summary
 --        SET computed_at = GREATEST(computed_at,
 --              ((day + 31)::timestamp AT TIME ZONE 'UTC'))
 --        WHERE day < (now() AT TIME ZONE 'UTC')::date - 30;
---      which routes their late rows onto the additive merge path
---      instead.)
+--      That protects those days from late-row replacement (their late
+--      rows take the additive merge path) — but it deliberately does NOT
+--      cover the boundary day (day = today-30 at cutover), whose
+--      inaccuracy is inherent to the upgrade: its surviving raw rows are
+--      already counted in the legacy summary, so marking it finalized
+--      would double-count them on merge, while leaving it non-finalized
+--      recomputes it from the partial remainder once. Accept the
+--      one-time boundary-day imprecision either way.)
 --   3. Raw rows appearing for an already-FINALIZED day — ingester
 --      backlog, restored data, or a row whose committing transaction was
 --      invisible to the finalizing snapshot — are MERGED additively into
