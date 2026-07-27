@@ -12,7 +12,10 @@ FROM denoland/deno:2.9.4
 WORKDIR /app
 
 # --frozen: see server/Dockerfile — ship exactly the lockfile-resolved graph.
-COPY deno.json deno.lock ./
+# postgres_deferred_patched.ts rides in this layer because the import map
+# remaps the driver's utils/deferred.ts to it — `deno install` fails to
+# resolve the graph without the file present (see server/Dockerfile).
+COPY deno.json deno.lock postgres_deferred_patched.ts ./
 RUN deno install --frozen
 
 # Copy ALL .ts files so cross-module imports resolve at build time.

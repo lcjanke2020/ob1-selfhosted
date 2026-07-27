@@ -73,3 +73,26 @@ jobs:
       - name: Run check-allow-env
         working-directory: server
         run: deno task check-allow-env
+
+  image-build:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head safely
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          fetch-depth: 1
+
+      # `deno task test` runs from the source tree and can't see Dockerfile
+      # layer-ordering mistakes: the import map references local modules
+      # (postgres_deferred_patched.ts), and `deno install --frozen` runs in
+      # an early COPY layer — if a referenced local file isn't in that
+      # layer, only an actual image build fails. Build both images (no
+      # push, no run) so copy-order drift is a PR failure, not a deploy
+      # failure.
+      - name: Build mcp image
+        run: docker build -f server/Dockerfile server/
+
+      - name: Build ingester image
+        run: docker build -f server/Dockerfile.ingester server/
