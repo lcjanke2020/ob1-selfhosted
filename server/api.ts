@@ -74,12 +74,12 @@ function errorJson(
   );
 }
 
-// requireAuth speaks MCP on auth failure: tried-but-invalid credentials get
-// HTTP 200 + a JSON-RPC error envelope, which keeps long-lived MCP
-// transports alive but is a footgun for REST scripts checking `res.ok`. This
-// wrapper runs OUTSIDE requireAuth and rewrites any auth-failure response to
-// a plain 401 JSON error. The auth decision, audit rows, WWW-Authenticate,
-// and Cache-Control still come from requireAuth — only the transport shape
+// requireAuth speaks MCP on auth failure: HTTP 401 with a JSON-RPC error
+// envelope body (id-correlated for MCP clients), which is the wrong body
+// shape for REST scripts parsing `{error: {code, message}}`. This wrapper
+// runs OUTSIDE requireAuth and rewrites any auth-failure response to a
+// plain 401 JSON error. The auth decision, audit rows, WWW-Authenticate,
+// and Cache-Control still come from requireAuth — only the body shape
 // changes. Detection: requireAuth sets `door` on success, so an unset door
 // after next() means it short-circuited with a failure response.
 const restifyAuthFailure: MiddlewareHandler<{ Variables: AppVariables }> =

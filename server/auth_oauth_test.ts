@@ -4,17 +4,14 @@
 // matrix an early review asked to bottle, plus the JWT failure modes (expired,
 // wrong issuer/audience, malformed). Run with `deno task test`.
 //
-// auth failure shape depends on whether a credential
-// was offered:
-//   - Creds tried but invalid (invalid_credentials / invalid_brain_key /
-//     token_validation_failed) → HTTP 200 with a JSON-RPC 2.0 error
-//     envelope (code -32001, single neutral message) so strict MCP hosts
-//     don't tear an established transport down (and avoids the credential-status side-channel).
-//   - No credential offered at all (missing_credentials) → HTTP 401 with
-//     the same envelope body. Spec-compliant OAuth-discovery signal for
-//     claude.ai's MCP connector validator on the pre-OAuth probe
-//     (missing-credentials 401). WWW-Authenticate is emitted on both shapes so OAuth-
-//     aware clients can discover the AS.
+// auth failure shape is uniform since audit finding PR55-AUTH-001: every
+// rejection — missing, invalid, unverifiable, or expired credentials —
+// returns HTTP 401 with a JSON-RPC 2.0 error envelope body (code -32001,
+// single neutral message), plus the WWW-Authenticate discovery payload
+// when OAuth is enabled. The transport-level 401 is the signal
+// OAuth-capable MCP clients key credential refresh / re-authorization
+// off; an earlier revision kept tried-but-rejected credentials at
+// HTTP 200 and stranded the claude.ai connector after token expiry.
 //
 // Strategy: AUTH0_JWKS_URI is set to a fake https URL that never resolves
 // to a real host; we override `globalThis.fetch` to intercept the JWKS
@@ -63,38 +60,19 @@ function makeApp(mw: MiddlewareHandler) {
   return app;
 }
 
-// Asserts the JSON-RPC unauthorized envelope (HTTP 200) returned when a credential
-// was offered but rejected. Body is JSON-RPC 2.0 with error.code -32001.
-async function assertUnauthorizedEnvelope(
-  res: Response,
-  expectedId: string | number | null,
-): Promise<void> {
-  await assertEnvelopeBody(res, 200, expectedId);
-}
-
-// Asserts the missing-credentials shape (HTTP 401, same body as
-// the JSON-RPC envelope). For Pattern B, WWW-Authenticate must also be
-// present — checked at the call site, not here, since some subtests
-// pair this with extra header assertions.
+// Asserts the uniform auth-failure shape: HTTP 401 with the JSON-RPC
+// error envelope body. Since PR55-AUTH-001 every rejection reason shares this
+// transport status; the WWW-Authenticate challenge is asserted at the
+// call sites that pin the discovery payload, since some subtests pair
+// this with extra header assertions.
 async function assertUnauthorized401(
   res: Response,
   expectedId: string | number | null,
 ): Promise<void> {
-  await assertEnvelopeBody(res, 401, expectedId);
-}
-
-// Shared body shape. The body, content-type, and cache-control are
-// identical across the 200 envelope and the 401 envelope;
-// only the HTTP status differs.
-async function assertEnvelopeBody(
-  res: Response,
-  expectedStatus: 200 | 401,
-  expectedId: string | number | null,
-): Promise<void> {
   assertEquals(
     res.status,
-    expectedStatus,
-    `expected HTTP ${expectedStatus}`,
+    401,
+    "expected HTTP 401",
   );
   assertEquals(
     res.headers.get("content-type")?.startsWith("application/json"),
@@ -272,7 +250,7 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
     );
 
     await t.step(
-      "dual: invalid brain-key + invalid Bearer → envelope (both tried)",
+      "dual: invalid brain-key + invalid Bearer → 401 (both tried)",
       async () => {
         const res = await app.request("/", {
           headers: {
@@ -281,23 +259,23 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
           },
         });
         // Both methods attempted → audit row records `invalid_credentials`;
-        // operator-facing envelope message is the single neutral string.
-        await assertUnauthorizedEnvelope(res, null);
+        // operator-facing message is the single neutral string.
+        await assertUnauthorized401(res, null);
       },
     );
 
     await t.step(
-      "dual: missing brain-key + invalid Bearer → envelope",
+      "dual: missing brain-key + invalid Bearer → 401",
       async () => {
         const res = await app.request("/", {
           headers: { "authorization": "Bearer not-a-real-token" },
         });
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
       },
     );
 
     await t.step(
-      "Bearer: token without exp claim → envelope (required exp claim)",
+      "Bearer: token without exp claim → 401 (required exp claim)",
       async () => {
         // jose's jwtVerify validates `exp` only when the claim is present
         // unless `requiredClaims` is set. Without that option, an attacker
@@ -316,44 +294,61 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
         const res = await app.request("/", {
           headers: { "authorization": `Bearer ${token}` },
         });
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
       },
     );
 
-    await t.step("Bearer: expired token → envelope", async () => {
-      // Sign with an `exp` 1 hour in the past.
-      const past = Math.floor(Date.now() / 1000) - 3600;
-      const token = await new SignJWT({ sub: "user" })
-        .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-        .setIssuer(ISSUER)
-        .setAudience(AUDIENCE)
-        .setIssuedAt(past - 7200)
-        .setExpirationTime(past)
-        .sign(privateKey as CryptoKey);
-      const res = await app.request("/", {
-        headers: { "authorization": `Bearer ${token}` },
-      });
-      await assertUnauthorizedEnvelope(res, null);
-    });
+    await t.step(
+      "Bearer: expired token → HTTP 401 with challenge",
+      async () => {
+        // The PR55-AUTH-001 regression pin: an expired (locally
+        // signed RS256) token must be rejected at the TRANSPORT level —
+        // HTTP 401 with the WWW-Authenticate challenge — not HTTP 200 with
+        // only a JSON-RPC error body. OAuth-capable MCP clients key token
+        // refresh off the 401; suppressing it left the claude.ai connector
+        // disconnected after expiry until a human reauthenticated.
+        // Sign with an `exp` 1 hour in the past.
+        const past = Math.floor(Date.now() / 1000) - 3600;
+        const token = await new SignJWT({ sub: "user" })
+          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
+          .setIssuer(ISSUER)
+          .setAudience(AUDIENCE)
+          .setIssuedAt(past - 7200)
+          .setExpirationTime(past)
+          .sign(privateKey as CryptoKey);
+        const res = await app.request("/", {
+          headers: { "authorization": `Bearer ${token}` },
+        });
+        await assertUnauthorized401(res, null);
+        // The challenge must survive on the rejected-credential path so the
+        // client can rediscover the AS and refresh.
+        const wa = res.headers.get("www-authenticate");
+        assertNotEquals(wa, null);
+        assertMatch(
+          wa!,
+          /resource_metadata=".*\/\.well-known\/oauth-protected-resource\/mcp"/,
+        );
+      },
+    );
 
-    await t.step("Bearer: wrong issuer → envelope", async () => {
+    await t.step("Bearer: wrong issuer → 401", async () => {
       const token = await signToken({ issuer: WRONG_ISSUER });
       const res = await app.request("/", {
         headers: { "authorization": `Bearer ${token}` },
       });
-      await assertUnauthorizedEnvelope(res, null);
+      await assertUnauthorized401(res, null);
     });
 
-    await t.step("Bearer: wrong audience → envelope", async () => {
+    await t.step("Bearer: wrong audience → 401", async () => {
       const token = await signToken({ audience: WRONG_AUDIENCE });
       const res = await app.request("/", {
         headers: { "authorization": `Bearer ${token}` },
       });
-      await assertUnauthorizedEnvelope(res, null);
+      await assertUnauthorized401(res, null);
     });
 
     await t.step(
-      "Bearer: signed by attacker's key (different RS256 key) → envelope",
+      "Bearer: signed by attacker's key (different RS256 key) → 401",
       async () => {
         // Generates a NEW key pair and signs with the attacker's private key. The
         // JWKS we publish only contains the original public key, so verification
@@ -365,17 +360,17 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
         const res = await app.request("/", {
           headers: { "authorization": `Bearer ${token}` },
         });
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
       },
     );
 
     await t.step(
-      "Bearer: malformed token (not three JWT segments) → envelope",
+      "Bearer: malformed token (not three JWT segments) → 401",
       async () => {
         const res = await app.request("/", {
           headers: { "authorization": "Bearer this-is-not-a-jwt" },
         });
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
       },
     );
 
@@ -396,9 +391,9 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
     await t.step(
       "Bearer: 'Basic' auth scheme is rejected (Bearer-only) → 401",
       async () => {
-        // No Bearer attempt was made → reason is missing_credentials, so
-        // the response is the 401 with the envelope body, not
-        // the 200 envelope used when credentials were rejected.
+        // No Bearer attempt was made → reason is missing_credentials
+        // (the audit row's honest signal); the response shape is the
+        // same uniform 401 as every other rejection.
         const res = await app.request("/", {
           headers: { "authorization": "Basic dXNlcjpwYXNz" },
         });
@@ -443,7 +438,7 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
         const res = await app.request("/", {
           headers: { "x-brain-key": "wrong" },
         });
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
         const wa = res.headers.get("www-authenticate");
         assertNotEquals(wa, null);
       },
@@ -451,7 +446,7 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
 
     // ─── JSON-RPC id echo for POST requests ────────────────
     await t.step(
-      "envelope: POST with JSON-RPC string id (Bearer-only fail path) → id echoed",
+      "401 envelope: POST with JSON-RPC string id (Bearer-only fail path) → id echoed",
       async () => {
         const res = await app.request("/", {
           method: "POST",
@@ -465,12 +460,12 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
             id: "mobile-req-7",
           }),
         });
-        await assertUnauthorizedEnvelope(res, "mobile-req-7");
+        await assertUnauthorized401(res, "mobile-req-7");
       },
     );
 
     await t.step(
-      "envelope: POST with malformed JSON body → id null",
+      "401 envelope: POST with malformed JSON body → id null",
       async () => {
         const res = await app.request("/", {
           method: "POST",
@@ -480,7 +475,7 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
           },
           body: "{not actually json",
         });
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
       },
     );
 

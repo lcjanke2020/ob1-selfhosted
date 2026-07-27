@@ -2,12 +2,12 @@
 // (MCP_ACCESS_KEY set) and OAuth DISABLED — the `compose-local` deployment mode.
 // Run with `deno task test`.
 //
-// auth failure shape depends on whether any credential was offered:
-//   - creds-tried-but-invalid → JSON-RPC 2.0 error envelope (HTTP 200,
-//     code -32001) so strict MCP hosts don't tear the established transport down.
-//   - missing_credentials → HTTP 401 with the same JSON-RPC envelope body.
-//     Spec-compliant OAuth-discovery signal for claude.ai's MCP connector
-//     validator on the pre-OAuth probe (missing-credentials 401).
+// auth failure shape is uniform since audit finding PR55-AUTH-001: every
+// rejection — missing or tried-but-invalid credentials — returns HTTP 401
+// with a JSON-RPC 2.0 error envelope body (code -32001). The
+// transport-level 401 is the RFC 6750 / MCP-authorization-spec signal
+// OAuth-capable clients key re-authorization off; the envelope body is
+// kept for JSON-RPC id correlation.
 // The operator-facing message is a single neutral string regardless of which
 // credential failed — that's the side-channel we deliberately close. The
 // granular AuthFailureReason is preserved internally via the audit row.
@@ -54,43 +54,21 @@ function makeApp(mw: MiddlewareHandler) {
   return app;
 }
 
-// Asserts the response matches the JSON-RPC unauthorized envelope
-// returned by requireAuth on the MCP transport when a credential was
-// tried but found invalid: HTTP 200, application/json, Cache-Control:
-// no-store, body { jsonrpc: "2.0", error: { code: -32001, message:
-// "Unauthorized: missing or invalid authentication." }, id }.
-async function assertUnauthorizedEnvelope(
-  res: Response,
-  expectedId: string | number | null,
-): Promise<void> {
-  await assertEnvelopeBody(res, 200, expectedId);
-}
-
-// Asserts the missing-credentials shape returned by requireAuth
-// when NO credential was offered at all: HTTP 401 with the same JSON-RPC
-// envelope body. Spec-compliant OAuth-discovery signal claude.ai's MCP
-// connector validator expects on a pre-OAuth probe. WWW-Authenticate (if
+// Asserts the uniform auth-failure shape returned by requireAuth on the
+// MCP transport: HTTP 401, application/json, Cache-Control: no-store,
+// body { jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized:
+// missing or invalid authentication." }, id }. Since PR55-AUTH-001 every
+// rejection reason shares this transport status. WWW-Authenticate (if
 // PROTECTED_RESOURCE_METADATA_URL is set) is checked at the call site,
 // not here, since Pattern A leaves it null.
 async function assertUnauthorized401(
   res: Response,
   expectedId: string | number | null,
 ): Promise<void> {
-  await assertEnvelopeBody(res, 401, expectedId);
-}
-
-// Shared shape check. The body, content-type, and cache-control are
-// identical for the 200 envelope (creds tried) and 401 envelope (no
-// creds offered); only the HTTP status differs.
-async function assertEnvelopeBody(
-  res: Response,
-  expectedStatus: 200 | 401,
-  expectedId: string | number | null,
-): Promise<void> {
   assertEquals(
     res.status,
-    expectedStatus,
-    `expected HTTP ${expectedStatus}`,
+    401,
+    "expected HTTP 401",
   );
   assertEquals(
     res.headers.get("content-type")?.startsWith("application/json"),
@@ -149,7 +127,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
       },
     );
 
-    // ─── requireAuth (MCP transport → envelope on auth-fail) ─────────
+    // ─── requireAuth (MCP transport → 401 + envelope body on auth-fail) ─
     await t.step("requireAuth: valid x-brain-key → 200", async () => {
       const app = makeApp(requireAuth);
       const res = await app.request("/", { headers: { "x-brain-key": KEY } });
@@ -158,13 +136,13 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
     });
 
     await t.step(
-      "requireAuth: invalid x-brain-key → JSON-RPC unauthorized envelope",
+      "requireAuth: invalid x-brain-key → 401 with JSON-RPC error envelope",
       async () => {
         const app = makeApp(requireAuth);
         const res = await app.request("/", {
           headers: { "x-brain-key": "wrong" },
         });
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
       },
     );
 
@@ -206,7 +184,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
     );
 
     await t.step(
-      "requireAuth: invalid brain-key + Bearer (OAuth off) → envelope, Bearer ignored",
+      "requireAuth: invalid brain-key + Bearer (OAuth off) → 401, Bearer ignored",
       async () => {
         const app = makeApp(requireAuth);
         const res = await app.request("/", {
@@ -216,10 +194,10 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
           },
         });
         // OAuth is disabled, so the Bearer path is never tried — but the
-        // operator-facing envelope is now a single neutral message
-        // regardless. (Audit row still distinguishes the cause via the
+        // operator-facing message is a single neutral string regardless.
+        // (Audit row still distinguishes the cause via the
         // AuthFailureReason enum — separate concern from the response.)
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
       },
     );
 
@@ -228,7 +206,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
       async () => {
         // Missing creds → HTTP 401. PROTECTED_RESOURCE_METADATA_URL is
         // null when OAuth disabled, so the unauthorized() helper skips
-        // the WWW-Authenticate emission on both response shapes.
+        // the WWW-Authenticate emission on the 401.
         const app = makeApp(requireAuth);
         const res = await app.request("/");
         await assertUnauthorized401(res, null);
@@ -244,35 +222,35 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
         const short = await app.request("/", {
           headers: { "x-brain-key": "k" },
         });
-        await assertUnauthorizedEnvelope(short, null);
+        await assertUnauthorized401(short, null);
         const long = await app.request("/", {
           headers: { "x-brain-key": KEY + "extra" },
         });
-        await assertUnauthorizedEnvelope(long, null);
+        await assertUnauthorized401(long, null);
       },
     );
 
     await t.step(
-      "brain-key compare: differs only in last byte → envelope",
+      "brain-key compare: differs only in last byte → 401",
       async () => {
         const app = makeApp(requireAuth);
         const wrong = KEY.slice(0, -1) + "x";
         const res = await app.request("/", {
           headers: { "x-brain-key": wrong },
         });
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
       },
     );
 
     await t.step(
-      "brain-key compare: differs only in first byte → envelope",
+      "brain-key compare: differs only in first byte → 401",
       async () => {
         const app = makeApp(requireAuth);
         const wrong = "x" + KEY.slice(1);
         const res = await app.request("/", {
           headers: { "x-brain-key": wrong },
         });
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
       },
     );
 
@@ -293,7 +271,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
             id: "req-abc-123",
           }),
         });
-        await assertUnauthorizedEnvelope(res, "req-abc-123");
+        await assertUnauthorized401(res, "req-abc-123");
       },
     );
 
@@ -313,7 +291,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
             id: 42,
           }),
         });
-        await assertUnauthorizedEnvelope(res, 42);
+        await assertUnauthorized401(res, 42);
       },
     );
 
@@ -333,7 +311,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
             id: null,
           }),
         });
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
       },
     );
 
@@ -355,7 +333,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
             id: { nested: true },
           }),
         });
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
       },
     );
 
@@ -371,7 +349,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
           },
           body: "{this is not valid json",
         });
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
       },
     );
 
@@ -383,7 +361,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
           method: "DELETE",
           headers: { "x-brain-key": "wrong" },
         });
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
       },
     );
 
@@ -395,7 +373,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
           method: "POST",
           headers: { "x-brain-key": "wrong" },
         });
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
       },
     );
 
@@ -416,7 +394,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
           },
           body: huge,
         });
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
       },
     );
 
@@ -452,7 +430,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
         const start = Date.now();
         const res = await app.fetch(req);
         const elapsed = Date.now() - start;
-        await assertUnauthorizedEnvelope(res, null);
+        await assertUnauthorized401(res, null);
         // With the 150 ms test timeout, the response must arrive in well
         // under 1 s. Without the cancel-on-timeout fix, this test hangs.
         if (elapsed > 1000) {

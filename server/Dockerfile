@@ -5,7 +5,11 @@ WORKDIR /app
 # --frozen: fail the build if the dependency graph doesn't match the
 # committed lockfile — the image must ship exactly what CI tested, and a
 # republished transitive can't silently enter the perimeter image.
-COPY deno.json deno.lock ./
+# postgres_deferred_patched.ts must be in this layer, before `deno install`:
+# the import map remaps the driver's utils/deferred.ts to it, so dependency
+# resolution fails without the file. It changes about as rarely as the
+# lockfile, so the layer-cache benefit of the split COPY survives.
+COPY deno.json deno.lock postgres_deferred_patched.ts ./
 RUN deno install --frozen
 
 COPY *.ts ./

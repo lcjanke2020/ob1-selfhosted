@@ -12,16 +12,21 @@
 // - One ingester process handles both files. Caddy assigns separate
 //   loggers per listener (`logger_names`) so the `socket` column is
 //   derived from the file we're reading, not from the JSON itself.
-// - Cursor (byte offset) persisted to `/var/log/caddy/<file>.cursor`
-//   so a restart doesn't re-ingest everything. The cursor lives next
-//   to the log files (same shared volume) so it survives container
-//   restart without needing a second volume.
-// - Rotation handling: if file size < cursor, treat as rotated and
-//   reset cursor to 0. Caddy rolls via rename (`*.log` → `*.log.1`)
-//   so the inode changes; we don't follow renames — we just keep
-//   reading the path and accept the small risk of skipping a partial
-//   final read of the rotated-out file. Acceptable trade-off for
-//   personal-scale observability.
+// - Cursor (byte offset + file identity) persisted per log file to
+//   CURSOR_DIR (`<basename>.cursor`, JSON) so a restart doesn't
+//   re-ingest everything. See the CURSOR_DIR block below for why the
+//   cursors live in a separate volume from the log files.
+// - Rotation handling: the cursor records the file's (dev, ino)
+//   identity alongside the byte offset. Caddy rolls via rename
+//   (`*.log` → `*.log.1`) + recreate, so the identity at the tailed
+//   path changes; when it does, the replacement is read from offset 0
+//   — even when it has already grown to or past the old offset, which
+//   the size<cursor heuristic alone cannot detect (it seeked into the
+//   replacement as though it were the old file and silently skipped
+//   its complete leading rows — audit finding PR55-OPS-002).
+//   Same-file shrinkage (truncation) still resets to 0. We don't
+//   follow renames — the renamed-out file's unread tail is still
+//   skipped. Acceptable trade-off for personal-scale observability.
 // - Sensitive-data discipline: this code is the LAST line of defense
 //   before per-request data lands in Postgres. Caddy's default JSON
 //   format does NOT include header values OR request bodies — but if
@@ -201,64 +206,139 @@ function durationMs(d: number | undefined): number | undefined {
 // at /var/log/caddy) fails at container init because Docker can't
 // create the nested mountpoint directory on the RO rootfs. Putting
 // the cursors at a sibling path under /var/lib avoids the nest.
-// The cursor filename derives from the log file's basename.
-const CURSOR_DIR = "/var/lib/ingester/cursors";
+// The cursor filename derives from the log file's basename. The env
+// override exists for the unit tests (the production default is baked
+// into the image + compose volume layout).
+const CURSOR_DIR = optional("INGESTER_CURSOR_DIR", "/var/lib/ingester/cursors");
 function cursorPath(logFilePath: string): string {
   const sep = logFilePath.lastIndexOf("/");
   const base = sep === -1 ? logFilePath : logFilePath.slice(sep + 1);
   return `${CURSOR_DIR}/${base}.cursor`;
 }
 
-// Read the cursor (byte offset) for a given log file. 0 if absent.
-async function readCursor(logFilePath: string): Promise<number> {
+// Cursor state for one tailed log file: the byte offset of the next
+// unread byte, plus the (st_dev, st_ino) identity of the file that
+// offset is valid against. Identity is what distinguishes a
+// rename/recreate rotation (new file at the same path — the offset must
+// reset even when the replacement is already as large as the old one)
+// from ordinary append. null identity fields come from legacy
+// offset-only cursor files or platforms without dev/ino; those fall
+// back to the size-shrank heuristic until the first identity-stamped
+// write.
+export interface LogCursor {
+  offset: number;
+  dev: number | null;
+  ino: number | null;
+}
+
+const FRESH_CURSOR: LogCursor = { offset: 0, dev: null, ino: null };
+
+// Read the persisted cursor for a given log file. Cursor files hold
+// JSON `{"offset":N,"dev":D,"ino":I}`; legacy files hold a bare integer
+// offset (which is also valid JSON — a number), parsed as offset-only so
+// an upgrade neither re-ingests nor skips. Unknown identity means the
+// next poll can't detect a same-size-or-larger replacement (one-time
+// upgrade gap); the first write stamps identity and closes it.
+// Exported for unit testing of the format round-trip.
+export async function readCursor(logFilePath: string): Promise<LogCursor> {
+  let raw: string;
   try {
-    const raw = await Deno.readTextFile(cursorPath(logFilePath));
-    const n = Number.parseInt(raw.trim(), 10);
-    return Number.isInteger(n) && n >= 0 ? n : 0;
+    raw = await Deno.readTextFile(cursorPath(logFilePath));
   } catch (e) {
-    if (e instanceof Deno.errors.NotFound) return 0;
+    if (e instanceof Deno.errors.NotFound) return { ...FRESH_CURSOR };
     throw e;
   }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw.trim());
+  } catch {
+    return { ...FRESH_CURSOR };
+  }
+  const intOrNull = (v: unknown): number | null =>
+    typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null;
+  if (typeof parsed === "number") {
+    // Legacy offset-only cursor.
+    return { offset: intOrNull(parsed) ?? 0, dev: null, ino: null };
+  }
+  if (parsed && typeof parsed === "object") {
+    const o = parsed as Record<string, unknown>;
+    return {
+      offset: intOrNull(o.offset) ?? 0,
+      dev: intOrNull(o.dev),
+      ino: intOrNull(o.ino),
+    };
+  }
+  return { ...FRESH_CURSOR };
 }
 
-async function writeCursor(
+// Exported for unit testing of the format round-trip.
+export async function writeCursor(
   logFilePath: string,
-  offset: number,
+  cursor: LogCursor,
 ): Promise<void> {
-  await Deno.writeTextFile(cursorPath(logFilePath), String(offset));
+  await Deno.writeTextFile(cursorPath(logFilePath), JSON.stringify(cursor));
 }
 
-// Stream new bytes from `filePath` starting at `offset`. Returns the new
-// offset and a flat array of complete JSON lines that were appended.
-// Exported for unit testing of the cursor-byte math .
+// Stream new bytes from `filePath` starting at the cursor. Returns the
+// advanced cursor (offset + the identity of the file actually read) and
+// a flat array of complete JSON lines that were appended.
+// Exported for unit testing of the cursor-byte math and rotation
+// detection.
 export async function readNewLines(
   filePath: string,
-  offset: number,
-): Promise<{ offset: number; lines: string[] }> {
-  let stat: Deno.FileInfo;
+  cursor: LogCursor,
+): Promise<{ cursor: LogCursor; lines: string[] }> {
+  let opened: Deno.FsFile;
   try {
-    stat = await Deno.stat(filePath);
+    opened = await Deno.open(filePath, { read: true });
   } catch (e) {
-    if (e instanceof Deno.errors.NotFound) return { offset, lines: [] };
+    if (e instanceof Deno.errors.NotFound) return { cursor, lines: [] };
     throw e;
   }
+  using f = opened;
+  // fstat the OPEN handle rather than stat'ing the path: a rotation
+  // between a path-stat and the open would attribute the replacement's
+  // size to the old file. The handle pins one file — whatever we read
+  // below is consistently that file, and its identity lands in the
+  // returned cursor so a mid-poll rotation is caught next tick.
+  const stat = await f.stat();
+  const dev = stat.dev ?? null;
+  const ino = stat.ino ?? null;
 
-  // File shrank → almost certainly rotated. Reset to 0 and read fresh.
-  let startOffset = offset;
-  if (stat.size < offset) {
+  let startOffset = cursor.offset;
+  if (
+    cursor.dev !== null && cursor.ino !== null &&
+    dev !== null && ino !== null &&
+    (dev !== cursor.dev || ino !== cursor.ino)
+  ) {
+    // Same path, different file: rename/recreate rotation. The old
+    // offset is meaningless here even when the replacement has grown to
+    // or past it — seeking would silently skip the replacement's
+    // complete leading rows (audit finding PR55-OPS-002).
     console.log(
-      `[ingester] ${filePath}: size ${stat.size} < cursor ${offset}; treating as rotated`,
+      `[ingester] ${filePath}: file identity changed (rotation); reading replacement from 0`,
+    );
+    startOffset = 0;
+  } else if (stat.size < cursor.offset) {
+    // Same file (or unknown identity) shrank below the cursor →
+    // truncated, or rotated before identity was ever stamped. Reset and
+    // read fresh.
+    console.log(
+      `[ingester] ${filePath}: size ${stat.size} < cursor ${cursor.offset}; treating as rotated`,
     );
     startOffset = 0;
   }
 
-  if (stat.size === startOffset) return { offset: startOffset, lines: [] };
+  if (stat.size === startOffset) {
+    return { cursor: { offset: startOffset, dev, ino }, lines: [] };
+  }
 
-  using f = await Deno.open(filePath, { read: true });
   await f.seek(startOffset, Deno.SeekMode.Start);
   const buf = new Uint8Array(stat.size - startOffset);
   const n = await f.read(buf);
-  if (n === null) return { offset: startOffset, lines: [] };
+  if (n === null) {
+    return { cursor: { offset: startOffset, dev, ino }, lines: [] };
+  }
 
   // Find the last '\n' in the RAW byte buffer, not in the
   // decoded string. The previous implementation re-encoded the decoded
@@ -278,7 +358,9 @@ export async function readNewLines(
     }
   }
   // Don't process a partial trailing line — leave its bytes "for next time".
-  if (lastNlByte === -1) return { offset: startOffset, lines: [] };
+  if (lastNlByte === -1) {
+    return { cursor: { offset: startOffset, dev, ino }, lines: [] };
+  }
 
   // Decode only the bytes up to (and not including) the trailing newline.
   // Splitting on '\n' over the decoded string is safe — '\n' is U+000A,
@@ -287,7 +369,7 @@ export async function readNewLines(
   const consumable = new TextDecoder().decode(consumed.subarray(0, lastNlByte));
   const lines = consumable.split("\n").filter((l) => l.length > 0);
   const newOffset = startOffset + lastNlByte + 1; // +1 for the trailing newline
-  return { offset: newOffset, lines };
+  return { cursor: { offset: newOffset, dev, ino }, lines };
 }
 
 // Result of attempting to insert one Caddy access-log line.
@@ -467,17 +549,20 @@ async function insertLine(
 async function tickOnce(): Promise<void> {
   for (const { path, socket } of FILES) {
     const cursor = await readCursor(path);
-    const { offset: newOffset, lines } = await readNewLines(path, cursor);
+    const { cursor: newCursor, lines } = await readNewLines(path, cursor);
+    const cursorChanged = newCursor.offset !== cursor.offset ||
+      newCursor.dev !== cursor.dev || newCursor.ino !== cursor.ino;
 
     // Case 1: no complete lines arrived this tick. Persist a changed
-    // offset immediately — this is the rotation case (readNewLines
-    // returns { offset: 0, lines: [] } when the file shrank below the
-    // cursor) and the partial-trailing-line case (offset advanced past
-    // the complete portion). Without persisting that, we'd be stuck
-    // "treating as rotated" every poll forever.
+    // cursor immediately — this covers the rotation/truncation reset
+    // (offset back to 0), the partial-trailing-line case (offset
+    // advanced past the complete portion), and identity stamping (a
+    // legacy offset-only cursor learning the file's dev/ino, or a
+    // replacement file's new identity). Without persisting, we'd be
+    // stuck "treating as rotated" every poll forever.
     if (lines.length === 0) {
-      if (newOffset !== cursor) {
-        await writeCursor(path, newOffset);
+      if (cursorChanged) {
+        await writeCursor(path, newCursor);
       }
       continue;
     }
@@ -510,12 +595,12 @@ async function tickOnce(): Promise<void> {
       // Include `skipped` so a "0 ok / 2 skipped /
       // 1 retry" batch isn't misread as "nothing happened."
       console.warn(
-        `[ingester] ${socket}: transient insert failure after ${inserted}/${lines.length} rows (${skipped} skipped); cursor=${cursor} retained for retry next tick`,
+        `[ingester] ${socket}: transient insert failure after ${inserted}/${lines.length} rows (${skipped} skipped); cursor=${cursor.offset} retained for retry next tick`,
       );
     } else {
-      await writeCursor(path, newOffset);
+      await writeCursor(path, newCursor);
       console.log(
-        `[ingester] ${socket}: ${inserted}/${lines.length} rows inserted (${skipped} skipped); cursor=${newOffset}`,
+        `[ingester] ${socket}: ${inserted}/${lines.length} rows inserted (${skipped} skipped); cursor=${newCursor.offset}`,
       );
     }
   }

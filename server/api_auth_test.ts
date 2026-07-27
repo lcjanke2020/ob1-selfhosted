@@ -1,9 +1,9 @@
 // REST gateway tests — auth failure shapes. requireAuth is reused
 // unmodified from auth.ts (its own suites cover the doors exhaustively);
 // what's REST-specific is the restifyAuthFailure wrapper in api.ts, which
-// rewrites the MCP-flavored failure responses (HTTP 200 + JSON-RPC envelope
-// for tried-but-invalid credentials) into a plain HTTP 401 JSON error that
-// curl/scripts can branch on with `res.ok`. Headers minted by requireAuth
+// rewrites the MCP-flavored failure body (the JSON-RPC error envelope on
+// the 401) into a plain HTTP 401 JSON error that curl/scripts can parse
+// as `{error: {code, message}}`. Headers minted by requireAuth
 // (Cache-Control: no-store) must survive the rewrite.
 
 import { assert, assertEquals } from "jsr:@std/assert@1";
@@ -90,10 +90,10 @@ Deno.test("REST /api/v1 — auth failure shapes", async (t) => {
     );
 
     await t.step(
-      "wrong x-brain-key → 401 (requireAuth's 200-envelope is rewritten)",
+      "wrong x-brain-key → 401 (requireAuth's envelope body is rewritten)",
       async () => {
-        // On /mcp this exact request would get HTTP 200 + a JSON-RPC error
-        // envelope (transport keep-alive). REST rewrites it to a plain 401.
+        // On /mcp this exact request gets HTTP 401 + a JSON-RPC error
+        // envelope body. REST rewrites the body to a plain JSON error.
         const res = await api.request("/thoughts/stats", {
           headers: { "x-brain-key": "wrong" },
         });

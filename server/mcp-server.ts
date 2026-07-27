@@ -188,7 +188,13 @@ export function createMcpServer(
     // filters shared byte-for-byte with the REST search body.
     // 1.7.0: thought search fuses bounded pgvector and token-preserving
     // full-text/literal candidate legs with reciprocal rank fusion (RRF).
-    version: "1.7.0",
+    // 1.8.0: every rejected credential on the MCP transport now returns
+    // HTTP 401 with the WWW-Authenticate challenge (was HTTP 200 + JSON-RPC
+    // error for tried-but-invalid credentials), so OAuth clients refresh
+    // expired tokens instead of stranding; plus live-reliability fixes in
+    // the pool stack, log-ingester rotation cursors, and the funnel
+    // summary window.
+    version: "1.8.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
