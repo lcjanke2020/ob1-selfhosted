@@ -381,8 +381,12 @@ jobs:
                      0, 0, '[]'::jsonb, '[]'::jsonb, now())" >/dev/null
 
           # Locker session: take the row lock, then hold the transaction
-          # open reading from a FIFO until we release it.
-          ctl=$(mktemp -u); mkfifo "$ctl"
+          # open reading from a FIFO until we release it. The FIFO lives
+          # in a freshly reserved temp dir (mktemp -u alone would race the
+          # name between allocation and mkfifo).
+          ctl_dir=$(mktemp -d)
+          trap 'rm -rf "$ctl_dir"' EXIT
+          ctl="$ctl_dir/lock_ctl"; mkfifo "$ctl"
           { echo "BEGIN;
                   SELECT 1 FROM funnel_access_summary
                   WHERE day = (now() AT TIME ZONE 'UTC')::date - 31
@@ -425,11 +429,11 @@ jobs:
             "INSERT INTO funnel_access_log (ts, socket, status, user_agent)
              VALUES (now() - interval '31 days', 'tailnet', 200, 'rr-concurrent')" >/dev/null
 
-          # Release the lock; let the rollup complete.
+          # Release the lock; let the rollup complete. (The EXIT trap
+          # above cleans up the FIFO's temp dir.)
           echo "COMMIT;" > "$ctl"
           wait "$rollup" || { echo "::error::rollup transaction failed"; exit 1; }
           wait "$locker" || true
-          rm -f "$ctl"
 
           verdict=$("${PSQL_SUPER[@]}" -tAc \
             "SELECT
@@ -464,6 +468,51 @@ jobs:
             exit 1
           }
           echo "next run merged the survivor additively into the finalized day (0|2)"
+
+      - name: Smoke test — bounded top-3 sketch semantics are pinned
+        run: |
+          # top_paths / top_user_agents are documented as bounded top-3
+          # sketches: finalization discards per-key counts below third
+          # place, so a merge combines two truncated lists and a dropped
+          # key's history cannot re-enter — a late surge for such a key
+          # raises the exact request_count but may not displace the shown
+          # top 3. Pin that accepted behavior so any future widening of
+          # the sketch is a deliberate change, not silent drift.
+          #
+          # Finalized day: tops /a:10 /b:9 /c:8 (an historical /d:7 was
+          # already discarded at finalization — count 34 includes it).
+          # Late /d ×5 arrives: true /d total is 12 (the real leader),
+          # but the sketch can only see the remainder's 5.
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c \
+            "INSERT INTO funnel_access_summary
+               (day, socket, status_class, request_count, unique_ips,
+                top_paths, top_user_agents, computed_at)
+             VALUES ((now() AT TIME ZONE 'UTC')::date - 40, 'funnel', '2xx', 34, 4,
+                     '[{\"path\": \"/a\", \"count\": 10}, {\"path\": \"/b\", \"count\": 9}, {\"path\": \"/c\", \"count\": 8}]'::jsonb,
+                     '[]'::jsonb, now() - interval '9 days');
+             INSERT INTO funnel_access_log (ts, socket, status, path, user_agent)
+             SELECT now() - interval '40 days', 'funnel', 200, '/d', 'sketch-pin'
+             FROM generate_series(1, 5)" >/dev/null
+
+          docker exec -i -e PGPASSWORD="$OPENBRAIN_APP_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_app -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/summarize_funnel.sql >/dev/null
+
+          verdict=$(docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT request_count,
+                    (SELECT string_agg(e->>'path', ',' ORDER BY (e->>'count')::bigint DESC)
+                       FROM jsonb_array_elements(top_paths) AS e),
+                    (SELECT COUNT(*) FROM funnel_access_log WHERE user_agent = 'sketch-pin')
+             FROM funnel_access_summary
+             WHERE day = (now() AT TIME ZONE 'UTC')::date - 40
+               AND socket = 'funnel' AND status_class = '2xx'")
+          test "$verdict" = "39|/a,/b,/c|0" || {
+            echo "::error::top-N sketch pin drifted (count|tops|raw=$verdict, want 39|/a,/b,/c|0)"
+            exit 1
+          }
+          echo "sketch pinned: request_count exact (34+5=39), below-3rd /d stays out of tops, raw retired"
 
       - name: Container logs on failure
         if: failure()

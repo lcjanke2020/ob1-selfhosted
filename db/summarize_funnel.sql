@@ -34,10 +34,22 @@
 --      same transaction deletes the day's raw rows. A finalized day is
 --      recognizable ever after because its summary's computed_at sits
 --      >= 31 days past `day`; in-horizon recomputes always stamp
---      computed_at - day <= 30. (No schema flag needed. Summaries
---      imported from elsewhere would read as non-finalized, but this
+--      computed_at - day <= 30. (No schema flag needed — but the
+--      heuristic assumes summaries were written BY THIS LIFECYCLE. This
 --      deployment's first production run starts from an empty summary
---      table, so the case doesn't arise.)
+--      table, so that holds. Summaries imported from elsewhere, or left
+--      by this file's earlier yesterday-only revision, read as
+--      non-finalized: exact for days whose raw is complete, but a day
+--      the old revision's instant-based retention partially purged gets
+--      recomputed from its remainder once — an undercount. When
+--      upgrading such a database, either accept that one-time boundary
+--      undercount or first mark past-horizon legacy summaries finalized:
+--        UPDATE funnel_access_summary
+--        SET computed_at = GREATEST(computed_at,
+--              ((day + 31)::timestamp AT TIME ZONE 'UTC'))
+--        WHERE day < (now() AT TIME ZONE 'UTC')::date - 30;
+--      which routes their late rows onto the additive merge path
+--      instead.)
 --   3. Raw rows appearing for an already-FINALIZED day — ingester
 --      backlog, restored data, or a row whose committing transaction was
 --      invisible to the finalizing snapshot — are MERGED additively into
@@ -50,6 +62,19 @@
 --      as new events: re-ingesting rows that were already counted
 --      overcounts, consistent with the ingester's documented
 --      at-least-once posture (over-counting beats under-counting).
+--
+--      top_paths / top_user_agents are bounded top-3 SKETCHES, not exact
+--      rankings. Finalization discards per-key counts below third place,
+--      and a merge can only combine the two truncated lists (keys below
+--      either side's own third place contribute nothing), so a dropped
+--      key's history can never re-enter: a late surge can leave the true
+--      leader under-ranked or absent from the sketch even though every
+--      one of its requests is in the exact request_count. Keys that ARE
+--      shown carry exact lower-bound counts. Exact ranking would need
+--      unbounded per-key state per day — a cardinality liability for a
+--      scanner-facing path column — so the bounded sketch is the
+--      deliberate trade at this scale; the db-init workflow pins this
+--      accepted behavior so any future widening is an explicit decision.
 --
 -- The invariant that falls out: a raw row is only ever deleted by the
 -- transaction that counted it (finalize or merge). Combined with the
