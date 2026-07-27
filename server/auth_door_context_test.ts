@@ -8,7 +8,7 @@
 // Coverage:
 //   1. Successful x-brain-key  → door = "tailnet", sub = null.
 //   2. Successful Bearer JWT   → door = "funnel",  sub = <verified jwt.sub>.
-//   3. Bearer without `sub`    → 401 (envelope), context vars never set
+//   3. Bearer without `sub`    → HTTP 401 (envelope body), context vars never set
 //      (the `requiredClaims: ["sub"]` change on `verifyBearer` is what
 //      makes Auth0 misconfig / forged-sub-less tokens fail closed).
 //
@@ -167,10 +167,10 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
         const res = await app.request("/", {
           headers: { "authorization": `Bearer ${token}` },
         });
-        // requireAuth returns the JSON-RPC unauthorized envelope (HTTP 200,
-        // code -32001) on token validation failure. The downstream
-        // sentinel handler never runs, so door/sub are never set.
-        assertEquals(res.status, 200);
+        // requireAuth returns HTTP 401 with the JSON-RPC error envelope
+        // body (code -32001) on token validation failure (PR55-AUTH-001). The
+        // downstream sentinel handler never runs, so door/sub are never set.
+        assertEquals(res.status, 401);
         const body = await res.json();
         assertEquals(body.jsonrpc, "2.0");
         assertEquals(body.error?.code, -32001);

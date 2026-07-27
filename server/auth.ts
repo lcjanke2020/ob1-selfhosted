@@ -225,17 +225,20 @@ async function verifyBearer(token: string): Promise<JWTPayload> {
 // defined server errors; -32001 is the conventional "unauthorized" code
 // MCP clients recognize.
 //
-// Why HTTP 200 + JSON-RPC envelope, not bare HTTP 401 (with the missing-credentials
-// carve-out for missing_credentials below): strict MCP hosts (Codex CLI,
-// Claude Code, claude.ai / Claude Mobile) treat 4xx on an established
-// MCP transport as a transport-level fault and tear the connection down
-// rather than surfacing the error to the application layer. Wrapping
-// auth rejection in a JSON-RPC error keeps a long-lived session alive
-// so the client can recover (prompt for a new key, refetch a stale
-// cache, ...). The missing_credentials path is carved out because
-// it's the OAuth-discovery pre-probe — no session is established yet —
-// where claude.ai's connector validator requires the RFC 6750 401
-// signal to proceed with the OAuth dance.
+// Transport status: EVERY auth failure returns HTTP 401 with this JSON-RPC
+// envelope as the body. An earlier revision returned HTTP 200 + envelope
+// when a credential was tried-but-rejected, on the theory that strict MCP
+// hosts tear down an established transport on 4xx and keeping the session
+// alive lets the client recover in-band. In practice that suppressed the
+// RFC 6750 / MCP-authorization-spec signal OAuth clients key credential
+// refresh and re-authorization off: after token expiry the claude.ai
+// connector sat disconnected until a human reauthenticated it (audit
+// finding PR55-AUTH-001). The MCP authorization spec (2025-11-25)
+// requires the transport-level 401 for invalid or expired credentials;
+// recovery is the client's re-auth dance against the advertised
+// authorization server, not a kept-alive session. The envelope body is
+// retained on the 401 so JSON-RPC-aware clients can still correlate the
+// inbound `id`.
 // Adapted from upstream NateBJones-Projects/OB1@a42695f.
 const JSON_RPC_UNAUTHORIZED_CODE = -32001;
 // Exported: the REST gateway (api.ts) reuses this exact operator-facing text
@@ -363,24 +366,23 @@ function extractJsonRpcId(bodyText: string | null): string | number | null {
 }
 
 // Auth-failure response for `require_auth` (mounted on /mcp + /), which speaks
-// MCP. The shape depends on whether any credential was actually offered:
+// MCP. Every failure — missing, invalid, unverifiable, or expired credentials —
+// gets HTTP 401 with a JSON-RPC 2.0 error envelope body (code -32001):
 //
-//   - A request that DID try a credential (`invalid_credentials`,
-//     `invalid_brain_key`, `token_validation_failed`) gets HTTP 200 with a
-//     JSON-RPC 2.0 error envelope (code -32001). The application-layer error
-//     keeps the long-lived MCP transport up so strict clients (claude.ai,
-//     Claude Mobile, Codex CLI, Claude Code) can surface the failure and
-//     recover (prompt for a new key, refetch a stale cache) without tearing
-//     down the connection.
+//   - HTTP 401 is the RFC 6750 / MCP-authorization-spec "auth required"
+//     signal. OAuth-capable MCP clients key credential refresh and
+//     re-authorization off the transport status — both the claude.ai
+//     connector validator's pre-OAuth probe AND the post-expiry refresh
+//     path. Returning 200 for tried-but-rejected credentials stranded the
+//     connector after token expiry until a human reauthenticated it
+//     (audit finding PR55-AUTH-001; see the contract comment above
+//     JSON_RPC_UNAUTHORIZED_CODE for the superseded keep-alive rationale).
+//     The invalid credential never reaches the protected handler — this
+//     middleware short-circuits.
 //
-//   - A request with NO credential at all (`missing_credentials`) gets HTTP 401
-//     with the same JSON-RPC envelope body. This is the RFC 6750 / MCP-
-//     Authorization-spec "auth required" signal claude.ai's connector-validation
-//     client expects on a pre-OAuth probe; HTTP 200 there made it report the
-//     connector as broken even after a successful OAuth dance. The keep-alive
-//     rationale only applies once a session is established and creds were tried —
-//     a pre-auth probe has no session to preserve, so RFC compliance wins.
-//     WWW-Authenticate still carries the resource_metadata URL on this path.
+//   - The JSON-RPC envelope body is retained on the 401 so clients that
+//     surface the failure at the application layer can correlate the
+//     response to the request's `id`.
 //
 // All paths emit WWW-Authenticate when OAuth is enabled (OAuth-aware clients use
 // it for AS discovery per RFC 9728), set `Cache-Control: no-store`, and fire the
@@ -401,13 +403,10 @@ async function unauthorized(
       `Bearer realm="open-brain", resource_metadata="${PROTECTED_RESOURCE_METADATA_URL}"`,
     );
   }
-  // The envelope path returns HTTP 200, which a naive cache could
-  // store and serve to a later (potentially authorized) request from
-  // the same URL — leaking the cached "unauthorized" body in place of
-  // the real response. `Cache-Control: no-store` (RFC 9111 §5.2.2.5)
-  // prevents any storage. The bare-401 path gets the same header for
-  // consistency; per RFC 9111 a 401 isn't cacheable by default anyway
-  // but explicit beats implicit.
+  // Per RFC 9111 a 401 isn't cacheable by default, but explicit beats
+  // implicit — `Cache-Control: no-store` (RFC 9111 §5.2.2.5) forecloses
+  // any cache serving a stored "unauthorized" body in place of a later
+  // (potentially authorized) request's real response.
   c.header("Cache-Control", "no-store");
   logAuthFailure({
     reason: code,
@@ -421,12 +420,11 @@ async function unauthorized(
   // auth-fail short-circuits — no downstream handler runs.
   const bodyText = await readBodyForJsonRpcId(c.req.raw);
   const id = extractJsonRpcId(bodyText);
-  // Missing credentials get HTTP 401 (RFC 6750 auth-required
-  // signal) so claude.ai's MCP connector-validation client proceeds with
-  // OAuth discovery. Tried-but-failed credentials keep HTTP 200 so
-  // long-lived MCP transports stay up. Body shape is identical across
-  // both statuses — only the transport-layer signal differs.
-  const status = code === "missing_credentials" ? 401 : 200;
+  // All rejection reasons share HTTP 401 — the transport-level signal
+  // OAuth clients require to start (missing credentials) or refresh
+  // (expired/invalid credentials) authorization. Body shape is identical
+  // across reasons; the distinguishing AuthFailureReason goes only to
+  // the audit row.
   return c.json(
     {
       jsonrpc: "2.0",
@@ -436,7 +434,7 @@ async function unauthorized(
       },
       id,
     },
-    status,
+    401,
   );
 }
 

@@ -243,7 +243,7 @@ Capture a thought, find it again by meaning, checkpoint an agent work session, a
 
 *(The recording is also committed as [`docs/assets/demo.cast`](docs/assets/demo.cast) for `asciinema play` — it's asciicast v3, so it needs asciinema ≥ 3.0.)*
 
-And what the observability stack is for — one week of real data from a live deployment's public Funnel door (UTC-day buckets): every request bucketed by day and status class, the internet's background scanning (`/.env` probes and friends) rejected `403` by the Anthropic IP allowlist before auth is ever attempted, and the handful of in-allowlist requests that presented no usable credentials and drew the `401` challenge that starts OAuth discovery (tried-but-invalid tokens get a `200` JSON-RPC error envelope by design, so they never appear as 4xx):
+And what the observability stack is for — one week of real data from a live deployment's public Funnel door (UTC-day buckets): every request bucketed by day and status class, the internet's background scanning (`/.env` probes and friends) rejected `403` by the Anthropic IP allowlist before auth is ever attempted, and the handful of in-allowlist requests that presented no usable credentials and drew the `401` challenge that starts OAuth discovery (in the recorded week, tried-but-invalid tokens were answered with a `200` JSON-RPC error envelope, so they don't appear as 4xx; every auth rejection now returns a transport-level `401` per the MCP authorization spec):
 
 ![One week of public-door funnel access summarized by UTC day and status class, plus the top scan paths rejected 403 by the IP allowlist](docs/assets/funnel-summary.png)
 
