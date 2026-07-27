@@ -170,11 +170,14 @@ that contrib extension. See
 
 After hybrid search, apply the idempotent
 [`db/06-spaces.sql`](../../../db/06-spaces.sql) migration in the same maintenance
-window and run `db/03-grants-assertion.sql` last. It backfills legacy rows into
-the `default` workspace, rebuilds audience-aware fingerprint uniqueness, and
-forces RLS on thoughts, sessions, and artifacts. It takes table locks and must
-land before the scoped app server starts; the server boot probe refuses a
-partial catalog. See [Memory spaces](../../../docs/spaces.md).
+window and run `db/03-grants-assertion.sql` last. Spaces requires PostgreSQL 15
+or newer and a PostgreSQL superuser (the documented local or tailnet-restricted
+`postgres` path). It backfills legacy rows into the `default` workspace,
+rebuilds audience-aware fingerprint uniqueness, and forces RLS on thoughts,
+sessions, and artifacts. Reapplication rebuilds that fingerprint index too, so
+it needs the same table-lock window and index headroom. It must land before the
+scoped app server starts; the server boot probe refuses a partial catalog. See
+[Memory spaces](../../../docs/spaces.md).
 
 ## Template note
 

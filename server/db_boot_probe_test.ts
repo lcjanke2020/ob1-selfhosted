@@ -157,6 +157,7 @@ Deno.test("probeDbAtBoot: missing spaces schema rejects with migration guidance"
   );
   assertStringIncludes(err.message, "session audience columns");
   assertStringIncludes(err.message, "db/06-spaces.sql");
+  assertStringIncludes(err.message, "PostgreSQL superuser");
   assertEquals(client.releaseCalls, 1);
 });
 

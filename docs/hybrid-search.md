@@ -129,8 +129,14 @@ from being pushed into the protected table scan. The spaces migration therefore
 installs one narrowly granted, fixed-SQL `SECURITY DEFINER` function that applies
 the resolved audience before candidate limits and returns only IDs and ranks.
 The server joins those candidates back through the RLS-protected `thoughts`
-table before returning content. See [Memory spaces](spaces.md#enforcement-and-search)
-for the security and migration contract.
+table before returning content. Unlike `05-hybrid-search.sql`, the spaces
+migration requires PostgreSQL 15 or newer and must run as a PostgreSQL
+superuser. Its candidate function also checks for exactly 768 embedding
+dimensions. Changing embedding models or dimensions therefore requires one
+coordinated migration that updates both `vector(768)` in `db/01-schema.sql` and
+the dimension check in `db/06-spaces.sql`. See
+[Memory spaces](spaces.md#enforcement-and-search) for the security and migration
+contract.
 
 ## Lineage
 

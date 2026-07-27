@@ -7,7 +7,8 @@
 
 \set ON_ERROR_STOP on
 
-DELETE FROM sessions.session WHERE title LIKE '__spaces_smoke_%';
+DELETE FROM sessions.session
+WHERE title LIKE '\_\_spaces\_smoke\_%' ESCAPE '\';
 DELETE FROM public.thoughts
 WHERE metadata @> '{"_spaces_smoke_fixture":true}'::jsonb;
 DELETE FROM memory_scope.project WHERE workspace_id = '__spaces_smoke_team';
@@ -358,12 +359,14 @@ DO $$
 DECLARE n integer;
 BEGIN
   SELECT count(*) INTO n
-  FROM sessions.session WHERE title LIKE '__spaces_smoke_%';
+  FROM sessions.session
+  WHERE title LIKE '\_\_spaces\_smoke\_%' ESCAPE '\';
   IF n <> 1 THEN
     RAISE EXCEPTION 'alpha context returned % sessions, expected 1', n;
   END IF;
   SELECT count(*) INTO n
-  FROM sessions.artifact WHERE title LIKE '__spaces_smoke_%';
+  FROM sessions.artifact
+  WHERE title LIKE '\_\_spaces\_smoke\_%' ESCAPE '\';
   IF n <> 1 THEN
     RAISE EXCEPTION 'alpha context returned % artifacts, expected 1', n;
   END IF;
@@ -431,8 +434,8 @@ ROLLBACK;
 RESET ROLE;
 
 -- Backup/exploration is deliberately all-row and does not depend on request
--- GUCs. The role has an all-row policy for ordinary SELECT plus BYPASSRLS for
--- pg_dump's deliberate `SET row_security = off` behavior.
+-- GUCs. Its SELECT grants plus BYPASSRLS are the sole path around forced RLS,
+-- including pg_dump's deliberate `SET row_security = off` behavior.
 SET ROLE openbrain_readonly;
 DO $$
 DECLARE n integer;
@@ -444,12 +447,14 @@ BEGIN
     RAISE EXCEPTION 'readonly saw % thought audiences, expected 7', n;
   END IF;
   SELECT count(*) INTO n
-  FROM sessions.session WHERE title LIKE '__spaces_smoke_%';
+  FROM sessions.session
+  WHERE title LIKE '\_\_spaces\_smoke\_%' ESCAPE '\';
   IF n <> 2 THEN
     RAISE EXCEPTION 'readonly saw % sessions, expected 2', n;
   END IF;
   SELECT count(*) INTO n
-  FROM sessions.artifact WHERE title LIKE '__spaces_smoke_%';
+  FROM sessions.artifact
+  WHERE title LIKE '\_\_spaces\_smoke\_%' ESCAPE '\';
   IF n <> 2 THEN
     RAISE EXCEPTION 'readonly saw % artifacts, expected 2', n;
   END IF;
@@ -457,7 +462,8 @@ END;
 $$;
 RESET ROLE;
 
-DELETE FROM sessions.session WHERE title LIKE '__spaces_smoke_%';
+DELETE FROM sessions.session
+WHERE title LIKE '\_\_spaces\_smoke\_%' ESCAPE '\';
 DELETE FROM public.thoughts
 WHERE metadata @> '{"_spaces_smoke_fixture":true}'::jsonb;
 DELETE FROM memory_scope.project WHERE workspace_id = '__spaces_smoke_team';

@@ -11,9 +11,9 @@
 #
 # The same completed init is also the integration fixture for the edge monitor
 # allowlist. The assertion is mounted last, then deliberately re-run after
-# direct table/sequence grants, a standing default grant, and a PUBLIC grant on
-# a new non-public-schema table; each drift must fail without changing the
-# assertion's allowlist.
+# an application-role membership, direct monitor table/sequence grants, a
+# standing default grant, and a PUBLIC grant on a new non-public-schema table;
+# each drift must fail without changing the assertion's allowlist.
 #
 # Rather than enumerate privileges in a static assertion (which lags the next
 # new object type, and can't see an object created later by a different
@@ -132,7 +132,7 @@ jobs:
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
             "SELECT 1 FROM memory_scope.workspace WHERE id='sensitive' AND personal_only" | grep -q 1
 
-      - name: Smoke test — monitor relation allowlist rejects grant drift
+      - name: Smoke test — protected roles reject grant drift
         run: |
           run_assertion() {
             docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
@@ -145,7 +145,7 @@ jobs:
             local diagnostic=${3:-}
             local output
             if output=$(run_assertion 2>&1); then
-              echo "::error::$label did not fail the monitor grants assertion"
+              echo "::error::$label did not fail the protected-role grants assertion"
               return 1
             fi
             if ! grep -Fq "$expected" <<< "$output"; then
@@ -163,6 +163,19 @@ jobs:
           # The completed clean schema is valid, including relations created
           # after 02-observability.sql.
           run_assertion >/dev/null
+
+          # Direct flags are not the only way to reach BYPASSRLS: membership
+          # would also confer inherited privileges and allow SET ROLE.
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -c \
+            "GRANT openbrain_readonly TO openbrain_app"
+          expect_rejected "app role membership" \
+            "openbrain_app is a member of" "openbrain_readonly"
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -c \
+            "REVOKE openbrain_readonly FROM openbrain_app"
 
           # Existing relation, direct role grant, schema outside public.
           docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
@@ -219,7 +232,7 @@ jobs:
              DROP SCHEMA monitor_assertion_probe CASCADE"
 
           run_assertion >/dev/null
-          echo "monitor allowlist accepted the clean catalog and rejected all four drift fixtures"
+          echo "protected-role assertions accepted the clean catalog and rejected all five drift fixtures"
 
       - name: Smoke test — spaces isolate every audience and pooled reuse
         run: |

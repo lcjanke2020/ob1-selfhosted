@@ -1,6 +1,7 @@
--- invariant assertions for role grants: openbrain_app on public.thoughts,
--- and (when the role exists) the relation allowlist for the SELECT-only
--- openbrain_monitor.
+-- invariant assertions for protected role grants: openbrain_app must be a
+-- standalone, non-bypass role with its intended public.thoughts access, and
+-- (when the role exists) openbrain_monitor must stay inside its SELECT-only
+-- relation allowlist.
 --
 -- Why this is its own file:
 --
@@ -28,10 +29,12 @@
 --      first. This is the intended contract.
 --
 -- Invariants checked:
---   (a) `openbrain_app` must NOT have DELETE on `public.thoughts`.
---   (b) `openbrain_app` MUST have SELECT, INSERT, UPDATE on
+--   (a) `openbrain_app` must have no role memberships and must not be a
+--       superuser or hold BYPASSRLS directly.
+--   (b) `openbrain_app` must NOT have DELETE on `public.thoughts`.
+--   (c) `openbrain_app` MUST have SELECT, INSERT, UPDATE on
 --       `public.thoughts`.
---   (c) the app may read but not mutate the memory-space registry, and only
+--   (d) the app may read but not mutate the memory-space registry, and only
 --       it may execute the two reviewed memory_scope helpers (never PUBLIC or
 --       the edge-resident monitor).
 --
@@ -42,6 +45,8 @@
 -- else in every non-system schema.
 
 DO $$
+DECLARE
+  memberships text;
 BEGIN
   IF (
     SELECT rolsuper OR rolbypassrls
@@ -49,6 +54,18 @@ BEGIN
   ) THEN
     RAISE EXCEPTION
       'grants assertion failed: openbrain_app can bypass row-level security.';
+  END IF;
+  SELECT string_agg(
+    roleid::regrole::text,
+    ', ' ORDER BY roleid::regrole::text
+  )
+  INTO memberships
+  FROM pg_auth_members
+  WHERE member = 'openbrain_app'::regrole;
+  IF memberships IS NOT NULL THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_app is a member of: %. It must be a standalone role so inherited privileges and SET ROLE cannot bypass row-level security.',
+      memberships;
   END IF;
   IF NOT COALESCE((
     SELECT rolbypassrls

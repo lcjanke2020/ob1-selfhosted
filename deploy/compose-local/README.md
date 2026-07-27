@@ -100,7 +100,12 @@ The server is gated by an `x-brain-key` header, and is deliberately header-only 
 
 > **Windows gotcha.** Claude Desktop spawns subprocesses without a shell, so PATH entries from a node-version manager (`fnm`, `nvm-windows`) often aren't visible — you'll see `spawn npx ENOENT` in the connector log. If you have Bun, `"command": "bun", "args": ["x", "mcp-remote", ...]` usually works out of the box; otherwise hard-code the full path to `npx.cmd`.
 
-After a client restart, the connector should list **eleven tools**: `capture_thought`, `search_thoughts`, `list_thoughts`, `thought_stats`, `search`, `fetch`, plus `session_capture`, `session_lookup`, `session_search`, `session_list`, `session_update_status`. Test by saying *"remember that I set up Open Brain today."*
+After installing or upgrading to server 1.8.0, reconnect or restart the client
+so the connector fetches the new scope-aware tool schemas. It should then list
+**eleven tools**: `capture_thought`, `search_thoughts`, `list_thoughts`,
+`thought_stats`, `search`, `fetch`, plus `session_capture`, `session_lookup`,
+`session_search`, `session_list`, `session_update_status`. Test by saying
+*"remember that I set up Open Brain today."*
 
 ## Verification checklist
 
@@ -143,11 +148,13 @@ is held through both regular GIN index builds until commit, blocking searches
 and captures for the migration's duration. Use a full application maintenance
 window on a large `thoughts` table and budget disk for the column plus both
 indexes.
-`06-spaces.sql` then backfills legacy thoughts and sessions into the `default`
-workspace, adds audience-aware indexes, and forces RLS; it also takes table
-locks, so keep the same maintenance window through both migrations. The updated
-server refuses to boot until both hybrid-search and spaces invariants exist.
-Re-running either file is safe. Details are in
+`06-spaces.sql` requires PostgreSQL 15 or newer and the `postgres` superuser. It
+then backfills legacy thoughts and sessions into the `default` workspace, adds
+audience-aware indexes, and forces RLS; it also takes table locks, so keep the
+same maintenance window through both migrations. The updated server refuses to
+boot until both hybrid-search and spaces invariants exist. Re-running either
+file is safe, but re-running `06-spaces.sql` still rebuilds its fingerprint index
+and needs the full lock window and index headroom. Details are in
 [`docs/hybrid-search.md`](../../docs/hybrid-search.md) and
 [`docs/spaces.md`](../../docs/spaces.md).
 

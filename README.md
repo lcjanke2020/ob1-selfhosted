@@ -190,6 +190,14 @@ parameters. Omitted scope selects `DEFAULT_WORKSPACE_ID`, never all workspaces.
 The complete union, principal, and seeded `sensitive` semantics are in
 [Memory spaces](docs/spaces.md).
 
+Compatibility note for server 1.8.0: REST request bodies and query envelopes
+are strict. Extra fields that older versions silently ignored now return 400.
+Session TOML is strict too and rejects the retired `ingested_path` and
+`needs_file_sync` fields; use structured session lookup plus live context when
+building a refresh, never an old raw TOML document. After upgrading, reconnect
+or restart every MCP client/connector so it fetches the 1.8.0 tool schemas with
+their new scope fields.
+
 Session capture mirrors `session_capture`: omit `id` in the TOML to create
 (201), or include it to refresh the same row (200); `title` remains required on
 a refresh. An unknown `id` is a 404, and an unchanged content hash skips the

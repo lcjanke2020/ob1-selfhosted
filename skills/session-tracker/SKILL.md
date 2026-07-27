@@ -89,6 +89,9 @@ it; it is not a foreign-key reference.
 `content_hash`, `created_at`, `updated_at`. The server sets identity/provenance from
 the authenticated transport — don't write it by hand. Unknown top-level TOML fields
 are rejected, not ignored; a misspelled workspace must never become omitted scope.
+The retired `ingested_path` and `needs_file_sync` fields are also rejected. Never
+reuse returned `raw_toml`; rebuild a refresh from current structured fields and
+live context.
 
 **Memory scope.** Omitted `workspace_id` selects exactly the server's configured
 default workspace, never all workspaces. `project_id` names a registered project

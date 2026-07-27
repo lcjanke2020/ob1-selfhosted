@@ -154,28 +154,13 @@ export async function probeDbAtBoot(
                )
                AND EXISTS (
                  SELECT 1 FROM pg_policy
-                 WHERE polrelid = thoughts.oid
-                   AND polname = 'thoughts_readonly_all'
-               )
-               AND EXISTS (
-                 SELECT 1 FROM pg_policy
                  WHERE polrelid = session_rel.oid
                    AND polname = 'session_app_audience'
                )
                AND EXISTS (
                  SELECT 1 FROM pg_policy
-                 WHERE polrelid = session_rel.oid
-                   AND polname = 'session_readonly_all'
-               )
-               AND EXISTS (
-                 SELECT 1 FROM pg_policy
                  WHERE polrelid = artifact_rel.oid
                    AND polname = 'artifact_app_audience'
-               )
-               AND EXISTS (
-                 SELECT 1 FROM pg_policy
-                 WHERE polrelid = artifact_rel.oid
-                   AND polname = 'artifact_readonly_all'
                )
            )`,
       );
@@ -227,8 +212,8 @@ export async function probeDbAtBoot(
         ].join(", ");
         throw new RequiredSchemaError(
           `[db] Postgres at ${target} is missing fail-closed spaces schema ` +
-            `(${missing}). Apply db/06-spaces.sql as the database owner before ` +
-            `starting this server version.`,
+            `(${missing}). Apply db/06-spaces.sql as a PostgreSQL superuser ` +
+            `(for example, postgres) before starting this server version.`,
         );
       }
       const configuredWorkspace = await client.queryArray<[boolean]>(

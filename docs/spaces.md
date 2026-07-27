@@ -51,6 +51,14 @@ Thought deduplication follows the same audience. Identical content deduplicates
 inside one exact workspace/project/visibility/owner tuple but remains distinct
 across audiences.
 
+Audience is immutable through the normal application APIs. A session recapture
+or status update must use the row's stored scope; supplying another scope gets
+the same not-found result as an unknown ID. Thoughts have no application-level
+move or delete operation. Moving one currently means capturing it into the new
+audience and having an administrator delete the old row. A safe transactional
+reclassification tool that preserves deduplication and session-artifact
+semantics is tracked as follow-up work.
+
 ## The seeded `sensitive` space
 
 [`db/06-spaces.sql`](../db/06-spaces.sql) creates two reserved workspaces:
@@ -126,7 +134,8 @@ personal scope and the `sensitive` workspace fail with a validation error.
 ## Registering workspaces and projects
 
 Registry changes are administrative operations; the application role can read
-the registry but cannot mutate it. Run changes as the database owner:
+the registry but cannot mutate it. Run changes through a migration/admin role
+(normally `postgres`):
 
 ```sql
 INSERT INTO memory_scope.workspace (
@@ -173,18 +182,23 @@ ranks; the server joins those IDs back through the RLS-protected table before
 returning content. The function revokes PostgreSQL's default `PUBLIC` execute
 grant and uses a fixed system catalog search path.
 
-The trusted `openbrain_readonly` role retains all-row SELECT and `BYPASSRLS` for
+The trusted `openbrain_readonly` role retains SELECT grants and `BYPASSRLS` for
 administration and `pg_dump`: PostgreSQL's dump client sets `row_security=off`
-and otherwise refuses to copy an RLS-protected table even under an all-row
-policy. The role receives no DML. `openbrain_app` is explicitly asserted not to
-bypass RLS, while `openbrain_monitor` and `openbrain_ingester` receive no
-memory-space access. The grants assertion remains the completed-catalog check.
+and otherwise refuses to copy an RLS-protected table. It needs no permissive RLS
+policy and receives no DML. `openbrain_app` is explicitly required to be a
+standalone role with no memberships, superuser flag, or `BYPASSRLS`; this also
+closes inherited privileges and `SET ROLE` paths. `openbrain_monitor` and
+`openbrain_ingester` receive no memory-space access. The grants assertion is the
+completed-catalog check for these invariants.
 
 ## Existing-database migration
 
 Fresh installs apply `06-spaces.sql` after sessions and hybrid search. For an
-existing deployment, stop or quiesce the MCP service and take a verified backup,
-then run, as the database owner:
+existing deployment, PostgreSQL 15 or newer is required because audience-aware
+uniqueness uses `NULLS NOT DISTINCT`. Stop or quiesce the MCP service and take a
+verified backup, then run as a PostgreSQL superuser (normally `postgres`). The
+superuser is required because the migration sets `BYPASSRLS` on the backup role
+and creates or replaces a `LEAKPROOF` function:
 
 ```bash
 docker compose exec -T postgres \
@@ -199,14 +213,17 @@ The migration backfills existing thoughts and sessions into the `default`
 workspace at workspace visibility. It takes table locks while adding and
 backfilling audience columns and rebuilding the fingerprint unique index, so
 use a full maintenance window and budget index headroom. It is idempotent, but
-rollback of a completed migration is restore-from-backup rather than dropping
-the new columns: once audience-aware rows exist, removing the boundary would be
-a security-sensitive data merge.
+not cheap: every reapplication intentionally restores the canonical `default`
+and `sensitive` registry settings and unconditionally drops and rebuilds the
+audience-aware fingerprint index. Budget the same lock window and temporary
+index headroom on every run. Rollback of a completed migration is
+restore-from-backup rather than dropping the new columns: once audience-aware
+rows exist, removing the boundary would be a security-sensitive data merge.
 
 After the migration, deploy the updated server and test both default and
 sensitive capture/recall before reopening the service. The boot probe fails
-closed if required registry rows, columns, indexes, policies, forced-RLS flags,
-or the scoped search function are absent.
+closed if required registry rows, columns, indexes, application policies,
+forced-RLS flags, or the scoped search function are absent.
 
 ## Inspiration and lineage
 

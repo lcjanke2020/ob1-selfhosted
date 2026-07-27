@@ -4,9 +4,9 @@
 -- sessions.session. Request scope is installed by the application with
 -- transaction-local `openbrain.*` settings; absent settings match no rows.
 -- The application role therefore cannot widen a read by accidentally omitting
--- a SQL predicate. The `openbrain_readonly` backup/exploration role receives an
--- explicit all-row SELECT policy plus BYPASSRLS for pg_dump; migration owners
--- and superusers retain their normal administrative bypass.
+-- a SQL predicate. The trusted `openbrain_readonly` backup/exploration role
+-- receives SELECT grants plus BYPASSRLS for pg_dump; superusers retain their
+-- normal administrative bypass.
 --
 -- Existing rows migrate to the reserved `default` workspace with workspace
 -- visibility. The reserved `sensitive` workspace defaults new application
@@ -20,9 +20,9 @@
 BEGIN;
 
 -- pg_dump sets row_security=off and refuses to COPY an RLS-protected table as
--- a non-bypass role, even under an all-row SELECT policy. The dedicated
--- backup/exploration role already has all-row SELECT and no DML; preserve its
--- full-dump contract while keeping openbrain_app subject to FORCE RLS.
+-- a non-bypass role. The dedicated backup/exploration role already has SELECT
+-- grants and no DML; BYPASSRLS is its single RLS escape mechanism, so it needs
+-- no permissive policy. Keep openbrain_app subject to FORCE RLS.
 ALTER ROLE openbrain_readonly BYPASSRLS;
 
 CREATE SCHEMA IF NOT EXISTS memory_scope;
@@ -515,8 +515,6 @@ CREATE POLICY thoughts_app_audience ON public.thoughts
   );
 
 DROP POLICY IF EXISTS thoughts_readonly_all ON public.thoughts;
-CREATE POLICY thoughts_readonly_all ON public.thoughts
-  FOR SELECT TO openbrain_readonly USING (true);
 
 ALTER TABLE sessions.session ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sessions.session FORCE ROW LEVEL SECURITY;
@@ -542,8 +540,6 @@ CREATE POLICY session_app_audience ON sessions.session
   );
 
 DROP POLICY IF EXISTS session_readonly_all ON sessions.session;
-CREATE POLICY session_readonly_all ON sessions.session
-  FOR SELECT TO openbrain_readonly USING (true);
 
 ALTER TABLE sessions.artifact ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sessions.artifact FORCE ROW LEVEL SECURITY;
@@ -563,8 +559,6 @@ CREATE POLICY artifact_app_audience ON sessions.artifact
   );
 
 DROP POLICY IF EXISTS artifact_readonly_all ON sessions.artifact;
-CREATE POLICY artifact_readonly_all ON sessions.artifact
-  FOR SELECT TO openbrain_readonly USING (true);
 
 -- ---------- Grants ---------------------------------------------------------
 
