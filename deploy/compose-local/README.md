@@ -100,7 +100,7 @@ The server is gated by an `x-brain-key` header, and is deliberately header-only 
 
 > **Windows gotcha.** Claude Desktop spawns subprocesses without a shell, so PATH entries from a node-version manager (`fnm`, `nvm-windows`) often aren't visible — you'll see `spawn npx ENOENT` in the connector log. If you have Bun, `"command": "bun", "args": ["x", "mcp-remote", ...]` usually works out of the box; otherwise hard-code the full path to `npx.cmd`.
 
-After installing or upgrading to server 1.8.0, reconnect or restart the client
+After installing or upgrading to server 1.9.0, reconnect or restart the client
 so the connector fetches the new scope-aware tool schemas. It should then list
 **eleven tools**: `capture_thought`, `search_thoughts`, `list_thoughts`,
 `thought_stats`, `search`, `fetch`, plus `session_capture`, `session_lookup`,
