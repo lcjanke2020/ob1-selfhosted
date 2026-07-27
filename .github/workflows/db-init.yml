@@ -303,6 +303,57 @@ jobs:
           }
           echo "hybrid semantics passed; vector, FTS, and literal legs selected their indexes"
 
+      - name: Smoke test — late funnel rows are summarized before retention deletes them
+        run: |
+          # The late-arrival retention race (audit finding PR55-OPS-001): a
+          # row whose event day is already beyond the raw-retention horizon
+          # — inserted here 31 days back — must land in funnel_access_summary
+          # in the SAME run whose retention pass deletes the raw evidence.
+          # Insert as the ingester role and run the production SQL as the app
+          # role, mirroring the deployed writer/runner split (this also
+          # asserts openbrain_app's grants cover every statement in the file).
+          docker exec -e PGPASSWORD="$OPENBRAIN_INGESTER_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_ingester -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c \
+            "INSERT INTO funnel_access_log
+               (ts, socket, client_ip, method, path, status, duration_ms, bytes_out, user_agent)
+             VALUES
+               (now() - interval '31 days', 'funnel', '203.0.113.7'::inet,
+                'GET', '/mcp', 401, 12, 100, 'late-summary-smoke')"
+
+          docker exec -i -e PGPASSWORD="$OPENBRAIN_APP_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_app -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/summarize_funnel.sql >/dev/null
+
+          verdict=$(docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT
+               (SELECT COUNT(*) FROM funnel_access_log
+                 WHERE user_agent = 'late-summary-smoke'),
+               (SELECT COUNT(*) FROM funnel_access_summary
+                 WHERE day = (now() AT TIME ZONE 'UTC')::date - 31
+                   AND socket = 'funnel' AND status_class = '4xx'
+                   AND request_count = 1)")
+          test "$verdict" = "0|1" || {
+            echo "::error::expected raw row deleted + one summary row (raw|summary=0|1), got $verdict"
+            exit 1
+          }
+
+          # Idempotency: a second run must neither double-count nor
+          # resurrect the day.
+          docker exec -i -e PGPASSWORD="$OPENBRAIN_APP_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_app -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/summarize_funnel.sql >/dev/null
+          verdict2=$(docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT COUNT(*), COALESCE(MAX(request_count), 0)
+             FROM funnel_access_summary
+             WHERE day = (now() AT TIME ZONE 'UTC')::date - 31")
+          test "$verdict2" = "1|1" || {
+            echo "::error::second run changed the late-day summary (rows|count=$verdict2, expected 1|1)"
+            exit 1
+          }
+          echo "late 31-day-old row summarized before deletion; re-run idempotent"
+
       - name: Container logs on failure
         if: failure()
         run: docker logs pgci || true

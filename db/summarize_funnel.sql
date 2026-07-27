@@ -13,25 +13,60 @@
 
 \set ON_ERROR_STOP on
 
--- We operate on "yesterday in the host's local time" so a midnight-aligned
--- cron job (e.g. 00:30) captures the previous calendar day, not whatever
--- partial today happens to span. UTC is intentional — keeps interpretation
--- stable across DST and host-tz changes. The expression
--- `(now() AT TIME ZONE 'UTC')::date - 1` is inlined at each use site
--- below (psql `\set` substitution doesn't compose cleanly inside WHERE
--- clauses without single-quoting gymnastics, and a stored function would
--- need extra grants).
+-- Day boundaries are UTC — keeps interpretation stable across DST and
+-- host-tz changes. The `(now() AT TIME ZONE 'UTC')::date` expressions are
+-- inlined at each use site below (psql `\set` substitution doesn't compose
+-- cleanly inside WHERE clauses without single-quoting gymnastics, and a
+-- stored function would need extra grants).
+--
+-- The rollup covers a TRAILING WINDOW of complete UTC days, not just
+-- yesterday. A single-day ("yesterday only") rollup permanently missed any
+-- row that arrived after its day's run (ingester backlog, restored data):
+-- later runs only ever looked at newer days, and raw retention eventually
+-- deleted the unsummarized evidence (audit finding PR55-OPS-001).
+-- Recomputing the window each run leans on the ON CONFLICT overwrite for
+-- idempotency; a midnight-aligned cron (e.g. 00:30) still lands yesterday
+-- in the summary on its first eligible run.
 
 BEGIN;
 
--- ---------- 1. Roll up yesterday's raw rows into the summary table -------
+-- ---------- 1. Roll up raw rows into the summary table -------------------
 -- ON CONFLICT means a re-run for the same day overwrites cleanly. The
 -- aggregation is over `funnel_access_log.ts` (the event time from Caddy),
--- not `inserted_at` (the ingest time), so even if the ingester is
--- backlogged the right rows land in the right day.
--- The shape: aggregate by (day, socket, status_class) over yesterday's
--- rows, then for each group compute count / unique_ips / percentiles and
+-- not `inserted_at` (the ingest time), so backlogged rows land in the
+-- right day — and recomputing the whole trailing window is what makes
+-- that hold even for rows that arrive AFTER their day's first rollup.
+--
+-- The recompute set is every complete UTC day still present in the raw
+-- table that is either:
+--   (a) inside the 31-day window — one day wider than the 30-day raw
+--       retention horizon, so a day always gets one final recompute in
+--       the same transaction that deletes its raw rows; or
+--   (b) older, but with NO summary row for that day at all — late or
+--       restored rows for a never-summarized day are rolled up (a
+--       lower-bound summary beats none) before retention deletes them.
+-- Days beyond the window that already HAVE a summary are deliberately
+-- NOT recomputed: their raw rows were purged by an earlier run, so a
+-- recompute from the partial remainder would overwrite a complete
+-- historical summary with an undercount. Late rows for such days are
+-- dropped from the aggregate — the one accepted gap, protecting summary
+-- integrity. Retention below therefore never deletes a row whose event
+-- day lacks a summary row.
+-- The shape: aggregate by (day, socket, status_class) over the recompute
+-- set, then for each group compute count / unique_ips / percentiles and
 -- subselect top-3 paths + UAs.
+WITH recompute_days AS (
+  SELECT DISTINCT (ts AT TIME ZONE 'UTC')::date AS day
+  FROM funnel_access_log
+  WHERE (ts AT TIME ZONE 'UTC')::date < (now() AT TIME ZONE 'UTC')::date
+    AND (
+      (ts AT TIME ZONE 'UTC')::date >= (now() AT TIME ZONE 'UTC')::date - 31
+      OR NOT EXISTS (
+        SELECT 1 FROM funnel_access_summary s
+        WHERE s.day = (funnel_access_log.ts AT TIME ZONE 'UTC')::date
+      )
+    )
+)
 INSERT INTO funnel_access_summary (
   day, socket, status_class,
   request_count, unique_ips,
@@ -112,7 +147,7 @@ FROM (
     percentile_disc(0.5)  WITHIN GROUP (ORDER BY duration_ms)::int  AS p50,
     percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms)::int  AS p95
   FROM funnel_access_log
-  WHERE (ts AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date - 1
+  WHERE (ts AT TIME ZONE 'UTC')::date IN (SELECT day FROM recompute_days)
   GROUP BY day, socket, status_class
 ) d
 ON CONFLICT (day, socket, status_class) DO UPDATE SET
@@ -128,8 +163,18 @@ ON CONFLICT (day, socket, status_class) DO UPDATE SET
 -- Raw retention is short because (a) the daily summary captures the
 -- shape we care about for long-term trends, and (b) per-IP raw retention
 -- is mildly sensitive (it's a public-internet IP log).
+--
+-- Day-granular at UTC midnight, matching the rollup above. The previous
+-- instant-based cutoff (`ts < now() - interval '30 days'`) started eating
+-- a day's rows mid-day while that day was still inside the recompute
+-- window — a recompute after partial deletion would deflate a complete
+-- summary. Whole-day deletion in the same transaction as the rollup means
+-- every deleted row's day was either just recomputed (in-window, or
+-- never-summarized via branch (b) above) or already carries its final
+-- historical summary. The sargable form below is equivalent to
+-- `(ts AT TIME ZONE 'UTC')::date < (now() AT TIME ZONE 'UTC')::date - 30`.
 DELETE FROM funnel_access_log
-WHERE ts < now() - interval '30 days';
+WHERE ts < (((now() AT TIME ZONE 'UTC')::date - 30)::timestamp AT TIME ZONE 'UTC');
 
 DELETE FROM mcp_auth_events
 WHERE ts < now() - interval '30 days';
