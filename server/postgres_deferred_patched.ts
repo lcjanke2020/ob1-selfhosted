@@ -1,13 +1,45 @@
 // Patched copy of deno-postgres's connection-stack module.
 //
 // Source: https://deno.land/x/postgres@v0.19.3/utils/deferred.ts
-// (deno-postgres, MIT license — © the deno-postgres authors). Wired in
-// via the import-map entry in deno.json that remaps that exact URL to
-// this file, so the driver's own `pool.ts` import resolves here. Keep
-// this file byte-identical to upstream EXCEPT the marked patch in
-// `DeferredAccessStack.pop()`; if the pinned driver version changes,
-// re-copy the new upstream file and re-apply the patch (or drop both
-// the file and the import-map entry if upstream has fixed it).
+// (denodrivers/postgres). Wired in via the import-map entry in deno.json
+// that remaps that exact URL to this file, so the driver's own `pool.ts`
+// import resolves here. Keep this file byte-identical to upstream EXCEPT
+// the marked patch in `DeferredAccessStack.pop()`; if the pinned driver
+// version changes, re-copy the new upstream file and re-apply the patch
+// (or drop both the file and the import-map entry if upstream has fixed
+// it).
+//
+// Upstream license (denodrivers/postgres @ v0.19.3, reproduced in full as
+// the MIT terms require for copies and substantial portions):
+//
+//   MIT License
+//
+//   Copyright (c) 2018-2025 Bartłomiej Iwańczuk, Steven Guerrero, and
+//   Hector Ayala
+//
+//   Permission is hereby granted, free of charge, to any person obtaining
+//   a copy of this software and associated documentation files (the
+//   "Software"), to deal in the Software without restriction, including
+//   without limitation the rights to use, copy, modify, merge, publish,
+//   distribute, sublicense, and/or sell copies of the Software, and to
+//   permit persons to whom the Software is furnished to do so, subject to
+//   the following conditions:
+//
+//   The above copyright notice and this permission notice shall be
+//   included in all copies or substantial portions of the Software.
+//
+//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+//   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+//   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+//   NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+//   BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+//   ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+//   CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//   SOFTWARE.
+//
+// Local modification disclosure: the try/catch marked "PATCH" in
+// `DeferredAccessStack.pop()` below is the only functional change from
+// the upstream file.
 //
 // THE PATCH (audit finding PR55-SRV-001): upstream `pop()` removes an
 // element from the stack and then runs the caller-supplied
