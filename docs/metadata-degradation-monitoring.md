@@ -1,7 +1,8 @@
 # Alerting when metadata extraction degrades
 
 The metadata extractor degrades in three ways, and every one of them is
-announced as a single line on the mcp container's stdout — which nobody reads.
+announced as a single line on the mcp container's **stderr** — which nobody
+reads.
 The worst of the three means **a thought's full text left your network**. The
 server intentionally never blocks a capture on classification, so without an
 operator-side alert the only "detection" is noticing, days later, that topic
@@ -26,6 +27,15 @@ no thought content; grep for the stable substrings shown.
 | `classified via FALLBACK endpoint` | Content may have left your network (depends on `FALLBACK_CHAT_API_BASE`). The headline event. | high |
 | `stamping uncategorized stub` | Every configured endpoint failed; the thought is stored with placeholder metadata and won't surface under topic/type filters until backfilled. | normal |
 | `primary endpoint failed` | Early warning — fires even when the fallback then rescues the capture. On a deployment that keeps a resident local model (see the [GPU-qube transport doc](../deploy/qubes/gpu-offload-transport.md), §6–7), this firing *at all* means the residency guarantees are not holding. | normal |
+
+All three are `console.warn` lines, which Deno emits on **stderr**; only the
+healthy `classified via primary endpoint` confirmation goes to stdout. The
+sketch below sees them because `docker logs` replays the container's stderr
+onto its own and the `2>&1` merges it into the scanned text — that redirect is
+load-bearing, not error plumbing. If you adapt the sketch to anything that
+splits the streams — `docker logs` piped without `2>&1`, journald forwarding,
+a log shipper — make sure the stderr leg survives, or the monitor goes silent
+on exactly the lines it exists to catch.
 
 ## Alert content policy
 
@@ -103,6 +113,8 @@ cursor=""; last_alert=0; pf=0; ps=0; pp=0
 
 # Closed window [cursor, now): --until keeps consecutive windows exact, so a
 # line that lands while the scan runs is counted once, in the next window.
+# The 2>&1 is load-bearing: the trigger lines are on the container's STDERR
+# (see "The trigger lines" above), which docker logs replays on its stderr.
 if ! logs=$(docker logs --since "$cursor" --until "$now_rfc" "$CONTAINER" 2>&1); then
   # Monitor is blind. The cursor does NOT advance — the unread window will be
   # scanned when visibility returns. Throttled like any other alert: a dead

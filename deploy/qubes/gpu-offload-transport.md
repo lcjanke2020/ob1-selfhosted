@@ -372,7 +372,7 @@ in front of a capture. Two companion settings, same qube:
   that keeps it off the capture path, and §6 explains why an undersized qube
   silently undoes both.
 - **Know when it degrades.** Every fallback classification is a privacy event
-  logged as a single line to container stdout that nobody reads. A small
+  logged as a single line to the container's stderr that nobody reads. A small
   operator alert channel over those lines — triggers, no-content alert policy,
   a Pushover sketch — is in
   [`docs/metadata-degradation-monitoring.md`](../../docs/metadata-degradation-monitoring.md).
