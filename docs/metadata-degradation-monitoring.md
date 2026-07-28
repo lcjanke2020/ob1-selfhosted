@@ -238,7 +238,9 @@ Two caveats worth knowing:
 - **Egress**: the monitor runs on the *host*, so container-scoped egress
   firewalls (e.g. a `DOCKER-USER` chain) don't apply to it — but check the
   host's own path once: `curl -sI https://api.pushover.net` from the account
-  that will run the timer.
+  that will run the timer. On a Qubes deployment the knob that actually
+  governs that path is the app qube's own Qubes-firewall egress policy —
+  check there first if the probe fails.
 
 ## Where this should go eventually
 
