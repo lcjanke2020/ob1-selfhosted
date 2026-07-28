@@ -14,9 +14,11 @@ Until a durable in-server signal exists (see [Where this should go
 eventually](#where-this-should-go-eventually)), a small log-scraping monitor
 gives the operator a push notification within minutes. This doc sketches one
 against [Pushover](https://pushover.net/); [ntfy](https://ntfy.sh/) is
-analogous. It was built and live-fire tested on the Qubes three-qube
-deployment, but nothing in it is Qubes-specific — any host that can run
-`docker logs` and a systemd user timer can carry it.
+analogous. An earlier revision was built and live-fire tested on the Qubes
+three-qube deployment; the state protocol below was then hardened in review
+(verified under a stub harness, not yet live-fired). Nothing in it is
+Qubes-specific — any host that can run `docker logs` and a systemd user
+timer can carry it.
 
 ## The trigger lines
 
@@ -253,7 +255,8 @@ sketched here so the interim doesn't calcify:
 - the server records each degradation event durably (the auth-audit table
   pattern already in [`db/`](../db/) is the in-repo precedent), and/or stamps
   the classifying endpoint into the thought's stored metadata at capture time;
-- the alerter reads that record instead of stdout, and grows pluggable
+- the alerter reads that record instead of scraping container logs, and grows
+  pluggable
   delivery (Pushover / ntfy / SMTP) rather than one hardcoded transport;
 - an operator-selected fallback policy (`off` / `alert` / `allow`) makes the
   privacy stance explicit instead of emergent from which env vars happen to be
