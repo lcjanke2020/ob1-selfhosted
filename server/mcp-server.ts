@@ -9,6 +9,13 @@ import type { Pool } from "postgres";
 
 import { CITATION_BASE_URL } from "./config.ts";
 import {
+  mcpError as err,
+  mcpJsonCollection,
+  mcpJsonRecord,
+  mcpText as text,
+  mcpTextRecords,
+} from "./mcp_result.ts";
+import {
   captureThoughtSchema,
   compatibilitySearchSchema,
   fetchThoughtSchema,
@@ -48,17 +55,6 @@ function thoughtTitle(content: string, createdAt?: string): string {
 
 function thoughtUrl(id: string): string {
   return `${CITATION_BASE_URL.replace(/\/$/, "")}/${id}`;
-}
-
-function err(message: string) {
-  return {
-    content: [{ type: "text" as const, text: `Error: ${message}` }],
-    isError: true,
-  };
-}
-
-function text(t: string) {
-  return { content: [{ type: "text" as const, text: t }] };
 }
 
 // Session TOML schema contract, served verbatim as an MCP resource
@@ -224,7 +220,7 @@ export function createMcpServer(
     {
       title: "Search Open Brain",
       description:
-        "Search Open Brain memories by meaning and exact text inside one fail-closed workspace scope. Read-only compatibility tool for ChatGPT-style search/fetch consumers.",
+        "Search Open Brain memories by meaning and exact text inside one fail-closed workspace scope. Read-only compatibility tool for ChatGPT-style search/fetch consumers. Oversized MCP results include explicit omission metadata and recovery guidance.",
       annotations: { readOnlyHint: true },
       inputSchema: compatibilitySearchSchema,
     },
@@ -240,7 +236,12 @@ export function createMcpServer(
           title: thoughtTitle(t.content, t.created_at),
           url: thoughtUrl(t.id),
         }));
-        return text(JSON.stringify({ results }));
+        return mcpJsonCollection(results, {
+          fullPayload: (included) => ({ results: included }),
+          id: (result) => result.id,
+          recovery:
+            "Call fetch once per omitted ID, or rerun search with a narrower query.",
+        });
       } catch (e) {
         return err((e as Error).message);
       }
@@ -252,7 +253,7 @@ export function createMcpServer(
     {
       title: "Fetch Open Brain Thought",
       description:
-        "Fetch one Open Brain thought by ID after using search. Read-only compatibility tool.",
+        "Fetch one Open Brain thought by ID after using search. Read-only compatibility tool. If MCP serialization cannot carry a complete record, the response identifies omitted fields and the optional tailnet REST recovery path.",
       annotations: { readOnlyHint: true },
       inputSchema: fetchThoughtSchema,
     },
@@ -274,7 +275,19 @@ export function createMcpServer(
             updated_at: t.updated_at,
           },
         };
-        return text(JSON.stringify(document));
+        const recovery =
+          `When tailnet REST is enabled, use GET /api/v1/thoughts/${t.id} to retrieve fields omitted from this MCP result.`;
+        return mcpJsonRecord(document, {
+          reductions: [
+            { field: "metadata", action: "replace", value: {} },
+            {
+              field: "text",
+              action: "replace",
+              value: `[Thought text omitted from MCP; ${recovery}]`,
+            },
+          ],
+          recovery,
+        });
       } catch (e) {
         return err((e as Error).message);
       }
@@ -286,7 +299,7 @@ export function createMcpServer(
     {
       title: "Search Thoughts",
       description:
-        "Hybrid-search captured thoughts by meaning and exact text inside one fail-closed workspace scope, optionally narrowing visibility or requiring/excluding caller-asserted provenance.",
+        "Hybrid-search captured thoughts by meaning and exact text inside one fail-closed workspace scope, optionally narrowing visibility or requiring/excluding caller-asserted provenance. Oversized MCP results retain complete records that fit and identify omitted thought IDs.",
       annotations: { readOnlyHint: true },
       inputSchema: searchThoughtsSchema,
     },
@@ -301,34 +314,41 @@ export function createMcpServer(
           auth,
         }, deps);
         if (!rows.length) return text(`No thoughts found matching "${query}".`);
-        const lines = rows.map((t, i) => {
-          const m = t.metadata || {};
-          const matchLabel = t.similarity < (threshold ?? 0.5)
-            ? "exact-text match"
-            : `${(t.similarity * 100).toFixed(1)}% semantic similarity`;
-          const parts = [
-            `--- Result ${i + 1} (${matchLabel}) ---`,
-            `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
-            `Space: ${t.workspace_id}${
-              t.project_id ? ` / ${t.project_id}` : ""
-            } (${t.visibility})`,
-            `Type: ${m.type ?? "unknown"}`,
-          ];
-          if (Array.isArray(m.topics) && m.topics.length) {
-            parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
-          }
-          if (Array.isArray(m.people) && m.people.length) {
-            parts.push(`People: ${(m.people as string[]).join(", ")}`);
-          }
-          if (Array.isArray(m.action_items) && m.action_items.length) {
-            parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
-          }
-          parts.push(`\n${t.content}`);
-          return parts.join("\n");
+        return mcpTextRecords(rows, {
+          fullHeading: (total) => `Found ${total} thought(s):`,
+          truncatedHeading: (included, total) =>
+            `Showing ${included} of ${total} thought(s):`,
+          renderRecord: (t, i) => {
+            const m = t.metadata || {};
+            const matchLabel = t.similarity < (threshold ?? 0.5)
+              ? "exact-text match"
+              : `${(t.similarity * 100).toFixed(1)}% semantic similarity`;
+            const parts = [
+              `--- Result ${i + 1} (${matchLabel}) ---`,
+              `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
+              `Space: ${t.workspace_id}${
+                t.project_id ? ` / ${t.project_id}` : ""
+              } (${t.visibility})`,
+              `Type: ${m.type ?? "unknown"}`,
+            ];
+            if (Array.isArray(m.topics) && m.topics.length) {
+              parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
+            }
+            if (Array.isArray(m.people) && m.people.length) {
+              parts.push(`People: ${(m.people as string[]).join(", ")}`);
+            }
+            if (Array.isArray(m.action_items) && m.action_items.length) {
+              parts.push(
+                `Actions: ${(m.action_items as string[]).join("; ")}`,
+              );
+            }
+            parts.push(`\n${t.content}`);
+            return parts.join("\n");
+          },
+          id: (thought) => thought.id,
+          recovery:
+            "Call fetch once per omitted ID; if an individual fetch is abridged and tailnet REST is enabled, use GET /api/v1/thoughts/:id.",
         });
-        return text(
-          `Found ${rows.length} thought(s):\n\n${lines.join("\n\n")}`,
-        );
       } catch (e) {
         return err((e as Error).message);
       }
@@ -340,7 +360,7 @@ export function createMcpServer(
     {
       title: "List Recent Thoughts",
       description:
-        "List recently captured thoughts inside one fail-closed workspace scope, with optional filters by type, topic, person, or time range.",
+        "List recently captured thoughts inside one fail-closed workspace scope, with optional filters by type, topic, person, or time range. Oversized MCP results retain complete records that fit and identify omitted thought IDs.",
       annotations: { readOnlyHint: true },
       inputSchema: listThoughtsSchema,
     },
@@ -348,22 +368,27 @@ export function createMcpServer(
       try {
         const rows = await listThoughtsInScope(pool, { ...opts, auth });
         if (!rows.length) return text("No thoughts found.");
-        const lines = rows.map((t, i) => {
-          const m = t.metadata || {};
-          const tags = Array.isArray(m.topics)
-            ? (m.topics as string[]).join(", ")
-            : "";
-          return `${i + 1}. [${
-            new Date(t.created_at).toLocaleDateString()
-          }] [${t.workspace_id}${
-            t.project_id ? `/${t.project_id}` : ""
-          }:${t.visibility}] (${m.type ?? "??"}${
-            tags ? " - " + tags : ""
-          })\n   ${t.content}`;
+        return mcpTextRecords(rows, {
+          fullHeading: (total) => `${total} recent thought(s):`,
+          truncatedHeading: (included, total) =>
+            `Showing ${included} of ${total} recent thought(s):`,
+          renderRecord: (t, i) => {
+            const m = t.metadata || {};
+            const tags = Array.isArray(m.topics)
+              ? (m.topics as string[]).join(", ")
+              : "";
+            return `${i + 1}. [${
+              new Date(t.created_at).toLocaleDateString()
+            }] [${t.workspace_id}${
+              t.project_id ? `/${t.project_id}` : ""
+            }:${t.visibility}] (${m.type ?? "??"}${
+              tags ? " - " + tags : ""
+            })\n   ${t.content}`;
+          },
+          id: (thought) => thought.id,
+          recovery:
+            "Call fetch once per omitted ID; if an individual fetch is abridged and tailnet REST is enabled, use GET /api/v1/thoughts/:id.",
         });
-        return text(
-          `${rows.length} recent thought(s):\n\n${lines.join("\n\n")}`,
-        );
       } catch (e) {
         return err((e as Error).message);
       }
@@ -523,7 +548,7 @@ export function createMcpServer(
     {
       title: "Look up Session",
       description:
-        "Retrieve a stored session record by id or branch — this does NOT resume execution, it fetches the record. Returns the full record (resume_context, next_actions, blockers, artifacts, raw_toml), or null if no match. Structured fields are authoritative; raw_toml is the verbatim input from the last session_capture, may differ from current structured fields (for example, after session_update_status), and must not be used as a recapture template. On a branch tie the most-recently-updated session wins.",
+        "Retrieve a stored session record by id or branch — this does NOT resume execution, it fetches the record. Returns the full record (resume_context, next_actions, blockers, artifacts, raw_toml), or null if no match. Structured fields are authoritative; raw_toml is the verbatim input from the last session_capture, may differ from current structured fields (for example, after session_update_status), and must not be used as a recapture template. On a branch tie the most-recently-updated session wins. Oversized MCP records identify omitted fields and the optional tailnet REST recovery path.",
       annotations: { readOnlyHint: true },
       inputSchema: sessionLookupSchema,
     },
@@ -538,7 +563,24 @@ export function createMcpServer(
           scope,
           auth,
         });
-        return text(JSON.stringify(rec));
+        if (!rec) return text("null");
+        const recovery =
+          `Structured fields are authoritative. When tailnet REST is enabled, use GET /api/v1/sessions/${rec.id} only when an omitted field is required.`;
+        return mcpJsonRecord(rec, {
+          reductions: [
+            { field: "raw_toml", action: "omit" },
+            { field: "summary", action: "omit" },
+            { field: "artifacts", action: "omit" },
+            { field: "related_sessions", action: "omit" },
+            { field: "linked_issues", action: "omit" },
+            { field: "tags", action: "omit" },
+            { field: "blockers", action: "omit" },
+            { field: "next_actions", action: "omit" },
+            { field: "resume_context", action: "omit" },
+            { field: "goal", action: "omit" },
+          ],
+          recovery,
+        });
       } catch (e) {
         return err((e as Error).message);
       }
@@ -550,7 +592,7 @@ export function createMcpServer(
     {
       title: "Search Sessions",
       description:
-        "Semantic search over session title/goal/summary/resume_context. Optional structured filters by status, repo_url, tag. Returns [{id, session_id, title, status, last_update, score}].",
+        "Semantic search over session title/goal/summary/resume_context. Optional structured filters by status, repo_url, tag. Returns [{id, session_id, title, status, last_update, score}]. Oversized MCP results retain complete rows and identify omitted session IDs.",
       annotations: { readOnlyHint: true },
       inputSchema: sessionSearchSchema,
     },
@@ -565,7 +607,12 @@ export function createMcpServer(
           scope,
           auth,
         }, deps);
-        return text(JSON.stringify(rows));
+        return mcpJsonCollection(rows, {
+          fullPayload: (included) => included,
+          id: (row) => row.id,
+          recovery:
+            "Call session_lookup once per omitted ID, or rerun session_search with a smaller limit and narrower filters.",
+        });
       } catch (e) {
         return err((e as Error).message);
       }
@@ -577,14 +624,19 @@ export function createMcpServer(
     {
       title: "List Sessions",
       description:
-        "List sessions by structured filters (no embedding) — the 'show me everything awaiting_review' path. Returns lightweight rows ordered by the chosen column.",
+        "List sessions by structured filters (no embedding) — the 'show me everything awaiting_review' path. Returns lightweight rows ordered by the chosen column. Oversized MCP results retain complete rows and identify omitted session IDs.",
       annotations: { readOnlyHint: true },
       inputSchema: sessionListSchema,
     },
     async (opts) => {
       try {
         const rows = await listSessionsInScope(pool, { ...opts, auth });
-        return text(JSON.stringify(rows));
+        return mcpJsonCollection(rows, {
+          fullPayload: (included) => included,
+          id: (row) => row.id,
+          recovery:
+            "Call session_lookup once per omitted ID, or rerun session_list with a smaller limit and narrower filters.",
+        });
       } catch (e) {
         return err((e as Error).message);
       }
