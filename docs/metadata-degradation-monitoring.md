@@ -67,9 +67,10 @@ doesn't claim it.
   than dropping them.
 - **A monitor that cannot see is itself an alert**: if the container log can't
   be read, send a "monitor is blind" notification instead of silently
-  skipping — throttled to the same rollup cadence (a dead container is one
-  push per rollup period, not one per timer tick), and **without advancing the
-  scan cursor**, so the unread window is scanned once visibility returns.
+  skipping — throttled at the rollup cadence on its **own** stamp (a dead
+  container is one push per rollup period, not one per timer tick, and
+  neither alert class delays the other's first push), and **without advancing
+  the scan cursor**, so the unread window is scanned once visibility returns.
   Fail-alert, never fail-silent.
 - **The cursor and the counts move together.** Scan position and pending
   counts live in one atomically-replaced state record, committed *before* any
@@ -110,9 +111,11 @@ API_URL="https://api.pushover.net/1/messages.json"
 ROLLUP_SECS=1800
 
 mkdir -p "$STATE_DIR"
-# One atomically-replaced record: scan cursor, last-alert time, pending counts.
-# A single file means a crash can never separate the cursor from the counts.
-STATE_FILE="$STATE_DIR/state"  # "<cursor-rfc3339> <last-alert-epoch> <fallback> <stub> <primaryfail>"
+# One atomically-replaced record: scan cursor, per-class last-alert times,
+# pending counts. A single file means a crash can never separate the cursor
+# from the counts. The blind stamp sits last so an older 5-field state file
+# still parses (the missing field defaults to 0).
+STATE_FILE="$STATE_DIR/state"  # "<cursor-rfc3339> <last-alert-epoch> <fallback> <stub> <primaryfail> <last-blind-epoch>"
 
 now_epoch=$(date +%s)
 now_rfc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -135,15 +138,15 @@ send_pushover() { # $1=title $2=message $3=priority
     -F "title=$1" -F "message=$2" -F "priority=${3:-0}" >/dev/null
 }
 
-write_state() { # $1=cursor $2=last_alert $3..$5=counts — tmp+mv, never half-written
-  printf '%s %s %s %s %s\n' "$1" "$2" "$3" "$4" "$5" > "$STATE_FILE.tmp" &&
+write_state() { # $1=cursor $2=last_alert $3..$5=counts $6=last_blind — tmp+mv, never half-written
+  printf '%s %s %s %s %s %s\n' "$1" "$2" "$3" "$4" "$5" "$6" > "$STATE_FILE.tmp" &&
     mv -f "$STATE_FILE.tmp" "$STATE_FILE"
 }
 
-cursor=""; last_alert=0; pf=0; ps=0; pp=0
-[[ -r "$STATE_FILE" ]] && { read -r cursor last_alert pf ps pp < "$STATE_FILE" || true; }
+cursor=""; last_alert=0; pf=0; ps=0; pp=0; last_blind=0
+[[ -r "$STATE_FILE" ]] && { read -r cursor last_alert pf ps pp last_blind < "$STATE_FILE" || true; }
 : "${cursor:=$(date -u -d "5 minutes ago" +%Y-%m-%dT%H:%M:%SZ)}"
-: "${last_alert:=0}" "${pf:=0}" "${ps:=0}" "${pp:=0}"
+: "${last_alert:=0}" "${pf:=0}" "${ps:=0}" "${pp:=0}" "${last_blind:=0}"
 
 # Closed window [cursor, now): --until keeps consecutive windows exact, so a
 # line that lands while the scan runs is counted once, in the next window.
@@ -151,12 +154,14 @@ cursor=""; last_alert=0; pf=0; ps=0; pp=0
 # (see "The trigger lines" above), which docker logs replays on its stderr.
 if ! logs=$(docker logs --since "$cursor" --until "$now_rfc" "$CONTAINER" 2>&1); then
   # Monitor is blind. The cursor does NOT advance — the unread window will be
-  # scanned when visibility returns. Throttled like any other alert: a dead
-  # container is one push per rollup period, not one per five-minute tick.
-  if (( now_epoch - last_alert >= ROLLUP_SECS )); then
+  # scanned when visibility returns. Throttled on its OWN stamp: a dead
+  # container is one push per rollup period, not one per five-minute tick,
+  # and a recent degradation alert never delays the first blind push (nor
+  # vice versa).
+  if (( now_epoch - last_blind >= ROLLUP_SECS )); then
     if send_pushover "OB1 metadata monitor" \
         "$LABEL: cannot read the mcp container's logs since $cursor — monitor is blind" 1; then
-      write_state "$cursor" "$now_epoch" "$pf" "$ps" "$pp"
+      write_state "$cursor" "$last_alert" "$pf" "$ps" "$pp" "$now_epoch"
     else
       echo "ERROR: pushover send failed while blind" >&2
       exit 1
@@ -173,7 +178,7 @@ pf=$((pf + fallback)); ps=$((ps + stub)); pp=$((pp + primfail))
 
 # Commit cursor + counts together BEFORE any send: from here a crash or failed
 # send can at worst repeat an alert — it can no longer lose counted events.
-write_state "$now_rfc" "$last_alert" "$pf" "$ps" "$pp"
+write_state "$now_rfc" "$last_alert" "$pf" "$ps" "$pp" "$last_blind"
 
 (( pf + ps + pp == 0 )) && exit 0
 
@@ -183,7 +188,7 @@ if (( now_epoch - last_alert >= ROLLUP_SECS )); then
   # points); priority-1 errs on the loud side either way.
   prio=0; (( pf > 0 )) && prio=1
   if send_pushover "OB1 metadata degraded" "$msg" "$prio"; then
-    write_state "$now_rfc" "$now_epoch" 0 0 0
+    write_state "$now_rfc" "$now_epoch" 0 0 0 "$last_blind"
   else
     echo "ERROR: pushover send failed; counts carried forward" >&2
     exit 1
