@@ -225,7 +225,10 @@ AccuracySec=30s
 WantedBy=timers.target
 ```
 
-Enable (as the user that can run `docker logs`, no root needed):
+Enable, as the account *already* authorized to access the Docker daemon — do
+not grant Docker-socket access solely for this monitor (on rootful Docker,
+`docker`-group membership is root-equivalent; rootless Docker is the genuinely
+unprivileged case):
 
 ```sh
 loginctl enable-linger "$USER"   # user timers must outlive login sessions (needs auth once)
