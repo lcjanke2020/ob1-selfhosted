@@ -12,6 +12,7 @@ import { assertEquals, assertThrows } from "jsr:@std/assert@1";
 const ENV_KEYS = [
   "DB_PASSWORD",
   "MCP_ACCESS_KEY",
+  "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
@@ -35,6 +36,7 @@ Deno.test("deriveProtectedResourceMetadata (RFC 9728 §3.1)", async (t) => {
   // config.ts requires these to be present (else throws at module load).
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", "0".repeat(64));
+  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   // disable audit emission for the same reason as the other
   // auth_*_test files.
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");

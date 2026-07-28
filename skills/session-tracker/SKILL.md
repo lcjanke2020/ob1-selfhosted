@@ -68,6 +68,7 @@ fields with `#` comments for readability; they round-trip.
 | When | `started_at`, `last_update`, `ended_at`, `session_date` |
 | What | `title`, `goal`, `status` (enum), `tags`, `linked_issues`, `related_sessions`, `next_actions`, `blockers` |
 | Prose | `summary`, `resume_context` (TOML `"""…"""` multiline) |
+| Memory scope | `workspace_id`, `project_id`, `visibility` (`personal | project | workspace`) |
 | Artifacts | `[[artifacts]]` array-of-tables — `kind` + `title` required, `detail` optional (see below) |
 | Upsert key | `id` (integer) — **only ever the value the server returned** (see Capturing) |
 | Resumable handle | `session_id` — optional, free-form, nullable; the *harness conversation id* for re-opening the chat transcript later (see *The resumable handle* below). **NOT** the key. |
@@ -84,9 +85,22 @@ it; it is not a foreign-key reference.
 - **Embedded-for-search content** is `title` / `goal` / `summary` / `resume_context`;
   the server re-embeds only when that content changes (`content_hash`).
 
-**Server-stamped — never author these:** `source`, `source_node`, `content_hash`,
-`created_at`, `updated_at`. The server sets `source` / `source_node` from the transport
-(tailnet x-brain-key vs OAuth door) — don't write a `source` by hand.
+**Server-stamped — never author these:** `owner_subject`, `source`, `source_node`,
+`content_hash`, `created_at`, `updated_at`. The server sets identity/provenance from
+the authenticated transport — don't write it by hand. Unknown top-level TOML fields
+are rejected, not ignored; a misspelled workspace must never become omitted scope.
+The retired `ingested_path` and `needs_file_sync` fields are also rejected. Never
+reuse returned `raw_toml`; rebuild a refresh from current structured fields and
+live context.
+
+**Memory scope.** Omitted `workspace_id` selects exactly the server's configured
+default workspace, never all workspaces. `project_id` names a registered project
+inside that workspace. On capture, omitted `visibility` chooses `project` when a
+project is present and otherwise the workspace default. On lookup/search/list/status
+updates, pass a nested MCP `scope = {workspace_id, project_id?, visibility?}` argument;
+omitted visibility reads the allowed audience union inside that one workspace. Always
+reuse the stored workspace/project context when refreshing or mutating an existing
+session. See [`docs/spaces.md`](../../docs/spaces.md).
 
 **`[[artifacts]]`** attach references — a PR, a note, a file, a branch — to the session.
 Each is a TOML table in an `[[artifacts]]` array: `kind` and `title` are **required**,
@@ -138,6 +152,22 @@ last_update = "2026-06-08"
 repo_url = "https://github.com/acme/billing-service"
 branch = "fix/flaky-invoice-test"
 goal = "Find and fix the intermittent failure in test_invoice_rounding."
++++
+```
+
+### Sensitive personal example
+
+The seeded `sensitive` workspace is personal-only. It requires a verified OAuth
+subject or a local shared-key deployment configured with
+`MCP_ACCESS_KEY_PRINCIPAL`; project/workspace visibility is rejected:
+
+```toml
++++
+title = "Private work log"
+status = "active"
+workspace_id = "sensitive"
+visibility = "personal"
+goal = "Keep particularly sensitive work in my personal audience."
 +++
 ```
 
@@ -225,10 +255,12 @@ title = "Benchmark: sliding-window vs token-bucket"
    omitted arrays become empty, and omitting all `[[artifacts]]` blocks deletes stored
    artifacts. Re-send every field and artifact you intend to retain, taking stored
    values from `session_lookup`'s structured record and updating them from live
-   context where applicable. **Omit `status` unless you are deliberately changing
-   lifecycle state.**
+   context where applicable. Re-send the stored `workspace_id`, `project_id`, and
+   `visibility` so the existing row is targeted through its actual audience.
+   **Omit `status` unless you are deliberately changing lifecycle state.**
 2. Assemble the TOML in memory (no on-disk file needed).
-3. Call `session_capture(toml_text)`. It returns `{id, session_id, status, created, reembedded}`.
+3. Call `session_capture(toml_text)`. It returns `{id, session_id, status, created,
+   reembedded, workspace_id, project_id, visibility}`.
 4. **First capture only:** the front matter has no `id`, so the server **mints
    one** and returns it (`created: true`). **Retain that `id` for this work-thread** —
    stash it in agent project memory, or plan to re-discover it via
@@ -251,10 +283,13 @@ title = "Benchmark: sliding-window vs token-bucket"
 
 ## Resuming a session
 
-- On a resume cue, locate the session first:
-  - by branch → `session_lookup(branch="<branch>")` (on a branch tie, newest-updated wins);
-  - by id → `session_lookup(id=<id>)`;
-  - fuzzy ("the session where I chased the flaky invoice test") → `session_search(query=…)`,
+- On a resume cue, locate the session first, supplying its workspace/project scope
+  when it is not in the configured default:
+  - by branch → `session_lookup(branch="<branch>", scope={…})` (on a branch tie,
+    newest-updated wins);
+  - by id → `session_lookup(id=<id>, scope={…})`;
+  - fuzzy ("the session where I chased the flaky invoice test") →
+    `session_search(query=…, scope={…})`,
     then `session_lookup` the best hit.
 - `session_lookup` *fetches* the stored record; it does not resume execution.
 - Read current state from the structured fields. The returned `raw_toml` is only the
@@ -294,7 +329,7 @@ was reconstructed from the session record.
 
 ## Searching & listing
 
-- "What's awaiting review / blocked / active" → `session_list(status=…)` (pure SQL
+- "What's awaiting review / blocked / active" → `session_list(status=…, scope={…})` (pure SQL
   filter; also filters by `repo_url`, `branch`, `agent`, `tag`, `linked_issue`, `since`,
   `until`).
 - Fuzzy recall over title/goal/summary/resume_context → `session_search(query, …)`
@@ -303,7 +338,7 @@ was reconstructed from the session record.
 ## Lifecycle
 
 - Quick transitions (e.g. mark `done` after a PR merges, or `blocked` when stuck) →
-  `session_update_status(id, status)`. Usable from any surface with no checkout; it writes
+  `session_update_status(id, status, scope={…})`. Usable from any surface with no checkout; it writes
   the new structured `status` straight to the canonical store and returns `{id, status}`.
   It intentionally does not rewrite historical `raw_toml`. There is no file to reconcile.
 
@@ -335,6 +370,8 @@ These directly counter the "agent asserts success about its own state" failure p
   transcript won't resume. Leave it unset rather than guess.
 - Don't author nested `[identity]` / `[where]` / `[state_for_resuming]` blocks —
   the schema is flat.
+- Don't omit a non-default session's scope on lookup, refresh, or status update; omission
+  selects the configured default workspace and therefore cannot target that row.
 - Don't author server-stamped fields (`source`, `content_hash`, …).
 - Don't pin embedding-model or dimension assumptions in session tooling — sessions
   follow whatever the Open Brain deployment uses.

@@ -7,6 +7,7 @@
 
 import { z } from "zod";
 import { SESSION_ORDER_BY, SESSION_STATUSES } from "./session_toml.ts";
+import { MEMORY_VISIBILITIES } from "./scope_contract.ts";
 
 // Hard cap on captured content at 100 000 UTF-8 bytes (≈97.7 KiB;
 // round-decimal limit, not a binary KiB). Downstream paths fan out through
@@ -23,6 +24,7 @@ export const MAX_CONTENT_BYTES = 100_000;
 // parser/planner workload. This is a UTF-8 byte bound for the same reason as
 // captured content: request cost follows bytes, not JavaScript code units.
 export const MAX_SEARCH_QUERY_BYTES = 8 * 1024;
+export const MAX_SCOPE_ID_CHARS = 128;
 
 // Module-level shared TextEncoder so the byte-cap refine doesn't
 // allocate a fresh instance on every capture call.
@@ -134,10 +136,37 @@ export const thoughtSearchFilterSchema = z.object({
 
 export type ThoughtSearchFilter = z.infer<typeof thoughtSearchFilterSchema>;
 
+const scopeId = (field: string) =>
+  z.string().trim().min(1, `${field} must not be empty`).max(
+    MAX_SCOPE_ID_CHARS,
+    `${field} must be at most ${MAX_SCOPE_ID_CHARS} characters`,
+  );
+
+// Strict nested object: a misspelled workspace/project/visibility must never be
+// stripped into omitted scope (which resolves to `default`). Field names align
+// with upstream OB1's agent-memory contract. On reads, visibility optionally
+// narrows the server-computed audience union to one class.
+export const memoryScopeSchema = z.object({
+  workspace_id: scopeId("workspace_id").optional().describe(
+    "Registered top-level memory workspace; omitted means the configured default workspace",
+  ),
+  project_id: scopeId("project_id").nullable().optional().describe(
+    "Optional project registered inside workspace_id",
+  ),
+  visibility: z.enum(MEMORY_VISIBILITIES).optional().describe(
+    "Capture audience, or an optional single-class narrowing on reads",
+  ),
+}).strict();
+
+export type MemoryScopeInput = z.infer<typeof memoryScopeSchema>;
+
 export const captureThoughtShape = {
   content: boundedUtf8String("content").describe("The thought to capture"),
   provenance: thoughtProvenanceClaimsSchema.optional().describe(
     "Optional caller-asserted author/agent/repo/branch context. Supply known values and omit unknowns; the server stores claims separately from verified transport identity.",
+  ),
+  scope: memoryScopeSchema.optional().describe(
+    "Fail-closed workspace/project/visibility audience. Omitted means the configured default workspace, never all workspaces.",
   ),
 };
 
@@ -159,6 +188,9 @@ export const searchThoughtsShape = {
   filter: thoughtSearchFilterSchema.optional().describe(
     "Optional caller-asserted provenance filter. Include fields are ANDed; a match on any exclude field rejects the thought.",
   ),
+  scope: memoryScopeSchema.optional().describe(
+    "Workspace/project recall context, optionally narrowed to one visibility class",
+  ),
 };
 
 export const listThoughtsShape = {
@@ -171,6 +203,16 @@ export const listThoughtsShape = {
   person: z.string().optional().describe("Filter by person mentioned"),
   days: z.number().int().min(1).max(3650).optional()
     .describe("Only thoughts from the last N days"),
+  scope: memoryScopeSchema.optional(),
+};
+
+export const fetchThoughtShape = {
+  id: z.string().describe("The thought ID returned by search"),
+  scope: memoryScopeSchema.optional(),
+};
+
+export const thoughtStatsShape = {
+  scope: memoryScopeSchema.optional(),
 };
 
 // ---- sessions ---------------------------------------------------------
@@ -189,6 +231,7 @@ export const sessionLookupShape = {
   branch: z.string().optional().describe(
     "Git branch; the newest matching session is returned",
   ),
+  scope: memoryScopeSchema.optional(),
 };
 
 export const sessionSearchShape = {
@@ -197,6 +240,7 @@ export const sessionSearchShape = {
   status: z.enum(SESSION_STATUSES).optional(),
   repo_url: z.string().optional(),
   tag: z.string().optional().describe("Match a single tag"),
+  scope: memoryScopeSchema.optional(),
 };
 
 export const sessionListShape = {
@@ -216,37 +260,53 @@ export const sessionListShape = {
   ),
   order_by: z.enum(SESSION_ORDER_BY).optional().default("last_update"),
   limit: z.number().int().min(1).max(200).optional().default(50),
+  scope: memoryScopeSchema.optional(),
 };
 
 export const sessionUpdateStatusShape = {
   id: z.number().int().positive()
     .describe("Session id (the canonical key returned by session_capture)"),
   status: z.enum(SESSION_STATUSES),
+  scope: memoryScopeSchema.optional(),
 };
 
 // A typo in the top-level filter key would otherwise be stripped into an
 // unfiltered search. The MCP SDK accepts an assembled object schema here, so
 // REST and MCP can share the same fail-closed envelope as well as field shapes.
 export const searchThoughtsSchema = z.object(searchThoughtsShape).strict();
+export const captureThoughtSchema = z.object(captureThoughtShape).strict();
+export const listThoughtsSchema = z.object(listThoughtsShape).strict();
+export const fetchThoughtSchema = z.object(fetchThoughtShape).strict();
+export const thoughtStatsSchema = z.object(thoughtStatsShape).strict();
+export const sessionCaptureSchema = z.object(sessionCaptureShape).strict();
+export const sessionLookupSchema = z.object(sessionLookupShape).strict();
+export const sessionSearchSchema = z.object(sessionSearchShape).strict();
+export const sessionListSchema = z.object(sessionListShape).strict();
+export const sessionUpdateStatusSchema = z.object(sessionUpdateStatusShape)
+  .strict();
+export const compatibilitySearchSchema = z.object({
+  query: thoughtSearchQuerySchema.describe(
+    "The search query to run against Open Brain",
+  ),
+  scope: memoryScopeSchema.optional(),
+}).strict();
 
 // ---- REST bodies ------------------------------------------------------
 // z.object(...) around the shared shapes, so a REST body and an MCP tool
 // call cannot drift apart in what they accept.
 
-// Keep the top-level body non-strict for compatibility with existing callers
-// whose extra fields were historically ignored. The new provenance envelope
-// is intentionally strict because misspelled identity claims must fail visibly.
-export const captureThoughtBody = z.object(captureThoughtShape);
+export const captureThoughtBody = captureThoughtSchema;
 // Search filters narrow or exclude returned memory, so a misspelled envelope
 // key must fail visibly instead of being stripped into an unfiltered search.
 export const searchThoughtsBody = searchThoughtsSchema;
-export const sessionCaptureBody = z.object(sessionCaptureShape);
-export const sessionSearchBody = z.object(sessionSearchShape);
+export const sessionCaptureBody = sessionCaptureSchema;
+export const sessionSearchBody = sessionSearchSchema;
 // The session id arrives via the URL path on REST (PATCH /sessions/:id/status),
 // so the body carries only the status.
 export const sessionUpdateStatusBody = z.object({
   status: z.enum(SESSION_STATUSES),
-});
+  scope: memoryScopeSchema.optional(),
+}).strict();
 
 // ---- REST query strings -----------------------------------------------
 // Query-string values always arrive as strings, so numeric fields use
@@ -258,7 +318,16 @@ export const listThoughtsQuery = z.object({
   topic: z.string().optional(),
   person: z.string().optional(),
   days: z.coerce.number().int().min(1).max(3650).optional(),
-});
+  workspace_id: scopeId("workspace_id").optional(),
+  project_id: scopeId("project_id").optional(),
+  visibility: z.enum(MEMORY_VISIBILITIES).optional(),
+}).strict();
+
+export const scopeQuery = z.object({
+  workspace_id: scopeId("workspace_id").optional(),
+  project_id: scopeId("project_id").optional(),
+  visibility: z.enum(MEMORY_VISIBILITIES).optional(),
+}).strict();
 
 export const listSessionsQuery = z.object({
   status: z.enum(SESSION_STATUSES).optional(),
@@ -271,12 +340,18 @@ export const listSessionsQuery = z.object({
   until: z.string().optional(),
   order_by: z.enum(SESSION_ORDER_BY).default("last_update"),
   limit: z.coerce.number().int().min(1).max(200).default(50),
-});
+  workspace_id: scopeId("workspace_id").optional(),
+  project_id: scopeId("project_id").optional(),
+  visibility: z.enum(MEMORY_VISIBILITIES).optional(),
+}).strict();
 
 export const sessionLookupQuery = z.object({
   id: z.coerce.number().int().positive().optional(),
   branch: z.string().min(1).optional(),
-}).refine((v) => v.id != null || v.branch != null, {
+  workspace_id: scopeId("workspace_id").optional(),
+  project_id: scopeId("project_id").optional(),
+  visibility: z.enum(MEMORY_VISIBILITIES).optional(),
+}).strict().refine((v) => v.id != null || v.branch != null, {
   // Matches the MCP session_lookup error text.
   message: "Provide id or branch.",
 });

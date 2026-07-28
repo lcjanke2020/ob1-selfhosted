@@ -1,7 +1,9 @@
 # Backup-recoverability smoke test for the database init scripts.
 #
-# The off-box backup runs `pg_dump` as the unprivileged `openbrain_readonly`
-# role. pg_dump reads every sequence's state (`SELECT last_value, is_called
+# The off-box backup runs `pg_dump` as the trusted SELECT-only
+# `openbrain_readonly` role (BYPASSRLS is required for pg_dump under forced
+# RLS; the grants assertion rejects it on the app role). pg_dump reads every
+# sequence's state (`SELECT last_value, is_called
 # FROM <seq>`), so the role needs SELECT on all sequences, not just tables —
 # a privilege that's easy to forget when a new serial/identity column lands.
 # That is exactly what silently broke the nightly backup once the sessions PK
@@ -9,9 +11,9 @@
 #
 # The same completed init is also the integration fixture for the edge monitor
 # allowlist. The assertion is mounted last, then deliberately re-run after
-# direct table/sequence grants, a standing default grant, and a PUBLIC grant on
-# a new non-public-schema table; each drift must fail without changing the
-# assertion's allowlist.
+# an application-role membership, direct monitor table/sequence grants, a
+# standing default grant, and a PUBLIC grant on a new non-public-schema table;
+# each drift must fail without changing the assertion's allowlist.
 #
 # Rather than enumerate privileges in a static assertion (which lags the next
 # new object type, and can't see an object created later by a different
@@ -98,6 +100,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/db/02-observability.sql:/docker-entrypoint-initdb.d/02-observability.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/04-sessions.sql:/docker-entrypoint-initdb.d/04-sessions.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/05-hybrid-search.sql:/docker-entrypoint-initdb.d/05-hybrid-search.sql:ro" \
+            -v "$GITHUB_WORKSPACE/db/06-spaces.sql:/docker-entrypoint-initdb.d/06-spaces.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro" \
             "$PG_IMAGE"
 
@@ -120,13 +123,16 @@ jobs:
             echo "::error::timed out waiting for postgres init"; docker logs pgci; exit 1
           fi
 
-      - name: Sanity-check init applied (sessions schema present)
+      - name: Sanity-check init applied (sessions + sensitive space present)
         run: |
           docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
             "SELECT 1 FROM information_schema.schemata WHERE schema_name='sessions'" | grep -q 1
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT 1 FROM memory_scope.workspace WHERE id='sensitive' AND personal_only" | grep -q 1
 
-      - name: Smoke test — monitor relation allowlist rejects grant drift
+      - name: Smoke test — protected roles reject grant drift
         run: |
           run_assertion() {
             docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
@@ -139,7 +145,7 @@ jobs:
             local diagnostic=${3:-}
             local output
             if output=$(run_assertion 2>&1); then
-              echo "::error::$label did not fail the monitor grants assertion"
+              echo "::error::$label did not fail the protected-role grants assertion"
               return 1
             fi
             if ! grep -Fq "$expected" <<< "$output"; then
@@ -157,6 +163,19 @@ jobs:
           # The completed clean schema is valid, including relations created
           # after 02-observability.sql.
           run_assertion >/dev/null
+
+          # Direct flags are not the only way to reach BYPASSRLS: membership
+          # would also confer inherited privileges and allow SET ROLE.
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -c \
+            "GRANT openbrain_readonly TO openbrain_app"
+          expect_rejected "app role membership" \
+            "openbrain_app is a member of" "openbrain_readonly"
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -c \
+            "REVOKE openbrain_readonly FROM openbrain_app"
 
           # Existing relation, direct role grant, schema outside public.
           docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
@@ -213,7 +232,19 @@ jobs:
              DROP SCHEMA monitor_assertion_probe CASCADE"
 
           run_assertion >/dev/null
-          echo "monitor allowlist accepted the clean catalog and rejected all four drift fixtures"
+          echo "protected-role assertions accepted the clean catalog and rejected all five drift fixtures"
+
+      - name: Smoke test — spaces isolate every audience and pooled reuse
+        run: |
+          # Reapply the upgrade migration first: init scripts do not rerun on
+          # live volumes, so its documented idempotent upgrade path matters.
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/06-spaces.sql >/dev/null
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/spaces-smoke.sql >/dev/null
+          echo "spaces RLS, sensitive ownership, dedupe, artifacts, and GUC reuse passed"
 
       - name: Smoke test — openbrain_readonly can run a full pg_dump
         run: |
@@ -246,7 +277,19 @@ jobs:
             echo "::error::openbrain_monitor can read public.thoughts — SELECT should be denied"
             exit 1
           fi
-          echo "openbrain_monitor probes succeeded; thoughts access correctly denied"
+          if docker exec -e PGPASSWORD="$OPENBRAIN_MONITOR_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_monitor -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT 1 FROM memory_scope.workspace LIMIT 1" >/dev/null 2>&1; then
+            echo "::error::openbrain_monitor can read the memory_scope registry"
+            exit 1
+          fi
+          if docker exec -e PGPASSWORD="$OPENBRAIN_MONITOR_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_monitor -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT memory_scope.audience_matches('default', NULL, 'workspace', NULL)" >/dev/null 2>&1; then
+            echo "::error::openbrain_monitor can execute a memory_scope helper"
+            exit 1
+          fi
+          echo "openbrain_monitor probes succeeded; memory tables, registry, and helpers denied"
 
       - name: Smoke test — thought filters keep GIN and scope HNSW iteration
         run: |
@@ -283,8 +326,8 @@ jobs:
           docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
             -v ON_ERROR_STOP=1 < db/05-hybrid-search.sql >/dev/null
-          plan=$(docker exec -i -e PGPASSWORD="$OPENBRAIN_APP_PASSWORD" pgci \
-            psql -h 127.0.0.1 -U openbrain_app -d "$POSTGRES_DB" \
+          plan=$(docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
             < db/hybrid-search-smoke.sql)
           grep -q 'idx_thoughts_content_tsv' <<< "$plan" || {
             echo "::error::full-text predicate did not select idx_thoughts_content_tsv"

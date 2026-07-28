@@ -3,8 +3,13 @@
 // getClient(pool) -> client.queryObject<T>(sql, params) -> client.release().
 
 import { Pool } from "postgres";
-import { getClient } from "./db_pool.ts";
 import { toVectorLiteral } from "./embeddings.ts";
+import { withScopeClient } from "./scoped_db.ts";
+import type {
+  MemoryVisibility,
+  ResolvedReadScope,
+  ResolvedWriteScope,
+} from "./scope_contract.ts";
 import {
   normalizeOrderBy,
   type ParsedArtifact,
@@ -26,6 +31,7 @@ export type SessionUpsertInput = {
   embedding: number[] | null;
   provenance: SessionProvenance;
   rawToml: string;
+  scope: ResolvedWriteScope;
 };
 
 export type UpsertOutcome = {
@@ -37,6 +43,9 @@ export type UpsertOutcome = {
   session_id: string | null;
   status: string;
   created: boolean;
+  workspace_id: string;
+  project_id: string | null;
+  visibility: MemoryVisibility;
 };
 
 export type ArtifactRow = {
@@ -76,6 +85,9 @@ export type SessionRow = {
   summary: string | null;
   source: string | null;
   source_node: string | null;
+  workspace_id: string;
+  project_id: string | null;
+  visibility: MemoryVisibility;
   raw_toml: string | null;
   content_hash: string | null;
   created_at: string;
@@ -92,6 +104,9 @@ export type SessionListRow = {
   repo_url: string | null;
   branch: string | null;
   last_update: string | null;
+  workspace_id: string;
+  project_id: string | null;
+  visibility: MemoryVisibility;
 };
 
 export type SessionSearchRow = {
@@ -101,6 +116,9 @@ export type SessionSearchRow = {
   status: string;
   last_update: string | null;
   score: number;
+  workspace_id: string;
+  project_id: string | null;
+  visibility: MemoryVisibility;
 };
 
 // Projection used everywhere a full record is returned. Deliberately excludes
@@ -113,6 +131,7 @@ const SESSION_COLUMNS = `
   tags, linked_issues, related_sessions, next_actions, blockers,
   resume_context, summary,
   source, source_node,
+  workspace_id, project_id, visibility,
   raw_toml, content_hash, created_at, updated_at`;
 
 // Look up the change-detection hash for an existing session by its canonical
@@ -124,17 +143,15 @@ const SESSION_COLUMNS = `
 export async function getSessionContentHash(
   pool: Pool,
   id: number,
+  scope: ResolvedReadScope,
 ): Promise<{ hash: string | null } | null> {
-  const client = await getClient(pool);
-  try {
+  return await withScopeClient(pool, scope, async (client) => {
     const r = await client.queryObject<{ content_hash: string | null }>(
       `SELECT content_hash FROM sessions.session WHERE id = $1`,
       [id],
     );
     return r.rows.length ? { hash: r.rows[0].content_hash } : null;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export async function upsertSession(
@@ -154,7 +171,7 @@ export async function upsertSession(
   // omitted value keeps what's stored: a mobile-set status, an unchanged
   // embedding, or a resumable handle set by an earlier capture from a surface
   // that exposed one. The $-positions are shared by both statements; the UPDATE
-  // appends the key as $30.
+  // appends audience fields as $30-$33 and the key as $34.
   const cols = [
     s.session_id, // $1  resumable handle (TEXT, nullable) — NOT the key
     s.title, // $2
@@ -185,6 +202,10 @@ export async function upsertSession(
     input.rawToml, // $27
     input.contentHash, // $28
     embParam, // $29
+    input.scope.workspaceId, // $30
+    input.scope.projectId, // $31
+    input.scope.visibility, // $32
+    input.scope.ownerSubject, // $33
   ];
 
   const insertSql = `
@@ -196,7 +217,8 @@ export async function upsertSession(
       tags, linked_issues, related_sessions, next_actions, blockers,
       resume_context, summary,
       source, source_node,
-      raw_toml, content_hash, embedding
+      raw_toml, content_hash, embedding,
+      workspace_id, project_id, visibility, owner_subject
     ) VALUES (
       $1, $2, $3::date, $4,
       $5, $6, $7,
@@ -206,9 +228,11 @@ export async function upsertSession(
       $18::text[], $19::text[], $20::text[], $21::text[], $22::text[],
       $23, $24,
       $25, $26,
-      $27, $28, $29::vector
+      $27, $28, $29::vector,
+      $30, $31, $32::memory_scope.visibility, $33
     )
-    RETURNING id, session_id, status`;
+    RETURNING id, session_id, status,
+              workspace_id, project_id, visibility`;
 
   const updateSql = `
     UPDATE sessions.session SET
@@ -241,16 +265,26 @@ export async function upsertSession(
       raw_toml = $27,
       content_hash = $28,
       embedding = COALESCE($29::vector, sessions.session.embedding),
+      workspace_id = $30,
+      project_id = $31,
+      visibility = $32::memory_scope.visibility,
+      owner_subject = $33,
       updated_at = now()
-    WHERE id = $30
-    RETURNING id, session_id, status`;
+    WHERE id = $34
+    RETURNING id, session_id, status,
+              workspace_id, project_id, visibility`;
 
-  type UpsertRow = { id: bigint; session_id: string | null; status: string };
+  type UpsertRow = {
+    id: bigint;
+    session_id: string | null;
+    status: string;
+    workspace_id: string;
+    project_id: string | null;
+    visibility: MemoryVisibility;
+  };
   const isUpdate = s.id != null;
 
-  const client = await getClient(pool);
-  try {
-    await client.queryArray("BEGIN");
+  return await withScopeClient(pool, input.scope, async (client) => {
     const res = isUpdate
       ? await client.queryObject<UpsertRow>(updateSql, [...cols, s.id])
       : await client.queryObject<UpsertRow>(insertSql, cols);
@@ -276,32 +310,29 @@ export async function upsertSession(
       );
     }
 
-    await client.queryArray("COMMIT");
     return {
       id: sessionPk,
       session_id: row.session_id,
       status: row.status,
       created: !isUpdate,
+      workspace_id: row.workspace_id,
+      project_id: row.project_id,
+      visibility: row.visibility,
     };
-  } catch (e) {
-    try {
-      await client.queryArray("ROLLBACK");
-    } catch { /* already failing; surface the original error */ }
-    throw e;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export async function getSession(
   pool: Pool,
   id: number,
+  scope: ResolvedReadScope,
 ): Promise<SessionRecord | null> {
-  const client = await getClient(pool);
-  try {
+  return await withScopeClient(pool, scope, async (client) => {
     // id decodes as a BigInt at runtime (deno-postgres); type it honestly as
     // bigint here and narrow to a number on return, rather than mislabelling it.
-    const sess = await client.queryObject<Omit<SessionRow, "id"> & { id: bigint }>(
+    const sess = await client.queryObject<
+      Omit<SessionRow, "id"> & { id: bigint }
+    >(
       `SELECT ${SESSION_COLUMNS} FROM sessions.session WHERE id = $1`,
       [id],
     );
@@ -316,21 +347,18 @@ export async function getSession(
     );
     // id comes back as a BigInt (JSON-unserializable) → narrow to a number.
     return { ...row, id: Number(row.id), artifacts: arts.rows };
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export async function resumeSession(
   pool: Pool,
   opts: { id?: number | null; branch?: string | null },
+  scope: ResolvedReadScope,
 ): Promise<SessionRecord | null> {
-  if (opts.id != null) return getSession(pool, opts.id);
+  if (opts.id != null) return getSession(pool, opts.id, scope);
   if (!opts.branch) return null;
 
-  const client = await getClient(pool);
-  let chosenId: number | null;
-  try {
+  const chosenId = await withScopeClient(pool, scope, async (client) => {
     // Branch ties broken deterministically: newest last_update, then the
     // server-managed updated_at, then id for total order.
     const r = await client.queryObject<{ id: bigint }>(
@@ -340,11 +368,9 @@ export async function resumeSession(
        LIMIT 1`,
       [opts.branch],
     );
-    chosenId = r.rows[0] ? Number(r.rows[0].id) : null;
-  } finally {
-    client.release();
-  }
-  return chosenId != null ? getSession(pool, chosenId) : null;
+    return r.rows[0] ? Number(r.rows[0].id) : null;
+  });
+  return chosenId != null ? getSession(pool, chosenId, scope) : null;
 }
 
 export async function searchSessions(
@@ -356,6 +382,7 @@ export async function searchSessions(
     repo_url?: string;
     tag?: string;
   },
+  scope: ResolvedReadScope,
 ): Promise<SessionSearchRow[]> {
   const { embedding, limit = 5, status, repo_url, tag } = opts;
   const embStr = toVectorLiteral(embedding);
@@ -374,12 +401,12 @@ export async function searchSessions(
     cond.push(`tags @> ARRAY[$${p++}]::text[]`);
     params.push(tag);
   }
-  const client = await getClient(pool);
-  try {
+  return await withScopeClient(pool, scope, async (client) => {
     const r = await client.queryObject<
       Omit<SessionSearchRow, "id" | "score"> & { id: bigint; score: string }
     >(
       `SELECT id, session_id, title, status, last_update,
+              workspace_id, project_id, visibility,
               1 - (embedding <=> $1::vector) AS score
        FROM sessions.session
        WHERE ${cond.join(" AND ")}
@@ -394,9 +421,7 @@ export async function searchSessions(
       id: Number(row.id),
       score: Number(row.score),
     }));
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export async function listSessions(
@@ -413,6 +438,7 @@ export async function listSessions(
     order_by?: string;
     limit?: number;
   },
+  scope: ResolvedReadScope,
 ): Promise<SessionListRow[]> {
   const cond: string[] = [];
   const params: unknown[] = [];
@@ -454,10 +480,12 @@ export async function listSessions(
   const orderBy = normalizeOrderBy(opts.order_by);
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
 
-  const client = await getClient(pool);
-  try {
-    const r = await client.queryObject<Omit<SessionListRow, "id"> & { id: bigint }>(
-      `SELECT id, session_id, title, status, repo_url, branch, last_update
+  return await withScopeClient(pool, scope, async (client) => {
+    const r = await client.queryObject<
+      Omit<SessionListRow, "id"> & { id: bigint }
+    >(
+      `SELECT id, session_id, title, status, repo_url, branch, last_update,
+              workspace_id, project_id, visibility
        FROM sessions.session
        ${where}
        ORDER BY ${orderBy} DESC NULLS LAST, updated_at DESC, id
@@ -466,20 +494,18 @@ export async function listSessions(
     );
     // id decodes as a BigInt → narrow to a number for JSON.
     return r.rows.map((row) => ({ ...row, id: Number(row.id) }));
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export async function updateSessionStatus(
   pool: Pool,
   id: number,
   status: string,
+  scope: ResolvedReadScope,
 ): Promise<
   { id: number; status: string } | null
 > {
-  const client = await getClient(pool);
-  try {
+  return await withScopeClient(pool, scope, async (client) => {
     const r = await client.queryObject<
       { id: bigint; status: string }
     >(
@@ -491,7 +517,5 @@ export async function updateSessionStatus(
     );
     const row = r.rows[0];
     return row ? { ...row, id: Number(row.id) } : null;
-  } finally {
-    client.release();
-  }
+  });
 }

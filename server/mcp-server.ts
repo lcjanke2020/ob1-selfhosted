@@ -6,33 +6,34 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Pool } from "postgres";
-import { z } from "zod";
 
 import { CITATION_BASE_URL } from "./config.ts";
-import { fetchThought, getStats, listThoughts } from "./queries.ts";
 import {
-  listSessions,
-  resumeSession,
-  updateSessionStatus,
-} from "./session_queries.ts";
-import {
-  captureThoughtShape,
-  listThoughtsShape,
+  captureThoughtSchema,
+  compatibilitySearchSchema,
+  fetchThoughtSchema,
+  listThoughtsSchema,
   searchThoughtsSchema,
-  sessionCaptureShape,
-  sessionListShape,
-  sessionLookupShape,
-  sessionSearchShape,
-  sessionUpdateStatusShape,
-  thoughtSearchQuerySchema,
+  sessionCaptureSchema,
+  sessionListSchema,
+  sessionLookupSchema,
+  sessionSearchSchema,
+  sessionUpdateStatusSchema,
+  thoughtStatsSchema,
 } from "./schemas.ts";
 import {
   captureSessionFromToml,
   captureThoughtWithMetadata,
   defaultDeps,
+  fetchThoughtInScope,
+  getThoughtStatsInScope,
+  listSessionsInScope,
+  listThoughtsInScope,
+  lookupSessionInScope,
   searchSessionsByQuery,
   searchThoughtsByQuery,
   type ServiceDeps,
+  updateSessionStatusInScope,
 } from "./services.ts";
 
 function thoughtTitle(content: string, createdAt?: string): string {
@@ -98,6 +99,17 @@ to \`session_capture\`. The schema is **flat** — do NOT use nested
 ## Optional prose (use TOML multiline """…""")
 - \`summary\`, \`resume_context\`
 
+## Optional memory scope
+- \`workspace_id\` (string) — registered workspace; omitted means the server's
+  configured default workspace, never every workspace
+- \`project_id\` (string) — registered project inside \`workspace_id\`
+- \`visibility\` — personal | project | workspace. Omit it to use the
+  workspace default (or project when \`project_id\` is present).
+
+The seeded \`sensitive\` workspace is personal-only. It requires a verified
+OAuth subject, or a shared-key deployment configured with
+\`MCP_ACCESS_KEY_PRINCIPAL\`; broader visibility is rejected.
+
 ## Artifacts — \`[[artifacts]]\` (plural) array-of-tables
 Each entry:
 - \`kind\` (string, required) — e.g. pr | code | doc | note
@@ -114,7 +126,8 @@ entire artifact set; it is not a patch. \`title\` remains required. Apart from
 scalars are stored as null, omitted arrays as empty arrays, and omitting all
 \`[[artifacts]]\` removes previously stored artifacts. Re-send every field and
 artifact you intend to retain, using the current structured record and live
-context to assemble fresh TOML.
+context to assemble fresh TOML. Supply the existing row's scope when refreshing;
+an ID outside the requested audience is indistinguishable from an unknown ID.
 
 ## Lookup and historical input
 \`session_lookup\` returns the current structured fields plus \`raw_toml\`.
@@ -124,15 +137,20 @@ from current structured fields (for example, after \`session_update_status\`).
 Treat the structured fields as authoritative. Never use \`raw_toml\` as a
 recapture template; assemble recapture TOML fresh from live context.
 
-## Server-stamped — do NOT author by hand
-\`source\`, \`source_node\`, \`content_hash\`, \`created_at\`, \`updated_at\` are set
-server-side and ignored if present.
+## Strict fields and server ownership
+Unknown top-level fields are rejected so a misspelled \`workspace_id\` cannot
+silently widen into the default workspace. \`owner_subject\` is stamped from
+verified server context and is rejected if authored. Other storage/provenance
+fields such as \`source\`, \`source_node\`, \`content_hash\`, \`created_at\`, and
+\`updated_at\` are not accepted TOML fields either.
 
 ## Example
 \`\`\`toml
 +++
 title = "Fix flaky CI"
 status = "awaiting_review"
+workspace_id = "sensitive"
+visibility = "personal"
 agent = "claude-code"
 repo_url = "https://github.com/x/y"
 branch = "main"
@@ -194,7 +212,9 @@ export function createMcpServer(
     // expired tokens instead of stranding; plus live-reliability fixes in
     // the pool stack, log-ingester rotation cursors, and the funnel
     // summary window.
-    version: "1.8.0",
+    // 1.9.0: fail-closed DB-enforced workspace/project/visibility audiences
+    // across thoughts and sessions, including personal-only sensitive memory.
+    version: "1.9.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -204,17 +224,17 @@ export function createMcpServer(
     {
       title: "Search Open Brain",
       description:
-        "Search Open Brain memories by meaning and exact text. Read-only compatibility tool for ChatGPT-style search/fetch consumers.",
+        "Search Open Brain memories by meaning and exact text inside one fail-closed workspace scope. Read-only compatibility tool for ChatGPT-style search/fetch consumers.",
       annotations: { readOnlyHint: true },
-      inputSchema: {
-        query: thoughtSearchQuerySchema.describe(
-          "The search query to run against Open Brain",
-        ),
-      },
+      inputSchema: compatibilitySearchSchema,
     },
-    async ({ query }) => {
+    async ({ query, scope }) => {
       try {
-        const rows = await searchThoughtsByQuery(pool, { query }, deps);
+        const rows = await searchThoughtsByQuery(
+          pool,
+          { query, scope, auth },
+          deps,
+        );
         const results = rows.map((t) => ({
           id: t.id,
           title: thoughtTitle(t.content, t.created_at),
@@ -234,13 +254,11 @@ export function createMcpServer(
       description:
         "Fetch one Open Brain thought by ID after using search. Read-only compatibility tool.",
       annotations: { readOnlyHint: true },
-      inputSchema: {
-        id: z.string().describe("The thought ID returned by search"),
-      },
+      inputSchema: fetchThoughtSchema,
     },
-    async ({ id }) => {
+    async ({ id, scope }) => {
       try {
-        const t = await fetchThought(pool, id);
+        const t = await fetchThoughtInScope(pool, id, { scope, auth });
         if (!t) return err(`No thought found for ID ${id}.`);
         const document = {
           id: t.id,
@@ -249,6 +267,9 @@ export function createMcpServer(
           url: thoughtUrl(t.id),
           metadata: {
             ...t.metadata,
+            workspace_id: t.workspace_id,
+            project_id: t.project_id,
+            visibility: t.visibility,
             created_at: t.created_at,
             updated_at: t.updated_at,
           },
@@ -265,17 +286,19 @@ export function createMcpServer(
     {
       title: "Search Thoughts",
       description:
-        "Hybrid-search captured thoughts by meaning and exact text, optionally requiring or excluding caller-asserted author/agent/repo/branch provenance in the same call.",
+        "Hybrid-search captured thoughts by meaning and exact text inside one fail-closed workspace scope, optionally narrowing visibility or requiring/excluding caller-asserted provenance.",
       annotations: { readOnlyHint: true },
       inputSchema: searchThoughtsSchema,
     },
-    async ({ query, limit, threshold, filter }) => {
+    async ({ query, limit, threshold, filter, scope }) => {
       try {
         const rows = await searchThoughtsByQuery(pool, {
           query,
           limit,
           threshold,
           filter,
+          scope,
+          auth,
         }, deps);
         if (!rows.length) return text(`No thoughts found matching "${query}".`);
         const lines = rows.map((t, i) => {
@@ -286,6 +309,9 @@ export function createMcpServer(
           const parts = [
             `--- Result ${i + 1} (${matchLabel}) ---`,
             `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
+            `Space: ${t.workspace_id}${
+              t.project_id ? ` / ${t.project_id}` : ""
+            } (${t.visibility})`,
             `Type: ${m.type ?? "unknown"}`,
           ];
           if (Array.isArray(m.topics) && m.topics.length) {
@@ -314,22 +340,26 @@ export function createMcpServer(
     {
       title: "List Recent Thoughts",
       description:
-        "List recently captured thoughts with optional filters by type, topic, person, or time range.",
+        "List recently captured thoughts inside one fail-closed workspace scope, with optional filters by type, topic, person, or time range.",
       annotations: { readOnlyHint: true },
-      inputSchema: listThoughtsShape,
+      inputSchema: listThoughtsSchema,
     },
     async (opts) => {
       try {
-        const rows = await listThoughts(pool, opts);
+        const rows = await listThoughtsInScope(pool, { ...opts, auth });
         if (!rows.length) return text("No thoughts found.");
         const lines = rows.map((t, i) => {
           const m = t.metadata || {};
           const tags = Array.isArray(m.topics)
             ? (m.topics as string[]).join(", ")
             : "";
-          return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${
-            m.type ?? "??"
-          }${tags ? " - " + tags : ""})\n   ${t.content}`;
+          return `${i + 1}. [${
+            new Date(t.created_at).toLocaleDateString()
+          }] [${t.workspace_id}${
+            t.project_id ? `/${t.project_id}` : ""
+          }:${t.visibility}] (${m.type ?? "??"}${
+            tags ? " - " + tags : ""
+          })\n   ${t.content}`;
         });
         return text(
           `${rows.length} recent thought(s):\n\n${lines.join("\n\n")}`,
@@ -345,13 +375,13 @@ export function createMcpServer(
     {
       title: "Thought Statistics",
       description:
-        "Summary of all captured thoughts: totals, types, top topics, people.",
+        "Summary of thoughts visible inside one fail-closed workspace scope: totals, types, top topics, people.",
       annotations: { readOnlyHint: true },
-      inputSchema: {},
+      inputSchema: thoughtStatsSchema,
     },
-    async () => {
+    async ({ scope }) => {
       try {
-        const s = await getStats(pool);
+        const s = await getThoughtStatsInScope(pool, { scope, auth });
         const lines: string[] = [
           `Total thoughts: ${s.count}`,
           `Date range: ${
@@ -385,7 +415,7 @@ export function createMcpServer(
     {
       title: "Capture Thought",
       description:
-        "Save a new thought. Generates an embedding via Ollama and (if configured) extracts metadata. When known, provide provenance author/agent/repo/branch values by default; they are stored as caller assertions, separately from server-verified transport identity. Omit unknown values rather than guessing.",
+        "Save a new thought in a fail-closed workspace/project/visibility audience. The seeded sensitive workspace is personal-only. Generates an embedding and optional metadata; provenance claims remain separate from verified transport identity.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
@@ -394,18 +424,19 @@ export function createMcpServer(
       },
       // The UTF-8 byte cap and its rationale live with the shared shape in
       // schemas.ts — the REST gateway validates the identical bound.
-      inputSchema: captureThoughtShape,
+      inputSchema: captureThoughtSchema,
     },
-    async ({ content, provenance }) => {
+    async ({ content, provenance, scope }) => {
       try {
         // Embed + extract + door/sub stamping live in services.ts, shared
         // with the REST gateway; via: "mcp" keeps persisted rows identical
         // to the pre-extraction behavior (metadata.source === "mcp").
-        const { id, metadata: meta } = await captureThoughtWithMetadata(
+        const captured = await captureThoughtWithMetadata(
           pool,
-          { content, provenance, auth, via: "mcp" },
+          { content, provenance, scope, auth, via: "mcp" },
           deps,
         );
+        const { id, metadata: meta } = captured;
 
         const parts: string[] = [`Captured as ${meta.type ?? "thought"}`];
         if (Array.isArray(meta.topics) && meta.topics.length) {
@@ -419,6 +450,11 @@ export function createMcpServer(
             `| Actions: ${(meta.action_items as string[]).join("; ")}`,
           );
         }
+        parts.push(
+          `| Space: ${captured.workspace_id}${
+            captured.project_id ? `/${captured.project_id}` : ""
+          } (${captured.visibility})`,
+        );
         parts.push(`(id: ${id})`);
         return text(parts.join(" "));
       } catch (e) {
@@ -439,7 +475,7 @@ export function createMcpServer(
     {
       title: "Capture Session",
       description:
-        "Ingest or refresh an agent work session from its TOML front matter. Upserts the session and its artifacts, re-embeds only when the embedded content changed, and stamps provenance server-side. Returns {id, session_id, status, created, reembedded} — `id` is the canonical key; write it back into the TOML to refresh the same session. Artifacts go in a [[artifacts]] array-of-tables: kind and title required, detail optional; unknown fields or a singular [[artifact]] block are rejected. See the 'Session TOML schema' resource for the full front-matter contract.",
+        "Ingest or refresh an agent work session from its TOML front matter. Upserts the session and its artifacts, re-embeds only when the embedded content changed, and stamps provenance/server-owned personal identity. Returns {id, session_id, status, created, reembedded, workspace_id, project_id, visibility} — `id` is the canonical key; write it and the stored scope back into fresh TOML to refresh the same session. Artifacts go in a [[artifacts]] array-of-tables: kind and title required, detail optional; unknown fields or a singular [[artifact]] block are rejected. See the 'Session TOML schema' resource for the full front-matter contract, including the personal-only sensitive workspace.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
@@ -450,7 +486,7 @@ export function createMcpServer(
         idempotentHint: false,
       },
       // Byte cap shared with the REST gateway via schemas.ts.
-      inputSchema: sessionCaptureShape,
+      inputSchema: sessionCaptureSchema,
     },
     async ({ toml_text }) => {
       try {
@@ -472,6 +508,9 @@ export function createMcpServer(
           status: res.status,
           created: res.created,
           reembedded: res.reembedded,
+          workspace_id: res.workspace_id,
+          project_id: res.project_id,
+          visibility: res.visibility,
         }));
       } catch (e) {
         return err((e as Error).message);
@@ -486,14 +525,19 @@ export function createMcpServer(
       description:
         "Retrieve a stored session record by id or branch — this does NOT resume execution, it fetches the record. Returns the full record (resume_context, next_actions, blockers, artifacts, raw_toml), or null if no match. Structured fields are authoritative; raw_toml is the verbatim input from the last session_capture, may differ from current structured fields (for example, after session_update_status), and must not be used as a recapture template. On a branch tie the most-recently-updated session wins.",
       annotations: { readOnlyHint: true },
-      inputSchema: sessionLookupShape,
+      inputSchema: sessionLookupSchema,
     },
-    async ({ id, branch }) => {
+    async ({ id, branch, scope }) => {
       try {
         if (id == null && !branch) {
           return err("Provide id or branch.");
         }
-        const rec = await resumeSession(pool, { id, branch });
+        const rec = await lookupSessionInScope(pool, {
+          id,
+          branch,
+          scope,
+          auth,
+        });
         return text(JSON.stringify(rec));
       } catch (e) {
         return err((e as Error).message);
@@ -508,9 +552,9 @@ export function createMcpServer(
       description:
         "Semantic search over session title/goal/summary/resume_context. Optional structured filters by status, repo_url, tag. Returns [{id, session_id, title, status, last_update, score}].",
       annotations: { readOnlyHint: true },
-      inputSchema: sessionSearchShape,
+      inputSchema: sessionSearchSchema,
     },
-    async ({ query, limit, status, repo_url, tag }) => {
+    async ({ query, limit, status, repo_url, tag, scope }) => {
       try {
         const rows = await searchSessionsByQuery(pool, {
           query,
@@ -518,6 +562,8 @@ export function createMcpServer(
           status,
           repo_url,
           tag,
+          scope,
+          auth,
         }, deps);
         return text(JSON.stringify(rows));
       } catch (e) {
@@ -533,11 +579,11 @@ export function createMcpServer(
       description:
         "List sessions by structured filters (no embedding) — the 'show me everything awaiting_review' path. Returns lightweight rows ordered by the chosen column.",
       annotations: { readOnlyHint: true },
-      inputSchema: sessionListShape,
+      inputSchema: sessionListSchema,
     },
     async (opts) => {
       try {
-        const rows = await listSessions(pool, opts);
+        const rows = await listSessionsInScope(pool, { ...opts, auth });
         return text(JSON.stringify(rows));
       } catch (e) {
         return err((e as Error).message);
@@ -557,11 +603,14 @@ export function createMcpServer(
         destructiveHint: false,
         idempotentHint: true,
       },
-      inputSchema: sessionUpdateStatusShape,
+      inputSchema: sessionUpdateStatusSchema,
     },
-    async ({ id, status }) => {
+    async ({ id, status, scope }) => {
       try {
-        const row = await updateSessionStatus(pool, id, status);
+        const row = await updateSessionStatusInScope(pool, id, status, {
+          scope,
+          auth,
+        });
         if (!row) return err(`No session found for id ${id}.`);
         return text(JSON.stringify(row));
       } catch (e) {

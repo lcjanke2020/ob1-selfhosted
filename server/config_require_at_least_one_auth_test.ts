@@ -17,6 +17,7 @@ import { assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 const ENV_KEYS = [
   "DB_PASSWORD",
   "MCP_ACCESS_KEY",
+  "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
@@ -33,6 +34,7 @@ Deno.test(
     // Disable BOTH doors: no x-brain-key, no OAuth. DB_PASSWORD is set so the
     // throw we observe is the auth guard, not the unrelated DB_PASSWORD required().
     Deno.env.delete("MCP_ACCESS_KEY");
+    Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
     Deno.env.delete("AUTH0_ISSUER");
     Deno.env.delete("AUTH0_JWKS_URI");
     Deno.env.delete("AUTH0_AUDIENCE");

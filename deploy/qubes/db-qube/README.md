@@ -65,8 +65,9 @@ superuser can `COPY … TO/FROM PROGRAM` (run commands **as the `postgres` OS us
 on this qube**), `DROP`/alter structures, and read password hashes from
 `pg_authid` — so a compromised app qube could **pivot into this qube's OS**, the
 very VM boundary the three-qube split exists to enforce. Accepted for now because
-(a) the app role already reads/writes every thought, and (b) this db qube is
-deliberately contained — a minimal template, no sshd, loopback + scoped peers,
+(a) the app compartment legitimately runs the memory service (though its runtime
+role remains constrained by memory-space RLS), and (b) this db qube is deliberately
+contained — a minimal template, no sshd, loopback + scoped peers,
 nothing of value beyond the store it already holds. Hardening to a non-superuser
 migration role — which closes the *pivot*, not just the data delta — is tracked in
 [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15). To revert to
@@ -129,6 +130,7 @@ sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
 #   db/02-observability.sql
 #   db/04-sessions.sql
 #   db/05-hybrid-search.sql
+#   db/06-spaces.sql
 #   db/03-grants-assertion.sql  # always last
 ```
 
@@ -165,6 +167,17 @@ indexes exist.
 The migration also installs `pg_trgm`; the native Postgres package must include
 that contrib extension. See
 [Hybrid thought search](../../../docs/hybrid-search.md) for the full contract.
+
+After hybrid search, apply the idempotent
+[`db/06-spaces.sql`](../../../db/06-spaces.sql) migration in the same maintenance
+window and run `db/03-grants-assertion.sql` last. Spaces requires PostgreSQL 15
+or newer and a PostgreSQL superuser (the documented local or tailnet-restricted
+`postgres` path). It backfills legacy rows into the `default` workspace,
+rebuilds audience-aware fingerprint uniqueness, and forces RLS on thoughts,
+sessions, and artifacts. Reapplication rebuilds that fingerprint index too, so
+it needs the same table-lock window and index headroom. It must land before the
+scoped app server starts; the server boot probe refuses a partial catalog. See
+[Memory spaces](../../../docs/spaces.md).
 
 ## Template note
 

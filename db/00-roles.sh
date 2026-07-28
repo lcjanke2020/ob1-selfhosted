@@ -22,7 +22,12 @@ psql -v ON_ERROR_STOP=1 \
   --set=readonly_password="$OPENBRAIN_READONLY_PASSWORD" \
   <<-'EOSQL'
   CREATE ROLE openbrain_app LOGIN PASSWORD :'app_password';
-  CREATE ROLE openbrain_readonly LOGIN PASSWORD :'readonly_password';
+  -- pg_dump deliberately executes SET row_security = off and refuses to copy
+  -- from an RLS table as a non-bypass role, even when a SELECT policy allows
+  -- every row. This role is already the trusted all-row backup/exploration
+  -- identity and receives no DML, so BYPASSRLS preserves the existing full
+  -- dump contract without weakening the application role's forced RLS.
+  CREATE ROLE openbrain_readonly LOGIN BYPASSRLS PASSWORD :'readonly_password';
 EOSQL
 
 # Pattern B observability-only role for the log-ingester sidecar.

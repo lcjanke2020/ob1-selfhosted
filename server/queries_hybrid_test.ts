@@ -8,12 +8,14 @@ import {
 } from "@std/assert";
 import { asPool, FAKE_VECTOR, FakePool } from "./api_test_support.ts";
 import type { HybridCandidate } from "./queries.ts";
+import type { ResolvedReadScope } from "./scope_contract.ts";
 
 // queries.ts imports embeddings.ts, whose configuration validates at module
 // load. Set the one required value before the dynamic import, matching the
 // existing service/API test pattern.
 Deno.env.set("DB_PASSWORD", "test-password");
 Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
+Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
 
 const {
   DEFAULT_RRF_K,
@@ -23,6 +25,13 @@ const {
   MIN_HYBRID_CANDIDATES_PER_LEG,
   searchThoughts,
 } = await import("./queries.ts");
+
+const DEFAULT_SCOPE: ResolvedReadScope = {
+  workspaceId: "default",
+  projectId: null,
+  visibilities: ["workspace"],
+  principal: null,
+};
 
 function candidate(
   id: string,
@@ -35,6 +44,9 @@ function candidate(
     id,
     content: `thought ${id}`,
     metadata: {},
+    workspace_id: "default",
+    project_id: null,
+    visibility: "workspace",
     created_at: "2026-07-25T00:00:00Z",
     similarity,
     vector_rank: vectorRank,
@@ -110,7 +122,7 @@ Deno.test("searchThoughts: emits bounded vector and lexical candidate legs", asy
   const statements: string[] = [];
   const pool = new FakePool((sql, params) => {
     statements.push(sql.trim());
-    if (!sql.includes("WITH parsed_query")) return undefined;
+    if (!sql.includes("search_thought_candidates")) return undefined;
     capturedSql = sql;
     capturedParams = params;
     return {
@@ -127,6 +139,7 @@ Deno.test("searchThoughts: emits bounded vector and lexical candidate legs", asy
     embedding: FAKE_VECTOR,
     limit: 3,
     threshold: 0.7,
+    scope: DEFAULT_SCOPE,
   });
 
   assertEquals(capturedParams, [
@@ -135,6 +148,8 @@ Deno.test("searchThoughts: emits bounded vector and lexical candidate legs", asy
     query,
     "OPS-275\\_search\\%\\\\path",
     true,
+    null,
+    "[]",
     MIN_HYBRID_CANDIDATES_PER_LEG,
   ]);
   assertEquals(statements.includes("BEGIN"), true);
@@ -145,20 +160,14 @@ Deno.test("searchThoughts: emits bounded vector and lexical candidate legs", asy
     true,
   );
   assertEquals(statements[statements.length - 1], "COMMIT");
-  assertStringIncludes(capturedSql, "ORDER BY embedding <=> $1::vector");
+  assertStringIncludes(capturedSql, "memory_scope.search_thought_candidates(");
+  assertStringIncludes(capturedSql, "$6::jsonb");
+  assertStringIncludes(capturedSql, "$7::jsonb");
+  assertStringIncludes(capturedSql, "$8::int");
   assertStringIncludes(
     capturedSql,
-    "content_tsv @@ query_input.ts_query",
+    "JOIN thoughts ON thoughts.id = candidates.candidate_id",
   );
-  assertStringIncludes(
-    capturedSql,
-    "websearch_to_tsquery('simple', $3::text)",
-  );
-  assertStringIncludes(capturedSql, "querytree(ts_query) NOT IN ('', 'T')");
-  assertStringIncludes(capturedSql, "ts_query::text !~ '(^|[ (])!'");
-  assertStringIncludes(capturedSql, "query_input.use_literal_fallback");
-  assertStringIncludes(capturedSql, "content ILIKE '%' || $4::text || '%'");
-  assertStringIncludes(capturedSql, "LIMIT $6::int");
   assertEquals(rows.map((row) => row.id), ["consensus", "lexical"]);
   assertEquals(rows[1].similarity, 0.12);
   assert(rows[1].rrf_score > 0, "lexical-only hit must survive fusion");
@@ -170,7 +179,7 @@ Deno.test("searchThoughts: one bound provenance predicate is applied to both leg
   const statements: string[] = [];
   const pool = new FakePool((sql, params) => {
     statements.push(sql.trim());
-    if (sql.includes("WITH parsed_query")) {
+    if (sql.includes("search_thought_candidates")) {
       capturedSql = sql;
       capturedParams = params;
       return { rows: [] };
@@ -186,6 +195,7 @@ Deno.test("searchThoughts: one bound provenance predicate is applied to both leg
       include: { repo: "example/open-brain" },
       exclude: { author: "release engineering" },
     },
+    scope: DEFAULT_SCOPE,
   });
 
   assertEquals(statements.includes("BEGIN"), true);
@@ -209,15 +219,13 @@ Deno.test("searchThoughts: one bound provenance predicate is applied to both leg
     JSON.stringify({
       provenance: { caller_asserted: { repo: "example/open-brain" } },
     }),
-    JSON.stringify({
+    JSON.stringify([{
       provenance: { caller_asserted: { author: "release engineering" } },
-    }),
+    }]),
     75,
   ]);
-  assertEquals(capturedSql.match(/metadata @> \$6::jsonb/g)?.length, 2);
-  assertEquals(
-    capturedSql.match(/NOT \(metadata @> \$7::jsonb\)/g)?.length,
-    2,
-  );
-  assertStringIncludes(capturedSql, "LIMIT $8::int");
+  assertStringIncludes(capturedSql, "memory_scope.search_thought_candidates(");
+  assertStringIncludes(capturedSql, "$6::jsonb");
+  assertStringIncludes(capturedSql, "$7::jsonb");
+  assertStringIncludes(capturedSql, "$8::int");
 });

@@ -16,6 +16,7 @@ import {
   sessionCaptureBody,
   sessionIdParam,
   sessionLookupQuery,
+  sessionSearchBody,
   sessionUpdateStatusBody,
   THOUGHT_PROVENANCE_SCHEMA_VERSION,
   thoughtIdParam,
@@ -160,6 +161,43 @@ Deno.test("search body: bounds enforced", () => {
   assertFalse(searchThoughtsBody.safeParse({ query: "x", limit: 101 }).success);
   assertFalse(
     searchThoughtsBody.safeParse({ query: "x", threshold: 1.5 }).success,
+  );
+});
+
+Deno.test("memory scope: exact upstream fields are strict and bounded", () => {
+  const valid = searchThoughtsBody.safeParse({
+    query: "private",
+    scope: {
+      workspace_id: "  sensitive  ",
+      visibility: "personal",
+    },
+  });
+  assert(valid.success);
+  assertEquals(valid.data.scope, {
+    workspace_id: "sensitive",
+    visibility: "personal",
+  });
+  assertFalse(
+    searchThoughtsBody.safeParse({
+      query: "private",
+      scope: { workpace_id: "sensitive" },
+    }).success,
+  );
+  assertFalse(
+    searchThoughtsBody.safeParse({
+      query: "private",
+      scope: { workspace_id: "sensitive", visibility: "private" },
+    }).success,
+  );
+  assertFalse(
+    searchThoughtsBody.safeParse({ query: "private", scop: {} }).success,
+  );
+  assertFalse(
+    sessionSearchBody.safeParse({ query: "private", scop: {} }).success,
+  );
+  assertFalse(
+    captureThoughtBody.safeParse({ content: "private", owner_subject: "alice" })
+      .success,
   );
 });
 

@@ -6,6 +6,21 @@
 
 BEGIN;
 
+-- The workflow connects as the migration owner so it can transactionally hide
+-- the audience B-tree during the EXPLAIN-only section below. Functional
+-- writes/reads run as the real app role with RLS forced on. The explained SQL
+-- mirrors the fixed body of the SECURITY DEFINER candidate function and thus
+-- runs with its owner context plus the same explicit audience predicate.
+SET LOCAL ROLE openbrain_app;
+
+-- db/06-spaces.sql makes missing audience context match no rows. Mirror the
+-- production transaction wrapper before exercising the app role.
+SELECT
+  set_config('openbrain.workspace_id', 'default', true),
+  set_config('openbrain.project_id', '', true),
+  set_config('openbrain.principal', '', true),
+  set_config('openbrain.visibilities', 'workspace', true);
+
 WITH vectors AS (
   SELECT
     ('[' || '1,' || rtrim(repeat('0,', 767), ',') || ']')::vector AS near,
@@ -52,6 +67,7 @@ DECLARE
   literal_count INTEGER;
   exact_token_vector_count INTEGER;
   hybrid_count INTEGER;
+  excluded_hybrid_count INTEGER;
   negation_leak_count INTEGER;
   identifier_literal_enabled BOOLEAN;
   pure_negative_disabled BOOLEAN;
@@ -129,86 +145,35 @@ BEGIN
   SELECT querytree(websearch_to_tsquery('simple', '-bar')) = 'T'
   INTO pure_negative_disabled;
 
-  WITH parsed_query AS (
-    SELECT websearch_to_tsquery('simple', 'OPS-275') AS ts_query
-  ),
-  query_input AS (
-    SELECT ts_query,
-           querytree(ts_query) NOT IN ('', 'T') AS has_indexable_query,
-           ts_query::text !~ '(^|[ (])!' AS use_literal_fallback
-    FROM parsed_query
-  ),
-  vector_candidates AS MATERIALIZED (
-    SELECT id,
-           embedding <=> (
-             '[' || '1,' || rtrim(repeat('0,', 767), ',') || ']'
-           )::vector AS distance
-    FROM thoughts
-    WHERE metadata @> '{"_ci_hybrid_search_fixture":true}'::jsonb
-      AND 1 - (
-        embedding <=> (
-          '[' || '1,' || rtrim(repeat('0,', 767), ',') || ']'
-        )::vector
-      ) >= 0.5
-    ORDER BY embedding <=> (
+  SELECT count(*) INTO hybrid_count
+  FROM memory_scope.search_thought_candidates(
+    (
       '[' || '1,' || rtrim(repeat('0,', 767), ',') || ']'
-    )::vector
-    LIMIT 50
-  ),
-  vector_hits AS (
-    SELECT id, ROW_NUMBER() OVER (ORDER BY distance, id) AS vector_rank
-    FROM vector_candidates
-  ),
-  lexical_candidates AS MATERIALIZED (
-    SELECT id,
-           CASE WHEN content_tsv @@ query_input.ts_query THEN 0 ELSE 1 END
-             AS source_priority,
-           ts_rank_cd(content_tsv, query_input.ts_query) AS lexical_score,
-           created_at
-    FROM thoughts
-    CROSS JOIN query_input
-    WHERE query_input.has_indexable_query
-      AND metadata @> '{"_ci_hybrid_search_fixture":true}'::jsonb
-      AND (
-        content_tsv @@ query_input.ts_query
-        OR (
-          query_input.use_literal_fallback
-          AND content ILIKE '%' || 'OPS-275' || '%' ESCAPE '\'
-        )
-      )
-    ORDER BY source_priority, lexical_score DESC, created_at DESC, id
-    LIMIT 50
-  ),
-  lexical_hits AS (
-    SELECT id,
-           source_priority AS lexical_source_priority,
-           ROW_NUMBER() OVER (
-             ORDER BY source_priority, lexical_score DESC, created_at DESC, id
-           ) AS lexical_rank
-    FROM lexical_candidates
-  ),
-  candidates AS (
-    SELECT COALESCE(vector_hits.id, lexical_hits.id) AS id,
-           vector_hits.vector_rank,
-           lexical_hits.lexical_rank,
-           lexical_hits.lexical_source_priority
-    FROM vector_hits
-    FULL OUTER JOIN lexical_hits USING (id)
-  ),
-  fused_rows AS (
-    SELECT thoughts.id,
-           1 - (
-             thoughts.embedding <=> (
-               '[' || '1,' || rtrim(repeat('0,', 767), ',') || ']'
-             )::vector
-           ) AS similarity,
-           candidates.vector_rank,
-           candidates.lexical_rank,
-           candidates.lexical_source_priority
-    FROM candidates
-    JOIN thoughts USING (id)
-  )
-  SELECT count(*) INTO hybrid_count FROM fused_rows;
+    )::vector,
+    0.5,
+    'OPS-275',
+    'OPS-275',
+    true,
+    '{"_ci_hybrid_search_fixture":true}'::jsonb,
+    '[]'::jsonb,
+    50
+  ) AS candidates
+  JOIN thoughts ON thoughts.id = candidates.candidate_id;
+
+  SELECT count(*) INTO excluded_hybrid_count
+  FROM memory_scope.search_thought_candidates(
+    (
+      '[' || '1,' || rtrim(repeat('0,', 767), ',') || ']'
+    )::vector,
+    0.5,
+    'OPS-275',
+    'OPS-275',
+    true,
+    '{"_ci_hybrid_search_fixture":true}'::jsonb,
+    '[{"kind":"vector"}]'::jsonb,
+    50
+  ) AS candidates
+  JOIN thoughts ON thoughts.id = candidates.candidate_id;
 
   IF fts_count <> 1 THEN
     RAISE EXCEPTION 'simple FTS returned %, expected 1 exact-token row', fts_count;
@@ -231,13 +196,26 @@ BEGIN
   IF hybrid_count <> 2 THEN
     RAISE EXCEPTION 'hybrid candidate union returned %, expected 2 rows', hybrid_count;
   END IF;
+  IF excluded_hybrid_count <> 1 THEN
+    RAISE EXCEPTION 'hybrid exclusion returned %, expected 1 row', excluded_hybrid_count;
+  END IF;
 END;
 $$;
 
 -- Small fixtures make sequential scans rational. Disable them locally only to
 -- prove PostgreSQL can select both indexes for the production predicates.
+-- The scope B-tree is intentionally removed inside this throwaway transaction:
+-- with four rows it is always the cheapest possible index and masks whether
+-- PostgreSQL can use HNSW/GIN under the RLS policy. ROLLBACK restores it.
+RESET ROLE;
+DROP INDEX public.idx_thoughts_scope_audience;
 SET LOCAL enable_indexscan = on;
 SET LOCAL enable_seqscan = off;
+
+-- RLS adds a workspace B-tree candidate to every plan. Penalize an explicit
+-- sort for this one EXPLAIN so the ordered HNSW path is still proven usable;
+-- the functional test above runs with normal planner costs.
+SET LOCAL enable_sort = off;
 
 EXPLAIN
 WITH vector_candidates AS MATERIALIZED (
@@ -246,7 +224,10 @@ WITH vector_candidates AS MATERIALIZED (
            '[' || '1,' || rtrim(repeat('0,', 767), ',') || ']'
          )::vector AS distance
   FROM thoughts
-  WHERE 1 - (
+  WHERE memory_scope.audience_matches(
+          workspace_id, project_id, visibility, owner_subject
+        )
+    AND 1 - (
     embedding <=> (
       '[' || '1,' || rtrim(repeat('0,', 767), ',') || ']'
     )::vector
@@ -259,15 +240,27 @@ WITH vector_candidates AS MATERIALIZED (
 SELECT id, ROW_NUMBER() OVER (ORDER BY distance, id) AS vector_rank
 FROM vector_candidates;
 
-EXPLAIN
-SELECT id
-FROM thoughts
-WHERE content_tsv @@ websearch_to_tsquery('simple', 'OPS-275');
+-- FTS/trigram GIN paths are bitmap scans. Disable plain index scans for these
+-- EXPLAIN-only probes so a tiny fixture cannot prefer the audience B-tree and
+-- hide the lexical indexes we are verifying.
+SET LOCAL enable_sort = on;
+SET LOCAL enable_indexscan = off;
 
 EXPLAIN
 SELECT id
 FROM thoughts
-WHERE content ILIKE '%' || 'search\_thoughts\_v2' || '%' ESCAPE '\';
+WHERE memory_scope.audience_matches(
+        workspace_id, project_id, visibility, owner_subject
+      )
+  AND content_tsv @@ websearch_to_tsquery('simple', 'OPS-275');
+
+EXPLAIN
+SELECT id
+FROM thoughts
+WHERE memory_scope.audience_matches(
+        workspace_id, project_id, visibility, owner_subject
+      )
+  AND content ILIKE '%' || 'search\_thoughts\_v2' || '%' ESCAPE '\';
 
 -- Exact lexical-candidate shape from queries.ts: PostgreSQL may combine the
 -- two GIN indexes with a BitmapOr before sorting the bounded candidate set.
@@ -289,6 +282,9 @@ SELECT id,
 FROM thoughts
 CROSS JOIN query_input
 WHERE query_input.has_indexable_query
+  AND memory_scope.audience_matches(
+        workspace_id, project_id, visibility, owner_subject
+      )
   AND (
     content_tsv @@ query_input.ts_query
     OR (

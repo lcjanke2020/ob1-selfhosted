@@ -59,13 +59,35 @@ class FakeClient {
   releaseCalls = 0;
 
   constructor(
-    private hybridSchema: [boolean, boolean] = [true, true],
+    private requiredSchema: [
+      boolean,
+      boolean,
+      boolean,
+      boolean,
+      boolean,
+      boolean,
+      boolean,
+      boolean,
+    ] = [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+    ],
+    private defaultWorkspaceExists = true,
   ) {}
 
   queryArray(sql: string): Promise<{ rows: unknown[] }> {
     this.queryCalls.push(sql);
     if (sql.includes("to_regclass")) {
-      return Promise.resolve({ rows: [this.hybridSchema] });
+      return Promise.resolve({ rows: [this.requiredSchema] });
+    }
+    if (sql.includes("FROM memory_scope.workspace WHERE id")) {
+      return Promise.resolve({ rows: [[this.defaultWorkspaceExists]] });
     }
     return Promise.resolve({ rows: [[1]] });
   }
@@ -82,15 +104,25 @@ Deno.test("probeDbAtBoot: success path validates connectivity and hybrid schema"
   } as unknown as Pool;
 
   await probeDbAtBoot(fakePool, "db:5432");
-  assertEquals(client.queryCalls.length, 2);
+  assertEquals(client.queryCalls.length, 3);
   assertEquals(client.queryCalls[0], "SELECT 1");
   assert(client.queryCalls[1].includes("idx_thoughts_content_tsv"));
   assert(client.queryCalls[1].includes("idx_thoughts_content_trgm"));
+  assert(client.queryCalls[2].includes("memory_scope.workspace"));
   assertEquals(client.releaseCalls, 1);
 });
 
 Deno.test("probeDbAtBoot: missing hybrid schema rejects with migration guidance", async () => {
-  const client = new FakeClient([true, false]);
+  const client = new FakeClient([
+    true,
+    false,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+  ]);
   const fakePool = {
     connect: () => Promise.resolve(client),
   } as unknown as Pool;
@@ -101,6 +133,76 @@ Deno.test("probeDbAtBoot: missing hybrid schema rejects with migration guidance"
   );
   assertStringIncludes(err.message, "idx_thoughts_content_trgm");
   assertStringIncludes(err.message, "db/05-hybrid-search.sql");
+  assertEquals(client.releaseCalls, 1);
+});
+
+Deno.test("probeDbAtBoot: missing spaces schema rejects with migration guidance", async () => {
+  const client = new FakeClient([
+    true,
+    true,
+    true,
+    true,
+    false,
+    true,
+    true,
+    true,
+  ]);
+  const fakePool = {
+    connect: () => Promise.resolve(client),
+  } as unknown as Pool;
+
+  const err = await assertRejects(
+    () => probeDbAtBoot(fakePool, "db:5432"),
+    Error,
+  );
+  assertStringIncludes(err.message, "session audience columns");
+  assertStringIncludes(err.message, "db/06-spaces.sql");
+  assertStringIncludes(err.message, "PostgreSQL superuser");
+  assertEquals(client.releaseCalls, 1);
+});
+
+Deno.test("probeDbAtBoot: missing audience indexes rejects before serving", async () => {
+  const client = new FakeClient([
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+    true,
+    true,
+  ]);
+  const fakePool = {
+    connect: () => Promise.resolve(client),
+  } as unknown as Pool;
+
+  const err = await assertRejects(
+    () => probeDbAtBoot(fakePool, "db:5432"),
+    Error,
+  );
+  assertStringIncludes(err.message, "audience-aware indexes");
+  assertStringIncludes(err.message, "db/06-spaces.sql");
+  assertEquals(client.releaseCalls, 1);
+});
+
+Deno.test("probeDbAtBoot: unknown configured workspace rejects before serving", async () => {
+  const client = new FakeClient(
+    [true, true, true, true, true, true, true, true],
+    false,
+  );
+  const fakePool = {
+    connect: () => Promise.resolve(client),
+  } as unknown as Pool;
+
+  const err = await assertRejects(
+    () =>
+      probeDbAtBoot(fakePool, "db:5432", {
+        defaultWorkspaceId: "misspelled",
+      }),
+    Error,
+  );
+  assertStringIncludes(err.message, "misspelled");
+  assertStringIncludes(err.message, "DEFAULT_WORKSPACE_ID");
   assertEquals(client.releaseCalls, 1);
 });
 

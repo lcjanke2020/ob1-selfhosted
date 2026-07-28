@@ -7,6 +7,7 @@ import {
   DB_POOL_SIZE,
   DB_PORT,
   DB_USER,
+  DEFAULT_WORKSPACE_ID,
 } from "./config.ts";
 import { probeDbAtBoot } from "./db_boot_probe.ts";
 
@@ -52,9 +53,10 @@ export const pool = new Pool(
 try {
   await probeDbAtBoot(pool, `${DB_HOST}:${DB_PORT}`, {
     deadlineMs: DB_BOOT_PROBE_TIMEOUT_MS,
+    defaultWorkspaceId: DEFAULT_WORKSPACE_ID,
   });
   console.log(
-    `[db] postgres reachable and hybrid-search schema ready at ${DB_HOST}:${DB_PORT}`,
+    `[db] postgres reachable; hybrid-search + fail-closed spaces schema ready at ${DB_HOST}:${DB_PORT}`,
   );
 } catch (e) {
   console.error(e instanceof Error ? e.message : String(e));
@@ -68,6 +70,9 @@ export type ThoughtRecord = {
   id: string;
   content: string;
   metadata: Record<string, unknown>;
+  workspace_id: string;
+  project_id: string | null;
+  visibility: "personal" | "project" | "workspace";
   created_at: string;
   updated_at?: string | null;
 };

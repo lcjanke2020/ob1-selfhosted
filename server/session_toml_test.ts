@@ -12,6 +12,8 @@ agent = "claude-code"
 repo_url = "https://github.com/x/y"
 branch = "main"
 status = "awaiting_review"
+workspace_id = "sensitive"
+visibility = "personal"
 session_date = "2026-06-07"
 started_at = 2026-06-07T10:00:00Z
 tags = ["ci", "flaky"]
@@ -39,6 +41,9 @@ title = "server/x.ts"
   assertEquals(session.repo_url, "https://github.com/x/y");
   assertEquals(session.branch, "main");
   assertEquals(session.status, "awaiting_review");
+  assertEquals(session.workspace_id, "sensitive");
+  assertEquals(session.project_id, null);
+  assertEquals(session.visibility, "personal");
   assertEquals(session.session_date, "2026-06-07");
   // TOML offset-datetime parses to Date → ISO string (TZ-independent: has Z).
   assertEquals(session.started_at, "2026-06-07T10:00:00.000Z");
@@ -125,23 +130,31 @@ Deno.test("parseSessionToml tolerates partial TOML (title only)", () => {
   assertEquals(artifacts, []);
 });
 
-// source/source_node are server-stamped; ingested_path/needs_file_sync are
-// legacy keys now dropped from the schema. The parser allowlist must keep
-// ignoring all of them, so a hand-supplied value never reaches a column —
-// the dropped pair doubles as a forward-compat guard for old on-disk TOML.
-Deno.test("parseSessionToml ignores caller-supplied provenance fields", () => {
-  const { session } = parseSessionToml(`title = "P"
-source = "evil"
-source_node = "attacker"
-ingested_path = "/etc/passwd"
-needs_file_sync = true
-`);
-  const asRec = session as unknown as Record<string, unknown>;
-  assertEquals(asRec.source, undefined);
-  assertEquals(asRec.source_node, undefined);
-  assertEquals(asRec.ingested_path, undefined);
-  assertEquals(asRec.needs_file_sync, undefined);
-  assertEquals(session.title, "P");
+// Unknown top-level keys are rejected rather than silently dropped. That is
+// load-bearing for scope: a misspelled workspace field must not become an
+// omitted scope and widen a write into the default workspace. Provenance and
+// ownership remain server-authored.
+Deno.test("parseSessionToml rejects unknown and server-authored fields", () => {
+  for (
+    const field of [
+      'source = "evil"',
+      'source_node = "attacker"',
+      'ingested_path = "/etc/passwd"',
+      "needs_file_sync = true",
+      'workpace_id = "sensitive"',
+    ]
+  ) {
+    assertThrows(
+      () => parseSessionToml(`title = "P"\n${field}\n`),
+      Error,
+      "unknown top-level field",
+    );
+  }
+  assertThrows(
+    () => parseSessionToml('title = "P"\nowner_subject = "attacker"'),
+    Error,
+    "server-stamped",
+  );
 });
 
 Deno.test("parseSessionToml supports a +++-fenced front-matter block", () => {

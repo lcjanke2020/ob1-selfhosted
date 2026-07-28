@@ -19,12 +19,24 @@ import { computeContentHash, parseSessionToml } from "./session_toml.ts";
 const ENV_KEYS = [
   "DB_PASSWORD",
   "MCP_ACCESS_KEY",
+  "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
 ];
 
 const AUTH = { door: "tailnet" as const, sub: null };
+
+function persistedSession(status: string, sessionId: string | null = null) {
+  return {
+    id: 7n,
+    session_id: sessionId,
+    status,
+    workspace_id: "default",
+    project_id: null,
+    visibility: "workspace",
+  };
+}
 
 Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
   // ─── Setup ─────────────────────────────────────────────────────────────
@@ -36,6 +48,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
   Deno.env.delete("AUTH0_AUDIENCE");
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
+  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
 
   const {
     captureSessionFromToml,
@@ -43,10 +56,10 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
     NotFoundError,
     searchSessionsByQuery,
     searchThoughtsByQuery,
+    updateSessionStatusInScope,
     UpstreamError,
     ValidationError,
   } = await import("./services.ts");
-  const { updateSessionStatus } = await import("./session_queries.ts");
 
   try {
     // ─── captureThoughtWithMetadata ───────────────────────────────────
@@ -226,13 +239,16 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       async () => {
         let captured: unknown[] = [];
         const pool = new FakePool((sql, params) => {
-          if (sql.includes("FROM thoughts")) {
+          if (sql.includes("search_thought_candidates")) {
             captured = params;
             return {
               rows: [{
                 id: "uuid-1",
                 content: "hit",
                 metadata: {},
+                workspace_id: "default",
+                project_id: null,
+                visibility: "workspace",
                 created_at: "2026-07-24T00:00:00Z",
                 similarity: 0.9,
                 vector_rank: 1,
@@ -246,7 +262,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         const deps = makeDeps();
         const rows = await searchThoughtsByQuery(
           asPool(pool),
-          { query: "find me", limit: 3, threshold: 0.7 },
+          { query: "find me", limit: 3, threshold: 0.7, auth: AUTH },
           deps,
         );
         assertEquals(rows.length, 1);
@@ -257,6 +273,8 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           "find me",
           "find me",
           true,
+          null,
+          "[]",
           50,
         ]);
         assertEquals(rows[0].rrf_score, 1 / 61);
@@ -271,7 +289,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         const statements: string[] = [];
         const pool = new FakePool((sql, params) => {
           statements.push(sql.trim());
-          if (sql.includes("FROM thoughts")) {
+          if (sql.includes("search_thought_candidates")) {
             capturedSql = sql;
             capturedParams = params;
             return { rows: [] };
@@ -292,19 +310,25 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
               },
               exclude: { agent: "  codex  ", branch: "  archived  " },
             },
+            auth: AUTH,
           },
           deps,
         );
 
         assertEquals(deps.embedCalls, ["release checklist"]);
-        assertEquals(statements[1], "BEGIN");
         assertEquals(
-          statements[2],
-          "SELECT set_config('hnsw.ef_search', $1::text, true)",
+          statements.includes("BEGIN"),
+          true,
         );
         assertEquals(
-          statements[3],
-          "SET LOCAL hnsw.iterative_scan = strict_order",
+          statements.includes(
+            "SELECT set_config('hnsw.ef_search', $1::text, true)",
+          ),
+          true,
+        );
+        assertEquals(
+          statements.includes("SET LOCAL hnsw.iterative_scan = strict_order"),
+          true,
         );
         assertEquals(statements[statements.length - 1], "COMMIT");
         assertEquals(capturedParams, [
@@ -321,24 +345,21 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
               },
             },
           }),
-          JSON.stringify({
-            provenance: { caller_asserted: { agent: "codex" } },
-          }),
-          JSON.stringify({
-            provenance: { caller_asserted: { branch: "archived" } },
-          }),
+          JSON.stringify([
+            {
+              provenance: { caller_asserted: { agent: "codex" } },
+            },
+            {
+              provenance: { caller_asserted: { branch: "archived" } },
+            },
+          ]),
           50,
         ]);
-        assertEquals(capturedSql.includes("metadata @> $6::jsonb"), true);
         assertEquals(
-          capturedSql.includes("NOT (metadata @> $7::jsonb)"),
+          capturedSql.includes("memory_scope.search_thought_candidates("),
           true,
         );
-        assertEquals(
-          capturedSql.includes("NOT (metadata @> $8::jsonb)"),
-          true,
-        );
-        assertEquals(capturedSql.includes("LIMIT $9::int"), true);
+        assertEquals(capturedSql.includes("$8::int"), true);
         assertEquals(capturedSql.includes("match_thoughts"), false);
       },
     );
@@ -359,6 +380,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
               {
                 query: "release checklist",
                 filter: { exclude: { author: "blocked" } },
+                auth: AUTH,
               },
               makeDeps(),
             ),
@@ -392,7 +414,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           () =>
             searchThoughtsByQuery(
               asPool(pool),
-              { query: "x", filter: {} as never },
+              { query: "x", filter: {} as never, auth: AUTH },
               deps,
             ),
           ValidationError,
@@ -412,7 +434,10 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           () =>
             searchThoughtsByQuery(
               asPool(pool),
-              { query: "x".repeat(MAX_SEARCH_QUERY_BYTES + 1) },
+              {
+                query: "x".repeat(MAX_SEARCH_QUERY_BYTES + 1),
+                auth: AUTH,
+              },
               deps,
             ),
           ValidationError,
@@ -427,7 +452,12 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       const pool = new FakePool(() => undefined);
       const { deps, message } = makeEmbedDownDeps();
       await assertRejects(
-        () => searchSessionsByQuery(asPool(pool), { query: "x" }, deps),
+        () =>
+          searchSessionsByQuery(
+            asPool(pool),
+            { query: "x", auth: AUTH },
+            deps,
+          ),
         UpstreamError,
         message,
       );
@@ -444,7 +474,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       });
       await searchSessionsByQuery(
         asPool(pool),
-        { query: "q", limit: 2, status: "active", tag: "ci" },
+        { query: "q", limit: 2, status: "active", tag: "ci", auth: AUTH },
         makeDeps(),
       );
       assertEquals(captured, [
@@ -463,7 +493,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         const pool = new FakePool((sql, params) => {
           if (sql.includes("INSERT INTO sessions.session")) {
             insertParams = params;
-            return { rows: [{ id: 7n, session_id: null, status: "active" }] };
+            return { rows: [persistedSession("active")] };
           }
           return undefined;
         });
@@ -478,6 +508,9 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           session_id: null,
           status: "active",
           created: true,
+          workspace_id: "default",
+          project_id: null,
+          visibility: "workspace",
           reembedded: true,
         });
         assertEquals(deps.embedCalls.length, 1);
@@ -526,7 +559,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
             storedStatus = params[16] as string;
             storedContentHash = params[27] as string;
             return {
-              rows: [{ id: 7n, session_id: null, status: storedStatus }],
+              rows: [persistedSession(storedStatus)],
             };
           }
           if (sql.includes("SET status = $2::sessions.session_status")) {
@@ -543,7 +576,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
             assertEquals(params[16], null, "omitted status must remain null");
             storedContentHash = params[27] as string;
             return {
-              rows: [{ id: 7n, session_id: null, status: storedStatus }],
+              rows: [persistedSession(storedStatus)],
             };
           }
           return undefined;
@@ -561,7 +594,12 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         assertEquals(created.status, "active");
 
         assertEquals(
-          await updateSessionStatus(asPool(pool), created.id, "done"),
+          await updateSessionStatusInScope(
+            asPool(pool),
+            created.id,
+            "done",
+            { auth: AUTH },
+          ),
           { id: 7, status: "done" },
         );
 
@@ -592,7 +630,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           }
           if (sql.includes("UPDATE sessions.session SET")) {
             updateParams = params;
-            return { rows: [{ id: 7n, session_id: "h-1", status: "done" }] };
+            return { rows: [persistedSession("done", "h-1")] };
           }
           return undefined;
         });
@@ -610,9 +648,9 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           0,
           "unchanged hash must not embed",
         );
-        // $29 null => COALESCE keeps the stored embedding; $30 is the key.
+        // $29 null => COALESCE keeps the stored embedding; $34 is the key.
         assertEquals(updateParams[28], null);
-        assertEquals(updateParams[29], 7);
+        assertEquals(updateParams[33], 7);
       },
     );
 
@@ -624,7 +662,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
             return { rows: [{ content_hash: "something-else" }] };
           }
           if (sql.includes("UPDATE sessions.session SET")) {
-            return { rows: [{ id: 7n, session_id: null, status: "active" }] };
+            return { rows: [persistedSession("active")] };
           }
           return undefined;
         });

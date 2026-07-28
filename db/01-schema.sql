@@ -1,6 +1,6 @@
--- Open Brain — Homelab + Tailscale schema
--- Vanilla Postgres + pgvector. No Supabase auth, no RLS.
--- Trust boundary is Tailscale + the x-brain-key header on the MCP server.
+-- Open Brain — self-hosted base schema
+-- Vanilla Postgres + pgvector. db/06-spaces.sql adds fail-closed row-level
+-- audience enforcement after the base thoughts and sessions tables exist.
 --
 -- Embedding dimension is 768 to match nomic-embed-text (Ollama default).
 -- If you change EMBED_MODEL, change vector(768) below to match the model's
@@ -58,8 +58,8 @@ CREATE TRIGGER thoughts_updated_at
 -- match_thoughts() RPC was never called by the server and supported only
 -- positive metadata containment, so retaining it created a second contract
 -- that could silently drift. Init scripts do not re-run automatically on an
--- existing database: replay this schema in the documented 01 -> 02 -> 03 order
--- or run this DROP directly during a maintenance window.
+-- existing database: use the documented ordered migration procedure or run
+-- this DROP directly during a maintenance window.
 DROP FUNCTION IF EXISTS match_thoughts(
   VECTOR,
   DOUBLE PRECISION,

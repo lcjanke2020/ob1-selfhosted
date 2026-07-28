@@ -32,6 +32,23 @@ export const DB_USER = optionalTrimmed("DB_USER") || "openbrain_app";
 export const DB_PASSWORD = required("DB_PASSWORD");
 export const DB_POOL_SIZE = requiredInt("DB_POOL_SIZE", 10);
 
+// Omitted request scope resolves to exactly this registered workspace — never
+// to every workspace. db/06-spaces.sql seeds `default`; operators may select a
+// different pre-registered workspace. Keep the same bounded, trimmed ID shape
+// as the shared Zod/SQL contract so a bad default fails at boot, not per call.
+function validatedScopeId(name: string, fallback: string): string {
+  const value = optionalTrimmed(name) || fallback;
+  if (value.length > 128) {
+    throw new Error(`${name} must be at most 128 characters`);
+  }
+  return value;
+}
+
+export const DEFAULT_WORKSPACE_ID = validatedScopeId(
+  "DEFAULT_WORKSPACE_ID",
+  "default",
+);
+
 export const OLLAMA_URL = optionalTrimmed("OLLAMA_URL") ||
   "http://localhost:11434";
 export const EMBED_MODEL = optionalTrimmed("EMBED_MODEL") || "nomic-embed-text";
@@ -124,6 +141,23 @@ export const MCP_ACCESS_KEY: string | null = rawBrainKey
   ? requireMinLength("MCP_ACCESS_KEY", rawBrainKey, MCP_ACCESS_KEY_MIN_LENGTH)
   : null;
 export const ENABLE_BRAIN_KEY = MCP_ACCESS_KEY !== null;
+
+// The x-brain-key is a shared credential, not a principal. Personal memory is
+// therefore disabled on that door unless the operator explicitly binds the
+// whole deployment to one stable server-trusted subject. This value is never
+// read from caller input and does not alter the historical metadata.sub stamp
+// (which remains null for tailnet/shared-key captures).
+export const MCP_ACCESS_KEY_PRINCIPAL = optionalTrimmed(
+  "MCP_ACCESS_KEY_PRINCIPAL",
+);
+if (MCP_ACCESS_KEY_PRINCIPAL.length > 1024) {
+  throw new Error("MCP_ACCESS_KEY_PRINCIPAL must be at most 1024 characters");
+}
+if (MCP_ACCESS_KEY_PRINCIPAL && !ENABLE_BRAIN_KEY) {
+  throw new Error(
+    "MCP_ACCESS_KEY_PRINCIPAL requires MCP_ACCESS_KEY; refusing an unused principal binding",
+  );
+}
 export const PORT = requiredInt("PORT", 8787);
 
 // Auth0 OAuth resource-server config. The three vars below have a tri-state

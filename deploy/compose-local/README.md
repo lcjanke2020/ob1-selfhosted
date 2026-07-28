@@ -26,6 +26,11 @@ openssl rand -hex 24    # OPENBRAIN_READONLY_PASSWORD
 openssl rand -hex 32    # MCP_ACCESS_KEY  (minimum 32 chars — enforced at boot)
 ```
 
+To use personal visibility and the seeded `sensitive` space on this single-user
+shared-key install, also set a stable, non-secret `MCP_ACCESS_KEY_PRINCIPAL`
+(for example `local-owner`). Without it, personal scope fails closed because a
+shared key is not an identity. See [Memory spaces](../../docs/spaces.md).
+
 ### 2. Pre-pull the embedding model
 
 One-time, so the first capture isn't slow:
@@ -52,7 +57,7 @@ docker compose up -d
 docker compose logs -f mcp
 ```
 
-You should see `open-brain-homelab listening on :8787`. The Postgres init scripts (roles, pgvector schema, observability tables, sessions schema, hybrid-search indexes) run on the first startup only.
+You should see `open-brain-homelab listening on :8787`. The Postgres init scripts (roles, pgvector schema, observability tables, sessions schema, hybrid-search indexes, fail-closed spaces/RLS) run on the first startup only.
 
 ### 4. Smoke-test
 
@@ -95,7 +100,12 @@ The server is gated by an `x-brain-key` header, and is deliberately header-only 
 
 > **Windows gotcha.** Claude Desktop spawns subprocesses without a shell, so PATH entries from a node-version manager (`fnm`, `nvm-windows`) often aren't visible — you'll see `spawn npx ENOENT` in the connector log. If you have Bun, `"command": "bun", "args": ["x", "mcp-remote", ...]` usually works out of the box; otherwise hard-code the full path to `npx.cmd`.
 
-After a client restart, the connector should list **eleven tools**: `capture_thought`, `search_thoughts`, `list_thoughts`, `thought_stats`, `search`, `fetch`, plus `session_capture`, `session_lookup`, `session_search`, `session_list`, `session_update_status`. Test by saying *"remember that I set up Open Brain today."*
+After installing or upgrading to server 1.9.0, reconnect or restart the client
+so the connector fetches the new scope-aware tool schemas. It should then list
+**eleven tools**: `capture_thought`, `search_thoughts`, `list_thoughts`,
+`thought_stats`, `search`, `fetch`, plus `session_capture`, `session_lookup`,
+`session_search`, `session_list`, `session_update_status`. Test by saying
+*"remember that I set up Open Brain today."*
 
 ## Verification checklist
 
@@ -109,7 +119,7 @@ After a client restart, the connector should list **eleven tools**: `capture_tho
 8. Capture the *same* text again — the row count stays at 1 (dedupe by `content_fingerprint`).
 9. `docker compose restart` — thoughts survive.
 
-## Upgrading an existing database for hybrid search
+## Upgrading an existing database for hybrid search and spaces
 
 Postgres init files run only when the data directory is first created. Before
 deploying a server version that uses hybrid thought search, verify pgvector is
@@ -123,6 +133,12 @@ older, update the pinned pgvector image/package and run
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/05-hybrid-search.sql
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/06-spaces.sql
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/03-grants-assertion.sql
 docker compose build mcp
 docker compose up -d --no-deps mcp
 ```
@@ -132,10 +148,15 @@ is held through both regular GIN index builds until commit, blocking searches
 and captures for the migration's duration. Use a full application maintenance
 window on a large `thoughts` table and budget disk for the column plus both
 indexes.
-The updated server refuses to boot until both hybrid-search indexes exist, so
-apply the migration before recreating MCP. Re-running the file is safe. Details
-and query semantics are in
-[`docs/hybrid-search.md`](../../docs/hybrid-search.md).
+`06-spaces.sql` requires PostgreSQL 15 or newer and the `postgres` superuser. It
+then backfills legacy thoughts and sessions into the `default` workspace, adds
+audience-aware indexes, and forces RLS; it also takes table locks, so keep the
+same maintenance window through both migrations. The updated server refuses to
+boot until both hybrid-search and spaces invariants exist. Re-running either
+file is safe, but re-running `06-spaces.sql` still rebuilds its fingerprint index
+and needs the full lock window and index headroom. Details are in
+[`docs/hybrid-search.md`](../../docs/hybrid-search.md) and
+[`docs/spaces.md`](../../docs/spaces.md).
 
 ## Common gotchas
 
@@ -161,7 +182,9 @@ If you switch embedding models later, old embeddings are mathematically incompat
 
 ## Key rotation
 
-`MCP_ACCESS_KEY` is the only thing standing between a key-holder and full read/write. Rotate on a regular cadence and immediately if it ever leaves trusted hands:
+`MCP_ACCESS_KEY` is the door to every registered non-personal audience (and to
+the one configured personal principal, when bound). Rotate it on a regular
+cadence and immediately if it ever leaves trusted hands:
 
 ```bash
 NEW_KEY=$(openssl rand -hex 32)
