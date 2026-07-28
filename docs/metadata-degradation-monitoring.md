@@ -3,7 +3,8 @@
 The metadata extractor degrades in three ways, and every one of them is
 announced as a single line on the mcp container's **stderr** — which nobody
 reads.
-The worst of the three means **a thought's full text left your network**. The
+The worst of the three can mean **a thought's full text left your network**
+(whether it did depends on where `FALLBACK_CHAT_API_BASE` points). The
 server intentionally never blocks a capture on classification, so without an
 operator-side alert the only "detection" is noticing, days later, that topic
 filters miss recent thoughts — or that your GPU's fans stayed quiet when they
@@ -26,7 +27,7 @@ no thought content; grep for the stable substrings shown.
 |---|---|---|
 | `classified via FALLBACK endpoint` | Content may have left your network (depends on `FALLBACK_CHAT_API_BASE`). The headline event. | high |
 | `stamping uncategorized stub` | Every configured endpoint failed; the thought is stored with placeholder metadata and won't surface under topic/type filters until backfilled. | normal |
-| `primary endpoint failed` | Early warning — fires even when the fallback then rescues the capture. On a deployment that keeps a resident local model (see the [GPU-qube transport doc](../deploy/qubes/gpu-offload-transport.md), §6–7), this firing *at all* means the residency guarantees are not holding. | normal |
+| `primary endpoint failed` | Primary-path health warning — fires even when the fallback then rescues the capture, and covers every primary failure mode alike: connectivity errors, timeouts, non-2xx responses, unparseable output, schema-invalid metadata (see the verification note at the end of the [GPU-qube transport doc](../deploy/qubes/gpu-offload-transport.md)). On a deployment that keeps a resident local model (transport doc §6–7), recurring firings deserve a diagnosis — a broken residency guarantee (§6) is one field-observed cause, not the conclusion. | normal |
 
 All three are `console.warn` lines, which Deno emits on **stderr**; only the
 healthy `classified via primary endpoint` confirmation goes to stdout. The
@@ -40,10 +41,20 @@ on exactly the lines it exists to catch.
 ## Alert content policy
 
 The alert says **that** captures degraded and **how many**, never **what** was
-captured: counts, hostname, and the time window only. An alert body quoting
-the thought would recreate the leak in a second channel — the notification
-service is exactly the kind of third party the primary/local path exists to
-keep content away from.
+captured. What leaves the host is exactly: a fixed title, an operator-chosen
+deployment label, three integers, and the time window — no thought content,
+and no infrastructure identifiers either. Hostnames and container names count
+as identifiers: the notification service is a third party, and handing it your
+topology in the message body is a smaller cousin of the leak this monitor
+watches for. The sketch uses `$LABEL` (default `ob1`, override with
+`OB1_MONITOR_LABEL`) everywhere a machine or container name would be tempting.
+An alert body quoting the thought would recreate the leak outright in a second
+channel.
+
+The counts are labeled honestly: the push says `fallback=`, not "off-box",
+because whether a fallback classification left your network depends entirely
+on where `FALLBACK_CHAT_API_BASE` points — the monitor can't see that, so it
+doesn't claim it.
 
 ## Anti-spam, and failing loudly
 
@@ -77,6 +88,7 @@ world-readable).
 #!/bin/bash
 set -u
 CONTAINER="${OB1_MCP_CONTAINER:-<mcp-container-name>}"   # e.g. from `docker ps`
+LABEL="${OB1_MONITOR_LABEL:-ob1}"  # non-identifying deployment label for alert bodies
 STATE_DIR="$HOME/.local/state/ob1-metadata-monitor"
 CONF_DIR="$HOME/.config/ob1-metadata-monitor"
 API_URL="https://api.pushover.net/1/messages.json"
@@ -121,7 +133,7 @@ if ! logs=$(docker logs --since "$cursor" --until "$now_rfc" "$CONTAINER" 2>&1);
   # container is one push per rollup period, not one per five-minute tick.
   if (( now_epoch - last_alert >= ROLLUP_SECS )); then
     if send_pushover "OB1 metadata monitor" \
-        "cannot read $CONTAINER logs on $(hostname) since $cursor — monitor is blind" 1; then
+        "$LABEL: cannot read the mcp container's logs since $cursor — monitor is blind" 1; then
       write_state "$cursor" "$now_epoch" "$pf" "$ps" "$pp"
     else
       echo "ERROR: pushover send failed while blind" >&2
@@ -144,7 +156,9 @@ write_state "$now_rfc" "$last_alert" "$pf" "$ps" "$pp"
 (( pf + ps + pp == 0 )) && exit 0
 
 if (( now_epoch - last_alert >= ROLLUP_SECS )); then
-  msg="capture degradation on $(hostname): off-box fallback=$pf, stub=$ps, primary-fail=$pp since last alert. No content included."
+  msg="$LABEL: capture degradation — fallback=$pf, stub=$ps, primary-fail=$pp since last alert. No content included."
+  # fallback may or may not be off-box (that's where FALLBACK_CHAT_API_BASE
+  # points); priority-1 errs on the loud side either way.
   prio=0; (( pf > 0 )) && prio=1
   if send_pushover "OB1 metadata degraded" "$msg" "$prio"; then
     write_state "$now_rfc" "$now_epoch" 0 0 0
