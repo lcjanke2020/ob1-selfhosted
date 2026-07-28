@@ -465,7 +465,13 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
 
     await t.step("session search: filters flow into SQL params", async () => {
       let captured: unknown[] = [];
+      let hnswDepth: unknown[] = [];
+      const statements: string[] = [];
       const pool = new FakePool((sql, params) => {
+        statements.push(sql.trim());
+        if (sql.includes("hnsw.ef_search")) {
+          hnswDepth = params;
+        }
         if (sql.includes("FROM sessions.session")) {
           captured = params;
           return { rows: [] };
@@ -474,16 +480,70 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       });
       await searchSessionsByQuery(
         asPool(pool),
-        { query: "q", limit: 2, status: "active", tag: "ci", auth: AUTH },
+        { query: "q", limit: 50, status: "active", tag: "ci", auth: AUTH },
         makeDeps(),
       );
       assertEquals(captured, [
         `[${FAKE_VECTOR.join(",")}]`,
         "active",
         "ci",
-        2,
+        50,
       ]);
+      assertEquals(hnswDepth, ["50"]);
+
+      const begin = statements.indexOf("BEGIN");
+      const audience = statements.findIndex((sql) =>
+        sql.includes("openbrain.workspace_id")
+      );
+      const efSearch = statements.findIndex((sql) =>
+        sql.includes("hnsw.ef_search")
+      );
+      const iterative = statements.indexOf(
+        "SET LOCAL hnsw.iterative_scan = strict_order",
+      );
+      const query = statements.findIndex((sql) =>
+        sql.includes("FROM sessions.session")
+      );
+      const commit = statements.lastIndexOf("COMMIT");
+      assertEquals(
+        0 <= begin && begin < audience && audience < efSearch &&
+          efSearch < iterative && iterative < query && query < commit,
+        true,
+      );
     });
+
+    await t.step(
+      "session search: query failure rolls back transaction-local HNSW controls",
+      async () => {
+        const statements: string[] = [];
+        const pool = new FakePool((sql) => {
+          statements.push(sql.trim());
+          return undefined;
+        });
+
+        await assertRejects(
+          () =>
+            searchSessionsByQuery(
+              asPool(pool),
+              { query: "rollback probe", auth: AUTH },
+              makeDeps(),
+            ),
+          Error,
+          "unscripted queryObject",
+        );
+        assertEquals(statements.includes("BEGIN"), true);
+        assertEquals(
+          statements.some((sql) => sql.includes("hnsw.ef_search")),
+          true,
+        );
+        assertEquals(
+          statements.includes("SET LOCAL hnsw.iterative_scan = strict_order"),
+          true,
+        );
+        assertEquals(statements.includes("ROLLBACK"), true);
+        assertEquals(statements.includes("COMMIT"), false);
+      },
+    );
 
     // ─── captureSessionFromToml ───────────────────────────────────────
     await t.step(

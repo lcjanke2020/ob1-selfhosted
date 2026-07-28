@@ -16,6 +16,11 @@ import {
   type ParsedSession,
 } from "./session_toml.ts";
 
+// Match the thought-search floor: pgvector's default ef_search of 40 can cap
+// a larger request before RLS or the optional session predicates are applied.
+// The per-request value still grows with a caller's requested result count.
+const MIN_SESSION_HNSW_EF_SEARCH = 50;
+
 export type SessionProvenance = {
   // The transport door: 'funnel' (Auth0 Bearer via Tailscale Funnel — all
   // Anthropic surfaces) or 'tailnet' (x-brain-key from an on-network client).
@@ -385,6 +390,7 @@ export async function searchSessions(
   scope: ResolvedReadScope,
 ): Promise<SessionSearchRow[]> {
   const { embedding, limit = 5, status, repo_url, tag } = opts;
+  const candidateDepth = Math.max(MIN_SESSION_HNSW_EF_SEARCH, limit);
   const embStr = toVectorLiteral(embedding);
   const params: unknown[] = [embStr];
   let p = 2;
@@ -402,6 +408,19 @@ export async function searchSessions(
     params.push(tag);
   }
   return await withScopeClient(pool, scope, async (client) => {
+    // RLS and the optional status/repository/tag predicates are residual
+    // filters on the HNSW scan. Without iterative scanning, all of the first
+    // approximate candidates can be discarded before a farther visible match
+    // is considered. Keep both controls transaction-local so pooled clients
+    // recover their pre-request state after commit or rollback.
+    await client.queryArray(
+      "SELECT set_config('hnsw.ef_search', $1::text, true)",
+      [String(candidateDepth)],
+    );
+    await client.queryArray(
+      "SET LOCAL hnsw.iterative_scan = strict_order",
+    );
+
     const r = await client.queryObject<
       Omit<SessionSearchRow, "id" | "score"> & { id: bigint; score: string }
     >(

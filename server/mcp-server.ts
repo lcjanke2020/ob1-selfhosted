@@ -214,7 +214,10 @@ export function createMcpServer(
     // summary window.
     // 1.9.0: fail-closed DB-enforced workspace/project/visibility audiences
     // across thoughts and sessions, including personal-only sensitive memory.
-    version: "1.9.0",
+    // 1.10.0: session semantic search uses request-sized, transaction-local
+    // HNSW controls so RLS and status/repository/tag residual filters cannot
+    // exhaust the default candidate scan before visible matches are reached.
+    version: "1.10.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
