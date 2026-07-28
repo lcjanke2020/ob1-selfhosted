@@ -380,12 +380,20 @@ systemctl daemon-reload && systemctl enable --now ollama-warmup.timer
 The five-minute tick bounds the window in which a crash can put a cold model
 in front of a capture. Two companion settings, same qube:
 
-- **Pin residency server-side, not per-request.** ollama's `keep_alive` is a
-  *per-request* parameter: the next request that omits it resets the model's
-  expiry to the server default (five minutes). A pin applied by a one-off
-  probe therefore does not survive real traffic — set
-  `Environment=OLLAMA_KEEP_ALIVE=-1` in a unit drop-in so every request
-  inherits it.
+- **Pin residency server-side, not per-request.** A per-request `keep_alive`
+  pin is weaker than it looks — not because ordinary traffic overwrites it
+  (in ollama 0.30 a request that *omits* `keep_alive` leaves a loaded
+  runner's expiry alone, and the OpenAI-compatible endpoint never sends one),
+  but because the pin lives in the runner, and runners get replaced by events
+  ordinary operation produces: a crash, a server restart, an option change
+  forcing a reload, a real request racing the boot warm-up. Every **fresh**
+  load whose request carries no `keep_alive` starts from the *server default*
+  of five minutes (upstream `server/sched.go` takes `envconfig.KeepAlive()`
+  unless the request overrides it) — so a probe-applied pin quietly
+  downgrades to five minutes on the next reload. Set
+  `Environment=OLLAMA_KEEP_ALIVE=-1` in a unit drop-in: that makes the
+  default itself infinite and covers every load path, including the ones the
+  warm-up timer exists to catch.
 - **Privacy note for ollama ≥ 0.30:** unless `OLLAMA_NO_CLOUD=true` is set,
   the server periodically phones ollama.com (registry / model-metadata cache
   hydration) — from the qube whose reason to exist is that content never
