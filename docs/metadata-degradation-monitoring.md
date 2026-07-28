@@ -44,7 +44,14 @@ keep content away from.
   than dropping them.
 - **A monitor that cannot see is itself an alert**: if the container log can't
   be read, send a "monitor is blind" notification instead of silently
-  skipping. Fail-alert, never fail-silent.
+  skipping — throttled to the same rollup cadence (a dead container is one
+  push per rollup period, not one per timer tick), and **without advancing the
+  scan cursor**, so the unread window is scanned once visibility returns.
+  Fail-alert, never fail-silent.
+- **The cursor and the counts move together.** Scan position and pending
+  counts live in one atomically-replaced state record, committed *before* any
+  send — so a crash or failed send at any point can at worst repeat an alert,
+  never lose events that were already read.
 
 ## Sketch: bash + systemd user timer
 
@@ -66,9 +73,9 @@ API_URL="https://api.pushover.net/1/messages.json"
 ROLLUP_SECS=1800
 
 mkdir -p "$STATE_DIR"
-LAST_SCAN_FILE="$STATE_DIR/last-scan"    # RFC3339 upper bound of last scanned window
-LAST_ALERT_FILE="$STATE_DIR/last-alert"  # epoch seconds of last alert sent
-PENDING_FILE="$STATE_DIR/pending-counts" # "fallback stub primaryfail" awaiting rollup
+# One atomically-replaced record: scan cursor, last-alert time, pending counts.
+# A single file means a crash can never separate the cursor from the counts.
+STATE_FILE="$STATE_DIR/state"  # "<cursor-rfc3339> <last-alert-epoch> <fallback> <stub> <primaryfail>"
 
 now_epoch=$(date +%s)
 now_rfc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -84,43 +91,55 @@ send_pushover() { # $1=title $2=message $3=priority
     -F "title=$1" -F "message=$2" -F "priority=${3:-0}" >/dev/null
 }
 
-since=$(cat "$LAST_SCAN_FILE" 2>/dev/null || true)
-[[ -z "$since" ]] && since=$(date -u -d "5 minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+write_state() { # $1=cursor $2=last_alert $3..$5=counts — tmp+mv, never half-written
+  printf '%s %s %s %s %s\n' "$1" "$2" "$3" "$4" "$5" > "$STATE_FILE.tmp" &&
+    mv -f "$STATE_FILE.tmp" "$STATE_FILE"
+}
 
-if ! logs=$(docker logs --since "$since" "$CONTAINER" 2>&1); then
-  send_pushover "OB1 metadata monitor" \
-    "cannot read $CONTAINER logs on $(hostname) since $since — monitor is blind" 1 || exit 1
-  echo "$now_rfc" > "$LAST_SCAN_FILE"
+cursor=""; last_alert=0; pf=0; ps=0; pp=0
+[[ -r "$STATE_FILE" ]] && { read -r cursor last_alert pf ps pp < "$STATE_FILE" || true; }
+: "${cursor:=$(date -u -d "5 minutes ago" +%Y-%m-%dT%H:%M:%SZ)}"
+: "${last_alert:=0}" "${pf:=0}" "${ps:=0}" "${pp:=0}"
+
+# Closed window [cursor, now): --until keeps consecutive windows exact, so a
+# line that lands while the scan runs is counted once, in the next window.
+if ! logs=$(docker logs --since "$cursor" --until "$now_rfc" "$CONTAINER" 2>&1); then
+  # Monitor is blind. The cursor does NOT advance — the unread window will be
+  # scanned when visibility returns. Throttled like any other alert: a dead
+  # container is one push per rollup period, not one per five-minute tick.
+  if (( now_epoch - last_alert >= ROLLUP_SECS )); then
+    if send_pushover "OB1 metadata monitor" \
+        "cannot read $CONTAINER logs on $(hostname) since $cursor — monitor is blind" 1; then
+      write_state "$cursor" "$now_epoch" "$pf" "$ps" "$pp"
+    else
+      echo "ERROR: pushover send failed while blind" >&2
+      exit 1
+    fi
+  fi
   exit 0
 fi
-echo "$now_rfc" > "$LAST_SCAN_FILE"
 
 fallback=$(grep -c "classified via FALLBACK endpoint" <<<"$logs") || true
 stub=$(grep -c "stamping uncategorized stub" <<<"$logs") || true
 primfail=$(grep -c "primary endpoint failed" <<<"$logs") || true
 
-if [[ -f "$PENDING_FILE" ]]; then
-  read -r pf ps pp < "$PENDING_FILE"
-else
-  pf=0; ps=0; pp=0
-fi
 pf=$((pf + fallback)); ps=$((ps + stub)); pp=$((pp + primfail))
+
+# Commit cursor + counts together BEFORE any send: from here a crash or failed
+# send can at worst repeat an alert — it can no longer lose counted events.
+write_state "$now_rfc" "$last_alert" "$pf" "$ps" "$pp"
+
 (( pf + ps + pp == 0 )) && exit 0
 
-last_alert=$(cat "$LAST_ALERT_FILE" 2>/dev/null || echo 0)
 if (( now_epoch - last_alert >= ROLLUP_SECS )); then
   msg="capture degradation on $(hostname): off-box fallback=$pf, stub=$ps, primary-fail=$pp since last alert. No content included."
   prio=0; (( pf > 0 )) && prio=1
   if send_pushover "OB1 metadata degraded" "$msg" "$prio"; then
-    echo "$now_epoch" > "$LAST_ALERT_FILE"
-    rm -f "$PENDING_FILE"
+    write_state "$now_rfc" "$now_epoch" 0 0 0
   else
-    printf '%s %s %s\n' "$pf" "$ps" "$pp" > "$PENDING_FILE"
     echo "ERROR: pushover send failed; counts carried forward" >&2
     exit 1
   fi
-else
-  printf '%s %s %s\n' "$pf" "$ps" "$pp" > "$PENDING_FILE"
 fi
 ```
 
@@ -159,10 +178,10 @@ systemctl --user enable --now ob1-metadata-monitor.timer
 ```
 
 To verify end-to-end without inducing a failure: if the container log still
-holds a past degradation, write an earlier RFC3339 timestamp into
-`~/.local/state/ob1-metadata-monitor/last-scan` and run the script once — it
-will count the real lines and send a real push. Otherwise point
-`CHAT_API_BASE` at a dead port for one capture and restore it.
+holds a past degradation, replace the first field (the scan cursor) of
+`~/.local/state/ob1-metadata-monitor/state` with an earlier RFC3339 timestamp
+and run the script once — it will count the real lines and send a real push.
+Otherwise point `CHAT_API_BASE` at a dead port for one capture and restore it.
 
 Two caveats worth knowing:
 
