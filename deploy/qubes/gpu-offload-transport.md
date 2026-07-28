@@ -353,7 +353,9 @@ Wants=ollama.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/ollama-warmup.sh
-TimeoutStartSec=420
+# Worst case in the script above: 60 waits x (5 s curl + 2 s sleep) = 420 s
+# before the generate even starts, + up to 290 s for the load itself.
+TimeoutStartSec=720
 ```
 
 `/etc/systemd/system/ollama-warmup.timer`:
