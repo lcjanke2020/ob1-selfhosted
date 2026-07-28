@@ -6,6 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { assert, assertEquals } from "@std/assert";
 import { asPool, FAKE_VECTOR, FakePool, makeDeps } from "./api_test_support.ts";
+import { MAX_SEARCH_QUERY_BYTES } from "./schemas.ts";
 
 const ENV_KEYS = [
   "DB_PASSWORD",
@@ -192,6 +193,43 @@ Deno.test("MCP publishes and executes the thought provenance contracts", async (
         deps.embedCalls,
         ["release checklist"],
         "misspelled scope must fail before embedding",
+      );
+
+      const sessionSearch = listed.tools.find((tool) =>
+        tool.name === "session_search"
+      );
+      assert(sessionSearch, "session_search must be published");
+      const sessionSearchProperties = sessionSearch.inputSchema.properties as
+        | Record<string, Record<string, unknown>>
+        | undefined;
+      assert(sessionSearchProperties, "session_search must publish properties");
+      assertEquals(
+        sessionSearchProperties.query.maxLength,
+        MAX_SEARCH_QUERY_BYTES,
+      );
+
+      const invalidSessionQueries = [
+        "",
+        "   \t\n",
+        "x".repeat(MAX_SEARCH_QUERY_BYTES + 1),
+        "é".repeat(MAX_SEARCH_QUERY_BYTES / 2 + 1),
+      ];
+      for (const query of invalidSessionQueries) {
+        const invalidSessionSearch = await client.callTool({
+          name: "session_search",
+          arguments: { query },
+        });
+        assertEquals(invalidSessionSearch.isError, true);
+        assert(
+          JSON.stringify(invalidSessionSearch.content).includes(
+            "Input validation error",
+          ),
+        );
+      }
+      assertEquals(
+        deps.embedCalls,
+        ["release checklist"],
+        "invalid session queries must fail before embedding",
       );
     } finally {
       await client.close();

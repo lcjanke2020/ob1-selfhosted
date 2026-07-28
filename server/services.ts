@@ -27,12 +27,12 @@ import {
 import {
   type MemoryScopeInput,
   memoryScopeSchema,
+  searchQuerySchema,
   THOUGHT_PROVENANCE_SCHEMA_VERSION,
   type ThoughtProvenanceClaims,
   thoughtProvenanceClaimsSchema,
   type ThoughtSearchFilter,
   thoughtSearchFilterSchema,
-  thoughtSearchQuerySchema,
 } from "./schemas.ts";
 import {
   getSession,
@@ -85,8 +85,8 @@ function validateThoughtSearchFilter(
   return parsed.data;
 }
 
-function validateThoughtSearchQuery(query: string): string {
-  const parsed = thoughtSearchQuerySchema.safeParse(query);
+function validateSearchQuery(query: string): string {
+  const parsed = searchQuerySchema.safeParse(query);
   if (!parsed.success) {
     throw new ValidationError(
       parsed.error.issues.map((issue) => issue.message).join("; "),
@@ -211,7 +211,7 @@ export async function searchThoughtsByQuery(
   // MCP and REST validate before this shared seam, but exported service calls
   // receive the same fail-fast contract and cannot trigger embedding work with
   // an oversized query or malformed filter.
-  const query = validateThoughtSearchQuery(opts.query);
+  const query = validateSearchQuery(opts.query);
   const filter = validateThoughtSearchFilter(opts.filter);
   const scopeInput = validateMemoryScope(opts.scope);
   const scope = await resolveReadScope(pool, scopeInput, opts.auth);
@@ -280,12 +280,16 @@ export async function searchSessionsByQuery(
   },
   deps: ServiceDeps = defaultDeps,
 ): Promise<SessionSearchRow[]> {
+  // Transport handlers validate this shape too, but the exported service must
+  // not let direct callers borrow a DB client or invoke the embedder with a
+  // blank/oversized query.
+  const query = validateSearchQuery(opts.query);
   const scope = await resolveReadScope(
     pool,
     validateMemoryScope(opts.scope),
     opts.auth,
   );
-  const embedding = await embedOrUpstreamError(deps.embed, opts.query);
+  const embedding = await embedOrUpstreamError(deps.embed, query);
   return await searchSessions(pool, {
     embedding,
     limit: opts.limit,

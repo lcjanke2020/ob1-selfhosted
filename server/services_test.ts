@@ -463,6 +463,35 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       );
     });
 
+    await t.step(
+      "session search: direct callers reject invalid queries before DB or embedding",
+      async () => {
+        const pool = new FakePool(() => undefined);
+        const deps = makeDeps();
+        const invalidQueries = [
+          "",
+          "   \t\n",
+          "x".repeat(MAX_SEARCH_QUERY_BYTES + 1),
+          "é".repeat(MAX_SEARCH_QUERY_BYTES / 2 + 1),
+        ];
+
+        for (const query of invalidQueries) {
+          await assertRejects(
+            () =>
+              searchSessionsByQuery(
+                asPool(pool),
+                { query, auth: AUTH },
+                deps,
+              ),
+            ValidationError,
+            "query",
+          );
+        }
+        assertEquals(deps.embedCalls, []);
+        assertEquals(pool.connectCalls, 0);
+      },
+    );
+
     await t.step("session search: filters flow into SQL params", async () => {
       let captured: unknown[] = [];
       const pool = new FakePool((sql, params) => {

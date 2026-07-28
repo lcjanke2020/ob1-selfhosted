@@ -170,7 +170,7 @@ export const captureThoughtShape = {
   ),
 };
 
-export const thoughtSearchQuerySchema = boundedUtf8String(
+export const searchQuerySchema = boundedUtf8String(
   "query",
   MAX_SEARCH_QUERY_BYTES,
 ).refine((query) => query.trim().length > 0, {
@@ -178,7 +178,7 @@ export const thoughtSearchQuerySchema = boundedUtf8String(
 });
 
 export const searchThoughtsShape = {
-  query: thoughtSearchQuerySchema.describe(
+  query: searchQuerySchema.describe(
     "Natural-language or literal text to search for. The lexical leg supports quoted phrases, OR, and -term web-search syntax.",
   ),
   limit: z.number().int().min(1).max(100).optional().default(10),
@@ -235,7 +235,7 @@ export const sessionLookupShape = {
 };
 
 export const sessionSearchShape = {
-  query: z.string().min(1).describe("What to search for"),
+  query: searchQuerySchema.describe("What to search for"),
   limit: z.number().int().min(1).max(50).optional().default(5),
   status: z.enum(SESSION_STATUSES).optional(),
   repo_url: z.string().optional(),
@@ -285,7 +285,7 @@ export const sessionListSchema = z.object(sessionListShape).strict();
 export const sessionUpdateStatusSchema = z.object(sessionUpdateStatusShape)
   .strict();
 export const compatibilitySearchSchema = z.object({
-  query: thoughtSearchQuerySchema.describe(
+  query: searchQuerySchema.describe(
     "The search query to run against Open Brain",
   ),
   scope: memoryScopeSchema.optional(),
