@@ -260,7 +260,9 @@ deployment's profile):
 - ollama wants enough **free** host RAM to **mmap** the model file at load —
   when it expects the model to fit on the GPU, the scheduler's host-pressure
   check (upstream `server/sched.go`) requires
-  `system_free ≥ model_size + loaded_mmap_size + max(8 GiB, total_memory/10)`.
+  `system_free ≥ model_size + loaded_mmap_size + max(8 GB, total_memory/10)`
+  — the floor is decimal (ollama's `format.GigaByte` is 1000³): 8 GB
+  ≈ 7.45 GiB.
   Below that it logs `disabling mmap for llama-server load due to host memory
   pressure` and takes a heavier buffered load path — more anonymous host RAM,
   slower loads, and no page cache to make the next load cheap. The log line
@@ -300,14 +302,15 @@ thresholds matter, and they are not the same number.
   above) plus the OS and services. Below this the qube is OOM roulette on
   every request, whatever mmap decides.
 - **The mmap threshold.** Cheap loads additionally need *free* RAM at load
-  time to clear the `model_size + loaded_mmap_size + max(8 GiB,
+  time to clear the `model_size + loaded_mmap_size + max(8 GB,
   total_memory/10)` check — *free*, not assigned: the OS, services, and
   whatever else is resident all bite into it first, so assigned RAM has to
   sit comfortably above the sum.
 
 A worked hypothetical: a 16 GiB model file, no other mmap-loaded model, and a
-qube small enough that the headroom term is its 8 GiB floor — the load wants
-≥ 24 GiB *free*. An 8 GiB qube is below even the OOM floor for that model. A
+qube small enough that the headroom term is its 8 GB floor (≈ 7.45 GiB) —
+the raw threshold is ≈ 23.5 GiB *free*; treat "≥ 24 GiB free" as the
+rounded-up target. An 8 GiB qube is below even the OOM floor for that model. A
 24 GiB qube clears the OOM floor but can never clear the mmap check (the OS
 and services already hold a few GiB), so every load quietly takes the
 buffered path. ~32 GiB keeps mmap on with margin — and the spare RAM is not
