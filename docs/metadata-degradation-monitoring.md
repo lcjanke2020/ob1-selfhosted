@@ -78,9 +78,22 @@ doesn't claim it.
 
 Secrets live in two `0600` files outside any repo —
 `~/.config/ob1-metadata-monitor/pushover-token` (the application API token)
-and `…/pushover-user` (the user key). The curl `-F name=<file` form reads the
-value from the file, keeping secrets out of argv (`/proc/*/cmdline` is
-world-readable).
+and `…/pushover-user` (the user key). Create them so the values never touch
+shell history or argv, and **without a trailing newline** — the curl
+`-F name=<file` form sends the file bytes *verbatim*, so a newline appended
+by `echo` or an editor becomes part of the credential and every send fails:
+
+```bash
+umask 077
+mkdir -p ~/.config/ob1-metadata-monitor
+# paste each value at the (silent) prompt; printf %s writes no trailing newline
+read -rs t && printf %s "$t" > ~/.config/ob1-metadata-monitor/pushover-token; unset t
+read -rs u && printf %s "$u" > ~/.config/ob1-metadata-monitor/pushover-user; unset u
+```
+
+The same `-F name=<file` form keeps the values out of argv at send time
+(`/proc/*/cmdline` is world-readable), and the script below refuses to run if
+either file's mode is anything but `0600`.
 
 `~/.local/bin/ob1-metadata-monitor.sh`:
 
@@ -102,10 +115,17 @@ STATE_FILE="$STATE_DIR/state"  # "<cursor-rfc3339> <last-alert-epoch> <fallback>
 now_epoch=$(date +%s)
 now_rfc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-if [[ ! -r "$CONF_DIR/pushover-token" || ! -r "$CONF_DIR/pushover-user" ]]; then
-  echo "ERROR: missing $CONF_DIR/pushover-{token,user} (0600, one value per file)" >&2
-  exit 1
-fi
+for f in "$CONF_DIR/pushover-token" "$CONF_DIR/pushover-user"; do
+  if [[ ! -r "$f" ]]; then
+    echo "ERROR: missing $f (see setup above: one value, no trailing newline)" >&2
+    exit 1
+  fi
+  mode=$(stat -c %a "$f")
+  if [[ "$mode" != "600" ]]; then
+    echo "ERROR: $f is mode $mode, want 0600" >&2
+    exit 1
+  fi
+done
 
 send_pushover() { # $1=title $2=message $3=priority
   curl -sf --max-time 20 "$API_URL" \
