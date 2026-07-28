@@ -241,11 +241,178 @@ model instead of dropping metadata. See
 [`app-qube/.env.example`](app-qube/.env.example) for the full block and the
 `ENABLE_PRIMARY_EXTRACTION` safety gate (off unless exactly `true`).
 
+## 6. Host RAM on the GPU qube — size it generously
+
+It is tempting to trim the GPU qube's memory down — "the model lives in VRAM,
+the host side is just a shim". Field experience says otherwise: **an undersized
+GPU qube produces exactly the silent-fallback failure class this transport
+exists to prevent**, and it does so *intermittently*, which makes it expensive
+to diagnose.
+
+What actually happens (mechanics per ollama 0.30 on Linux with a discrete
+GPU; the numbers used below are a worked hypothetical, not any particular
+deployment's profile):
+
+- The model server's host-side process legitimately needs several GiB even with
+  the weights in VRAM: load machinery, per-request state, and — on newer
+  ollama — large transient allocations that arrive at *request* time (prompt-
+  cache state saves approaching 1 GiB).
+- ollama wants enough **free** host RAM to **mmap** the model file at load —
+  when it expects the model to fit on the GPU, the scheduler's host-pressure
+  check (upstream `server/sched.go`) requires
+  `system_free ≥ model_size + loaded_mmap_size + max(8 GB, total_memory/10)`
+  — the floor is decimal (ollama's `format.GigaByte` is 1000³): 8 GB
+  ≈ 7.45 GiB.
+  Below that it logs `disabling mmap for llama-server load due to host memory
+  pressure` and takes a heavier buffered load path — more anonymous host RAM,
+  slower loads, and no page cache to make the next load cheap. The log line
+  prints every input to the decision (`model_size`, `loaded_mmap_size`,
+  `headroom`, `system_free`, `system_total`) — size from those fields, not
+  from guesses.
+- A GPU-passthrough qube typically runs with **fixed memory** (`maxmem 0` — no
+  ballooning), so nothing rescues a spike: the kernel OOM killer kills the
+  server. `Restart=always` brings it back in seconds — **empty**. The resident
+  model is gone, a `keep_alive=-1` pin died with the process, and nothing looks
+  wrong until the next capture pays a cold load or times out into
+  `FALLBACK_CHAT_*` — content off-box.
+
+The symptom set masquerades as an eviction or keep-alive bug, which is the
+trap: `/api/ps` shows the model pinned with a far-future `expires_at` on one
+check and absent on the next; captures classify via primary at HH:MM and leak
+via fallback at HH:MM+20. Note also that this failure **burns the full
+`CHAT_TIMEOUT_MS`** when the kill lands mid-request — unlike the halted-qube
+case in the degradation section above, which fails fast — because the
+connection is accepted and then never answered.
+
+**Diagnosis** (on the GPU qube; unit name per your install):
+
+```sh
+journalctl -u ollama | grep -iE "oom|killed|memory pressure"
+# the two smoking guns:
+#   "A process of this unit has been killed by the OOM killer" / "Failed with result 'oom-kill'"
+#   "disabling mmap for llama-server load due to host memory pressure"
+systemctl show ollama -p NRestarts    # restarts you didn't perform
+```
+
+**Sizing rule:** derive it from the scheduler's own inputs — two different
+thresholds matter, and they are not the same number.
+
+- **The OOM floor.** Assigned RAM must cover the server's host-side peak
+  (several GiB of anonymous memory at request time, per the first bullet
+  above) plus the OS and services. Below this the qube is OOM roulette on
+  every request, whatever mmap decides.
+- **The mmap threshold.** Cheap loads additionally need *free* RAM at load
+  time to clear the `model_size + loaded_mmap_size + max(8 GB,
+  total_memory/10)` check — *free*, not assigned: the OS, services, and
+  whatever else is resident all bite into it first, so assigned RAM has to
+  sit comfortably above the sum.
+
+A worked hypothetical: a 16 GiB model file, no other mmap-loaded model, and a
+qube small enough that the headroom term is its 8 GB floor (≈ 7.45 GiB) —
+the raw threshold is ≈ 23.5 GiB *free*; treat "≥ 24 GiB free" as the
+rounded-up target. An 8 GiB qube is below even the OOM floor for that model. A
+24 GiB qube clears the OOM floor but can never clear the mmap check (the OS
+and services already hold a few GiB), so every load quietly takes the
+buffered path. ~32 GiB keeps mmap on with margin — and the spare RAM is not
+wasted: it becomes page cache for the model file, which makes post-restart
+reloads dramatically cheaper. After resizing, confirm the load journal no
+longer shows the mmap-disable line and the oom-kill entries stop recurring —
+the line's own fields tell you how much margin you actually have.
+
+## 7. Keep the model resident (pre-warm at boot, re-warm on a timer)
+
+The first request after a model (re)load pays a cold start of tens of seconds;
+with a 30B-class model that can consume most of the extractor's
+`CHAT_TIMEOUT_MS` budget (default 60 s) and tip a capture into the fallback.
+Load the model *before* any capture arrives, and re-assert residency on a
+timer so a crash or restart self-heals instead of leaking. Three files on the
+GPU qube (ollama flavor; adjust for your server):
+
+`/usr/local/bin/ollama-warmup.sh`:
+
+```bash
+#!/bin/bash
+# Load the classifier model and pin it resident. A no-op costing milliseconds
+# when the model is already loaded — so the same script is both the boot
+# pre-warm and the periodic self-heal.
+MODEL="<your-served-model>"
+for i in $(seq 1 60); do
+  curl -sf --max-time 5 http://127.0.0.1:11434/api/version >/dev/null && break
+  sleep 2
+done
+exec curl -sf --max-time 290 -X POST http://127.0.0.1:11434/api/generate \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"${MODEL}\",\"keep_alive\":-1}" >/dev/null
+```
+
+`/etc/systemd/system/ollama-warmup.service`:
+
+```ini
+[Unit]
+Description=Pre-load classifier model (resident warm-up)
+After=ollama.service
+Wants=ollama.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ollama-warmup.sh
+# Worst case in the script above: 60 waits x (5 s curl + 2 s sleep) = 420 s
+# before the generate even starts, + up to 290 s for the load itself.
+TimeoutStartSec=720
+```
+
+`/etc/systemd/system/ollama-warmup.timer`:
+
+```ini
+[Unit]
+Description=Re-warm classifier model every 5 min (self-heal after crash)
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+```
+
+```sh
+systemctl daemon-reload && systemctl enable --now ollama-warmup.timer
+```
+
+The five-minute tick bounds the window in which a crash can put a cold model
+in front of a capture. Two companion settings, same qube:
+
+- **Pin residency server-side, not per-request.** A per-request `keep_alive`
+  pin is weaker than it looks — not because ordinary traffic overwrites it
+  (in ollama 0.30 a request that *omits* `keep_alive` leaves a loaded
+  runner's expiry alone, and the OpenAI-compatible endpoint never sends one),
+  but because the pin lives in the runner, and runners get replaced by events
+  ordinary operation produces: a crash, a server restart, an option change
+  forcing a reload, a real request racing the boot warm-up. Every **fresh**
+  load whose request carries no `keep_alive` starts from the *server default*
+  of five minutes (upstream `server/sched.go` takes `envconfig.KeepAlive()`
+  unless the request overrides it) — so a probe-applied pin quietly
+  downgrades to five minutes on the next reload. Set
+  `Environment=OLLAMA_KEEP_ALIVE=-1` in a unit drop-in: that makes the
+  default itself infinite and covers every load path, including the ones the
+  warm-up timer exists to catch.
+- **Privacy note for ollama ≥ 0.30:** unless `OLLAMA_NO_CLOUD=true` is set,
+  the server periodically phones ollama.com (registry / model-metadata cache
+  hydration) — from the qube whose reason to exist is that content never
+  leaves it. Add it to the same drop-in.
+
 ## Notes
 
-- **Cold load.** The first request after a model (re)load pays a cold-start of
-  tens of seconds vs a warm call; pre-warm the model so the first capture after
-  a load isn't slow. The extractor's `CHAT_TIMEOUT_MS` (default 60s) covers it.
+- **Cold load / residency.** The first request after a model (re)load pays a
+  cold start of tens of seconds vs a warm call; §7 wires the pre-warm + re-warm
+  that keeps it off the capture path, and §6 explains why an undersized qube
+  silently undoes both.
+- **Know when it degrades.** Every fallback classification is a privacy event
+  logged as a single line to the container's stderr that nobody reads. A small
+  operator alert channel over those lines — triggers, no-content alert policy,
+  a Pushover sketch — is in
+  [`docs/metadata-degradation-monitoring.md`](../../docs/metadata-degradation-monitoring.md).
 - **Verify the transport:** from the app-qube host, `curl http://<compose-gw>:11434/v1/models`
   (should list the model); from inside the container,
   `docker exec <mcp-container> deno eval 'console.log((await fetch("http://<compose-gw>:11434/v1/models")).status)'`
