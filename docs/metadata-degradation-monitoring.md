@@ -148,8 +148,11 @@ cursor=""; last_alert=0; pf=0; ps=0; pp=0; last_blind=0
 : "${cursor:=$(date -u -d "5 minutes ago" +%Y-%m-%dT%H:%M:%SZ)}"
 : "${last_alert:=0}" "${pf:=0}" "${ps:=0}" "${pp:=0}" "${last_blind:=0}"
 
-# Closed window [cursor, now): --until keeps consecutive windows exact, so a
-# line that lands while the scan runs is counted once, in the next window.
+# Bounded window: --until stops the scan at now_rfc, so a line landing while
+# the scan runs is picked up next run. Note docker includes events whose
+# timestamp EQUALS either bound, so an event landing exactly on the stored
+# bound can be counted in two adjacent scans — a rare duplicate, which is the
+# preferred failure direction here.
 # The 2>&1 is load-bearing: the trigger lines are on the container's STDERR
 # (see "The trigger lines" above), which docker logs replays on its stderr.
 if ! logs=$(docker logs --since "$cursor" --until "$now_rfc" "$CONTAINER" 2>&1); then
@@ -239,9 +242,11 @@ Otherwise point `CHAT_API_BASE` at a dead port for one capture and restore it.
 Two caveats worth knowing:
 
 - **Container recreation wipes `docker logs` history** (a deploy that rebuilds
-  the container, not a mere restart). The monitor only scans small forward
-  windows, so at worst one window of events is lost — but it also means the
-  log is not an audit trail. See the next section.
+  the container, not a mere restart). Everything since the last *successful*
+  scan is lost with it — normally one five-minute window, but a blind spell
+  or a stopped timer stretches the unread interval, and a recreation during
+  it takes the whole backlog. Either way the log is not an audit trail. See
+  the next section.
 - **Egress**: the monitor runs on the *host*, so container-scoped egress
   firewalls (e.g. a `DOCKER-USER` chain) don't apply to it — but check the
   host's own path once: `curl -sI https://api.pushover.net` from the account
