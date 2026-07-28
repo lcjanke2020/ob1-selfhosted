@@ -17,7 +17,10 @@ const ENV_KEYS = [
   "AUTH0_AUDIENCE",
 ];
 
-Deno.test("MCP publishes and executes the thought provenance contracts", async () => {
+const FOUND_THOUGHT_ID = "6f6c0d3a-9a0b-4e3e-8f4a-2d1c5b7e9a01";
+const MISSING_THOUGHT_ID = "11111111-1111-4111-8111-111111111111";
+
+Deno.test("MCP publishes and executes the shared thought contracts", async () => {
   const origEnv = new Map<string, string | undefined>(
     ENV_KEYS.map((key) => [key, Deno.env.get(key)]),
   );
@@ -32,13 +35,14 @@ Deno.test("MCP publishes and executes the thought provenance contracts", async (
     const { createMcpServer } = await import("./mcp-server.ts");
     let capturedSql = "";
     let capturedParams: unknown[] = [];
+    const fetchedIds: string[] = [];
     const pool = new FakePool((sql, params) => {
       if (sql.includes("search_thought_candidates")) {
         capturedSql = sql;
         capturedParams = params;
         return {
           rows: [{
-            id: "uuid-1",
+            id: FOUND_THOUGHT_ID,
             content: "release checklist",
             metadata: {},
             workspace_id: "default",
@@ -51,6 +55,24 @@ Deno.test("MCP publishes and executes the thought provenance contracts", async (
             lexical_source_priority: 0,
           }],
         };
+      }
+      if (sql.includes("FROM thoughts WHERE id = $1")) {
+        const id = params[0] as string;
+        fetchedIds.push(id);
+        return id === FOUND_THOUGHT_ID
+          ? {
+            rows: [{
+              id,
+              content: "release checklist",
+              metadata: {},
+              workspace_id: "default",
+              project_id: null,
+              visibility: "workspace",
+              created_at: "2026-07-25T00:00:00Z",
+              updated_at: null,
+            }],
+          }
+          : { rows: [] };
       }
       return undefined;
     });
@@ -113,6 +135,60 @@ Deno.test("MCP publishes and executes the thought provenance contracts", async (
         Object.keys(filter.properties as Record<string, unknown>).sort(),
         ["exclude", "include"],
       );
+
+      const fetch = listed.tools.find((tool) => tool.name === "fetch");
+      assert(fetch, "fetch must be published");
+      const fetchProperties = fetch.inputSchema.properties as
+        | Record<string, Record<string, unknown>>
+        | undefined;
+      assert(fetchProperties, "fetch must publish properties");
+      assertEquals(fetchProperties.id.type, "string");
+      assertEquals(fetchProperties.id.format, "uuid");
+      assertEquals(fetch.inputSchema.additionalProperties, false);
+
+      const connectionsBeforeInvalidFetches = pool.connectCalls;
+      const invalidFetchArguments: Array<Record<string, unknown>> = [
+        {},
+        { id: "" },
+        { id: "42" },
+        { id: "not-a-uuid" },
+        { id: "6f6c0d3a-9a0b-4e3e-8f4a" },
+        { id: 42 },
+        { id: null },
+      ];
+      for (const args of invalidFetchArguments) {
+        const invalidFetch = await client.callTool({
+          name: "fetch",
+          arguments: args,
+        });
+        assertEquals(invalidFetch.isError, true);
+        assert(
+          JSON.stringify(invalidFetch.content).includes(
+            "Input validation error",
+          ),
+        );
+      }
+      assertEquals(fetchedIds, []);
+      assertEquals(
+        pool.connectCalls,
+        connectionsBeforeInvalidFetches,
+        "invalid fetch ids must fail before scope resolution or DB borrowing",
+      );
+
+      const found = await client.callTool({
+        name: "fetch",
+        arguments: { id: FOUND_THOUGHT_ID },
+      });
+      assertEquals(found.isError, undefined);
+      assert(JSON.stringify(found.content).includes(FOUND_THOUGHT_ID));
+
+      const missing = await client.callTool({
+        name: "fetch",
+        arguments: { id: MISSING_THOUGHT_ID },
+      });
+      assertEquals(missing.isError, true);
+      assert(JSON.stringify(missing.content).includes("No thought found"));
+      assertEquals(fetchedIds, [FOUND_THOUGHT_ID, MISSING_THOUGHT_ID]);
 
       const result = await client.callTool({
         name: "search_thoughts",

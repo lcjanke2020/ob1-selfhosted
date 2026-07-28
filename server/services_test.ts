@@ -53,6 +53,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
   const {
     captureSessionFromToml,
     captureThoughtWithMetadata,
+    fetchThoughtInScope,
     NotFoundError,
     searchSessionsByQuery,
     searchThoughtsByQuery,
@@ -444,6 +445,19 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           "query must be at most",
         );
         assertEquals(deps.embedCalls, []);
+        assertEquals(pool.connectCalls, 0);
+      },
+    );
+
+    await t.step(
+      "thought fetch: direct callers reject malformed UUIDs before DB work",
+      async () => {
+        const pool = new FakePool(() => undefined);
+        await assertRejects(
+          () => fetchThoughtInScope(asPool(pool), "not-a-uuid", { auth: AUTH }),
+          ValidationError,
+          "id",
+        );
         assertEquals(pool.connectCalls, 0);
       },
     );

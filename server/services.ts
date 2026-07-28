@@ -29,6 +29,7 @@ import {
   memoryScopeSchema,
   searchQuerySchema,
   THOUGHT_PROVENANCE_SCHEMA_VERSION,
+  thoughtIdSchema,
   type ThoughtProvenanceClaims,
   thoughtProvenanceClaimsSchema,
   type ThoughtSearchFilter,
@@ -90,6 +91,16 @@ function validateSearchQuery(query: string): string {
   if (!parsed.success) {
     throw new ValidationError(
       parsed.error.issues.map((issue) => issue.message).join("; "),
+    );
+  }
+  return parsed.data;
+}
+
+function validateThoughtId(id: string): string {
+  const parsed = thoughtIdSchema.safeParse(id);
+  if (!parsed.success) {
+    throw new ValidationError(
+      `id: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
     );
   }
   return parsed.data;
@@ -247,12 +258,15 @@ export async function fetchThoughtInScope(
   id: string,
   input: { scope?: MemoryScopeInput; auth: AuthContext },
 ): Promise<ThoughtRecord | null> {
+  // MCP and REST validate at their transport boundaries, but preserve the
+  // same pre-DB invariant for direct callers of this exported service seam.
+  const thoughtId = validateThoughtId(id);
   const scope = await resolveReadScope(
     pool,
     validateMemoryScope(input.scope),
     input.auth,
   );
-  return await fetchThought(pool, id, scope);
+  return await fetchThought(pool, thoughtId, scope);
 }
 
 export async function getThoughtStatsInScope(
