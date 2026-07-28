@@ -249,17 +249,24 @@ GPU qube produces exactly the silent-fallback failure class this transport
 exists to prevent**, and it does so *intermittently*, which makes it expensive
 to diagnose.
 
-What actually happens (observed live: ollama 0.30 serving a ~16 GiB quantized
-model from a qube pinned at 8 GiB):
+What actually happens (mechanics per ollama 0.30 on Linux with a discrete
+GPU; the numbers used below are a worked hypothetical, not any particular
+deployment's profile):
 
 - The model server's host-side process legitimately needs several GiB even with
   the weights in VRAM: load machinery, per-request state, and — on newer
   ollama — large transient allocations that arrive at *request* time (prompt-
   cache state saves approaching 1 GiB).
-- ollama wants enough free host RAM to **mmap** the model file at load. Below
-  that it logs `disabling mmap for llama-server load due to host memory
+- ollama wants enough **free** host RAM to **mmap** the model file at load —
+  when it expects the model to fit on the GPU, the scheduler's host-pressure
+  check (upstream `server/sched.go`) requires
+  `system_free ≥ model_size + loaded_mmap_size + max(8 GiB, total_memory/10)`.
+  Below that it logs `disabling mmap for llama-server load due to host memory
   pressure` and takes a heavier buffered load path — more anonymous host RAM,
-  slower loads, and no page cache to make the next load cheap.
+  slower loads, and no page cache to make the next load cheap. The log line
+  prints every input to the decision (`model_size`, `loaded_mmap_size`,
+  `headroom`, `system_free`, `system_total`) — size from those fields, not
+  from guesses.
 - A GPU-passthrough qube typically runs with **fixed memory** (`maxmem 0` — no
   ballooning), so nothing rescues a spike: the kernel OOM killer kills the
   server. `Restart=always` brings it back in seconds — **empty**. The resident
@@ -285,12 +292,29 @@ journalctl -u ollama | grep -iE "oom|killed|memory pressure"
 systemctl show ollama -p NRestarts    # restarts you didn't perform
 ```
 
-**Sizing rule of thumb:** qube RAM ≥ model file size + ~4 GiB for the server
-and OS — and round *up*, not down: spare RAM becomes page cache for the model
-file, which makes post-restart reloads dramatically cheaper. For a ~16 GiB
-model, 8 GiB is OOM roulette on every request; 24 GiB works; 32 GiB is
-comfortable if the host has it. After resizing, confirm the load journal no
-longer shows the mmap-disable line and the oom-kill entries stop recurring.
+**Sizing rule:** derive it from the scheduler's own inputs — two different
+thresholds matter, and they are not the same number.
+
+- **The OOM floor.** Assigned RAM must cover the server's host-side peak
+  (several GiB of anonymous memory at request time, per the first bullet
+  above) plus the OS and services. Below this the qube is OOM roulette on
+  every request, whatever mmap decides.
+- **The mmap threshold.** Cheap loads additionally need *free* RAM at load
+  time to clear the `model_size + loaded_mmap_size + max(8 GiB,
+  total_memory/10)` check — *free*, not assigned: the OS, services, and
+  whatever else is resident all bite into it first, so assigned RAM has to
+  sit comfortably above the sum.
+
+A worked hypothetical: a 16 GiB model file, no other mmap-loaded model, and a
+qube small enough that the headroom term is its 8 GiB floor — the load wants
+≥ 24 GiB *free*. An 8 GiB qube is below even the OOM floor for that model. A
+24 GiB qube clears the OOM floor but can never clear the mmap check (the OS
+and services already hold a few GiB), so every load quietly takes the
+buffered path. ~32 GiB keeps mmap on with margin — and the spare RAM is not
+wasted: it becomes page cache for the model file, which makes post-restart
+reloads dramatically cheaper. After resizing, confirm the load journal no
+longer shows the mmap-disable line and the oom-kill entries stop recurring —
+the line's own fields tell you how much margin you actually have.
 
 ## 7. Keep the model resident (pre-warm at boot, re-warm on a timer)
 
