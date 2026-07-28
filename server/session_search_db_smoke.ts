@@ -38,6 +38,10 @@ const [{ searchSessions }, { getClient }, { withScopeClient }] = await Promise
 const database = "openbrain";
 const fixtureWorkspace = "session-hnsw-smoke-hidden";
 const fixtureTitlePrefix = "session-hnsw-smoke-";
+// Deliberately beyond pgvector 0.8.x's default hnsw.max_scan_tuples (20,000):
+// the application-owned exact fallback must recover eligible rows after the
+// bounded ANN leg underfills.
+const hiddenNoiseRows = 26_000;
 const embedding = [1, ...Array.from({ length: 767 }, () => 0)];
 const embeddingLiteral = `[${embedding.join(",")}]`;
 
@@ -109,9 +113,9 @@ async function seedFixture(): Promise<void> {
       [fixtureWorkspace],
     );
 
-    // The closest 6,000 rows are useful to the hidden-workspace limit case,
-    // but must be discarded by RLS for a default-workspace caller and by each
-    // optional residual-filter case below.
+    // The closest rows exceed the deployed HNSW scan cap. They are useful to
+    // the hidden-workspace limit case, but must be discarded by RLS for a
+    // default-workspace caller and by each optional residual-filter case.
     await client.queryArray(
       `INSERT INTO sessions.session
          (title, status, repo_url, tags, workspace_id, project_id,
@@ -120,8 +124,8 @@ async function seedFixture(): Promise<void> {
               $2, NULL, 'workspace', NULL,
               ('[' || '1,' || (g::double precision / 100000)::text || ',' ||
                 rtrim(repeat('0,', 766), ',') || ']')::vector
-       FROM generate_series(1, 6000) AS g`,
-      [`${fixtureTitlePrefix}noise-`, fixtureWorkspace],
+       FROM generate_series(1, $3::integer) AS g`,
+      [`${fixtureTitlePrefix}noise-`, fixtureWorkspace, hiddenNoiseRows],
     );
 
     await client.queryArray(
@@ -275,9 +279,35 @@ async function exactTitles(testCase: SearchCase): Promise<string[]> {
   });
 }
 
+async function assertApproximatePlanUsesHnsw(
+  testCase: SearchCase,
+): Promise<void> {
+  await withScopeClient(appPool, testCase.scope, async (client) => {
+    // Keep this planner assertion separate from the result-count contract.
+    // It proves the stabilized fixture exercises HNSW; runCase independently
+    // proves the production boundary recovers a complete eligible result.
+    await client.queryArray(
+      "SELECT set_config('hnsw.ef_search', $1::text, true)",
+      [String(Math.max(50, testCase.limit))],
+    );
+    await client.queryArray("SET LOCAL hnsw.iterative_scan = strict_order");
+    const query = exactQuery(testCase);
+    const explained = await client.queryArray(
+      `EXPLAIN ${query.sql}`,
+      query.params,
+    );
+    const plan = explained.rows.flat().join("\n");
+    assert(
+      plan.includes("idx_session_embedding_hnsw"),
+      `${testCase.name}: production-shaped plan did not use HNSW\n${plan}`,
+    );
+  });
+}
+
 async function readHnswSettings(): Promise<{
   ef_search: string;
   iterative_scan: string;
+  max_scan_tuples: string;
 }> {
   const client = await getClient(appPool);
   try {
@@ -290,9 +320,11 @@ async function readHnswSettings(): Promise<{
     const result = await client.queryObject<{
       ef_search: string;
       iterative_scan: string;
+      max_scan_tuples: string;
     }>(
       `SELECT current_setting('hnsw.ef_search') AS ef_search,
-              current_setting('hnsw.iterative_scan') AS iterative_scan`,
+              current_setting('hnsw.iterative_scan') AS iterative_scan,
+              current_setting('hnsw.max_scan_tuples') AS max_scan_tuples`,
     );
     return result.rows[0];
   } finally {
@@ -343,6 +375,7 @@ async function runCase(testCase: SearchCase): Promise<void> {
 }
 
 async function runAllCases(): Promise<void> {
+  await assertApproximatePlanUsesHnsw(cases[0]);
   for (const testCase of cases) await runCase(testCase);
 }
 
@@ -351,6 +384,10 @@ try {
   await seedFixture();
 
   const settingsBefore = await readHnswSettings();
+  assert(
+    hiddenNoiseRows > Number(settingsBefore.max_scan_tuples),
+    "hidden-noise fixture must exceed the deployed HNSW scan-tuple cap",
+  );
   await runAllCases();
   assertEquals(
     await readHnswSettings(),

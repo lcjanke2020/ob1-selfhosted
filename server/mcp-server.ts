@@ -214,9 +214,9 @@ export function createMcpServer(
     // summary window.
     // 1.9.0: fail-closed DB-enforced workspace/project/visibility audiences
     // across thoughts and sessions, including personal-only sensitive memory.
-    // 1.10.0: session semantic search uses request-sized, transaction-local
-    // HNSW controls so RLS and status/repository/tag residual filters cannot
-    // exhaust the default candidate scan before visible matches are reached.
+    // 1.10.0: session semantic search uses transaction-local iterative HNSW,
+    // then an exact retry when RLS or status/repository/tag residual filters
+    // exhaust the bounded ANN scan before enough visible matches are reached.
     version: "1.10.0",
   });
 

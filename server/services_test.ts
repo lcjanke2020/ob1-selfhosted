@@ -38,6 +38,20 @@ function persistedSession(status: string, sessionId: string | null = null) {
   };
 }
 
+function sessionSearchRow(id: number) {
+  return {
+    id: BigInt(id),
+    session_id: null,
+    title: `session-${id}`,
+    status: "active",
+    last_update: null,
+    score: "0.9",
+    workspace_id: "default",
+    project_id: null,
+    visibility: "workspace",
+  };
+}
+
 Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
   // ─── Setup ─────────────────────────────────────────────────────────────
   const origEnv = new Map<string, string | undefined>(
@@ -474,20 +488,25 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         }
         if (sql.includes("FROM sessions.session")) {
           captured = params;
-          return { rows: [] };
+          return {
+            rows: Array.from(
+              { length: 5 },
+              (_, index) => sessionSearchRow(index + 1),
+            ),
+          };
         }
         return undefined;
       });
       await searchSessionsByQuery(
         asPool(pool),
-        { query: "q", limit: 50, status: "active", tag: "ci", auth: AUTH },
+        { query: "q", limit: 5, status: "active", tag: "ci", auth: AUTH },
         makeDeps(),
       );
       assertEquals(captured, [
         `[${FAKE_VECTOR.join(",")}]`,
         "active",
         "ci",
-        50,
+        5,
       ]);
       assertEquals(hnswDepth, ["50"]);
 
@@ -511,6 +530,49 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         true,
       );
     });
+
+    await t.step(
+      "session search: ANN underfill retries through the exact materialized path",
+      async () => {
+        const statements: string[] = [];
+        const pool = new FakePool((sql) => {
+          const statement = sql.trim();
+          statements.push(statement);
+          if (statement.startsWith("WITH eligible AS MATERIALIZED")) {
+            return {
+              rows: Array.from(
+                { length: 5 },
+                (_, index) => sessionSearchRow(index + 1),
+              ),
+            };
+          }
+          if (statement.includes("FROM sessions.session")) {
+            return { rows: [sessionSearchRow(1)] };
+          }
+          return undefined;
+        });
+
+        const rows = await searchSessionsByQuery(
+          asPool(pool),
+          { query: "selective", limit: 5, auth: AUTH },
+          makeDeps(),
+        );
+        assertEquals(rows.length, 5);
+
+        const approximate = statements.findIndex((sql) =>
+          sql.startsWith("SELECT id, session_id") &&
+          sql.includes("FROM sessions.session")
+        );
+        const fallback = statements.findIndex((sql) =>
+          sql.startsWith("WITH eligible AS MATERIALIZED")
+        );
+        const commit = statements.lastIndexOf("COMMIT");
+        assertEquals(
+          0 <= approximate && approximate < fallback && fallback < commit,
+          true,
+        );
+      },
+    );
 
     await t.step(
       "session search: query failure rolls back transaction-local HNSW controls",
