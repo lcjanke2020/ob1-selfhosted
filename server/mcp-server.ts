@@ -254,7 +254,9 @@ export function createMcpServer(
     // scalar/list fields and requires a strictly typed [[artifacts]] array.
     // 1.15.0: session time fields and list bounds reject malformed values
     // before database work; session search adds a bounded similarity floor.
-    version: "1.15.0",
+    // 1.16.0: session branch lookup and default listing share deterministic
+    // effective-freshness ordering when caller last_update is absent.
+    version: "1.16.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -593,7 +595,7 @@ export function createMcpServer(
     {
       title: "Look up Session",
       description:
-        "Retrieve a stored session record by id or branch — this does NOT resume execution, it fetches the record. Returns the full record (resume_context, next_actions, blockers, artifacts, raw_toml), or null if no match. Structured fields are authoritative; raw_toml is the verbatim input from the last session_capture, may differ from current structured fields (for example, after session_update_status), and must not be used as a recapture template. On a branch tie the most-recently-updated session wins. Oversized MCP records identify omitted fields and the optional tailnet REST recovery path.",
+        "Retrieve a stored session record by id or branch — this does NOT resume execution, it fetches the record. Returns the full record (resume_context, next_actions, blockers, artifacts, raw_toml), or null if no match. Structured fields are authoritative; raw_toml is the verbatim input from the last session_capture, may differ from current structured fields (for example, after session_update_status), and must not be used as a recapture template. On a branch tie, effective freshness wins: caller-supplied last_update when present, otherwise server-managed updated_at; remaining ties use updated_at then id. Oversized MCP records identify omitted fields and the optional tailnet REST recovery path.",
       annotations: { readOnlyHint: true },
       inputSchema: sessionLookupSchema,
     },

@@ -23,7 +23,7 @@
 # full `pg_dump -U openbrain_readonly`. If the read-only role can't dump any
 # object, the job fails. This catches this class of regression generically.
 #
-# Scoped to db/**, the session-HNSW production smoke and query path,
+# Scoped to db/**, the session-query production smokes and query path,
 # deploy/compose-local/docker-compose.yml (the Postgres image pin it reads —
 # see "Derive Postgres image" below), and this file — so it runs when the
 # schema/grants, filtered-session search, the pinned image, or the test itself
@@ -39,6 +39,7 @@ on:
       - "db/**"
       - "server/session_queries.ts"
       - "server/session_search_db_smoke.ts"
+      - "server/session_ordering_db_smoke.ts"
       - "server/scoped_db.ts"
       - "server/scope_contract.ts"
       - "server/db_pool.ts"
@@ -56,6 +57,7 @@ on:
       - "db/**"
       - "server/session_queries.ts"
       - "server/session_search_db_smoke.ts"
+      - "server/session_ordering_db_smoke.ts"
       - "server/scoped_db.ts"
       - "server/scope_contract.ts"
       - "server/db_pool.ts"
@@ -288,6 +290,15 @@ jobs:
             --allow-env \
             --allow-net=127.0.0.1:55439 \
             server/session_search_db_smoke.ts
+
+      - name: Smoke test — session lookup and list share effective freshness
+        run: |
+          # Calls the checked-out production branch lookup and default list as
+          # the forced-RLS app role over null, explicit, and tied timestamps.
+          deno run --config server/deno.json --frozen \
+            --allow-env \
+            --allow-net=127.0.0.1:55439 \
+            server/session_ordering_db_smoke.ts
 
       - name: Smoke test — openbrain_readonly can run a full pg_dump
         run: |

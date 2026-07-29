@@ -293,7 +293,8 @@ title = "Benchmark: sliding-window vs token-bucket"
 - On a resume cue, locate the session first, supplying its workspace/project scope
   when it is not in the configured default:
   - by branch → `session_lookup(branch="<branch>", scope={…})` (on a branch tie,
-    newest-updated wins);
+    effective freshness wins: caller-supplied `last_update` when present, otherwise
+    server-managed `updated_at`; remaining ties use `updated_at` then `id`);
   - by id → `session_lookup(id=<id>, scope={…})`;
   - fuzzy ("the session where I chased the flaky invoice test") →
     `session_search(query=…, scope={…})`,
