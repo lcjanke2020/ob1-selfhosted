@@ -38,14 +38,14 @@ function persistedSession(status: string, sessionId: string | null = null) {
   };
 }
 
-function sessionSearchRow(id: number) {
+function sessionSearchRow(id: number, score = 0.9) {
   return {
     id: BigInt(id),
     session_id: null,
     title: `session-${id}`,
     status: "active",
     last_update: null,
-    score: "0.9",
+    score: String(score),
     workspace_id: "default",
     project_id: null,
     visibility: "workspace",
@@ -552,14 +552,11 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         `[${FAKE_VECTOR.join(",")}]`,
         "active",
         "ci",
-        0.5,
         5,
       ]);
       assertEquals(
-        capturedSql.includes(
-          "1 - (embedding <=> $1::vector) >= $4::double precision",
-        ),
-        true,
+        capturedSql.includes("1 - (embedding <=> $1::vector) >="),
+        false,
       );
       assertEquals(hnswDepth, ["50"]);
 
@@ -585,32 +582,42 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
     });
 
     await t.step(
-      "session search: custom similarity threshold is validated and bound",
+      "session search: custom similarity threshold is validated and applied",
       async () => {
         let captured: unknown[] = [];
+        let queryCount = 0;
         const pool = new FakePool((sql, params) => {
           if (sql.includes("FROM sessions.session")) {
+            queryCount++;
             captured = params;
             return {
-              rows: Array.from(
-                { length: 5 },
-                (_, index) => sessionSearchRow(index + 1),
-              ),
+              rows: [
+                sessionSearchRow(1, 0.91),
+                sessionSearchRow(2, 0.73),
+                sessionSearchRow(3, 0.72),
+                sessionSearchRow(4, 0.4),
+                sessionSearchRow(5, -0.1),
+              ],
             };
           }
           return undefined;
         });
         const deps = makeDeps();
-        await searchSessionsByQuery(
+        const rows = await searchSessionsByQuery(
           asPool(pool),
           { query: "quality floor", threshold: 0.73, auth: AUTH },
           deps,
         );
         assertEquals(captured, [
           `[${FAKE_VECTOR.join(",")}]`,
-          0.73,
           5,
         ]);
+        assertEquals(rows.map((row) => row.id), [1, 2]);
+        assertEquals(
+          queryCount,
+          1,
+          "a filled ANN result must not fall back merely because the floor removes rows",
+        );
 
         for (const threshold of [-0.01, 1.01, Number.NaN]) {
           const invalidPool = new FakePool(() => undefined);

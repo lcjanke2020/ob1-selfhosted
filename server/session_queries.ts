@@ -409,8 +409,6 @@ export async function searchSessions(
     cond.push(`tags @> ARRAY[$${p++}]::text[]`);
     params.push(tag);
   }
-  cond.push(`1 - (embedding <=> $1::vector) >= $${p++}::double precision`);
-  params.push(threshold);
   const searchParams = [...params, limit];
   const approximateSql = `SELECT id, session_id, title, status, last_update,
             workspace_id, project_id, visibility,
@@ -455,8 +453,10 @@ export async function searchSessions(
     // Iterative HNSW remains bounded by pgvector's max_scan_tuples and scan
     // memory. If RLS or residual predicates still exhaust that bounded scan,
     // retry through the exact materialized path instead of silently returning
-    // fewer rows than are available. A genuinely sparse result pays for one
-    // exact confirmation; filled ANN requests retain the fast path.
+    // fewer rows than are available. Decide from the raw candidate count:
+    // putting the monotonic similarity floor in SQL makes pgvector drain the
+    // graph looking for later matches that cannot exist, then makes a normally
+    // filled request look sparse and pay for an unnecessary exact retry.
     if (result.rows.length < limit) {
       result = await client.queryObject<
         Omit<SessionSearchRow, "id" | "score"> & {
@@ -466,13 +466,19 @@ export async function searchSessions(
       >(exactFallbackSql, searchParams);
     }
 
-    // id decodes as a BigInt and the distance expression as text; expose both
-    // as JS numbers.
-    return result.rows.map((row) => ({
-      ...row,
-      id: Number(row.id),
-      score: Number(row.score),
-    }));
+    // Both query legs return candidates in ascending cosine distance, so the
+    // monotonic floor can be applied to that ordered top-k without admitting a
+    // row SQL-side filtering would reject. The ANN leg remains approximate;
+    // threshold is an admission rule, not an exact-recall promise. Filtering
+    // here preserves HNSW's early exit and the fallback's true underfill signal.
+    // id decodes as BigInt and score as text; expose both as numbers.
+    return result.rows
+      .map((row) => ({
+        ...row,
+        id: Number(row.id),
+        score: Number(row.score),
+      }))
+      .filter((row) => row.score >= threshold);
   });
 }
 
