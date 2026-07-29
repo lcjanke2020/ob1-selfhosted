@@ -16,6 +16,7 @@ import {
   searchThoughtsBody,
   sessionCaptureBody,
   sessionIdParam,
+  sessionListSchema,
   sessionLookupQuery,
   sessionSearchBody,
   sessionUpdateStatusBody,
@@ -194,6 +195,29 @@ Deno.test("session search query: shares nonblank UTF-8 byte boundaries", () => {
   );
 });
 
+Deno.test("session search: similarity threshold defaults and bounds", () => {
+  const defaults = sessionSearchBody.safeParse({ query: "sessions" });
+  assert(defaults.success);
+  assertEquals(defaults.data.threshold, 0.5);
+  assert(
+    sessionSearchBody.safeParse({ query: "sessions", threshold: 0 }).success,
+  );
+  assert(
+    sessionSearchBody.safeParse({ query: "sessions", threshold: 1 }).success,
+  );
+  assertFalse(
+    sessionSearchBody.safeParse({ query: "sessions", threshold: -0.01 })
+      .success,
+  );
+  assertFalse(
+    sessionSearchBody.safeParse({ query: "sessions", threshold: 1.01 }).success,
+  );
+  assertFalse(
+    sessionSearchBody.safeParse({ query: "sessions", threshold: "0.5" })
+      .success,
+  );
+});
+
 Deno.test("memory scope: exact upstream fields are strict and bounded", () => {
   const valid = searchThoughtsBody.safeParse({
     query: "private",
@@ -317,6 +341,31 @@ Deno.test("list sessions query: order_by whitelisted with default", () => {
     listSessionsQuery.safeParse({ order_by: "updated_at; DROP TABLE" }).success,
   );
   assert(listSessionsQuery.safeParse({ order_by: "title" }).success);
+});
+
+Deno.test("session list: MCP and REST share strict date/time bounds", () => {
+  const valid = [
+    "2026-07-29",
+    "2026-07-29T12:34:56Z",
+    "2026-07-29T12:34:56.789-04:00",
+  ];
+  for (const value of valid) {
+    assert(sessionListSchema.safeParse({ since: value, until: value }).success);
+    assert(listSessionsQuery.safeParse({ since: value, until: value }).success);
+  }
+
+  const invalid = [
+    "",
+    "tomorrow",
+    "2026-02-30",
+    "2026-07-29T12:34:56",
+    "2026-07-29T25:00:00Z",
+    "2026-07-29T12:60:00Z",
+  ];
+  for (const value of invalid) {
+    assertFalse(sessionListSchema.safeParse({ since: value }).success);
+    assertFalse(listSessionsQuery.safeParse({ until: value }).success);
+  }
 });
 
 Deno.test("session status body: enum enforced", () => {

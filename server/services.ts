@@ -28,6 +28,7 @@ import {
   type MemoryScopeInput,
   memoryScopeSchema,
   searchQuerySchema,
+  similarityThresholdSchema,
   THOUGHT_PROVENANCE_SCHEMA_VERSION,
   thoughtIdSchema,
   type ThoughtProvenanceClaims,
@@ -52,6 +53,7 @@ import { resolveReadScope, resolveWriteScope } from "./scope.ts";
 import {
   computeContentHash,
   embedSource,
+  normalizeSessionTimestamp,
   type ParsedSessionDoc,
   parseSessionToml,
 } from "./session_toml.ts";
@@ -84,6 +86,30 @@ function validateThoughtSearchFilter(
     );
   }
   return parsed.data;
+}
+
+function validateSimilarityThreshold(value: number | undefined): number {
+  const parsed = similarityThresholdSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new ValidationError(
+      `threshold: ${
+        parsed.error.issues.map((issue) => issue.message).join("; ")
+      }`,
+    );
+  }
+  return parsed.data;
+}
+
+function validateSessionTimestampBound(
+  field: "since" | "until",
+  value: string | undefined,
+): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    return normalizeSessionTimestamp(value, field);
+  } catch (error) {
+    throw new ValidationError((error as Error).message);
+  }
 }
 
 function validateSearchQuery(query: string): string {
@@ -286,6 +312,7 @@ export async function searchSessionsByQuery(
   opts: {
     query: string;
     limit?: number;
+    threshold?: number;
     status?: string;
     repo_url?: string;
     tag?: string;
@@ -298,6 +325,7 @@ export async function searchSessionsByQuery(
   // not let direct callers borrow a DB client or invoke the embedder with a
   // blank/oversized query.
   const query = validateSearchQuery(opts.query);
+  const threshold = validateSimilarityThreshold(opts.threshold);
   const scope = await resolveReadScope(
     pool,
     validateMemoryScope(opts.scope),
@@ -307,6 +335,7 @@ export async function searchSessionsByQuery(
   return await searchSessions(pool, {
     embedding,
     limit: opts.limit,
+    threshold,
     status: opts.status,
     repo_url: opts.repo_url,
     tag: opts.tag,
@@ -420,12 +449,17 @@ export async function listSessionsInScope(
   },
 ): Promise<SessionListRow[]> {
   const { scope: requested, auth, ...filters } = opts;
+  const normalizedFilters = {
+    ...filters,
+    since: validateSessionTimestampBound("since", filters.since),
+    until: validateSessionTimestampBound("until", filters.until),
+  };
   const scope = await resolveReadScope(
     pool,
     validateMemoryScope(requested),
     auth,
   );
-  return await listSessions(pool, filters, scope);
+  return await listSessions(pool, normalizedFilters, scope);
 }
 
 export async function updateSessionStatusInScope(

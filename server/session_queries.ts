@@ -384,13 +384,14 @@ export async function searchSessions(
   opts: {
     embedding: number[];
     limit?: number;
+    threshold?: number;
     status?: string;
     repo_url?: string;
     tag?: string;
   },
   scope: ResolvedReadScope,
 ): Promise<SessionSearchRow[]> {
-  const { embedding, limit = 5, status, repo_url, tag } = opts;
+  const { embedding, limit = 5, threshold = 0.5, status, repo_url, tag } = opts;
   const candidateDepth = Math.max(MIN_SESSION_HNSW_EF_SEARCH, limit);
   const embStr = toVectorLiteral(embedding);
   const params: unknown[] = [embStr];
@@ -408,6 +409,8 @@ export async function searchSessions(
     cond.push(`tags @> ARRAY[$${p++}]::text[]`);
     params.push(tag);
   }
+  cond.push(`1 - (embedding <=> $1::vector) >= $${p++}::double precision`);
+  params.push(threshold);
   const searchParams = [...params, limit];
   const approximateSql = `SELECT id, session_id, title, status, last_update,
             workspace_id, project_id, visibility,

@@ -6,7 +6,12 @@
 // every input bound is auditable in one file.
 
 import { z } from "zod";
-import { SESSION_ORDER_BY, SESSION_STATUSES } from "./session_toml.ts";
+import {
+  isSessionTimestamp,
+  SESSION_ORDER_BY,
+  SESSION_STATUSES,
+  SESSION_TIMESTAMP_FORMAT_MESSAGE,
+} from "./session_toml.ts";
 import { MEMORY_VISIBILITIES } from "./scope_contract.ts";
 
 // Hard cap on captured content at 100 000 UTF-8 bytes (≈97.7 KiB;
@@ -177,12 +182,15 @@ export const searchQuerySchema = boundedUtf8String(
   message: "query must not be empty",
 });
 
+export const similarityThresholdSchema = z.number().min(0).max(1).optional()
+  .default(0.5);
+
 export const searchThoughtsShape = {
   query: searchQuerySchema.describe(
     "Natural-language or literal text to search for. The lexical leg supports quoted phrases, OR, and -term web-search syntax.",
   ),
   limit: z.number().int().min(1).max(100).optional().default(10),
-  threshold: z.number().min(0).max(1).optional().default(0.5).describe(
+  threshold: similarityThresholdSchema.describe(
     "Minimum cosine similarity for admission through the vector leg. Exact lexical hits may still be returned below this value.",
   ),
   filter: thoughtSearchFilterSchema.optional().describe(
@@ -242,6 +250,9 @@ export const sessionLookupShape = {
 export const sessionSearchShape = {
   query: searchQuerySchema.describe("What to search for"),
   limit: z.number().int().min(1).max(50).optional().default(5),
+  threshold: similarityThresholdSchema.describe(
+    "Minimum cosine similarity required for a session result",
+  ),
   status: z.enum(SESSION_STATUSES).optional(),
   repo_url: z.string().optional(),
   tag: z.string().optional().describe("Match a single tag"),
@@ -257,10 +268,14 @@ export const sessionListShape = {
   linked_issue: z.string().optional().describe(
     "Match a single linked issue (e.g. PROJ-123)",
   ),
-  since: z.string().optional().describe(
+  since: z.string().refine(isSessionTimestamp, {
+    message: SESSION_TIMESTAMP_FORMAT_MESSAGE,
+  }).optional().describe(
     "ISO date/datetime lower bound on last_update",
   ),
-  until: z.string().optional().describe(
+  until: z.string().refine(isSessionTimestamp, {
+    message: SESSION_TIMESTAMP_FORMAT_MESSAGE,
+  }).optional().describe(
     "ISO date/datetime upper bound on last_update",
   ),
   order_by: z.enum(SESSION_ORDER_BY).optional().default("last_update"),
@@ -341,8 +356,12 @@ export const listSessionsQuery = z.object({
   agent: z.string().optional(),
   tag: z.string().optional(),
   linked_issue: z.string().optional(),
-  since: z.string().optional(),
-  until: z.string().optional(),
+  since: z.string().refine(isSessionTimestamp, {
+    message: SESSION_TIMESTAMP_FORMAT_MESSAGE,
+  }).optional(),
+  until: z.string().refine(isSessionTimestamp, {
+    message: SESSION_TIMESTAMP_FORMAT_MESSAGE,
+  }).optional(),
   order_by: z.enum(SESSION_ORDER_BY).default("last_update"),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   workspace_id: scopeId("workspace_id").optional(),
