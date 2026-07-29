@@ -856,7 +856,36 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         "missing required field 'title'",
       );
       assertEquals(deps.embedCalls.length, 0);
+      assertEquals(pool.connectCalls, 0);
     });
+
+    await t.step(
+      "session capture: invalid field types fail before embedding or DB work",
+      async () => {
+        const invalidDocs = [
+          "title = 7",
+          'title = "typed"\ntags = "not-an-array"',
+          'title = "typed"\ntags = ["ok", 7]',
+          'title = "typed"\nartifacts = "not-an-array"',
+          'title = "typed"\nartifacts = [{ kind = 7, title = "x" }]',
+        ];
+        for (const tomlText of invalidDocs) {
+          const pool = new FakePool(() => undefined);
+          const deps = makeDeps();
+          await assertRejects(
+            () =>
+              captureSessionFromToml(
+                asPool(pool),
+                { tomlText, auth: AUTH },
+                deps,
+              ),
+            ValidationError,
+          );
+          assertEquals(deps.embedCalls, []);
+          assertEquals(pool.connectCalls, 0);
+        }
+      },
+    );
   } finally {
     // ─── Teardown ──────────────────────────────────────────────────────
     for (const [k, v] of origEnv) {

@@ -92,17 +92,155 @@ detail = "session_capture, session_list, ... exposed on both connections."
   });
 });
 
-// A single `[artifacts]` table (not array-of-tables) is tolerated as one entry.
-Deno.test("parseSessionToml tolerates a single [artifacts] table", () => {
-  const { artifacts } = parseSessionToml(
-    `title = "t"\n[artifacts]\nkind = "doc"\ntitle = "README"`,
+Deno.test("parseSessionToml rejects a single [artifacts] table", () => {
+  assertThrows(
+    () =>
+      parseSessionToml(
+        `title = "t"\n[artifacts]\nkind = "doc"\ntitle = "README"`,
+      ),
+    Error,
+    "array of tables",
   );
+});
+
+Deno.test("parseSessionToml accepts a complete strictly typed document", () => {
+  const { session, artifacts } = parseSessionToml(`id = 42
+session_id = "conversation/42"
+title = "Complete document"
+session_date = 2026-07-29
+goal = "Exercise every field"
+agent = "codex"
+agent_version = "5"
+harness = "Codex"
+machine = "workstation"
+working_dir = "/src/openbrain"
+repo_url = "https://example.invalid/openbrain"
+branch = "main"
+head = "abc123"
+worktree = "/src/openbrain"
+started_at = 2026-07-29T10:00:00Z
+last_update = 2026-07-29T11:00:00Z
+ended_at = 2026-07-29T12:00:00Z
+status = "done"
+tags = ["validation", "sessions"]
+linked_issues = ["PROJ-545"]
+related_sessions = ["7"]
+next_actions = ["ship"]
+blockers = []
+resume_context = "Nothing remains."
+summary = "All fields survived strict parsing."
+workspace_id = "default"
+project_id = "openbrain"
+visibility = "project"
+
+[[artifacts]]
+kind = "pr"
+title = "PR #63"
+detail = "Strict session TOML validation"
+`);
+
+  assertEquals(session.id, 42);
+  assertEquals(session.session_id, "conversation/42");
+  assertEquals(session.status, "done");
+  assertEquals(session.tags, ["validation", "sessions"]);
+  assertEquals(session.blockers, []);
+  assertEquals(session.workspace_id, "default");
+  assertEquals(session.project_id, "openbrain");
+  assertEquals(session.visibility, "project");
   assertEquals(artifacts, [{
     position: 0,
-    kind: "doc",
-    title: "README",
-    detail: null,
+    kind: "pr",
+    title: "PR #63",
+    detail: "Strict session TOML validation",
   }]);
+});
+
+Deno.test("parseSessionToml rejects invalid scalar and collection types", () => {
+  const invalidScalars = [
+    ["title", "title = 7"],
+    ["session_id", "session_id = false"],
+    ["goal", "goal = 7"],
+    ["agent", "agent = true"],
+    ["agent_version", "agent_version = 5"],
+    ["harness", "harness = false"],
+    ["machine", "machine = 7"],
+    ["working_dir", "working_dir = false"],
+    ["repo_url", "repo_url = 7"],
+    ["branch", "branch = false"],
+    ["head", "head = 7"],
+    ["worktree", "worktree = false"],
+    ["resume_context", "resume_context = 7"],
+    ["summary", "summary = false"],
+    ["started_at", "started_at = 7"],
+    ["last_update", "last_update = false"],
+    ["ended_at", "ended_at = 7"],
+    ["session_date", "session_date = false"],
+  ];
+  for (const [field, declaration] of invalidScalars) {
+    const toml = field === "title"
+      ? declaration
+      : `title = "t"\n${declaration}`;
+    assertThrows(
+      () => parseSessionToml(toml),
+      Error,
+      field,
+    );
+  }
+
+  const listFields = [
+    "tags",
+    "linked_issues",
+    "related_sessions",
+    "next_actions",
+    "blockers",
+  ];
+  for (const field of listFields) {
+    assertThrows(
+      () => parseSessionToml(`title = "t"\n${field} = "scalar"`),
+      Error,
+      `${field} must be an array of strings`,
+    );
+    assertThrows(
+      () => parseSessionToml(`title = "t"\n${field} = ["ok", 7]`),
+      Error,
+      `${field}[1] must be a string`,
+    );
+    assertThrows(
+      () => parseSessionToml(`title = "t"\n${field} = [{ value = "x" }]`),
+      Error,
+      `${field}[0] must be a string`,
+    );
+  }
+});
+
+Deno.test("parseSessionToml rejects malformed artifacts without rewriting them", () => {
+  const malformed = [
+    ['artifacts = "scalar"', "array of tables"],
+    ["artifacts = [7]", "artifacts[0] must be a table"],
+    [
+      'artifacts = [{ kind = 7, title = "x" }]',
+      "artifacts[0].kind must be a string",
+    ],
+    [
+      'artifacts = [{ kind = "pr", title = false }]',
+      "artifacts[0].title must be a string",
+    ],
+    [
+      'artifacts = [{ kind = "pr", title = "x", detail = 7 }]',
+      "artifacts[0].detail must be a string",
+    ],
+    [
+      'artifacts = [{ kind = " ", title = "x" }]',
+      "requires non-empty string fields",
+    ],
+  ];
+  for (const [declaration, message] of malformed) {
+    assertThrows(
+      () => parseSessionToml(`title = "t"\n${declaration}`),
+      Error,
+      message,
+    );
+  }
 });
 
 Deno.test("parseSessionToml parses id and a free-form session_id handle", () => {
@@ -206,7 +344,7 @@ Deno.test("parseSessionToml rejects malformed input", () => {
   assertThrows(
     () => parseSessionToml(`title = "t"\n[[artifacts]]\nkind = "pr"`),
     Error,
-    "missing required",
+    "requires non-empty string fields",
   );
   // Unknown field (e.g. the legacy `ref`) → loud failure.
   assertThrows(

@@ -288,6 +288,30 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
         "session_search must document its truncated response envelope",
       );
 
+      const connectionsBeforeInvalidCapture = pool.connectCalls;
+      const invalidSessionCapture = await client.callTool({
+        name: "session_capture",
+        arguments: {
+          toml_text: 'title = "typed"\ntags = "not-an-array"',
+        },
+      });
+      assertEquals(invalidSessionCapture.isError, true);
+      assert(
+        JSON.stringify(invalidSessionCapture.content).includes(
+          "tags must be an array of strings",
+        ),
+      );
+      assertEquals(
+        pool.connectCalls,
+        connectionsBeforeInvalidCapture,
+        "schema-invalid session TOML must fail before scope resolution or DB borrowing",
+      );
+      assertEquals(
+        deps.embedCalls,
+        ["release checklist"],
+        "schema-invalid session TOML must fail before embedding",
+      );
+
       const sessionList = listed.tools.find((tool) =>
         tool.name === "session_list"
       );
