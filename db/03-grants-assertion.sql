@@ -19,9 +19,10 @@
 -- Putting the assertion in its own file solves both cases:
 --   1. Fresh init: the Compose/CI paths mount this source file as
 --      99-grants-assertion.sql, after every schema migration. Native
---      provisioning applies 01-, 02-, 04-, 05-, and 06-, then invokes this stable
---      source path last. In both cases the assertion sees the completed
---      catalog, so an init file that widens a protected role fails loudly.
+--      provisioning applies 01-, 02-, 04-, 05-, 06-, and 07-, then invokes
+--      this stable source path last. In both cases the assertion sees the
+--      completed catalog, so an init file that widens a protected role fails
+--      loudly.
 --   2. Drift check against a deployed DB: an operator can run this
 --      file standalone (`psql -f db/03-grants-assertion.sql`) against
 --      a live DB and the assertion exercises the LIVE catalog state
@@ -37,6 +38,8 @@
 --   (d) the app may read but not mutate the memory-space registry, and only
 --       it may execute the two reviewed memory_scope helpers (never PUBLIC or
 --       the edge-resident monitor).
+--   (e) metadata degradation history is append-only to the app, while only
+--       the singleton notification ledger is mutable.
 --
 -- The openbrain_app check is deliberately scoped to thoughts:
 -- 02-observability.sql and 04-sessions.sql legitimately grant it access to
@@ -84,6 +87,77 @@ BEGIN
       AND has_table_privilege('openbrain_app', 'public.thoughts', 'UPDATE')) THEN
     RAISE EXCEPTION
       'grants assertion failed: openbrain_app missing required SELECT/INSERT/UPDATE on public.thoughts.';
+  END IF;
+
+  IF to_regclass('public.metadata_degradation_events') IS NULL
+     OR to_regclass('public.metadata_degradation_notification_state') IS NULL
+     OR to_regclass('public.metadata_degradation_events_id_seq') IS NULL THEN
+    RAISE EXCEPTION
+      'grants assertion failed: metadata degradation schema is missing; apply db/07-metadata-degradation.sql first.';
+  END IF;
+
+  IF NOT (
+       has_table_privilege(
+         'openbrain_app', 'public.metadata_degradation_events', 'SELECT'
+       )
+       AND has_table_privilege(
+         'openbrain_app', 'public.metadata_degradation_events', 'INSERT'
+       )
+       AND has_sequence_privilege(
+         'openbrain_app', 'public.metadata_degradation_events_id_seq', 'USAGE'
+       )
+     ) OR has_table_privilege(
+       'openbrain_app', 'public.metadata_degradation_events',
+       'UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+     ) OR has_sequence_privilege(
+       'openbrain_app', 'public.metadata_degradation_events_id_seq',
+       'SELECT, UPDATE'
+     ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_app metadata degradation history must be SELECT/INSERT-only with sequence USAGE.';
+  END IF;
+
+  IF NOT (
+       has_table_privilege(
+         'openbrain_app',
+         'public.metadata_degradation_notification_state',
+         'SELECT'
+       )
+       AND has_table_privilege(
+         'openbrain_app',
+         'public.metadata_degradation_notification_state',
+         'UPDATE'
+       )
+     ) OR has_table_privilege(
+       'openbrain_app',
+       'public.metadata_degradation_notification_state',
+       'INSERT, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+     ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_app notification ledger must be SELECT/UPDATE-only.';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM pg_class relation
+    CROSS JOIN LATERAL aclexplode(
+      COALESCE(
+        relation.relacl,
+        acldefault(
+          (CASE WHEN relation.relkind = 'S' THEN 'S' ELSE 'r' END)::"char",
+          relation.relowner
+        )
+      )
+    ) acl
+    WHERE relation.oid = ANY (ARRAY[
+      'public.metadata_degradation_events'::regclass::oid,
+      'public.metadata_degradation_notification_state'::regclass::oid,
+      'public.metadata_degradation_events_id_seq'::regclass::oid
+    ])
+      AND acl.grantee = 0
+  ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: PUBLIC can access metadata degradation relations or sequence.';
   END IF;
 END;
 $$ LANGUAGE plpgsql;

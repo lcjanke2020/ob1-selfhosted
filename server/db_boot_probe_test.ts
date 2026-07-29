@@ -68,7 +68,9 @@ class FakeClient {
       boolean,
       boolean,
       boolean,
+      boolean,
     ] = [
+      true,
       true,
       true,
       true,
@@ -79,12 +81,16 @@ class FakeClient {
       true,
     ],
     private defaultWorkspaceExists = true,
+    private notificationStateExists = true,
   ) {}
 
   queryArray(sql: string): Promise<{ rows: unknown[] }> {
     this.queryCalls.push(sql);
     if (sql.includes("to_regclass")) {
       return Promise.resolve({ rows: [this.requiredSchema] });
+    }
+    if (sql.includes("FROM public.metadata_degradation_notification_state")) {
+      return Promise.resolve({ rows: [[this.notificationStateExists]] });
     }
     if (sql.includes("FROM memory_scope.workspace WHERE id")) {
       return Promise.resolve({ rows: [[this.defaultWorkspaceExists]] });
@@ -104,11 +110,15 @@ Deno.test("probeDbAtBoot: success path validates connectivity and hybrid schema"
   } as unknown as Pool;
 
   await probeDbAtBoot(fakePool, "db:5432");
-  assertEquals(client.queryCalls.length, 3);
+  assertEquals(client.queryCalls.length, 4);
   assertEquals(client.queryCalls[0], "SELECT 1");
   assert(client.queryCalls[1].includes("idx_thoughts_content_tsv"));
   assert(client.queryCalls[1].includes("idx_thoughts_content_trgm"));
-  assert(client.queryCalls[2].includes("memory_scope.workspace"));
+  assert(client.queryCalls[1].includes("metadata_degradation_events_id_seq"));
+  assert(
+    client.queryCalls[2].includes("metadata_degradation_notification_state"),
+  );
+  assert(client.queryCalls[3].includes("memory_scope.workspace"));
   assertEquals(client.releaseCalls, 1);
 });
 
@@ -116,6 +126,7 @@ Deno.test("probeDbAtBoot: missing hybrid schema rejects with migration guidance"
   const client = new FakeClient([
     true,
     false,
+    true,
     true,
     true,
     true,
@@ -146,6 +157,7 @@ Deno.test("probeDbAtBoot: missing spaces schema rejects with migration guidance"
     true,
     true,
     true,
+    true,
   ]);
   const fakePool = {
     connect: () => Promise.resolve(client),
@@ -171,6 +183,7 @@ Deno.test("probeDbAtBoot: missing audience indexes rejects before serving", asyn
     false,
     true,
     true,
+    true,
   ]);
   const fakePool = {
     connect: () => Promise.resolve(client),
@@ -185,9 +198,53 @@ Deno.test("probeDbAtBoot: missing audience indexes rejects before serving", asyn
   assertEquals(client.releaseCalls, 1);
 });
 
+Deno.test("probeDbAtBoot: missing metadata audit schema rejects with migration guidance", async () => {
+  const client = new FakeClient([
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+  ]);
+  const fakePool = {
+    connect: () => Promise.resolve(client),
+  } as unknown as Pool;
+
+  const err = await assertRejects(
+    () => probeDbAtBoot(fakePool, "db:5432"),
+    Error,
+  );
+  assertStringIncludes(err.message, "metadata-degradation audit schema");
+  assertStringIncludes(err.message, "db/07-metadata-degradation.sql");
+  assertEquals(client.releaseCalls, 1);
+});
+
+Deno.test("probeDbAtBoot: missing metadata notification singleton rejects with migration guidance", async () => {
+  const client = new FakeClient(
+    [true, true, true, true, true, true, true, true, true],
+    true,
+    false,
+  );
+  const fakePool = {
+    connect: () => Promise.resolve(client),
+  } as unknown as Pool;
+
+  const err = await assertRejects(
+    () => probeDbAtBoot(fakePool, "db:5432"),
+    Error,
+  );
+  assertStringIncludes(err.message, "notification ledger row");
+  assertStringIncludes(err.message, "db/07-metadata-degradation.sql");
+  assertEquals(client.releaseCalls, 1);
+});
+
 Deno.test("probeDbAtBoot: unknown configured workspace rejects before serving", async () => {
   const client = new FakeClient(
-    [true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true, true],
     false,
   );
   const fakePool = {

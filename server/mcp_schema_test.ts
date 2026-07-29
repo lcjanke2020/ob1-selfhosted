@@ -91,7 +91,7 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
       await client.connect(clientTransport);
       assertEquals(client.getServerVersion(), {
         name: "open-brain-homelab",
-        version: "1.15.0",
+        version: "1.16.0",
       });
       const listed = await client.listTools();
       const capture = listed.tools.find((tool) =>

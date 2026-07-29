@@ -68,7 +68,11 @@ Deno.test("extractMetadata: primary is skipped when ENABLE_PRIMARY_EXTRACTION is
   try {
     const { extractMetadata } = await import("./metadata.ts");
     const r = await extractMetadata("anything");
-    assertEquals(r.type, "observation");
+    assertEquals(r.metadata.type, "observation");
+    assertEquals(r.classifier.endpoint, "fallback");
+    assertEquals(r.degradation_events.map((event) => event.event_type), [
+      "fallback_used",
+    ]);
     // Only the fallback endpoint was contacted; the primary was never called.
     assertEquals(urls.length, 1);
     assertEquals(urls[0], `${FALLBACK_BASE}/chat/completions`);

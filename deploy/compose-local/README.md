@@ -119,7 +119,7 @@ so the connector fetches the new scope-aware tool schemas. It should then list
 8. Capture the *same* text again — the row count stays at 1 (dedupe by `content_fingerprint`).
 9. `docker compose restart` — thoughts survive.
 
-## Upgrading an existing database for hybrid search and spaces
+## Upgrading an existing database for hybrid search, spaces, and metadata audit
 
 Postgres init files run only when the data directory is first created. Before
 deploying a server version that uses hybrid thought search, verify pgvector is
@@ -138,6 +138,9 @@ docker compose exec -T postgres \
   < ../../db/06-spaces.sql
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/07-metadata-degradation.sql
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/03-grants-assertion.sql
 docker compose build mcp
 docker compose up -d --no-deps mcp
@@ -151,12 +154,15 @@ indexes.
 `06-spaces.sql` requires PostgreSQL 15 or newer and the `postgres` superuser. It
 then backfills legacy thoughts and sessions into the `default` workspace, adds
 audience-aware indexes, and forces RLS; it also takes table locks, so keep the
-same maintenance window through both migrations. The updated server refuses to
-boot until both hybrid-search and spaces invariants exist. Re-running either
-file is safe, but re-running `06-spaces.sql` still rebuilds its fingerprint index
-and needs the full lock window and index headroom. Details are in
+same maintenance window through both migrations. Migration 07 then adds the
+append-only metadata-degradation audit and its notification ledger; it does not
+rewrite `thoughts` or build an index over that table. The updated server refuses
+to boot until all three schema contracts exist. Re-running the files is safe,
+but re-running `06-spaces.sql` still rebuilds its fingerprint index and needs the
+full lock window and index headroom. Details are in
 [`docs/hybrid-search.md`](../../docs/hybrid-search.md) and
-[`docs/spaces.md`](../../docs/spaces.md).
+[`docs/spaces.md`](../../docs/spaces.md); alert configuration and audit queries
+are in [metadata degradation monitoring](../../docs/metadata-degradation-monitoring.md).
 
 ## Common gotchas
 
@@ -164,7 +170,7 @@ and needs the full lock window and index headroom. Details are in
 - **Schema didn't run.** Postgres only runs `/docker-entrypoint-initdb.d/*` when the data dir is empty. After a schema change, either apply it manually with `psql` or `docker compose down -v` to wipe the volume (destroys all thoughts).
 - **Host port already in use.** If the box already runs postgres (or anything else) on `5432`, the stack fails to start with `failed to bind host port 127.0.0.1:5432`. Change the host side of the mapping in `docker-compose.yml` (e.g. `"127.0.0.1:15432:5432"`) — the containers talk over the docker network, so only your direct-psql habits change. Same applies to `8787`/`11434`.
 - **No GPU detected for Ollama.** Install the NVIDIA Container Toolkit, or remove the `deploy: resources:` block from the `ollama` service.
-- **Metadata extraction silently degrading.** With `CHAT_API_BASE`/`CHAT_MODEL` unset (or unreachable), capture still works but every thought gets `{topics: [uncategorized], type: observation}`. Point them at a chat-capable Ollama model or any OpenAI-compatible endpoint to enable real extraction.
+- **Metadata extraction degrading.** With `CHAT_API_BASE`/`CHAT_MODEL` unset (or unreachable), capture still works but thoughts may receive `{topics: [uncategorized], type: observation}`. Inspect the durable audit or enable content-free Pushover/ntfy alerts as described in [metadata degradation monitoring](../../docs/metadata-degradation-monitoring.md).
 
 ## Backups
 

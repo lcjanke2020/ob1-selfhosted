@@ -116,6 +116,12 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         assertEquals(out.metadata.door, "tailnet");
         assertEquals(out.metadata.sub, null);
         assertEquals(out.metadata.type, "observation");
+        assertEquals(out.metadata.metadata_extraction, {
+          schema_version: 1,
+          endpoint: "primary",
+          model: "test-local-model",
+          base_url: "http://test-primary.invalid/v1",
+        });
         assertEquals(out.metadata.provenance, {
           schema_version: 1,
           caller_asserted: {
@@ -136,7 +142,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
     );
 
     await t.step(
-      "thought capture: via 'mcp' persists source 'mcp' (MCP rows byte-identical to pre-refactor)",
+      "thought capture: via 'mcp' persists source and server-owned classifier stamps",
       async () => {
         const pool = new FakePool((sql, params) =>
           sql.includes("INSERT INTO thoughts")
@@ -161,30 +167,58 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         assertEquals(out.metadata.door, "funnel");
         assertEquals(out.metadata.sub, "auth0|abc");
         assertEquals(out.metadata.provenance, undefined);
+        assertEquals(out.metadata.metadata_extraction, {
+          schema_version: 1,
+          endpoint: "primary",
+          model: "test-local-model",
+          base_url: "http://test-primary.invalid/v1",
+        });
       },
     );
 
     await t.step(
       "thought capture: reserved metadata keys cannot be forged by an extractor",
       async () => {
-        const pool = new FakePool((sql, params) =>
-          sql.includes("INSERT INTO thoughts")
+        let eventInsert: unknown[] = [];
+        const pool = new FakePool((sql, params) => {
+          if (sql.includes("INSERT INTO metadata_degradation_events")) {
+            eventInsert = params;
+            return undefined;
+          }
+          return sql.includes("INSERT INTO thoughts")
             ? {
               rows: [{
                 id: "uuid-3",
                 metadata: JSON.parse(params[2] as string),
               }],
             }
-            : undefined
-        );
+            : undefined;
+        });
         const deps = makeDeps({
           extractMetadata: () =>
             Promise.resolve({
-              type: "observation",
-              source: "forged-source",
-              door: "forged-door",
-              sub: "forged-sub",
-              provenance: { forged: true },
+              metadata: {
+                type: "observation",
+                source: "forged-source",
+                door: "forged-door",
+                sub: "forged-sub",
+                provenance: { forged: true },
+                metadata_extraction: { endpoint: "forged-endpoint" },
+              },
+              classifier: {
+                schema_version: 1,
+                endpoint: "fallback",
+                model: "server-owned-model",
+                base_url: "https://fallback.example/v1",
+              },
+              degradation_events: [{
+                event_type: "fallback_used",
+                endpoint_role: "fallback",
+                failure_reason: null,
+                http_status: null,
+                endpoint_model: "server-owned-model",
+                endpoint_base_url: "https://fallback.example/v1",
+              }],
             }),
         });
         const out = await captureThoughtWithMetadata(
@@ -204,6 +238,77 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           schema_version: 1,
           caller_asserted: { author: "caller claim" },
         });
+        assertEquals(out.metadata.metadata_extraction, {
+          schema_version: 1,
+          endpoint: "fallback",
+          model: "server-owned-model",
+          base_url: "https://fallback.example/v1",
+        });
+        assertEquals(eventInsert[0], "uuid-3");
+        assertEquals(
+          typeof eventInsert[1] === "string" &&
+            /^[0-9a-f-]{36}$/.test(eventInsert[1] as string),
+          true,
+        );
+        assertEquals(JSON.parse(eventInsert[2] as string), [{
+          event_type: "fallback_used",
+          endpoint_role: "fallback",
+          failure_reason: null,
+          http_status: null,
+          endpoint_model: "server-owned-model",
+          endpoint_base_url: "https://fallback.example/v1",
+        }]);
+      },
+    );
+
+    await t.step(
+      "thought capture: audit insert failure rolls back the thought upsert",
+      async () => {
+        let rolledBack = false;
+        let committed = false;
+        const pool = new FakePool((sql, params) => {
+          if (sql.trim() === "ROLLBACK") rolledBack = true;
+          if (sql.trim() === "COMMIT") committed = true;
+          if (sql.includes("INSERT INTO metadata_degradation_events")) {
+            throw new Error("simulated audit insert failure");
+          }
+          return sql.includes("INSERT INTO thoughts")
+            ? {
+              rows: [{
+                id: "uuid-atomic",
+                metadata: JSON.parse(params[2] as string),
+              }],
+            }
+            : undefined;
+        });
+        const deps = makeDeps({
+          extractMetadata: () =>
+            Promise.resolve({
+              metadata: { type: "observation" },
+              classifier: { schema_version: 1, endpoint: "stub" },
+              degradation_events: [{
+                event_type: "stub_used",
+                endpoint_role: null,
+                failure_reason: null,
+                http_status: null,
+                endpoint_model: null,
+                endpoint_base_url: null,
+              }],
+            }),
+        });
+
+        await assertRejects(
+          () =>
+            captureThoughtWithMetadata(
+              asPool(pool),
+              { content: "atomic fixture", auth: AUTH, via: "rest" },
+              deps,
+            ),
+          Error,
+          "simulated audit insert failure",
+        );
+        assertEquals(rolledBack, true);
+        assertEquals(committed, false);
       },
     );
 

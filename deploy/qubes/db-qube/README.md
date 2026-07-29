@@ -131,6 +131,7 @@ sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
 #   db/04-sessions.sql
 #   db/05-hybrid-search.sql
 #   db/06-spaces.sql
+#   db/07-metadata-degradation.sql
 #   db/03-grants-assertion.sql  # always last
 ```
 
@@ -178,6 +179,15 @@ sessions, and artifacts. Reapplication rebuilds that fingerprint index too, so
 it needs the same table-lock window and index headroom. It must land before the
 scoped app server starts; the server boot probe refuses a partial catalog. See
 [Memory spaces](../../../docs/spaces.md).
+
+Finally, apply
+[`db/07-metadata-degradation.sql`](../../../db/07-metadata-degradation.sql) as
+the database owner, then run `db/03-grants-assertion.sql` last. It adds the
+append-only, content-free metadata-classification audit and its singleton
+notification ledger without rewriting `thoughts`. Server 1.16.0 refuses to
+start until both relations and the seeded ledger row exist. Audit queries and
+the optional Pushover/ntfy worker are documented in [Metadata degradation
+monitoring](../../../docs/metadata-degradation-monitoring.md).
 
 ## Template note
 

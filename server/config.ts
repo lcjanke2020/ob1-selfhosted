@@ -96,6 +96,127 @@ export const ENABLE_FALLBACK_EXTRACTION = Boolean(
 export const ENABLE_METADATA_EXTRACTION = ENABLE_PRIMARY_EXTRACTION ||
   ENABLE_FALLBACK_EXTRACTION;
 
+// Optional durable metadata-degradation notifications. Empty means
+// the audit rows are still recorded but no delivery worker runs. A comma-
+// separated list enables one or both pluggable adapters; fan-out succeeds when
+// at least one configured adapter accepts the alert.
+export type MetadataNotificationChannel = "pushover" | "ntfy";
+
+function metadataNotificationChannels(): MetadataNotificationChannel[] {
+  const raw = optionalTrimmed("METADATA_NOTIFY_CHANNELS");
+  if (!raw) return [];
+  const channels = raw.split(",").map((value) => value.trim()).filter(Boolean);
+  const unique = new Set<string>();
+  for (const channel of channels) {
+    if (channel !== "pushover" && channel !== "ntfy") {
+      throw new Error(
+        "Invalid METADATA_NOTIFY_CHANNELS entry " +
+          "(expected pushover and/or ntfy)",
+      );
+    }
+    if (unique.has(channel)) {
+      throw new Error(`Duplicate METADATA_NOTIFY_CHANNELS entry: ${channel}`);
+    }
+    unique.add(channel);
+  }
+  return [...unique] as MetadataNotificationChannel[];
+}
+
+function noControlCharacters(name: string, value: string, max: number): string {
+  const hasControlCharacter = [...value].some((character) => {
+    const codePoint = character.codePointAt(0)!;
+    return codePoint <= 0x1f || codePoint === 0x7f;
+  });
+  if (value.length > max || hasControlCharacter) {
+    throw new Error(
+      `${name} must be at most ${max} characters and contain no control characters`,
+    );
+  }
+  return value;
+}
+
+export const METADATA_NOTIFY_CHANNELS = metadataNotificationChannels();
+export const ENABLE_METADATA_NOTIFICATIONS =
+  METADATA_NOTIFY_CHANNELS.length > 0;
+export const METADATA_NOTIFY_LABEL = noControlCharacters(
+  "METADATA_NOTIFY_LABEL",
+  optionalTrimmed("METADATA_NOTIFY_LABEL") || "OpenBrain",
+  64,
+);
+export const METADATA_NOTIFY_POLL_INTERVAL_MS = requiredInt(
+  "METADATA_NOTIFY_POLL_INTERVAL_MS",
+  300_000,
+);
+export const METADATA_NOTIFY_ROLLUP_MS = requiredInt(
+  "METADATA_NOTIFY_ROLLUP_MS",
+  1_800_000,
+);
+export const METADATA_NOTIFY_TIMEOUT_MS = requiredInt(
+  "METADATA_NOTIFY_TIMEOUT_MS",
+  10_000,
+);
+
+export const METADATA_PUSHOVER_APP_TOKEN = noControlCharacters(
+  "METADATA_PUSHOVER_APP_TOKEN",
+  optionalTrimmed("METADATA_PUSHOVER_APP_TOKEN"),
+  1024,
+);
+export const METADATA_PUSHOVER_USER_KEY = noControlCharacters(
+  "METADATA_PUSHOVER_USER_KEY",
+  optionalTrimmed("METADATA_PUSHOVER_USER_KEY"),
+  1024,
+);
+export const METADATA_NTFY_TOPIC = noControlCharacters(
+  "METADATA_NTFY_TOPIC",
+  optionalTrimmed("METADATA_NTFY_TOPIC"),
+  256,
+);
+export const METADATA_NTFY_TOKEN = noControlCharacters(
+  "METADATA_NTFY_TOKEN",
+  optionalTrimmed("METADATA_NTFY_TOKEN"),
+  2048,
+);
+export const METADATA_NTFY_SERVER_URL = optionalTrimmed(
+  "METADATA_NTFY_SERVER_URL",
+) || "https://ntfy.sh";
+
+if (METADATA_NOTIFY_CHANNELS.includes("pushover")) {
+  if (!METADATA_PUSHOVER_APP_TOKEN || !METADATA_PUSHOVER_USER_KEY) {
+    throw new Error(
+      "METADATA_NOTIFY_CHANNELS includes pushover, so " +
+        "METADATA_PUSHOVER_APP_TOKEN and METADATA_PUSHOVER_USER_KEY are required",
+    );
+  }
+}
+
+if (METADATA_NOTIFY_CHANNELS.includes("ntfy")) {
+  if (!METADATA_NTFY_TOPIC) {
+    throw new Error(
+      "METADATA_NOTIFY_CHANNELS includes ntfy, so METADATA_NTFY_TOPIC is required",
+    );
+  }
+  let ntfyUrl: URL;
+  try {
+    ntfyUrl = new URL(METADATA_NTFY_SERVER_URL);
+  } catch {
+    throw new Error("METADATA_NTFY_SERVER_URL must be an absolute URL");
+  }
+  if (
+    !["http:", "https:"].includes(ntfyUrl.protocol) || ntfyUrl.username ||
+    ntfyUrl.password || ntfyUrl.search || ntfyUrl.hash
+  ) {
+    throw new Error(
+      "METADATA_NTFY_SERVER_URL must use http/https and contain no credentials, query, or fragment",
+    );
+  }
+  if (
+    METADATA_NTFY_TOKEN &&
+    !/^[A-Za-z0-9\-._~+/]+=*$/.test(METADATA_NTFY_TOKEN)
+  ) {
+    throw new Error("METADATA_NTFY_TOKEN is not a valid bearer token");
+  }
+}
+
 // Opt-in REST gateway (/api/v1). Default OFF; when off the router is never
 // mounted, so the surface does not exist (every /api/v1 path 404s before any
 // handler is registered). The docker-compose installs opt in

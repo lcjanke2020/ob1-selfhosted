@@ -38,6 +38,9 @@ on:
     paths:
       - "db/**"
       - "server/session_queries.ts"
+      - "server/queries.ts"
+      - "server/metadata_notifications.ts"
+      - "server/metadata_notifications_db_smoke.ts"
       - "server/session_search_db_smoke.ts"
       - "server/scoped_db.ts"
       - "server/scope_contract.ts"
@@ -55,6 +58,9 @@ on:
     paths:
       - "db/**"
       - "server/session_queries.ts"
+      - "server/queries.ts"
+      - "server/metadata_notifications.ts"
+      - "server/metadata_notifications_db_smoke.ts"
       - "server/session_search_db_smoke.ts"
       - "server/scoped_db.ts"
       - "server/scope_contract.ts"
@@ -131,6 +137,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/db/04-sessions.sql:/docker-entrypoint-initdb.d/04-sessions.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/05-hybrid-search.sql:/docker-entrypoint-initdb.d/05-hybrid-search.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/06-spaces.sql:/docker-entrypoint-initdb.d/06-spaces.sql:ro" \
+            -v "$GITHUB_WORKSPACE/db/07-metadata-degradation.sql:/docker-entrypoint-initdb.d/07-metadata-degradation.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro" \
             "$PG_IMAGE"
 
@@ -153,7 +160,7 @@ jobs:
             echo "::error::timed out waiting for postgres init"; docker logs pgci; exit 1
           fi
 
-      - name: Sanity-check init applied (sessions + sensitive space present)
+      - name: Sanity-check init applied (sessions + spaces + audit present)
         run: |
           docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
@@ -161,6 +168,9 @@ jobs:
           docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
             "SELECT 1 FROM memory_scope.workspace WHERE id='sensitive' AND personal_only" | grep -q 1
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT 1 FROM metadata_degradation_notification_state WHERE singleton" | grep -q 1
 
       - name: Smoke test — protected roles reject grant drift
         run: |
@@ -263,6 +273,23 @@ jobs:
 
           run_assertion >/dev/null
           echo "protected-role assertions accepted the clean catalog and rejected all five drift fixtures"
+
+      - name: Smoke test — metadata audit is append-only and coherent
+        run: |
+          # Reapply the upgrade migration to exercise its live-database path,
+          # then use the real app role and audience settings. The fixture rolls
+          # back, including the notification ledger update.
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/07-metadata-degradation.sql >/dev/null
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/metadata-degradation-smoke.sql >/dev/null
+          deno run --config server/deno.json --frozen \
+            --allow-env \
+            --allow-net=127.0.0.1:55439 \
+            server/metadata_notifications_db_smoke.ts
+          echo "metadata audit append/read, immutable-history, shape, and ledger checks passed"
 
       - name: Smoke test — spaces isolate every audience and pooled reuse
         run: |
