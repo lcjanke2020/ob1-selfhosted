@@ -170,6 +170,30 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
       assert(body.error.message.includes("missing required field 'title'"));
     });
 
+    await t.step(
+      "POST /sessions (invalid TOML types) → stable 400 before work",
+      async () => {
+        const pool = new FakePool(() => undefined);
+        const deps = makeDeps();
+        const api = createApiRouter(asPool(pool), deps);
+        const res = await api.request(
+          "/sessions",
+          authed({
+            method: "POST",
+            body: JSON.stringify({
+              toml_text: 'title = "typed"\ntags = "not-an-array"',
+            }),
+          }),
+        );
+        assertEquals(res.status, 400);
+        const body = await res.json();
+        assertEquals(body.error.code, "validation_error");
+        assertEquals(body.error.message, "tags must be an array of strings");
+        assertEquals(deps.embedCalls, []);
+        assertEquals(pool.connectCalls, 0);
+      },
+    );
+
     await t.step("POST /sessions/search → 200 structured rows", async () => {
       const api = makeApi((sql) =>
         sql.includes("FROM sessions.session")

@@ -73,11 +73,17 @@ fields with `#` comments for readability; they round-trip.
 | Upsert key | `id` (integer) — **only ever the value the server returned** (see Capturing) |
 | Resumable handle | `session_id` — optional, free-form, nullable; the *harness conversation id* for re-opening the chat transcript later (see *The resumable handle* below). **NOT** the key. |
 
+Every ordinary string-valued scalar must use TOML string syntax, including identity,
+location, prose, status, scope, and resumable-handle fields. The parser does not
+coerce numbers or booleans into strings. Session time fields also accept TOML
+date/datetime literals or quoted ISO-8601 strings.
+
 `tags`, `linked_issues`, `related_sessions`, `next_actions`, and `blockers` are
-**array-valued** (`key = [ ... ]`) — write the bare key, never `key[]`.
-`related_sessions` is a **free-form** list (point at other sessions by their
-integer `id`) — the server stores it verbatim and never validates or joins on
-it; it is not a foreign-key reference.
+**arrays of quoted strings** (`key = ["..."]`) — write the bare key, never `key[]`,
+and never supply a scalar or a non-string element. `related_sessions` is free-form in
+meaning (point at other sessions by their integer `id` encoded as strings, such as
+`["42", "57"]`): the server stores those strings verbatim and never validates or
+joins on them; it is not a foreign-key reference.
 
 - **`status` enum:** `active | awaiting_review | blocked | done | abandoned`.
 - **Timestamps** are ISO-8601. Date-only (`"2026-06-08"`) is accepted and expanded to
@@ -105,8 +111,9 @@ session. See [`docs/spaces.md`](../../docs/spaces.md).
 **`[[artifacts]]`** attach references — a PR, a note, a file, a branch — to the session.
 Each is a TOML table in an `[[artifacts]]` array: `kind` and `title` are **required**,
 `detail` is optional; the server assigns `position` from array order (don't author it).
-Unknown fields, or a singular `[[artifact]]`, are **rejected with an error** — so once
-`session_capture` returns success, the artifacts did land.
+Unknown fields, a single `[artifacts]` table, or a singular `[[artifact]]` block are
+**rejected with an error** — so once `session_capture` returns success, the artifacts
+did land.
 
 ### The resumable handle (`session_id`)
 

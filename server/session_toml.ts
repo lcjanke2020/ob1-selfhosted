@@ -147,10 +147,12 @@ function toPositiveIntOrNull(v: unknown): number | null {
   );
 }
 
-function toStrOrNull(v: unknown): string | null {
+function toStrOrNull(field: string, v: unknown): string | null {
   if (v === null || v === undefined) return null;
-  if (typeof v === "string") return v;
-  return String(v);
+  if (typeof v !== "string") {
+    throw new Error(`${field} must be a string`);
+  }
+  return v;
 }
 
 function toScopeIdOrNull(field: string, v: unknown): string | null {
@@ -183,21 +185,30 @@ function parseVisibility(v: unknown): MemoryVisibility | null {
 
 // TOML date/datetime values parse to Date; keep ISO strings so the value is
 // deterministic for tests and unambiguous for Postgres timestamptz binding.
-function toIsoOrNull(v: unknown): string | null {
+function toIsoOrNull(field: string, v: unknown): string | null {
   if (v === null || v === undefined) return null;
   if (v instanceof Date) return v.toISOString();
   if (typeof v === "string") return v.trim() || null;
-  return String(v);
+  throw new Error(`${field} must be a date or date/time string`);
 }
 
 // DATE column: keep only the calendar-date portion.
-function toDateOrNull(v: unknown): string | null {
-  const iso = toIsoOrNull(v);
+function toDateOrNull(field: string, v: unknown): string | null {
+  const iso = toIsoOrNull(field, v);
   return iso === null ? null : iso.split("T")[0];
 }
 
-function toStringArray(v: unknown): string[] {
-  return Array.isArray(v) ? v.map((x) => String(x)) : [];
+function toStringArray(field: string, v: unknown): string[] {
+  if (v === null || v === undefined) return [];
+  if (!Array.isArray(v)) {
+    throw new Error(`${field} must be an array of strings`);
+  }
+  return v.map((item, index) => {
+    if (typeof item !== "string") {
+      throw new Error(`${field}[${index}] must be a string`);
+    }
+    return item;
+  });
 }
 
 function parseStatus(v: unknown): SessionStatus | null {
@@ -243,7 +254,7 @@ export function parseSessionToml(tomlText: string): ParsedSessionDoc {
     );
   }
 
-  const title = toStrOrNull(doc.title);
+  const title = toStrOrNull("title", doc.title);
   if (!title || !title.trim()) {
     throw new Error("session TOML is missing required field 'title'");
   }
@@ -252,30 +263,30 @@ export function parseSessionToml(tomlText: string): ParsedSessionDoc {
     id: toPositiveIntOrNull(doc.id),
     // Free-form resumable handle; no longer UUID-validated (the random UUID was
     // the demoted PK — see db/04-sessions.sql).
-    session_id: toStrOrNull(doc.session_id),
+    session_id: toStrOrNull("session_id", doc.session_id),
     title,
-    session_date: toDateOrNull(doc.session_date),
-    goal: toStrOrNull(doc.goal),
-    agent: toStrOrNull(doc.agent),
-    agent_version: toStrOrNull(doc.agent_version),
-    harness: toStrOrNull(doc.harness),
-    machine: toStrOrNull(doc.machine),
-    working_dir: toStrOrNull(doc.working_dir),
-    repo_url: toStrOrNull(doc.repo_url),
-    branch: toStrOrNull(doc.branch),
-    head: toStrOrNull(doc.head),
-    worktree: toStrOrNull(doc.worktree),
-    started_at: toIsoOrNull(doc.started_at),
-    last_update: toIsoOrNull(doc.last_update),
-    ended_at: toIsoOrNull(doc.ended_at),
+    session_date: toDateOrNull("session_date", doc.session_date),
+    goal: toStrOrNull("goal", doc.goal),
+    agent: toStrOrNull("agent", doc.agent),
+    agent_version: toStrOrNull("agent_version", doc.agent_version),
+    harness: toStrOrNull("harness", doc.harness),
+    machine: toStrOrNull("machine", doc.machine),
+    working_dir: toStrOrNull("working_dir", doc.working_dir),
+    repo_url: toStrOrNull("repo_url", doc.repo_url),
+    branch: toStrOrNull("branch", doc.branch),
+    head: toStrOrNull("head", doc.head),
+    worktree: toStrOrNull("worktree", doc.worktree),
+    started_at: toIsoOrNull("started_at", doc.started_at),
+    last_update: toIsoOrNull("last_update", doc.last_update),
+    ended_at: toIsoOrNull("ended_at", doc.ended_at),
     status: parseStatus(doc.status),
-    tags: toStringArray(doc.tags),
-    linked_issues: toStringArray(doc.linked_issues),
-    related_sessions: toStringArray(doc.related_sessions),
-    next_actions: toStringArray(doc.next_actions),
-    blockers: toStringArray(doc.blockers),
-    resume_context: toStrOrNull(doc.resume_context),
-    summary: toStrOrNull(doc.summary),
+    tags: toStringArray("tags", doc.tags),
+    linked_issues: toStringArray("linked_issues", doc.linked_issues),
+    related_sessions: toStringArray("related_sessions", doc.related_sessions),
+    next_actions: toStringArray("next_actions", doc.next_actions),
+    blockers: toStringArray("blockers", doc.blockers),
+    resume_context: toStrOrNull("resume_context", doc.resume_context),
+    summary: toStrOrNull("summary", doc.summary),
     workspace_id: toScopeIdOrNull("workspace_id", doc.workspace_id),
     project_id: toScopeIdOrNull("project_id", doc.project_id),
     visibility: parseVisibility(doc.visibility),
@@ -295,14 +306,24 @@ export function parseSessionToml(tomlText: string): ParsedSessionDoc {
     );
   }
 
-  // `[[artifacts]]` → array; tolerate a single `[artifacts]` table.
+  // `[[artifacts]]` must parse to an array of tables. A single `[artifacts]`
+  // table, a scalar, or any other shape is schema-invalid and must not be
+  // rewritten into a different artifact set while reporting success.
   const rawArtifacts = doc.artifacts;
-  const artifactList: unknown[] = Array.isArray(rawArtifacts)
-    ? rawArtifacts
-    : (rawArtifacts && typeof rawArtifacts === "object" ? [rawArtifacts] : []);
+  if (rawArtifacts !== null && rawArtifacts !== undefined) {
+    if (!Array.isArray(rawArtifacts)) {
+      throw new Error(
+        "artifacts must be an array of tables written as [[artifacts]]",
+      );
+    }
+  }
+  const artifactList: unknown[] = rawArtifacts ?? [];
 
   const artifacts: ParsedArtifact[] = artifactList.map((a, i) => {
-    const o = (a ?? {}) as Record<string, unknown>;
+    if (a === null || typeof a !== "object" || Array.isArray(a)) {
+      throw new Error(`artifacts[${i}] must be a table`);
+    }
+    const o = a as Record<string, unknown>;
     // Reject unknown keys loudly rather than dropping them — a silent drop
     // reads as success (strict artifacts parsing). Catches the legacy `ref`/`note` + typos.
     const unknownKeys = Object.keys(o).filter((k) => !ARTIFACT_KEYS.has(k));
@@ -312,14 +333,19 @@ export function parseSessionToml(tomlText: string): ParsedSessionDoc {
           "allowed: kind, title, detail",
       );
     }
-    const kind = toStrOrNull(o.kind);
-    const title = toStrOrNull(o.title);
-    if (!kind || !title) {
+    const kind = toStrOrNull(`artifacts[${i}].kind`, o.kind);
+    const title = toStrOrNull(`artifacts[${i}].title`, o.title);
+    if (!kind?.trim() || !title?.trim()) {
       throw new Error(
-        `artifacts[${i}] is missing required 'kind' and/or 'title'`,
+        `artifacts[${i}] requires non-empty string fields 'kind' and 'title'`,
       );
     }
-    return { position: i, kind, title, detail: toStrOrNull(o.detail) };
+    return {
+      position: i,
+      kind,
+      title,
+      detail: toStrOrNull(`artifacts[${i}].detail`, o.detail),
+    };
   });
 
   return { session, artifacts, rawToml: tomlText };

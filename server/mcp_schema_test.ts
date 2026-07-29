@@ -89,6 +89,10 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
     try {
       await server.connect(serverTransport);
       await client.connect(clientTransport);
+      assertEquals(client.getServerVersion(), {
+        name: "open-brain-homelab",
+        version: "1.14.0",
+      });
       const listed = await client.listTools();
       const capture = listed.tools.find((tool) =>
         tool.name === "capture_thought"
@@ -286,6 +290,30 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
       assert(
         sessionSearch.description?.includes("{results, truncation}"),
         "session_search must document its truncated response envelope",
+      );
+
+      const connectionsBeforeInvalidCapture = pool.connectCalls;
+      const invalidSessionCapture = await client.callTool({
+        name: "session_capture",
+        arguments: {
+          toml_text: 'title = "typed"\ntags = "not-an-array"',
+        },
+      });
+      assertEquals(invalidSessionCapture.isError, true);
+      assert(
+        JSON.stringify(invalidSessionCapture.content).includes(
+          "tags must be an array of strings",
+        ),
+      );
+      assertEquals(
+        pool.connectCalls,
+        connectionsBeforeInvalidCapture,
+        "schema-invalid session TOML must fail before scope resolution or DB borrowing",
+      );
+      assertEquals(
+        deps.embedCalls,
+        ["release checklist"],
+        "schema-invalid session TOML must fail before embedding",
       );
 
       const sessionList = listed.tools.find((tool) =>
