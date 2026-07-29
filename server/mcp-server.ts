@@ -113,8 +113,13 @@ to \`session_capture\`. The schema is **flat** — do NOT use nested
   (defaults to active on first capture; on a refresh, omit it unless deliberately
   changing lifecycle state so the stored status is preserved)
 
+Every ordinary string-valued scalar must use TOML string syntax; numbers and
+booleans are not coerced to strings. Session time fields also accept TOML
+date/datetime literals.
+
 ## Optional arrays
 - \`tags\`, \`linked_issues\`, \`related_sessions\`, \`next_actions\`, \`blockers\`
+  — each must be an array whose every element is a quoted string
 
 ## Optional prose (use TOML multiline """…""")
 - \`summary\`, \`resume_context\`
@@ -136,8 +141,8 @@ Each entry:
 - \`title\` (string, required)
 - \`detail\` (string, optional)
 
-A singular \`[[artifact]]\` block, or any other field name inside an entry, is
-**rejected** (it used to be silently dropped).
+A single \`[artifacts]\` table, a singular \`[[artifact]]\` block, or any other
+field name inside an entry is **rejected**.
 
 ## Refresh semantics
 A refresh (\`id\` present) replaces the authorable session document and its
@@ -245,7 +250,9 @@ export function createMcpServer(
     // 1.13.0: metadata classification logs preserve non-2xx HTTP statuses and
     // distinguish endpoint availability, malformed responses, unparseable
     // output, and runtime-schema rejection.
-    version: "1.13.0",
+    // 1.14.0: session capture rejects non-string values supplied to string
+    // scalar/list fields and requires a strictly typed [[artifacts]] array.
+    version: "1.14.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -536,7 +543,7 @@ export function createMcpServer(
     {
       title: "Capture Session",
       description:
-        "Ingest or refresh an agent work session from its TOML front matter. Upserts the session and its artifacts, re-embeds only when the embedded content changed, and stamps provenance/server-owned personal identity. Returns {id, session_id, status, created, reembedded, workspace_id, project_id, visibility} — `id` is the canonical key; write it and the stored scope back into fresh TOML to refresh the same session. Artifacts go in a [[artifacts]] array-of-tables: kind and title required, detail optional; unknown fields or a singular [[artifact]] block are rejected. See the 'Session TOML schema' resource for the full front-matter contract, including the personal-only sensitive workspace.",
+        "Ingest or refresh an agent work session from its TOML front matter. Upserts the session and its artifacts, re-embeds only when the embedded content changed, and stamps provenance/server-owned personal identity. Returns {id, session_id, status, created, reembedded, workspace_id, project_id, visibility} — `id` is the canonical key; write it and the stored scope back into fresh TOML to refresh the same session. String fields are not coerced, list fields contain only strings, and artifacts must use a [[artifacts]] array-of-tables with kind and title required and detail optional. See the 'Session TOML schema' resource for the full front-matter contract, including the personal-only sensitive workspace.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,

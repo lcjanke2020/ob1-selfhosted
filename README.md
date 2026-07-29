@@ -199,6 +199,13 @@ building a refresh, never an old raw TOML document. After upgrading, reconnect
 or restart every MCP client/connector so it fetches the 1.9.0 tool schemas with
 their new scope fields.
 
+Compatibility note for server 1.14.0: session TOML no longer coerces numbers or
+booleans supplied to ordinary string fields, or non-string list elements. Quote
+those values, use arrays of quoted strings for list fields, and encode artifacts
+only as `[[artifacts]]` array-of-tables. Session time fields still accept TOML
+date/datetime literals. Other artifact shapes, including a single `[artifacts]`
+table, return a validation error.
+
 Session capture mirrors `session_capture`: omit `id` in the TOML to create
 (201), or include it to refresh the same row (200); `title` remains required on
 a refresh. An unknown `id` is a 404, and an unchanged content hash skips the
