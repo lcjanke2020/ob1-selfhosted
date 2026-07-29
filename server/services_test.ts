@@ -68,6 +68,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
     captureSessionFromToml,
     captureThoughtWithMetadata,
     fetchThoughtInScope,
+    listSessionsInScope,
     NotFoundError,
     searchSessionsByQuery,
     searchThoughtsByQuery,
@@ -522,6 +523,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
 
     await t.step("session search: filters flow into SQL params", async () => {
       let captured: unknown[] = [];
+      let capturedSql = "";
       let hnswDepth: unknown[] = [];
       const statements: string[] = [];
       const pool = new FakePool((sql, params) => {
@@ -530,6 +532,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           hnswDepth = params;
         }
         if (sql.includes("FROM sessions.session")) {
+          capturedSql = sql;
           captured = params;
           return {
             rows: Array.from(
@@ -549,8 +552,15 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         `[${FAKE_VECTOR.join(",")}]`,
         "active",
         "ci",
+        0.5,
         5,
       ]);
+      assertEquals(
+        capturedSql.includes(
+          "1 - (embedding <=> $1::vector) >= $4::double precision",
+        ),
+        true,
+      );
       assertEquals(hnswDepth, ["50"]);
 
       const begin = statements.indexOf("BEGIN");
@@ -573,6 +583,53 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         true,
       );
     });
+
+    await t.step(
+      "session search: custom similarity threshold is validated and bound",
+      async () => {
+        let captured: unknown[] = [];
+        const pool = new FakePool((sql, params) => {
+          if (sql.includes("FROM sessions.session")) {
+            captured = params;
+            return {
+              rows: Array.from(
+                { length: 5 },
+                (_, index) => sessionSearchRow(index + 1),
+              ),
+            };
+          }
+          return undefined;
+        });
+        const deps = makeDeps();
+        await searchSessionsByQuery(
+          asPool(pool),
+          { query: "quality floor", threshold: 0.73, auth: AUTH },
+          deps,
+        );
+        assertEquals(captured, [
+          `[${FAKE_VECTOR.join(",")}]`,
+          0.73,
+          5,
+        ]);
+
+        for (const threshold of [-0.01, 1.01, Number.NaN]) {
+          const invalidPool = new FakePool(() => undefined);
+          const invalidDeps = makeDeps();
+          await assertRejects(
+            () =>
+              searchSessionsByQuery(
+                asPool(invalidPool),
+                { query: "quality floor", threshold, auth: AUTH },
+                invalidDeps,
+              ),
+            ValidationError,
+            "threshold",
+          );
+          assertEquals(invalidDeps.embedCalls, []);
+          assertEquals(invalidPool.connectCalls, 0);
+        }
+      },
+    );
 
     await t.step(
       "session search: ANN underfill retries through the exact materialized path",
@@ -884,6 +941,67 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           assertEquals(deps.embedCalls, []);
           assertEquals(pool.connectCalls, 0);
         }
+      },
+    );
+
+    await t.step(
+      "session dates and list bounds fail before embedding or DB casts",
+      async () => {
+        const capturePool = new FakePool(() => undefined);
+        const captureDeps = makeDeps();
+        await assertRejects(
+          () =>
+            captureSessionFromToml(
+              asPool(capturePool),
+              {
+                tomlText: 'title = "bad date"\nlast_update = "2026-02-30"',
+                auth: AUTH,
+              },
+              captureDeps,
+            ),
+          ValidationError,
+          "last_update",
+        );
+        assertEquals(captureDeps.embedCalls, []);
+        assertEquals(capturePool.connectCalls, 0);
+
+        for (
+          const [field, value] of [
+            ["since", "not-a-date"],
+            ["until", "2026-07-29T10:00:00"],
+          ] as const
+        ) {
+          const invalidPool = new FakePool(() => undefined);
+          await assertRejects(
+            () =>
+              listSessionsInScope(asPool(invalidPool), {
+                [field]: value,
+                auth: AUTH,
+              }),
+            ValidationError,
+            field,
+          );
+          assertEquals(invalidPool.connectCalls, 0);
+        }
+
+        let listParams: unknown[] = [];
+        const listPool = new FakePool((sql, params) => {
+          if (sql.includes("SELECT id, session_id, title")) {
+            listParams = params;
+            return { rows: [] };
+          }
+          return undefined;
+        });
+        await listSessionsInScope(asPool(listPool), {
+          since: "2026-07-29",
+          until: "2026-07-30T12:00:00-04:00",
+          auth: AUTH,
+        });
+        assertEquals(listParams, [
+          "2026-07-29T00:00:00.000Z",
+          "2026-07-30T12:00:00-04:00",
+          50,
+        ]);
       },
     );
   } finally {

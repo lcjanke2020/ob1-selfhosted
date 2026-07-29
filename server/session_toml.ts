@@ -183,19 +183,89 @@ function parseVisibility(v: unknown): MemoryVisibility | null {
   );
 }
 
-// TOML date/datetime values parse to Date; keep ISO strings so the value is
-// deterministic for tests and unambiguous for Postgres timestamptz binding.
-function toIsoOrNull(field: string, v: unknown): string | null {
-  if (v === null || v === undefined) return null;
-  if (v instanceof Date) return v.toISOString();
-  if (typeof v === "string") return v.trim() || null;
-  throw new Error(`${field} must be a date or date/time string`);
+export const SESSION_TIMESTAMP_FORMAT_MESSAGE =
+  "must be YYYY-MM-DD or a valid ISO-8601 timestamp with a timezone";
+
+const DATE_ONLY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+const TIMESTAMP_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(Z|([+-])(\d{2}):(\d{2}))$/;
+
+function validCalendarDate(year: number, month: number, day: number): boolean {
+  if (year < 1 || year > 9999 || month < 1 || month > 12 || day < 1) {
+    return false;
+  }
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= days[month - 1];
 }
 
-// DATE column: keep only the calendar-date portion.
+function invalidTimestamp(field: string): Error {
+  return new Error(`${field} ${SESSION_TIMESTAMP_FORMAT_MESSAGE}`);
+}
+
+// Validate and normalize date/time strings before they can reach PostgreSQL.
+// Date-only values are the one documented convenience conversion: timestamp
+// fields expand them to midnight UTC. Full timestamps retain the caller's
+// explicit offset/text after validation, so raw structured state remains
+// recognizable while PostgreSQL receives an unambiguous instant.
+export function normalizeSessionTimestamp(
+  value: string,
+  field = "timestamp",
+): string {
+  const input = value.trim();
+  const date = DATE_ONLY_PATTERN.exec(input);
+  if (date) {
+    const [, y, m, d] = date;
+    if (validCalendarDate(Number(y), Number(m), Number(d))) {
+      return `${input}T00:00:00.000Z`;
+    }
+    throw invalidTimestamp(field);
+  }
+
+  const timestamp = TIMESTAMP_PATTERN.exec(input);
+  if (!timestamp) throw invalidTimestamp(field);
+  const [, y, m, d, hour, minute, second = "0", , , offsetHour, offsetMinute] =
+    timestamp;
+  if (
+    !validCalendarDate(Number(y), Number(m), Number(d)) ||
+    Number(hour) > 23 || Number(minute) > 59 || Number(second) > 59 ||
+    (offsetHour !== undefined &&
+      (Number(offsetHour) > 23 || Number(offsetMinute) > 59)) ||
+    !Number.isFinite(Date.parse(input))
+  ) {
+    throw invalidTimestamp(field);
+  }
+  return input;
+}
+
+export function isSessionTimestamp(value: string): boolean {
+  try {
+    normalizeSessionTimestamp(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// TOML date/datetime values parse to Date; normalize them to UTC. Quoted
+// strings go through the same strict validator used by MCP/REST list bounds.
+function toIsoOrNull(field: string, v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  if (v instanceof Date) {
+    if (!Number.isFinite(v.getTime())) throw invalidTimestamp(field);
+    return v.toISOString();
+  }
+  if (typeof v === "string") return normalizeSessionTimestamp(v, field);
+  throw invalidTimestamp(field);
+}
+
+// DATE column: normalize through UTC so an explicit offset and an unquoted
+// TOML datetime cannot produce different calendar dates for the same instant.
 function toDateOrNull(field: string, v: unknown): string | null {
-  const iso = toIsoOrNull(field, v);
-  return iso === null ? null : iso.split("T")[0];
+  const timestamp = toIsoOrNull(field, v);
+  return timestamp === null
+    ? null
+    : new Date(timestamp).toISOString().slice(0, 10);
 }
 
 function toStringArray(field: string, v: unknown): string[] {

@@ -309,6 +309,35 @@ tags = ["x"]
   assertEquals(rawToml, fenced); // body preserved, never parsed as TOML
 });
 
+Deno.test("parseSessionToml validates and normalizes session dates", () => {
+  const { session } = parseSessionToml(`title = "Dates"
+session_date = "2026-07-29T23:30:00-04:00"
+started_at = "2026-07-29"
+last_update = "2026-07-29T12:34:56.789-04:00"
+ended_at = 2026-07-29T17:00:00Z
+`);
+  assertEquals(session.session_date, "2026-07-30");
+  assertEquals(session.started_at, "2026-07-29T00:00:00.000Z");
+  assertEquals(session.last_update, "2026-07-29T12:34:56.789-04:00");
+  assertEquals(session.ended_at, "2026-07-29T17:00:00.000Z");
+
+  const invalid = [
+    ["session_date", 'session_date = "2026-02-30"'],
+    ["started_at", 'started_at = "2026-07-29T10:00:00"'],
+    ["started_at", 'started_at = "2026-07-29T24:00:00Z"'],
+    ["last_update", 'last_update = "not-a-date"'],
+    ["ended_at", 'ended_at = ""'],
+    ["ended_at", "ended_at = 7"],
+  ];
+  for (const [field, declaration] of invalid) {
+    assertThrows(
+      () => parseSessionToml(`title = "Dates"\n${declaration}`),
+      Error,
+      field,
+    );
+  }
+});
+
 Deno.test("parseSessionToml rejects malformed input", () => {
   assertThrows(() => parseSessionToml(`goal = "no title"`), Error, "title");
   assertThrows(

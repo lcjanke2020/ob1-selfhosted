@@ -114,8 +114,8 @@ to \`session_capture\`. The schema is **flat** — do NOT use nested
   changing lifecycle state so the stored status is preserved)
 
 Every ordinary string-valued scalar must use TOML string syntax; numbers and
-booleans are not coerced to strings. Session time fields also accept TOML
-date/datetime literals.
+booleans are not coerced to strings. Session time fields accept TOML
+date/datetime literals or quoted ISO-8601 strings.
 
 ## Optional arrays
 - \`tags\`, \`linked_issues\`, \`related_sessions\`, \`next_actions\`, \`blockers\`
@@ -252,7 +252,9 @@ export function createMcpServer(
     // output, and runtime-schema rejection.
     // 1.14.0: session capture rejects non-string values supplied to string
     // scalar/list fields and requires a strictly typed [[artifacts]] array.
-    version: "1.14.0",
+    // 1.15.0: session time fields and list bounds reject malformed values
+    // before database work; session search adds a bounded similarity floor.
+    version: "1.15.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -637,15 +639,16 @@ export function createMcpServer(
     {
       title: "Search Sessions",
       description:
-        "Semantic search over session title/goal/summary/resume_context. Optional structured filters by status, repo_url, tag. A fitting response is the existing [{id, session_id, title, status, last_update, score}] array; a truncated response is {results, truncation}. Oversized MCP results retain complete rows and identify omitted session IDs.",
+        "Semantic search over session title/goal/summary/resume_context with an optional minimum cosine-similarity threshold (default 0.5). Optional structured filters by status, repo_url, tag. A fitting response is the existing [{id, session_id, title, status, last_update, score}] array; a truncated response is {results, truncation}. Oversized MCP results retain complete rows and identify omitted session IDs.",
       annotations: { readOnlyHint: true },
       inputSchema: sessionSearchSchema,
     },
-    async ({ query, limit, status, repo_url, tag, scope }) => {
+    async ({ query, limit, threshold, status, repo_url, tag, scope }) => {
       try {
         const rows = await searchSessionsByQuery(pool, {
           query,
           limit,
+          threshold,
           status,
           repo_url,
           tag,

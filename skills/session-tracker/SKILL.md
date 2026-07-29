@@ -340,7 +340,8 @@ was reconstructed from the session record.
   filter; also filters by `repo_url`, `branch`, `agent`, `tag`, `linked_issue`, `since`,
   `until`).
 - Fuzzy recall over title/goal/summary/resume_context → `session_search(query, …)`
-  (semantic; optional `status` / `repo_url` / `tag` pre-filters).
+  (semantic; optional `status` / `repo_url` / `tag` pre-filters and `threshold` minimum
+  cosine similarity, default `0.5`).
 
 ## Lifecycle
 
