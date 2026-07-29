@@ -75,8 +75,9 @@ fields with `#` comments for readability; they round-trip.
 
 Every ordinary string-valued scalar must use TOML string syntax, including identity,
 location, prose, status, scope, and resumable-handle fields. The parser does not
-coerce numbers or booleans into strings. Session time fields also accept TOML
-date/datetime literals or quoted ISO-8601 strings.
+coerce numbers or booleans into strings. Session time fields also accept TOML date
+literals, timezone-qualified TOML datetime literals, or quoted timezone-qualified
+ISO-8601 strings.
 
 `tags`, `linked_issues`, `related_sessions`, `next_actions`, and `blockers` are
 **arrays of quoted strings** (`key = ["..."]`) — write the bare key, never `key[]`,
@@ -87,7 +88,9 @@ joins on them; it is not a foreign-key reference.
 
 - **`status` enum:** `active | awaiting_review | blocked | done | abandoned`.
 - **Timestamps** are ISO-8601. Date-only (`"2026-06-08"`) is accepted and expanded to
-  midnight UTC; full timestamps round-trip as given.
+  midnight UTC; full timestamps must carry `Z` or an explicit numeric offset and
+  round-trip as given. A timestamp supplied for `session_date` stores its UTC
+  calendar date.
 - **Embedded-for-search content** is `title` / `goal` / `summary` / `resume_context`;
   the server re-embeds only when that content changes (`content_hash`).
 

@@ -209,7 +209,10 @@ strings. A single `[artifacts]` table returns a validation error.
 Compatibility note for server 1.15.0: session time fields and list `since`/`until`
 bounds accept valid dates or timezone-qualified ISO-8601 timestamps and reject
 malformed values before database work. Session search also accepts an optional
-similarity `threshold` from 0 through 1, defaulting to `0.5`.
+similarity `threshold` from 0 through 1, defaulting to `0.5`. Date-only list
+bounds expand to midnight UTC, so a date-only `until` is the start of that day;
+use the following date or an explicit timestamp to include a whole day. A
+timestamp supplied as `session_date` stores the calendar date of its UTC instant.
 
 Session capture mirrors `session_capture`: omit `id` in the TOML to create
 (201), or include it to refresh the same row (200); `title` remains required on

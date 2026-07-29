@@ -331,6 +331,22 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
         sessionList.description?.includes("{results, truncation}"),
         "session_list must document its truncated response envelope",
       );
+      const sessionListProperties = sessionList.inputSchema.properties as
+        | Record<string, Record<string, unknown>>
+        | undefined;
+      assert(sessionListProperties, "session_list must publish properties");
+      assert(
+        String(sessionListProperties.since.description).includes(
+          "midnight UTC",
+        ),
+        "session_list must disclose date-only lower-bound expansion",
+      );
+      assert(
+        String(sessionListProperties.until.description).includes(
+          "start of that day",
+        ),
+        "session_list must disclose date-only upper-bound semantics",
+      );
 
       const connectionsBeforeInvalidList = pool.connectCalls;
       const invalidSessionList = await client.callTool({

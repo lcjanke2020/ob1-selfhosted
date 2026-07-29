@@ -114,8 +114,9 @@ to \`session_capture\`. The schema is **flat** — do NOT use nested
   changing lifecycle state so the stored status is preserved)
 
 Every ordinary string-valued scalar must use TOML string syntax; numbers and
-booleans are not coerced to strings. Session time fields accept TOML
-date/datetime literals or quoted ISO-8601 strings.
+booleans are not coerced to strings. Session time fields accept TOML date
+literals, timezone-qualified TOML datetime literals, or quoted
+timezone-qualified ISO-8601 strings.
 
 ## Optional arrays
 - \`tags\`, \`linked_issues\`, \`related_sessions\`, \`next_actions\`, \`blockers\`

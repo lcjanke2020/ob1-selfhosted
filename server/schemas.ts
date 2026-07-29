@@ -182,6 +182,8 @@ export const searchQuerySchema = boundedUtf8String(
   message: "query must not be empty",
 });
 
+// Thought and session vector search intentionally share one admission range
+// and default so the two semantic-search surfaces do not drift.
 export const similarityThresholdSchema = z.number().min(0).max(1).optional()
   .default(0.5);
 
@@ -271,12 +273,12 @@ export const sessionListShape = {
   since: z.string().refine(isSessionTimestamp, {
     message: SESSION_TIMESTAMP_FORMAT_MESSAGE,
   }).optional().describe(
-    "ISO date/datetime lower bound on last_update",
+    "ISO date/datetime lower bound on last_update; a date-only value expands to midnight UTC",
   ),
   until: z.string().refine(isSessionTimestamp, {
     message: SESSION_TIMESTAMP_FORMAT_MESSAGE,
   }).optional().describe(
-    "ISO date/datetime upper bound on last_update",
+    "Inclusive ISO date/datetime upper bound on last_update; a date-only value is midnight UTC at the start of that day",
   ),
   order_by: z.enum(SESSION_ORDER_BY).optional().default("last_update"),
   limit: z.number().int().min(1).max(200).optional().default(50),

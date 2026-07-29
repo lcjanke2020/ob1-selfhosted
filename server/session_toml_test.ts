@@ -370,6 +370,28 @@ ended_at = 2026-07-29T17:00:00Z
   }
 });
 
+Deno.test("bare local datetimes reject independently of the host timezone", () => {
+  const originalTimezone = Deno.env.get("TZ");
+  try {
+    for (const timezone of ["UTC", "Etc/GMT+4"]) {
+      Deno.env.set("TZ", timezone);
+      for (const field of ["session_date", "started_at"]) {
+        assertThrows(
+          () =>
+            parseSessionToml(
+              `title = "Local datetime"\n${field} = 2026-07-29T10:00:00`,
+            ),
+          Error,
+          field,
+        );
+      }
+    }
+  } finally {
+    if (originalTimezone === undefined) Deno.env.delete("TZ");
+    else Deno.env.set("TZ", originalTimezone);
+  }
+});
+
 Deno.test("bare TOML date validation ignores comments and string contents", () => {
   const { session } = parseSessionToml(`title = "Scanner boundaries"
 # last_update = 2026-02-30
