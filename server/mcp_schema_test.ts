@@ -283,6 +283,19 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
         sessionSearchProperties.query.maxLength,
         MAX_SEARCH_QUERY_BYTES,
       );
+      assert(
+        sessionSearch.description?.includes("{results, truncation}"),
+        "session_search must document its truncated response envelope",
+      );
+
+      const sessionList = listed.tools.find((tool) =>
+        tool.name === "session_list"
+      );
+      assert(sessionList, "session_list must be published");
+      assert(
+        sessionList.description?.includes("{results, truncation}"),
+        "session_list must document its truncated response envelope",
+      );
 
       const invalidSessionQueries = [
         "",
