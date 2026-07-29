@@ -16,6 +16,12 @@ import {
   type ParsedSession,
 } from "./session_toml.ts";
 
+// Match the thought-search floor: pgvector's default ef_search of 40 is a
+// smaller scan batch than the public session-search maximum of 50. Public
+// callers therefore use this floor today; Math.max also keeps internal/future
+// callers above it if they request more than 50 rows.
+const MIN_SESSION_HNSW_EF_SEARCH = 50;
+
 export type SessionProvenance = {
   // The transport door: 'funnel' (Auth0 Bearer via Tailscale Funnel — all
   // Anthropic surfaces) or 'tailnet' (x-brain-key from an on-network client).
@@ -385,6 +391,7 @@ export async function searchSessions(
   scope: ResolvedReadScope,
 ): Promise<SessionSearchRow[]> {
   const { embedding, limit = 5, status, repo_url, tag } = opts;
+  const candidateDepth = Math.max(MIN_SESSION_HNSW_EF_SEARCH, limit);
   const embStr = toVectorLiteral(embedding);
   const params: unknown[] = [embStr];
   let p = 2;
@@ -401,22 +408,64 @@ export async function searchSessions(
     cond.push(`tags @> ARRAY[$${p++}]::text[]`);
     params.push(tag);
   }
-  return await withScopeClient(pool, scope, async (client) => {
-    const r = await client.queryObject<
-      Omit<SessionSearchRow, "id" | "score"> & { id: bigint; score: string }
-    >(
-      `SELECT id, session_id, title, status, last_update,
-              workspace_id, project_id, visibility,
-              1 - (embedding <=> $1::vector) AS score
+  const searchParams = [...params, limit];
+  const approximateSql = `SELECT id, session_id, title, status, last_update,
+            workspace_id, project_id, visibility,
+            1 - (embedding <=> $1::vector) AS score
+     FROM sessions.session
+     WHERE ${cond.join(" AND ")}
+     ORDER BY embedding <=> $1::vector
+     LIMIT $${p}`;
+  // MATERIALIZED prevents the distance ordering from being satisfied by the
+  // HNSW index: PostgreSQL must first collect the RLS-visible, filter-eligible
+  // rows and then sort that finite relation by exact vector distance.
+  const exactFallbackSql = `WITH eligible AS MATERIALIZED (
+       SELECT id, session_id, title, status, last_update,
+              workspace_id, project_id, visibility, embedding
        FROM sessions.session
        WHERE ${cond.join(" AND ")}
-       ORDER BY embedding <=> $1::vector
-       LIMIT $${p}`,
-      [...params, limit],
+     )
+     SELECT id, session_id, title, status, last_update,
+            workspace_id, project_id, visibility,
+            1 - (embedding <=> $1::vector) AS score
+     FROM eligible
+     ORDER BY embedding <=> $1::vector
+     LIMIT $${p}`;
+  return await withScopeClient(pool, scope, async (client) => {
+    // RLS and the optional status/repository/tag predicates are residual
+    // filters on the HNSW scan. Without iterative scanning, all of the first
+    // approximate candidates can be discarded before a farther visible match
+    // is considered. Keep both controls transaction-local so pooled clients
+    // recover their pre-request state after commit or rollback.
+    await client.queryArray(
+      "SELECT set_config('hnsw.ef_search', $1::text, true)",
+      [String(candidateDepth)],
     );
+    await client.queryArray(
+      "SET LOCAL hnsw.iterative_scan = strict_order",
+    );
+
+    let result = await client.queryObject<
+      Omit<SessionSearchRow, "id" | "score"> & { id: bigint; score: string }
+    >(approximateSql, searchParams);
+
+    // Iterative HNSW remains bounded by pgvector's max_scan_tuples and scan
+    // memory. If RLS or residual predicates still exhaust that bounded scan,
+    // retry through the exact materialized path instead of silently returning
+    // fewer rows than are available. A genuinely sparse result pays for one
+    // exact confirmation; filled ANN requests retain the fast path.
+    if (result.rows.length < limit) {
+      result = await client.queryObject<
+        Omit<SessionSearchRow, "id" | "score"> & {
+          id: bigint;
+          score: string;
+        }
+      >(exactFallbackSql, searchParams);
+    }
+
     // id decodes as a BigInt and the distance expression as text; expose both
     // as JS numbers.
-    return r.rows.map((row) => ({
+    return result.rows.map((row) => ({
       ...row,
       id: Number(row.id),
       score: Number(row.score),

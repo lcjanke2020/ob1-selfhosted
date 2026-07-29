@@ -23,9 +23,11 @@
 # full `pg_dump -U openbrain_readonly`. If the read-only role can't dump any
 # object, the job fails. This catches this class of regression generically.
 #
-# Scoped to db/**, deploy/compose-local/docker-compose.yml (the Postgres image
-# pin it reads — see "Derive Postgres image" below), and this file — so it runs
-# when the schema/grants, the pinned image, or the test itself change.
+# Scoped to db/**, the session-HNSW production smoke and query path,
+# deploy/compose-local/docker-compose.yml (the Postgres image pin it reads —
+# see "Derive Postgres image" below), and this file — so it runs when the
+# schema/grants, filtered-session search, the pinned image, or the test itself
+# change.
 
 name: DB init smoke test
 
@@ -34,15 +36,37 @@ on:
     types: [opened, synchronize, reopened]
     branches: [main]
     paths:
-      - 'db/**'
-      - 'deploy/compose-local/docker-compose.yml'
-      - '.github/workflows/db-init.yml'
+      - "db/**"
+      - "server/session_queries.ts"
+      - "server/session_search_db_smoke.ts"
+      - "server/scoped_db.ts"
+      - "server/scope_contract.ts"
+      - "server/db_pool.ts"
+      - "server/embeddings.ts"
+      - "server/config.ts"
+      - "server/session_toml.ts"
+      - "server/postgres_deferred_patched.ts"
+      - "server/deno.json"
+      - "server/deno.lock"
+      - "deploy/compose-local/docker-compose.yml"
+      - ".github/workflows/db-init.yml"
   push:
     branches: [main]
     paths:
-      - 'db/**'
-      - 'deploy/compose-local/docker-compose.yml'
-      - '.github/workflows/db-init.yml'
+      - "db/**"
+      - "server/session_queries.ts"
+      - "server/session_search_db_smoke.ts"
+      - "server/scoped_db.ts"
+      - "server/scope_contract.ts"
+      - "server/db_pool.ts"
+      - "server/embeddings.ts"
+      - "server/config.ts"
+      - "server/session_toml.ts"
+      - "server/postgres_deferred_patched.ts"
+      - "server/deno.json"
+      - "server/deno.lock"
+      - "deploy/compose-local/docker-compose.yml"
+      - ".github/workflows/db-init.yml"
   workflow_dispatch:
 
 permissions:
@@ -75,6 +99,11 @@ jobs:
           ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
           fetch-depth: 1
 
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.4
+
       - name: Derive Postgres image from compose-local (single source of truth)
         run: |
           # Read the pinned pgvector image from compose so this test always
@@ -92,6 +121,7 @@ jobs:
           # Mount the init files individually (not the whole db/ dir) so the
           # ops-only summarize_funnel.sql never runs as init — mirrors compose.
           docker run -d --name pgci \
+            -p 127.0.0.1:55439:5432 \
             -e POSTGRES_DB -e POSTGRES_USER -e POSTGRES_PASSWORD \
             -e OPENBRAIN_APP_PASSWORD -e OPENBRAIN_READONLY_PASSWORD \
             -e OPENBRAIN_INGESTER_PASSWORD -e OPENBRAIN_MONITOR_PASSWORD \
@@ -245,6 +275,19 @@ jobs:
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
             -v ON_ERROR_STOP=1 < db/spaces-smoke.sql >/dev/null
           echo "spaces RLS, sensitive ownership, dedupe, artifacts, and GUC reuse passed"
+
+      - name: Smoke test — session HNSW survives audience and residual filters
+        env:
+          DB_SMOKE_REBUILDS: "1"
+        run: |
+          # Calls the checked-out production searchSessions function as the
+          # forced-RLS app role. The smoke separately forces and plan-checks
+          # an exact reference, then verifies commit/rollback GUC restoration
+          # and repeats after rebuilding the approximate index.
+          deno run --config server/deno.json --frozen \
+            --allow-env \
+            --allow-net=127.0.0.1:55439 \
+            server/session_search_db_smoke.ts
 
       - name: Smoke test — openbrain_readonly can run a full pg_dump
         run: |
