@@ -1,8 +1,9 @@
 # Alerting when metadata extraction degrades
 
-The metadata extractor degrades in three ways, and every one of them is
-announced as a single line on the mcp container's **stderr** — which nobody
-reads.
+The metadata extractor has three operator-relevant degradation outcomes, and
+every one of them is announced on the mcp container's **stderr** — which nobody
+reads. Primary-attempt failures additionally carry a reason-specific line so
+endpoint availability and model-output quality no longer look identical.
 The worst of the three can mean **a thought's full text left your network**
 (whether it did depends on where `FALLBACK_CHAT_API_BASE` points). The
 server intentionally never blocks a capture on classification, so without an
@@ -29,16 +30,20 @@ no thought content; grep for the stable substrings shown.
 |---|---|---|
 | `classified via FALLBACK endpoint` | Content may have left your network (depends on `FALLBACK_CHAT_API_BASE`). The headline event. | high |
 | `stamping uncategorized stub` | Every configured endpoint failed; the thought is stored with placeholder metadata and won't surface under topic/type filters until backfilled. | normal |
-| `primary endpoint failed` | Primary-path health warning — fires even when the fallback then rescues the capture, and covers every primary failure mode alike: connectivity errors, timeouts, non-2xx responses, unparseable output, schema-invalid metadata (see the verification note at the end of the [GPU-qube transport doc](../deploy/qubes/gpu-offload-transport.md)). On a deployment that keeps a resident local model (transport doc §6–7), recurring firings deserve a diagnosis — a broken residency guarantee (§6) is one field-observed cause, not the conclusion. | normal |
+| `primary endpoint failed (transport/timeout)` | The request could not complete. On a deployment that keeps a resident local model, recurring firings are an availability signal: diagnose reachability, cold starts, timeouts, and residency (see the [GPU-qube transport doc](../deploy/qubes/gpu-offload-transport.md) §6–7). | normal |
+| `primary endpoint failed (non-2xx response)` | The endpoint was reachable but rejected or failed the request. Check its server logs and support for the configured request shape. | normal |
+| `primary endpoint returned an invalid response` | The endpoint returned 2xx, but not a usable OpenAI-compatible completion envelope. | normal |
+| `primary endpoint returned unparseable metadata` | The completion envelope was usable, but the model's content was not JSON. This is an output-quality signal, not an availability signal. | normal |
+| `primary endpoint returned schema-invalid metadata` | The model returned JSON that failed the local runtime schema. A recurring rejection is a model-quality or compatibility regression; when fallback is configured it can systematically route capture content to that fallback. | high |
 
-All three are `console.warn` lines, which Deno emits on **stderr**; only the
+These are all `console.warn` lines, which Deno emits on **stderr**; only the
 healthy `classified via primary endpoint` confirmation goes to stdout. The
 sketch below sees them because `docker logs` replays the container's stderr
 onto its own and the `2>&1` merges it into the scanned text — that redirect is
 load-bearing, not error plumbing. If you adapt the sketch to anything that
-splits the streams — `docker logs` piped without `2>&1`, journald forwarding,
-a log shipper — make sure the stderr leg survives, or the monitor goes silent
-on exactly the lines it exists to catch.
+splits the streams — `docker logs` piped without `2>&1`, journald forwarding, a
+log shipper — make sure the stderr leg survives, or the monitor goes silent on
+exactly the lines it exists to catch.
 
 ## Alert content policy
 
@@ -175,7 +180,7 @@ fi
 
 fallback=$(grep -c "classified via FALLBACK endpoint" <<<"$logs") || true
 stub=$(grep -c "stamping uncategorized stub" <<<"$logs") || true
-primfail=$(grep -c "primary endpoint failed" <<<"$logs") || true
+primfail=$(grep -Ec "primary endpoint (failed|returned (an invalid response|unparseable metadata|schema-invalid metadata))" <<<"$logs") || true
 
 pf=$((pf + fallback)); ps=$((ps + stub)); pp=$((pp + primfail))
 

@@ -426,11 +426,12 @@ in front of a capture. Two companion settings, same qube:
   transport exists to prevent. Captures still succeed and the extractor *does*
   warn on every fallback classification, but only in the container logs — so
   check them deliberately: capture a test thought and look for
-  `[metadata] classified via primary endpoint`. A `primary endpoint failed`
-  line followed by `classified via FALLBACK endpoint` proves only that the
-  primary failed — the same line covers a rejected request shape, connectivity
-  errors, timeouts, non-2xx responses, and unparseable output alike; check the
-  model server's own logs to tell which.
+  `[metadata] classified via primary endpoint`. Failure lines now identify the
+  broad cause: `primary endpoint failed (transport/timeout)` is an availability
+  signal, `primary endpoint failed (non-2xx response)` is a server or request-
+  compatibility failure, and `primary endpoint returned … metadata` identifies
+  invalid, unparseable, or runtime-schema-rejected output. Check the model
+  server's own logs for the detail within that class.
 - This plumbing exists only to keep content on a **loopback-only** GPU qube. A
   reachable OpenAI-compatible server (local or over the tailnet) used directly
   as `CHAT_API_BASE` needs none of it.
