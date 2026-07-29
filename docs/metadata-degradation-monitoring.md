@@ -1,13 +1,13 @@
 # Alerting when metadata extraction degrades
 
-The metadata extractor has three operator-relevant degradation outcomes, and
-every one of them is announced on the mcp container's **stderr** — which nobody
+The metadata extractor has three operator-relevant degradation outcome classes,
+and every event is announced on the mcp container's **stderr** — which nobody
 reads. Primary-attempt failures additionally carry a reason-specific line so
-endpoint availability and model-output quality no longer look identical.
-The worst of the three can mean **a thought's full text left your network**
-(whether it did depends on where `FALLBACK_CHAT_API_BASE` points). The
-server intentionally never blocks a capture on classification, so without an
-operator-side alert the only "detection" is noticing, days later, that topic
+endpoint availability and model-output quality no longer look identical. The
+privacy-sensitive fallback class can mean **a thought's full text left your
+network** (whether it did depends on where `FALLBACK_CHAT_API_BASE` points).
+The server intentionally never blocks a capture on classification, so without
+an operator-side alert the only "detection" is noticing, days later, that topic
 filters miss recent thoughts — or that your GPU's fans stayed quiet when they
 shouldn't have.
 
@@ -23,8 +23,8 @@ timer can carry it.
 
 ## The trigger lines
 
-All three come from [`server/metadata.ts`](../server/metadata.ts) and contain
-no thought content; grep for the stable substrings shown.
+All lines below come from [`server/metadata.ts`](../server/metadata.ts) and
+contain no thought content; grep for the stable substrings shown.
 
 | log line (substring) | what it means | suggested priority |
 |---|---|---|
@@ -35,6 +35,19 @@ no thought content; grep for the stable substrings shown.
 | `primary endpoint returned an invalid response` | The endpoint returned 2xx, but not a usable OpenAI-compatible completion envelope. | normal |
 | `primary endpoint returned unparseable metadata` | The completion envelope was usable, but the model's content was not JSON. This is an output-quality signal, not an availability signal. | normal |
 | `primary endpoint returned schema-invalid metadata` | The model returned JSON that failed the local runtime schema. A recurring rejection is a model-quality or compatibility regression; when fallback is configured it can systematically route capture content to that fallback. | high |
+
+**Upgrade note:** if you deployed an earlier revision of the monitor sketch,
+replace its `grep -c "primary endpoint failed"` expression when this server
+change rolls out. The old expression counts only the two availability forms
+and silently misses the three new `primary endpoint returned …` forms. The
+fallback-classified and stub counters are unchanged.
+
+The reference monitor deliberately aggregates all five primary failure forms
+into one `primary-fail` counter. When schema rejection actually routes content
+to a configured fallback, that capture also emits the high-priority
+`classified via FALLBACK endpoint` line; without a fallback, it stubs locally
+and remains a normal-priority quality event. That companion signal is why the
+sketch does not need a second schema-only counter to honor the table's priority.
 
 These are all `console.warn` lines, which Deno emits on **stderr**; only the
 healthy `classified via primary endpoint` confirmation goes to stdout. The

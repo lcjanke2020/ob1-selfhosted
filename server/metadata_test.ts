@@ -13,6 +13,7 @@ import { assertEquals } from "jsr:@std/assert@1";
 
 const PRIMARY_BASE = "http://primary.invalid/v1";
 const FALLBACK_BASE = "http://fallback.invalid/v1";
+const TEST_CHAT_TIMEOUT_MS = 40;
 
 const ENV_KEYS = [
   "DB_PASSWORD",
@@ -47,9 +48,52 @@ function chatOk(obj: unknown): Response {
 }
 
 // Error response with a null body so the test resource sanitizer sees no
-// unconsumed body stream (the production code returns null without reading it).
+// unconsumed body stream (production cancels a non-2xx body without reading it).
 function chatErr(status: number): Response {
   return new Response(null, { status });
+}
+
+function stalledChatResponse(
+  signal: AbortSignal | null | undefined,
+): { response: Response; release: () => void } {
+  const encoder = new TextEncoder();
+  let open = true;
+  let streamController: ReadableStreamDefaultController<Uint8Array>;
+
+  const abortBody = () => {
+    if (!open) return;
+    open = false;
+    streamController.error(
+      signal?.reason ??
+        new DOMException("The operation was aborted", "AbortError"),
+    );
+  };
+
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      streamController = controller;
+      controller.enqueue(encoder.encode("{"));
+      if (signal?.aborted) abortBody();
+      else signal?.addEventListener("abort", abortBody, { once: true });
+    },
+    cancel() {
+      open = false;
+      signal?.removeEventListener("abort", abortBody);
+    },
+  });
+
+  return {
+    response: new Response(body, {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+    release: () => {
+      signal?.removeEventListener("abort", abortBody);
+      if (!open) return;
+      open = false;
+      streamController.error(new Error("stalled-response test cleanup"));
+    },
+  };
 }
 
 function validMetadata(
@@ -79,6 +123,7 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
   Deno.env.set("CHAT_API_BASE", PRIMARY_BASE);
   Deno.env.set("CHAT_MODEL", "local-model");
+  Deno.env.set("CHAT_TIMEOUT_MS", String(TEST_CHAT_TIMEOUT_MS));
   Deno.env.delete("CHAT_API_KEY"); // primary needs no auth (e.g. local ollama)
   Deno.env.set("FALLBACK_CHAT_API_BASE", FALLBACK_BASE);
   Deno.env.set("FALLBACK_CHAT_MODEL", "hosted-model");
@@ -87,7 +132,8 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
 
   const calls: Captured[] = [];
   // Reassigned per step to choose what each endpoint returns.
-  let responder: (c: Captured) => Response = () => chatErr(500);
+  let responder: (c: Captured, init?: RequestInit) => Response = () =>
+    chatErr(500);
   const warnings: string[] = [];
 
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
@@ -98,7 +144,7 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
     const headers = (init?.headers ?? {}) as Record<string, string>;
     const captured: Captured = { url, body, headers };
     calls.push(captured);
-    return Promise.resolve(responder(captured));
+    return Promise.resolve(responder(captured, init));
   }) as typeof fetch;
   console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
 
@@ -216,6 +262,58 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
           warnings[0],
           "[metadata] primary endpoint returned an invalid response — falling through",
         );
+      },
+    );
+
+    await t.step(
+      "primary malformed outer JSON is an invalid response",
+      async () => {
+        calls.length = 0;
+        warnings.length = 0;
+        responder = (c) =>
+          c.url.startsWith(PRIMARY_BASE)
+            ? new Response("{", {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            })
+            : chatOk(validMetadata({ topics: ["malformed-fallback"] }));
+
+        const r = await extractMetadata("anything");
+        assertEquals(r.topics, ["malformed-fallback"]);
+        assertEquals(calls.length, 2);
+        assertEquals(
+          warnings[0],
+          "[metadata] primary endpoint returned an invalid response — falling through",
+        );
+      },
+    );
+
+    await t.step(
+      "primary response body timeout is a transport failure",
+      async () => {
+        calls.length = 0;
+        warnings.length = 0;
+        let releaseBody = () => {};
+        responder = (c, init) => {
+          if (c.url.startsWith(PRIMARY_BASE)) {
+            const stalled = stalledChatResponse(init?.signal);
+            releaseBody = stalled.release;
+            return stalled.response;
+          }
+          return chatOk(validMetadata({ topics: ["timeout-fallback"] }));
+        };
+
+        try {
+          const r = await extractMetadata("anything");
+          assertEquals(r.topics, ["timeout-fallback"]);
+          assertEquals(calls.length, 2);
+          assertEquals(
+            warnings[0],
+            "[metadata] primary endpoint failed (transport/timeout)",
+          );
+        } finally {
+          releaseBody();
+        }
       },
     );
 

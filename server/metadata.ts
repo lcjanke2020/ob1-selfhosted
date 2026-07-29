@@ -240,6 +240,8 @@ function logClassificationFailure(
         `[metadata] ${endpoint} endpoint returned schema-invalid metadata — falling through`,
       );
       return;
+    default:
+      reason satisfies never;
   }
 }
 
