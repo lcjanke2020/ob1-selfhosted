@@ -12,6 +12,7 @@ import {
   type QueryHandler,
 } from "./api_test_support.ts";
 import { computeContentHash, parseSessionToml } from "./session_toml.ts";
+import { MAX_SEARCH_QUERY_BYTES } from "./schemas.ts";
 
 const KEY = "k".repeat(64);
 
@@ -193,6 +194,34 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
       assertEquals(body.results[0].id, 7);
       assertEquals(body.results[0].score, 0.87);
     });
+
+    await t.step(
+      "POST /sessions/search rejects blank and oversized UTF-8 queries before work",
+      async () => {
+        const pool = new FakePool(() => undefined);
+        const deps = makeDeps();
+        const api = createApiRouter(asPool(pool), deps);
+        const invalidQueries = [
+          "",
+          "   \t\n",
+          "x".repeat(MAX_SEARCH_QUERY_BYTES + 1),
+          "é".repeat(MAX_SEARCH_QUERY_BYTES / 2 + 1),
+        ];
+
+        for (const query of invalidQueries) {
+          const res = await api.request(
+            "/sessions/search",
+            authed({ method: "POST", body: JSON.stringify({ query }) }),
+          );
+          assertEquals(res.status, 400);
+          const body = await res.json();
+          assertEquals(body.error.code, "validation_error");
+          assert(body.error.message.includes("query"));
+        }
+        assertEquals(deps.embedCalls, []);
+        assertEquals(pool.connectCalls, 0);
+      },
+    );
 
     await t.step("GET /sessions/lookup?id=7 → 200 full record", async () => {
       const api = makeApi((sql) => {

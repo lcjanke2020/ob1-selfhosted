@@ -170,7 +170,7 @@ export const captureThoughtShape = {
   ),
 };
 
-export const thoughtSearchQuerySchema = boundedUtf8String(
+export const searchQuerySchema = boundedUtf8String(
   "query",
   MAX_SEARCH_QUERY_BYTES,
 ).refine((query) => query.trim().length > 0, {
@@ -178,7 +178,7 @@ export const thoughtSearchQuerySchema = boundedUtf8String(
 });
 
 export const searchThoughtsShape = {
-  query: thoughtSearchQuerySchema.describe(
+  query: searchQuerySchema.describe(
     "Natural-language or literal text to search for. The lexical leg supports quoted phrases, OR, and -term web-search syntax.",
   ),
   limit: z.number().int().min(1).max(100).optional().default(10),
@@ -206,8 +206,13 @@ export const listThoughtsShape = {
   scope: memoryScopeSchema.optional(),
 };
 
+// Thought ids are Postgres gen_random_uuid() values. This single validator is
+// shared by MCP fetch and the REST path so malformed ids fail at either
+// transport boundary instead of reaching a PostgreSQL UUID cast.
+export const thoughtIdSchema = z.uuid();
+
 export const fetchThoughtShape = {
-  id: z.string().describe("The thought ID returned by search"),
+  id: thoughtIdSchema.describe("The thought ID returned by search"),
   scope: memoryScopeSchema.optional(),
 };
 
@@ -235,7 +240,7 @@ export const sessionLookupShape = {
 };
 
 export const sessionSearchShape = {
-  query: z.string().min(1).describe("What to search for"),
+  query: searchQuerySchema.describe("What to search for"),
   limit: z.number().int().min(1).max(50).optional().default(5),
   status: z.enum(SESSION_STATUSES).optional(),
   repo_url: z.string().optional(),
@@ -285,7 +290,7 @@ export const sessionListSchema = z.object(sessionListShape).strict();
 export const sessionUpdateStatusSchema = z.object(sessionUpdateStatusShape)
   .strict();
 export const compatibilitySearchSchema = z.object({
-  query: thoughtSearchQuerySchema.describe(
+  query: searchQuerySchema.describe(
     "The search query to run against Open Brain",
   ),
   scope: memoryScopeSchema.optional(),
@@ -358,9 +363,9 @@ export const sessionLookupQuery = z.object({
 
 // ---- REST path params -------------------------------------------------
 
-// Thought ids are Postgres gen_random_uuid() values; rejecting a malformed id
-// here yields a 400 instead of a Postgres uuid-cast error surfacing as a 500.
-export const thoughtIdParam = z.uuid();
+// Keep the route-oriented export name used by api.ts while sharing the exact
+// UUID contract with MCP fetch above.
+export const thoughtIdParam = thoughtIdSchema;
 
 // The session key is a BIGINT identity. The safe-integer ceiling mirrors
 // toPositiveIntOrNull in session_toml.ts: a value past 2^53-1 would round

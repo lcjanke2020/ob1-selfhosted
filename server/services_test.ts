@@ -67,6 +67,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
   const {
     captureSessionFromToml,
     captureThoughtWithMetadata,
+    fetchThoughtInScope,
     NotFoundError,
     searchSessionsByQuery,
     searchThoughtsByQuery,
@@ -462,6 +463,19 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
+    await t.step(
+      "thought fetch: direct callers reject malformed UUIDs before DB work",
+      async () => {
+        const pool = new FakePool(() => undefined);
+        await assertRejects(
+          () => fetchThoughtInScope(asPool(pool), "not-a-uuid", { auth: AUTH }),
+          ValidationError,
+          "id",
+        );
+        assertEquals(pool.connectCalls, 0);
+      },
+    );
+
     await t.step("session search: embed failure → UpstreamError", async () => {
       const pool = new FakePool(() => undefined);
       const { deps, message } = makeEmbedDownDeps();
@@ -476,6 +490,35 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         message,
       );
     });
+
+    await t.step(
+      "session search: direct callers reject invalid queries before DB or embedding",
+      async () => {
+        const pool = new FakePool(() => undefined);
+        const deps = makeDeps();
+        const invalidQueries = [
+          "",
+          "   \t\n",
+          "x".repeat(MAX_SEARCH_QUERY_BYTES + 1),
+          "é".repeat(MAX_SEARCH_QUERY_BYTES / 2 + 1),
+        ];
+
+        for (const query of invalidQueries) {
+          await assertRejects(
+            () =>
+              searchSessionsByQuery(
+                asPool(pool),
+                { query, auth: AUTH },
+                deps,
+              ),
+            ValidationError,
+            "query",
+          );
+        }
+        assertEquals(deps.embedCalls, []);
+        assertEquals(pool.connectCalls, 0);
+      },
+    );
 
     await t.step("session search: filters flow into SQL params", async () => {
       let captured: unknown[] = [];

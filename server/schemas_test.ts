@@ -7,6 +7,7 @@
 import { assert, assertEquals, assertFalse } from "jsr:@std/assert@1";
 import {
   captureThoughtBody,
+  fetchThoughtSchema,
   listSessionsQuery,
   listThoughtsQuery,
   MAX_CONTENT_BYTES,
@@ -164,6 +165,35 @@ Deno.test("search body: bounds enforced", () => {
   );
 });
 
+Deno.test("session search query: shares nonblank UTF-8 byte boundaries", () => {
+  assertFalse(sessionSearchBody.safeParse({ query: "" }).success);
+  assertFalse(sessionSearchBody.safeParse({ query: "   \t\n" }).success);
+
+  assert(
+    sessionSearchBody.safeParse({
+      query: "x".repeat(MAX_SEARCH_QUERY_BYTES),
+    }).success,
+  );
+  assertFalse(
+    sessionSearchBody.safeParse({
+      query: "x".repeat(MAX_SEARCH_QUERY_BYTES + 1),
+    }).success,
+  );
+
+  // `é` is one UTF-16 code unit but two UTF-8 bytes. The exact byte boundary
+  // is accepted and one additional code point is rejected.
+  assert(
+    sessionSearchBody.safeParse({
+      query: "é".repeat(MAX_SEARCH_QUERY_BYTES / 2),
+    }).success,
+  );
+  assertFalse(
+    sessionSearchBody.safeParse({
+      query: "é".repeat(MAX_SEARCH_QUERY_BYTES / 2 + 1),
+    }).success,
+  );
+});
+
 Deno.test("memory scope: exact upstream fields are strict and bounded", () => {
   const valid = searchThoughtsBody.safeParse({
     query: "private",
@@ -305,12 +335,29 @@ Deno.test("session lookup query: id or branch required", () => {
   assertEquals(byId.data.id, 7);
 });
 
-Deno.test("thought id param: UUID shape enforced", () => {
+Deno.test("thought id: MCP fetch and REST path share one UUID contract", () => {
+  const cases: unknown[] = [
+    "6f6c0d3a-9a0b-4e3e-8f4a-2d1c5b7e9a01",
+    "",
+    "42",
+    "not-a-uuid",
+    "6f6c0d3a-9a0b-4e3e-8f4a",
+    42,
+    null,
+    undefined,
+  ];
+  for (const id of cases) {
+    assertEquals(
+      fetchThoughtSchema.safeParse({ id }).success,
+      thoughtIdParam.safeParse(id).success,
+    );
+  }
   assert(
-    thoughtIdParam.safeParse("6f6c0d3a-9a0b-4e3e-8f4a-2d1c5b7e9a01").success,
+    fetchThoughtSchema.safeParse({
+      id: "6f6c0d3a-9a0b-4e3e-8f4a-2d1c5b7e9a01",
+    }).success,
   );
-  assertFalse(thoughtIdParam.safeParse("42").success);
-  assertFalse(thoughtIdParam.safeParse("not-a-uuid").success);
+  assertFalse(fetchThoughtSchema.safeParse({}).success);
 });
 
 Deno.test("session id param: positive safe integer, coerced from the path string", () => {
