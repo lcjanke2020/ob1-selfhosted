@@ -29,6 +29,20 @@ Deno.test("MCP result budget: ordinary text and JSON remain byte-for-byte stable
   assertEquals(textOf(result), JSON.stringify(rows));
 });
 
+Deno.test("MCP result budget: exact serialized boundary fits and one byte over truncates", () => {
+  const envelopeBytes = serializedMcpResultBytes(mcpText(""));
+  const exactText = "x".repeat(MAX_MCP_TOOL_RESULT_BYTES - envelopeBytes);
+  const exact = mcpText(exactText);
+
+  assertEquals(textOf(exact), exactText);
+  assertEquals(serializedMcpResultBytes(exact), MAX_MCP_TOOL_RESULT_BYTES);
+
+  const oneOver = mcpText(`${exactText}x`);
+  assert(serializedMcpResultBytes(oneOver) <= MAX_MCP_TOOL_RESULT_BYTES);
+  assertFalse(textOf(oneOver) === `${exactText}x`);
+  assertStringIncludes(textOf(oneOver), "MCP result truncation");
+});
+
 Deno.test("MCP result budget: text aggregation keeps whole records and recovery IDs", () => {
   const records = [
     { id: "thought-1", content: "a".repeat(100_000) },
@@ -95,6 +109,50 @@ Deno.test("MCP result budget: JSON aggregation is byte-counted for multibyte row
   });
 });
 
+Deno.test("MCP result budget: maximum-cardinality collection work stays linear", () => {
+  const records = Array.from(
+    { length: 200 },
+    (_, index) => ({ id: index + 1, content: "x".repeat(1_000) }),
+  );
+  let jsonIdCalls = 0;
+  const jsonResult = mcpJsonCollection(records, {
+    fullPayload: (values) => values,
+    id: (record) => {
+      jsonIdCalls++;
+      return record.id;
+    },
+    recovery: "Call lookup for each omitted ID.",
+  });
+  const jsonPayload = JSON.parse(textOf(jsonResult));
+
+  assertEquals(jsonIdCalls, records.length);
+  assert(jsonPayload.results.length > 0);
+  assert(jsonPayload.results.length < records.length);
+  assert(serializedMcpResultBytes(jsonResult) <= MAX_MCP_TOOL_RESULT_BYTES);
+
+  let textIdCalls = 0;
+  let renderCalls = 0;
+  const textResult = mcpTextRecords(records, {
+    fullHeading: (total) => `${total} records:`,
+    truncatedHeading: (included, total) =>
+      `Showing ${included} of ${total} records:`,
+    renderRecord: (record) => {
+      renderCalls++;
+      return `${record.id}: ${record.content}`;
+    },
+    id: (record) => {
+      textIdCalls++;
+      return record.id;
+    },
+    recovery: "Call fetch for each omitted ID.",
+  });
+
+  assertEquals(renderCalls, records.length);
+  assertEquals(textIdCalls, records.length);
+  assertStringIncludes(textOf(textResult), '"truncated":true');
+  assert(serializedMcpResultBytes(textResult) <= MAX_MCP_TOOL_RESULT_BYTES);
+});
+
 Deno.test("MCP result budget: lookup drops duplicated raw TOML before prose", () => {
   const summary = "s".repeat(99_000);
   const record = {
@@ -121,6 +179,27 @@ Deno.test("MCP result budget: lookup drops duplicated raw TOML before prose", ()
     omitted_fields: ["raw_toml"],
     recovery: "Structured fields are authoritative; use REST for raw TOML.",
   });
+});
+
+Deno.test("MCP result budget: lookup restores metadata after reducing oversized text", () => {
+  const metadata = { topics: ["budgeting"], type: "observation" };
+  const result = mcpJsonRecord({
+    id: "thought-1",
+    text: '"'.repeat(70_000),
+    metadata,
+  }, {
+    reductions: [
+      { field: "metadata", action: "replace", value: {} },
+      { field: "text", action: "replace", value: "[text omitted]" },
+    ],
+    recovery: "Use the fully scoped REST path.",
+  });
+  const payload = JSON.parse(textOf(result));
+
+  assert(serializedMcpResultBytes(result) <= MAX_MCP_TOOL_RESULT_BYTES);
+  assertEquals(payload.metadata, metadata);
+  assertEquals(payload.text, "[text omitted]");
+  assertEquals(payload.truncation.omitted_fields, ["text"]);
 });
 
 Deno.test("MCP result budget: generic truncation preserves valid multibyte text", () => {

@@ -23,6 +23,13 @@ const THOUGHT_IDS = [
 ];
 const LARGE_THOUGHTS = ["a".repeat(100_000), "b".repeat(100_000)];
 const LARGE_SESSION_TITLES = ["c".repeat(80_000), "d".repeat(80_000)];
+const NON_DEFAULT_SCOPE = {
+  workspace_id: "research",
+  project_id: "mcp-boundaries",
+  visibility: "project",
+} as const;
+const SCOPED_REST_QUERY =
+  "workspace_id=research&project_id=mcp-boundaries&visibility=project";
 
 function resultText(result: unknown): string {
   const parsed = result as {
@@ -39,6 +46,13 @@ function assertWithinBudget(result: unknown): void {
     bytes <= MAX_MCP_TOOL_RESULT_BYTES,
     `${bytes} serialized bytes exceeded ${MAX_MCP_TOOL_RESULT_BYTES}`,
   );
+}
+
+function textTruncation(output: string): Record<string, unknown> {
+  const marker = "--- MCP result truncation ---\n";
+  const markerIndex = output.lastIndexOf(marker);
+  assert(markerIndex >= 0, "expected text truncation metadata");
+  return JSON.parse(output.slice(markerIndex + marker.length));
 }
 
 Deno.test("MCP read tools enforce one serialized result budget", async () => {
@@ -63,9 +77,9 @@ Deno.test("MCP read tools enforce one serialized result budget", async () => {
             id,
             content: LARGE_THOUGHTS[index],
             metadata: {},
-            workspace_id: "default",
-            project_id: null,
-            visibility: "workspace",
+            workspace_id: NON_DEFAULT_SCOPE.workspace_id,
+            project_id: NON_DEFAULT_SCOPE.project_id,
+            visibility: NON_DEFAULT_SCOPE.visibility,
             created_at: "2026-07-28T00:00:00Z",
             similarity: "0.9",
             vector_rank: index + 1,
@@ -78,11 +92,11 @@ Deno.test("MCP read tools enforce one serialized result budget", async () => {
         return {
           rows: [{
             id: THOUGHT_IDS[0],
-            content: LARGE_THOUGHTS[0],
-            metadata: {},
-            workspace_id: "default",
-            project_id: null,
-            visibility: "workspace",
+            content: '"'.repeat(70_000),
+            metadata: { topics: ["budgeting"] },
+            workspace_id: NON_DEFAULT_SCOPE.workspace_id,
+            project_id: NON_DEFAULT_SCOPE.project_id,
+            visibility: NON_DEFAULT_SCOPE.visibility,
             created_at: "2026-07-28T00:00:00Z",
             updated_at: "2026-07-28T00:00:00Z",
           }],
@@ -96,9 +110,9 @@ Deno.test("MCP read tools enforce one serialized result budget", async () => {
             id,
             content: LARGE_THOUGHTS[index],
             metadata: {},
-            workspace_id: "default",
-            project_id: null,
-            visibility: "workspace",
+            workspace_id: NON_DEFAULT_SCOPE.workspace_id,
+            project_id: NON_DEFAULT_SCOPE.project_id,
+            visibility: NON_DEFAULT_SCOPE.visibility,
             created_at: `2026-07-2${8 - index}T00:00:00Z`,
             updated_at: null,
           })),
@@ -116,9 +130,9 @@ Deno.test("MCP read tools enforce one serialized result budget", async () => {
             status: "active",
             last_update: "2026-07-28T00:00:00Z",
             score: "0.9",
-            workspace_id: "default",
-            project_id: null,
-            visibility: "workspace",
+            workspace_id: NON_DEFAULT_SCOPE.workspace_id,
+            project_id: NON_DEFAULT_SCOPE.project_id,
+            visibility: NON_DEFAULT_SCOPE.visibility,
           })),
         };
       }
@@ -136,9 +150,9 @@ Deno.test("MCP read tools enforce one serialized result budget", async () => {
             repo_url: null,
             branch: null,
             last_update: "2026-07-28T00:00:00Z",
-            workspace_id: "default",
-            project_id: null,
-            visibility: "workspace",
+            workspace_id: NON_DEFAULT_SCOPE.workspace_id,
+            project_id: NON_DEFAULT_SCOPE.project_id,
+            visibility: NON_DEFAULT_SCOPE.visibility,
           })),
         };
       }
@@ -172,9 +186,9 @@ Deno.test("MCP read tools enforce one serialized result budget", async () => {
             summary,
             source: "tailnet",
             source_node: null,
-            workspace_id: "default",
-            project_id: null,
-            visibility: "workspace",
+            workspace_id: NON_DEFAULT_SCOPE.workspace_id,
+            project_id: NON_DEFAULT_SCOPE.project_id,
+            visibility: NON_DEFAULT_SCOPE.visibility,
             raw_toml: rawToml,
             content_hash: "fixture-hash",
             created_at: "2026-07-28T00:00:00Z",
@@ -200,7 +214,7 @@ Deno.test("MCP read tools enforce one serialized result budget", async () => {
 
       const compatibilitySearch = await client.callTool({
         name: "search",
-        arguments: { query: "budget" },
+        arguments: { query: "budget", scope: NON_DEFAULT_SCOPE },
       });
       assertWithinBudget(compatibilitySearch);
       assertFalse(
@@ -210,15 +224,25 @@ Deno.test("MCP read tools enforce one serialized result budget", async () => {
 
       const fetch = await client.callTool({
         name: "fetch",
-        arguments: { id: THOUGHT_IDS[0] },
+        arguments: { id: THOUGHT_IDS[0], scope: NON_DEFAULT_SCOPE },
       });
       assertWithinBudget(fetch);
-      assertEquals(JSON.parse(resultText(fetch)).text.length, 100_000);
+      const fetchPayload = JSON.parse(resultText(fetch));
+      assertEquals(fetchPayload.metadata.topics, ["budgeting"]);
+      assertEquals(fetchPayload.truncation.omitted_fields, ["text"]);
+      assert(
+        fetchPayload.truncation.recovery.includes(
+          `/api/v1/thoughts/${THOUGHT_IDS[0]}?${SCOPED_REST_QUERY}`,
+        ),
+      );
 
       for (
         const [name, args] of [
-          ["search_thoughts", { query: "budget", limit: 2 }],
-          ["list_thoughts", { limit: 2 }],
+          [
+            "search_thoughts",
+            { query: "budget", limit: 2, scope: NON_DEFAULT_SCOPE },
+          ],
+          ["list_thoughts", { limit: 2, scope: NON_DEFAULT_SCOPE }],
         ] as const
       ) {
         const result = await client.callTool({ name, arguments: args });
@@ -227,22 +251,36 @@ Deno.test("MCP read tools enforce one serialized result budget", async () => {
         assert(output.includes('"returned_records":1'));
         assert(output.includes(`"omitted_ids":["${THOUGHT_IDS[1]}"]`));
         assertFalse(output.includes("b".repeat(1_000)));
+        const truncation = textTruncation(output);
+        assert(
+          String(truncation.recovery).includes(
+            JSON.stringify(NON_DEFAULT_SCOPE),
+          ),
+        );
       }
 
       const lookup = await client.callTool({
         name: "session_lookup",
-        arguments: { id: 7 },
+        arguments: { id: 7, scope: NON_DEFAULT_SCOPE },
       });
       assertWithinBudget(lookup);
       const lookupPayload = JSON.parse(resultText(lookup));
       assertEquals(lookupPayload.summary, summary);
       assertFalse("raw_toml" in lookupPayload);
       assertEquals(lookupPayload.truncation.omitted_fields, ["raw_toml"]);
+      assert(
+        lookupPayload.truncation.recovery.includes(
+          `/api/v1/sessions/7?${SCOPED_REST_QUERY}`,
+        ),
+      );
 
       for (
         const [name, args] of [
-          ["session_search", { query: "budget", limit: 2 }],
-          ["session_list", { limit: 2 }],
+          [
+            "session_search",
+            { query: "budget", limit: 2, scope: NON_DEFAULT_SCOPE },
+          ],
+          ["session_list", { limit: 2, scope: NON_DEFAULT_SCOPE }],
         ] as const
       ) {
         const result = await client.callTool({ name, arguments: args });
@@ -250,6 +288,11 @@ Deno.test("MCP read tools enforce one serialized result budget", async () => {
         const payload = JSON.parse(resultText(result));
         assertEquals(payload.results.length, 1);
         assertEquals(payload.truncation.omitted_ids, [12]);
+        assert(
+          payload.truncation.recovery.includes(
+            JSON.stringify(NON_DEFAULT_SCOPE),
+          ),
+        );
       }
     } finally {
       await client.close();

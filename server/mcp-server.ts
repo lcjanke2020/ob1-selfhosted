@@ -20,6 +20,7 @@ import {
   compatibilitySearchSchema,
   fetchThoughtSchema,
   listThoughtsSchema,
+  type MemoryScopeInput,
   searchThoughtsSchema,
   sessionCaptureSchema,
   sessionListSchema,
@@ -55,6 +56,29 @@ function thoughtTitle(content: string, createdAt?: string): string {
 
 function thoughtUrl(id: string): string {
   return `${CITATION_BASE_URL.replace(/\/$/, "")}/${id}`;
+}
+
+function followUpScope(scope: MemoryScopeInput | undefined): string {
+  return scope
+    ? `Reuse this exact scope argument for every follow-up: ${
+      JSON.stringify(scope)
+    }.`
+    : "Omit scope again on every follow-up to reuse this call's default scope.";
+}
+
+function scopedRestPath(
+  path: string,
+  scope: {
+    workspace_id: string;
+    project_id?: string | null;
+    visibility: string;
+  },
+): string {
+  const query = new URLSearchParams();
+  query.set("workspace_id", scope.workspace_id);
+  if (scope.project_id) query.set("project_id", scope.project_id);
+  query.set("visibility", scope.visibility);
+  return `${path}?${query.toString()}`;
 }
 
 // Session TOML schema contract, served verbatim as an MCP resource
@@ -216,7 +240,9 @@ export function createMcpServer(
     // 1.11.0: thought, session, and compatibility search share nonblank,
     // UTF-8-byte-bounded queries; MCP thought fetch now publishes and enforces
     // the same UUID contract as REST before database work.
-    version: "1.11.0",
+    // 1.12.0: MCP recall results enforce one 120,000-byte serialized budget,
+    // preserve whole-record boundaries, and publish scope-safe recovery paths.
+    version: "1.12.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -245,7 +271,7 @@ export function createMcpServer(
         return mcpJsonCollection(results, {
           fullPayload: (included) => ({ results: included }),
           id: (result) => result.id,
-          recovery:
+          recovery: `${followUpScope(scope)} ` +
             "Call fetch once per omitted ID, or rerun search with a narrower query.",
         });
       } catch (e) {
@@ -281,8 +307,9 @@ export function createMcpServer(
             updated_at: t.updated_at,
           },
         };
-        const recovery =
-          `When tailnet REST is enabled, use GET /api/v1/thoughts/${t.id} to retrieve fields omitted from this MCP result.`;
+        const recovery = `When tailnet REST is enabled, use GET ${
+          scopedRestPath(`/api/v1/thoughts/${t.id}`, t)
+        } to retrieve fields omitted from this MCP result.`;
         return mcpJsonRecord(document, {
           reductions: [
             { field: "metadata", action: "replace", value: {} },
@@ -352,8 +379,8 @@ export function createMcpServer(
             return parts.join("\n");
           },
           id: (thought) => thought.id,
-          recovery:
-            "Call fetch once per omitted ID; if an individual fetch is abridged and tailnet REST is enabled, use GET /api/v1/thoughts/:id.",
+          recovery: `${followUpScope(scope)} ` +
+            "Call fetch once per omitted ID; an abridged fetch will publish a fully scoped tailnet REST path when one is available.",
         });
       } catch (e) {
         return err((e as Error).message);
@@ -392,8 +419,8 @@ export function createMcpServer(
             })\n   ${t.content}`;
           },
           id: (thought) => thought.id,
-          recovery:
-            "Call fetch once per omitted ID; if an individual fetch is abridged and tailnet REST is enabled, use GET /api/v1/thoughts/:id.",
+          recovery: `${followUpScope(opts.scope)} ` +
+            "Call fetch once per omitted ID; an abridged fetch will publish a fully scoped tailnet REST path when one is available.",
         });
       } catch (e) {
         return err((e as Error).message);
@@ -570,8 +597,10 @@ export function createMcpServer(
           auth,
         });
         if (!rec) return text("null");
-        const recovery =
-          `Structured fields are authoritative. When tailnet REST is enabled, use GET /api/v1/sessions/${rec.id} only when an omitted field is required.`;
+        const recovery = `Structured fields are authoritative. ` +
+          `When tailnet REST is enabled, use GET ${
+            scopedRestPath(`/api/v1/sessions/${rec.id}`, rec)
+          } only when an omitted field is required.`;
         return mcpJsonRecord(rec, {
           reductions: [
             { field: "raw_toml", action: "omit" },
@@ -598,7 +627,7 @@ export function createMcpServer(
     {
       title: "Search Sessions",
       description:
-        "Semantic search over session title/goal/summary/resume_context. Optional structured filters by status, repo_url, tag. Returns [{id, session_id, title, status, last_update, score}]. Oversized MCP results retain complete rows and identify omitted session IDs.",
+        "Semantic search over session title/goal/summary/resume_context. Optional structured filters by status, repo_url, tag. A fitting response is the existing [{id, session_id, title, status, last_update, score}] array; a truncated response is {results, truncation}. Oversized MCP results retain complete rows and identify omitted session IDs.",
       annotations: { readOnlyHint: true },
       inputSchema: sessionSearchSchema,
     },
@@ -616,7 +645,7 @@ export function createMcpServer(
         return mcpJsonCollection(rows, {
           fullPayload: (included) => included,
           id: (row) => row.id,
-          recovery:
+          recovery: `${followUpScope(scope)} ` +
             "Call session_lookup once per omitted ID, or rerun session_search with a smaller limit and narrower filters.",
         });
       } catch (e) {
@@ -630,7 +659,7 @@ export function createMcpServer(
     {
       title: "List Sessions",
       description:
-        "List sessions by structured filters (no embedding) — the 'show me everything awaiting_review' path. Returns lightweight rows ordered by the chosen column. Oversized MCP results retain complete rows and identify omitted session IDs.",
+        "List sessions by structured filters (no embedding) — the 'show me everything awaiting_review' path. A fitting response is the existing array of lightweight rows; a truncated response is {results, truncation}. Rows are ordered by the chosen column, and oversized MCP results retain complete rows while identifying omitted session IDs.",
       annotations: { readOnlyHint: true },
       inputSchema: sessionListSchema,
     },
@@ -640,7 +669,7 @@ export function createMcpServer(
         return mcpJsonCollection(rows, {
           fullPayload: (included) => included,
           id: (row) => row.id,
-          recovery:
+          recovery: `${followUpScope(opts.scope)} ` +
             "Call session_lookup once per omitted ID, or rerun session_list with a smaller limit and narrower filters.",
         });
       } catch (e) {
