@@ -217,7 +217,10 @@ export function createMcpServer(
     // 1.10.0: session semantic search uses transaction-local iterative HNSW,
     // then an exact retry when RLS or status/repository/tag residual filters
     // exhaust the bounded ANN scan before enough visible matches are reached.
-    version: "1.10.0",
+    // 1.11.0: thought, session, and compatibility search share nonblank,
+    // UTF-8-byte-bounded queries; MCP thought fetch now publishes and enforces
+    // the same UUID contract as REST before database work.
+    version: "1.11.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
