@@ -183,19 +183,263 @@ function parseVisibility(v: unknown): MemoryVisibility | null {
   );
 }
 
-// TOML date/datetime values parse to Date; keep ISO strings so the value is
-// deterministic for tests and unambiguous for Postgres timestamptz binding.
-function toIsoOrNull(field: string, v: unknown): string | null {
-  if (v === null || v === undefined) return null;
-  if (v instanceof Date) return v.toISOString();
-  if (typeof v === "string") return v.trim() || null;
-  throw new Error(`${field} must be a date or date/time string`);
+export const SESSION_TIMESTAMP_FORMAT_MESSAGE =
+  "must be YYYY-MM-DD or a valid ISO-8601 timestamp with a timezone";
+
+const SESSION_TIMESTAMP_FIELDS = [
+  "session_date",
+  "started_at",
+  "last_update",
+  "ended_at",
+] as const;
+
+const DATE_ONLY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+const TIMESTAMP_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(Z|([+-])(\d{2}):(\d{2}))$/;
+
+function validCalendarDate(year: number, month: number, day: number): boolean {
+  if (year < 1 || year > 9999 || month < 1 || month > 12 || day < 1) {
+    return false;
+  }
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= days[month - 1];
 }
 
-// DATE column: keep only the calendar-date portion.
-function toDateOrNull(field: string, v: unknown): string | null {
-  const iso = toIsoOrNull(field, v);
-  return iso === null ? null : iso.split("T")[0];
+function invalidTimestamp(field: string): Error {
+  return new Error(`${field} ${SESSION_TIMESTAMP_FORMAT_MESSAGE}`);
+}
+
+// Validate and normalize date/time strings before they can reach PostgreSQL.
+// Date-only values are the one documented convenience conversion: timestamp
+// fields expand them to midnight UTC. Full string timestamps retain the
+// caller's explicit offset/text through validation while PostgreSQL receives
+// an unambiguous instant.
+export function normalizeSessionTimestamp(
+  value: string,
+  field = "timestamp",
+): string {
+  const input = value.trim();
+  const date = DATE_ONLY_PATTERN.exec(input);
+  if (date) {
+    const [, y, m, d] = date;
+    if (validCalendarDate(Number(y), Number(m), Number(d))) {
+      return `${input}T00:00:00.000Z`;
+    }
+    throw invalidTimestamp(field);
+  }
+
+  const timestamp = TIMESTAMP_PATTERN.exec(input);
+  if (!timestamp) throw invalidTimestamp(field);
+  const [, y, m, d, hour, minute, second = "0", , , offsetHour, offsetMinute] =
+    timestamp;
+  const epochMillis = Date.parse(input);
+  const utcInstant = Number.isFinite(epochMillis)
+    ? new Date(epochMillis).toISOString()
+    : "";
+  if (
+    !validCalendarDate(Number(y), Number(m), Number(d)) ||
+    Number(hour) > 23 || Number(minute) > 59 || Number(second) > 59 ||
+    (offsetHour !== undefined &&
+      (Number(offsetHour) > 15 || Number(offsetMinute) > 59)) ||
+    !/^(?!0000-)\d{4}-\d{2}-\d{2}T/.test(utcInstant)
+  ) {
+    throw invalidTimestamp(field);
+  }
+  return input;
+}
+
+export function isSessionTimestamp(value: string): boolean {
+  try {
+    normalizeSessionTimestamp(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// TOML permits one space instead of "T" between the date and time in a bare
+// datetime literal. Normalize that delimiter only for raw TOML validation;
+// quoted strings and list bounds retain the documented ISO-8601 contract.
+function validateBareSessionTimestamp(value: string, field: string): void {
+  const timestamp = value.replace(
+    /^(\d{4}-\d{2}-\d{2}) (\d{2}:)/,
+    "$1T$2",
+  );
+  normalizeSessionTimestamp(timestamp, field);
+}
+
+type TomlLexState =
+  | "normal"
+  | "comment"
+  | "basic"
+  | "literal"
+  | "multiline-basic"
+  | "multiline-literal";
+
+// @std/toml materializes bare TOML dates as JavaScript Date objects. That
+// loses the source spelling before application validation can see it: the JS
+// constructor rolls 2026-02-30 into March and interprets a local datetime in
+// the host timezone. Preserve only syntax outside strings/comments so raw
+// top-level time literals can be validated before the TOML parser normalizes
+// them. The output has exactly the same length as the input.
+function maskTomlStringsAndComments(source: string): string {
+  let state: TomlLexState = "normal";
+  let masked = "";
+
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i];
+    const triple = source.slice(i, i + 3);
+
+    if (char === "\n") {
+      masked += char;
+      if (state === "comment" || state === "basic" || state === "literal") {
+        state = "normal";
+      }
+      continue;
+    }
+
+    if (state === "comment") {
+      masked += " ";
+      continue;
+    }
+    if (state === "basic") {
+      masked += " ";
+      if (char === "\\" && i + 1 < source.length) {
+        masked += source[i + 1] === "\n" ? "\n" : " ";
+        i++;
+      } else if (char === '"') {
+        state = "normal";
+      }
+      continue;
+    }
+    if (state === "literal") {
+      masked += " ";
+      if (char === "'") state = "normal";
+      continue;
+    }
+    if (state === "multiline-basic") {
+      if (triple === '"""') {
+        masked += "   ";
+        i += 2;
+        state = "normal";
+      } else {
+        masked += " ";
+        if (char === "\\" && i + 1 < source.length) {
+          masked += source[i + 1] === "\n" ? "\n" : " ";
+          i++;
+        }
+      }
+      continue;
+    }
+    if (state === "multiline-literal") {
+      if (triple === "'''") {
+        masked += "   ";
+        i += 2;
+        state = "normal";
+      } else {
+        masked += " ";
+      }
+      continue;
+    }
+
+    if (char === "#") {
+      masked += " ";
+      state = "comment";
+    } else if (triple === '"""') {
+      masked += "   ";
+      i += 2;
+      state = "multiline-basic";
+    } else if (triple === "'''") {
+      masked += "   ";
+      i += 2;
+      state = "multiline-literal";
+    } else if (char === '"') {
+      masked += " ";
+      state = "basic";
+    } else if (char === "'") {
+      masked += " ";
+      state = "literal";
+    } else {
+      masked += char;
+    }
+  }
+
+  return masked;
+}
+
+function validateBareSessionTimestamps(source: string): Set<string> {
+  const bareFields = new Set<string>();
+  const sourceLines = source.split(/\r?\n/);
+  const visibleLines = maskTomlStringsAndComments(source).split(/\r?\n/);
+  let atRoot = true;
+
+  for (let lineIndex = 0; lineIndex < visibleLines.length; lineIndex++) {
+    const visible = visibleLines[lineIndex];
+    if (/^\s*\[/.test(visible)) {
+      // TOML has no syntax for returning to the root table. All assignments
+      // after the first table header belong to that table or a later one.
+      atRoot = false;
+      continue;
+    }
+    if (!atRoot) continue;
+
+    const equals = visible.indexOf("=");
+    if (equals < 0) continue;
+    const authoredKey = sourceLines[lineIndex].slice(0, equals).trim();
+    const field = SESSION_TIMESTAMP_FIELDS.find((candidate) =>
+      authoredKey === candidate || authoredKey === `"${candidate}"` ||
+      authoredKey === `'${candidate}'`
+    );
+    if (!field) continue;
+
+    // Quoted values were masked and will be validated after parsing as
+    // strings. Anything still visible is a bare TOML literal whose exact
+    // spelling would otherwise be lost when @std/toml constructs a Date.
+    const bareValue = visible.slice(equals + 1).trim();
+    if (!bareValue) continue;
+    validateBareSessionTimestamp(bareValue, field);
+    bareFields.add(field);
+  }
+
+  return bareFields;
+}
+
+// TOML date/datetime values parse to Date; normalize them to UTC. Quoted
+// strings go through the same strict validator used by MCP/REST list bounds.
+function toIsoOrNull(
+  field: string,
+  v: unknown,
+  bareTimestampFields: ReadonlySet<string>,
+): string | null {
+  if (v === null || v === undefined) return null;
+  if (v instanceof Date) {
+    const iso = Number.isFinite(v.getTime()) ? v.toISOString() : "";
+    if (
+      !bareTimestampFields.has(field) ||
+      !/^(?!0000-)\d{4}-\d{2}-\d{2}T/.test(iso)
+    ) {
+      throw invalidTimestamp(field);
+    }
+    return iso;
+  }
+  if (typeof v === "string") return normalizeSessionTimestamp(v, field);
+  throw invalidTimestamp(field);
+}
+
+// DATE column: normalize through UTC so an explicit offset and an unquoted
+// TOML datetime cannot produce different calendar dates for the same instant.
+function toDateOrNull(
+  field: string,
+  v: unknown,
+  bareTimestampFields: ReadonlySet<string>,
+): string | null {
+  const timestamp = toIsoOrNull(field, v, bareTimestampFields);
+  if (timestamp === null) return null;
+  const utcInstant = new Date(timestamp).toISOString();
+  const utcDate = /^(?!0000-)(\d{4}-\d{2}-\d{2})T/.exec(utcInstant)?.[1];
+  if (!utcDate) throw invalidTimestamp(field);
+  return utcDate;
 }
 
 function toStringArray(field: string, v: unknown): string[] {
@@ -238,7 +482,9 @@ function extractToml(input: string): string {
 }
 
 export function parseSessionToml(tomlText: string): ParsedSessionDoc {
-  const doc = parse(extractToml(tomlText)) as Record<string, unknown>;
+  const sourceToml = extractToml(tomlText);
+  const bareTimestampFields = validateBareSessionTimestamps(sourceToml);
+  const doc = parse(sourceToml) as Record<string, unknown>;
 
   if (doc.owner_subject !== undefined) {
     throw new Error("owner_subject is server-stamped and cannot be authored");
@@ -265,7 +511,11 @@ export function parseSessionToml(tomlText: string): ParsedSessionDoc {
     // the demoted PK — see db/04-sessions.sql).
     session_id: toStrOrNull("session_id", doc.session_id),
     title,
-    session_date: toDateOrNull("session_date", doc.session_date),
+    session_date: toDateOrNull(
+      "session_date",
+      doc.session_date,
+      bareTimestampFields,
+    ),
     goal: toStrOrNull("goal", doc.goal),
     agent: toStrOrNull("agent", doc.agent),
     agent_version: toStrOrNull("agent_version", doc.agent_version),
@@ -276,9 +526,21 @@ export function parseSessionToml(tomlText: string): ParsedSessionDoc {
     branch: toStrOrNull("branch", doc.branch),
     head: toStrOrNull("head", doc.head),
     worktree: toStrOrNull("worktree", doc.worktree),
-    started_at: toIsoOrNull("started_at", doc.started_at),
-    last_update: toIsoOrNull("last_update", doc.last_update),
-    ended_at: toIsoOrNull("ended_at", doc.ended_at),
+    started_at: toIsoOrNull(
+      "started_at",
+      doc.started_at,
+      bareTimestampFields,
+    ),
+    last_update: toIsoOrNull(
+      "last_update",
+      doc.last_update,
+      bareTimestampFields,
+    ),
+    ended_at: toIsoOrNull(
+      "ended_at",
+      doc.ended_at,
+      bareTimestampFields,
+    ),
     status: parseStatus(doc.status),
     tags: toStringArray("tags", doc.tags),
     linked_issues: toStringArray("linked_issues", doc.linked_issues),

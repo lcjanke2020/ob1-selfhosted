@@ -91,7 +91,7 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
       await client.connect(clientTransport);
       assertEquals(client.getServerVersion(), {
         name: "open-brain-homelab",
-        version: "1.14.0",
+        version: "1.15.0",
       });
       const listed = await client.listTools();
       const capture = listed.tools.find((tool) =>
@@ -287,9 +287,16 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
         sessionSearchProperties.query.maxLength,
         MAX_SEARCH_QUERY_BYTES,
       );
+      assertEquals(sessionSearchProperties.threshold.minimum, 0);
+      assertEquals(sessionSearchProperties.threshold.maximum, 1);
+      assertEquals(sessionSearchProperties.threshold.default, 0.5);
       assert(
         sessionSearch.description?.includes("{results, truncation}"),
         "session_search must document its truncated response envelope",
+      );
+      assert(
+        sessionSearch.description?.includes("default 0.5"),
+        "session_search must document its default similarity floor",
       );
 
       const connectionsBeforeInvalidCapture = pool.connectCalls;
@@ -323,6 +330,39 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
       assert(
         sessionList.description?.includes("{results, truncation}"),
         "session_list must document its truncated response envelope",
+      );
+      const sessionListProperties = sessionList.inputSchema.properties as
+        | Record<string, Record<string, unknown>>
+        | undefined;
+      assert(sessionListProperties, "session_list must publish properties");
+      assert(
+        String(sessionListProperties.since.description).includes(
+          "midnight UTC",
+        ),
+        "session_list must disclose date-only lower-bound expansion",
+      );
+      assert(
+        String(sessionListProperties.until.description).includes(
+          "start of that day",
+        ),
+        "session_list must disclose date-only upper-bound semantics",
+      );
+
+      const connectionsBeforeInvalidList = pool.connectCalls;
+      const invalidSessionList = await client.callTool({
+        name: "session_list",
+        arguments: { since: "2026-02-30" },
+      });
+      assertEquals(invalidSessionList.isError, true);
+      assert(
+        JSON.stringify(invalidSessionList.content).includes(
+          "Input validation error",
+        ),
+      );
+      assertEquals(
+        pool.connectCalls,
+        connectionsBeforeInvalidList,
+        "invalid session-list bounds must fail before DB borrowing",
       );
 
       const invalidSessionQueries = [

@@ -178,7 +178,7 @@ The same operations the MCP tools expose, as plain HTTP + JSON for consumers tha
 | GET | `/api/v1/thoughts/stats` | `?workspace_id&project_id&visibility` | 200 stats |
 | GET | `/api/v1/thoughts/:id` | UUID path param + optional scope query | 200 thought |
 | POST | `/api/v1/sessions` | `{toml_text}` (session TOML) | 201 created / 200 updated |
-| POST | `/api/v1/sessions/search` | `{query, limit?, status?, repo_url?, tag?, scope?: {...}}` | 200 `{results}` |
+| POST | `/api/v1/sessions/search` | `{query, limit?, threshold?, status?, repo_url?, tag?, scope?: {...}}` | 200 `{results}` |
 | GET | `/api/v1/sessions` | filters plus optional `workspace_id`, `project_id`, `visibility` | 200 `{sessions}` |
 | GET | `/api/v1/sessions/lookup` | `?id` or `?branch`, plus optional scope | 200 session record |
 | GET | `/api/v1/sessions/:id` | integer path param + optional scope query | 200 session record |
@@ -202,9 +202,17 @@ their new scope fields.
 Compatibility note for server 1.14.0: session TOML no longer coerces numbers or
 booleans supplied to ordinary string fields, or non-string list elements. Quote
 those values, use arrays of quoted strings for list fields, and encode artifacts
-only as `[[artifacts]]` array-of-tables. Session time fields still accept TOML
-date/datetime literals. Other artifact shapes, including a single `[artifacts]`
-table, return a validation error.
+as an array of tables using `[[artifacts]]` blocks or an inline array of inline
+tables. Session time fields accept TOML date/datetime literals or quoted ISO-8601
+strings. A single `[artifacts]` table returns a validation error.
+
+Compatibility note for server 1.15.0: session time fields and list `since`/`until`
+bounds accept valid dates or timezone-qualified ISO-8601 timestamps and reject
+malformed values before database work. Session search also accepts an optional
+similarity `threshold` from 0 through 1, defaulting to `0.5`. Date-only list
+bounds expand to midnight UTC, so a date-only `until` is the start of that day;
+use the following date or an explicit timestamp to include a whole day. A
+timestamp supplied as `session_date` stores the calendar date of its UTC instant.
 
 Session capture mirrors `session_capture`: omit `id` in the TOML to create
 (201), or include it to refresh the same row (200); `title` remains required on

@@ -374,9 +374,41 @@ async function runCase(testCase: SearchCase): Promise<void> {
   }
 }
 
+async function assertSimilarityFloor(): Promise<void> {
+  const testCase: SearchCase = {
+    ...cases[0],
+    name: "similarity floor after exact fallback",
+    // Only ten fixture rows are visible in this scope. Asking for eleven
+    // guarantees that the raw ANN candidate set underfills and production
+    // executes the exact fallback before applying the floor.
+    limit: 11,
+  };
+  const eligibleWithoutFloor = await exactTitles(testCase);
+  assertEquals(
+    eligibleWithoutFloor.length,
+    10,
+    "similarity-floor fixture must contain visible candidates",
+  );
+  assert(
+    eligibleWithoutFloor.length < testCase.limit,
+    "similarity-floor fixture must force the exact fallback",
+  );
+
+  // Every visible fixture vector has cosine similarity below 0.95. This call
+  // exercises the production boundary after its guaranteed exact retry and
+  // proves that below-floor candidates are not admitted.
+  const rows = await searchSessions(
+    appPool,
+    { embedding, limit: testCase.limit, threshold: 0.95 },
+    testCase.scope,
+  );
+  assertEquals(rows, [], "session search admitted a result below the floor");
+}
+
 async function runAllCases(): Promise<void> {
   await assertApproximatePlanUsesHnsw(cases[0]);
   for (const testCase of cases) await runCase(testCase);
+  await assertSimilarityFloor();
 }
 
 try {

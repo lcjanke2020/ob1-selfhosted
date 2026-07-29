@@ -194,6 +194,30 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
       },
     );
 
+    await t.step(
+      "POST /sessions (invalid date) → 400 before work",
+      async () => {
+        const pool = new FakePool(() => undefined);
+        const deps = makeDeps();
+        const api = createApiRouter(asPool(pool), deps);
+        const res = await api.request(
+          "/sessions",
+          authed({
+            method: "POST",
+            body: JSON.stringify({
+              toml_text: 'title = "bad date"\nlast_update = 2026-02-30',
+            }),
+          }),
+        );
+        assertEquals(res.status, 400);
+        const body = await res.json();
+        assertEquals(body.error.code, "validation_error");
+        assert(body.error.message.includes("last_update"));
+        assertEquals(deps.embedCalls, []);
+        assertEquals(pool.connectCalls, 0);
+      },
+    );
+
     await t.step("POST /sessions/search → 200 structured rows", async () => {
       const api = makeApi((sql) =>
         sql.includes("FROM sessions.session")
@@ -321,6 +345,40 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
         assertEquals(res.status, 200);
         assertEquals(await res.json(), { sessions: [] });
         assertEquals(captured, ["awaiting_review", 10]);
+      },
+    );
+
+    await t.step(
+      "GET /sessions: date bounds validate and normalize before SQL",
+      async () => {
+        let captured: unknown[] = [];
+        const pool = new FakePool((sql, params) => {
+          if (sql.includes("SELECT id, session_id, title")) {
+            captured = params;
+            return { rows: [] };
+          }
+          return undefined;
+        });
+        const api = createApiRouter(asPool(pool), makeDeps());
+        const valid = await api.request(
+          "/sessions?since=2026-07-29&until=2026-07-30T12%3A00%3A00-04%3A00",
+          authed(),
+        );
+        assertEquals(valid.status, 200);
+        assertEquals(captured, [
+          "2026-07-29T00:00:00.000Z",
+          "2026-07-30T12:00:00-04:00",
+          50,
+        ]);
+
+        const connectionsBeforeInvalid = pool.connectCalls;
+        const invalid = await api.request(
+          "/sessions?since=2026-02-30",
+          authed(),
+        );
+        assertEquals(invalid.status, 400);
+        assertEquals((await invalid.json()).error.code, "validation_error");
+        assertEquals(pool.connectCalls, connectionsBeforeInvalid);
       },
     );
 
