@@ -212,9 +212,9 @@ function invalidTimestamp(field: string): Error {
 
 // Validate and normalize date/time strings before they can reach PostgreSQL.
 // Date-only values are the one documented convenience conversion: timestamp
-// fields expand them to midnight UTC. Full timestamps retain the caller's
-// explicit offset/text after validation, so raw structured state remains
-// recognizable while PostgreSQL receives an unambiguous instant.
+// fields expand them to midnight UTC. Full string timestamps retain the
+// caller's explicit offset/text through validation while PostgreSQL receives
+// an unambiguous instant.
 export function normalizeSessionTimestamp(
   value: string,
   field = "timestamp",

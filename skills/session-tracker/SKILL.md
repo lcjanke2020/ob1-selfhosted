@@ -88,9 +88,11 @@ joins on them; it is not a foreign-key reference.
 
 - **`status` enum:** `active | awaiting_review | blocked | done | abandoned`.
 - **Timestamps** are ISO-8601. Date-only (`"2026-06-08"`) is accepted and expanded to
-  midnight UTC; full timestamps must carry `Z` or an explicit numeric offset and
-  round-trip as given. A timestamp supplied for `session_date` stores its UTC
-  calendar date.
+  midnight UTC; full timestamps must carry `Z` or an explicit numeric offset. Bare
+  TOML datetime literals normalize to UTC during parsing, and persisted structured
+  timestamp fields represent instants rather than preserving the authored spelling;
+  `raw_toml` preserves that original text. A timestamp supplied for `session_date`
+  stores its UTC calendar date.
 - **Embedded-for-search content** is `title` / `goal` / `summary` / `resume_context`;
   the server re-embeds only when that content changes (`content_hash`).
 

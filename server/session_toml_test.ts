@@ -327,6 +327,8 @@ ended_at = 2026-07-29T17:00:00Z
     ["started_at", 'started_at = "2026-07-29T24:00:00Z"'],
     ["last_update", 'last_update = "not-a-date"'],
     ["last_update", 'last_update = "2026-07-29T10:00:00+16:00"'],
+    ["last_update", 'last_update = "0001-01-01T00:00:00+15:59"'],
+    ["started_at", 'started_at = "9999-12-31T23:59:59-15:59"'],
     ["session_date", 'session_date = "0001-01-01T00:00:00+15:59"'],
     ["session_date", 'session_date = "9999-12-31T23:59:59-15:59"'],
     ["ended_at", 'ended_at = ""'],
@@ -369,6 +371,17 @@ ended_at = 2026-07-29T17:00:00Z
       field,
     );
   }
+});
+
+Deno.test("Date-valued timestamps fail closed when raw scanning misses a key", () => {
+  const escapedKey = String.raw`title = "Scanner miss"
+"started\u005fat" = 2026-07-29T10:00:00Z
+`;
+  assertThrows(
+    () => parseSessionToml(escapedKey),
+    Error,
+    "started_at",
+  );
 });
 
 Deno.test("bare local datetimes reject independently of the host timezone", () => {
