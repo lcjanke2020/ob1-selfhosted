@@ -101,15 +101,28 @@ interface ChatEndpoint {
   model: string;
 }
 
+type ClassificationFailure =
+  | { reason: "transport_or_timeout" }
+  | { reason: "non_2xx"; status: number }
+  | { reason: "invalid_response" }
+  | { reason: "unparseable_output" }
+  | { reason: "schema_rejection" };
+
+type ClassificationAttempt =
+  | {
+    ok: true;
+    metadata: z.infer<typeof THOUGHT_METADATA_RUNTIME_SCHEMA>;
+  }
+  | ({ ok: false } & ClassificationFailure);
+
 // One classification attempt against a single OpenAI-compatible endpoint.
-// Returns the parsed metadata object, or `null` on ANY failure (non-2xx,
-// timeout/abort, missing/non-string content, unparseable JSON, or a value that
-// violates THOUGHT_METADATA_RUNTIME_SCHEMA) so the caller can move on to the
-// next endpoint or the stub. Never throws.
+// Returns either validated metadata or the reason this attempt failed so the
+// caller can log an endpoint-aware signal before moving on to the next endpoint
+// or the stub. Never throws.
 async function classifyOnce(
   text: string,
   { base, key, model }: ChatEndpoint,
-): Promise<Record<string, unknown> | null> {
+): Promise<ClassificationAttempt> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), CHAT_TIMEOUT_MS);
 
@@ -119,41 +132,113 @@ async function classifyOnce(
     };
     if (key) headers.Authorization = `Bearer ${key}`;
 
-    const r = await fetch(`${base}/chat/completions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        model,
-        temperature: 0,
-        response_format: {
-          type: "json_schema",
-          json_schema: THOUGHT_METADATA_SCHEMA,
-        },
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: text },
-        ],
-      }),
-      signal: controller.signal,
-    });
+    let r: Response;
+    try {
+      r = await fetch(`${base}/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model,
+          temperature: 0,
+          response_format: {
+            type: "json_schema",
+            json_schema: THOUGHT_METADATA_SCHEMA,
+          },
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: text },
+          ],
+        }),
+        signal: controller.signal,
+      });
+    } catch {
+      return { ok: false, reason: "transport_or_timeout" };
+    }
 
     if (!r.ok) {
       // Cancel the unconsumed error body so Deno doesn't leak the response
       // stream / hold the connection open longer than necessary.
-      await r.body?.cancel();
-      return null;
+      try {
+        await r.body?.cancel();
+      } catch {
+        // The response status is already authoritative; cleanup failure must
+        // not hide the non-2xx reason or break capture.
+      }
+      return { ok: false, reason: "non_2xx", status: r.status };
     }
-    const d = await r.json();
-    const content = d?.choices?.[0]?.message?.content;
-    if (typeof content !== "string") return null;
-    const parsed = JSON.parse(content);
+
+    let d: unknown;
+    try {
+      d = await r.json();
+    } catch (error) {
+      // A timeout can fire after headers arrive while the body is still being
+      // read. Invalid JSON is instead a response-shape failure.
+      return {
+        ok: false,
+        reason: controller.signal.aborted || !(error instanceof SyntaxError)
+          ? "transport_or_timeout"
+          : "invalid_response",
+      };
+    }
+    const choices = typeof d === "object" && d !== null
+      ? (d as Record<string, unknown>).choices
+      : undefined;
+    const content = Array.isArray(choices)
+      ? choices[0]?.message?.content
+      : undefined;
+    if (typeof content !== "string") {
+      return { ok: false, reason: "invalid_response" };
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      return { ok: false, reason: "unparseable_output" };
+    }
     const validated = THOUGHT_METADATA_RUNTIME_SCHEMA.safeParse(parsed);
-    return validated.success ? validated.data : null;
-  } catch {
-    // Includes AbortError on timeout — treat as a failed attempt.
-    return null;
+    return validated.success
+      ? { ok: true, metadata: validated.data }
+      : { ok: false, reason: "schema_rejection" };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+type EndpointRole = "primary" | "fallback";
+
+function logClassificationFailure(
+  endpoint: EndpointRole,
+  failure: ClassificationFailure,
+): void {
+  switch (failure.reason) {
+    case "transport_or_timeout":
+      console.warn(
+        `[metadata] ${endpoint} endpoint failed (transport/timeout)`,
+      );
+      return;
+    case "non_2xx":
+      console.warn(
+        `[metadata] ${endpoint} endpoint failed (non-2xx response) — HTTP ${failure.status}`,
+      );
+      return;
+    case "invalid_response":
+      console.warn(
+        `[metadata] ${endpoint} endpoint returned an invalid response — falling through`,
+      );
+      return;
+    case "unparseable_output":
+      console.warn(
+        `[metadata] ${endpoint} endpoint returned unparseable metadata — falling through`,
+      );
+      return;
+    case "schema_rejection":
+      console.warn(
+        `[metadata] ${endpoint} endpoint returned schema-invalid metadata — falling through`,
+      );
+      return;
+    default:
+      failure satisfies never;
   }
 }
 
@@ -178,34 +263,34 @@ export async function extractMetadata(
   // dangerous primary transport can't fire on the capture path; when off we
   // skip straight to the fallback.
   if (ENABLE_PRIMARY_EXTRACTION) {
-    const primary = await classifyOnce(text, {
+    const primaryAttempt = await classifyOnce(text, {
       base: CHAT_API_BASE,
       key: CHAT_API_KEY,
       model: CHAT_MODEL,
     });
-    if (primary) {
+    if (primaryAttempt.ok) {
       console.log("[metadata] classified via primary endpoint");
-      return primary;
+      return primaryAttempt.metadata;
     }
-    console.warn("[metadata] primary endpoint failed");
+    logClassificationFailure("primary", primaryAttempt);
   }
 
   // Fallback runs whenever it is configured — after a primary failure OR as the
   // sole extractor in a fallback-only deployment. NB this path can send thought
   // content off-box (the privacy trade-off documented in .env.example).
   if (ENABLE_FALLBACK_EXTRACTION) {
-    const fallback = await classifyOnce(text, {
+    const fallbackAttempt = await classifyOnce(text, {
       base: FALLBACK_CHAT_API_BASE,
       key: FALLBACK_CHAT_API_KEY,
       model: FALLBACK_CHAT_MODEL,
     });
-    if (fallback) {
+    if (fallbackAttempt.ok) {
       console.warn(
         "[metadata] classified via FALLBACK endpoint — thought content may have left your local network (depends on the configured fallback base URL)",
       );
-      return fallback;
+      return fallbackAttempt.metadata;
     }
-    console.warn("[metadata] fallback endpoint failed");
+    logClassificationFailure("fallback", fallbackAttempt);
   }
 
   console.warn(

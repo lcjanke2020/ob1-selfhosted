@@ -13,6 +13,7 @@ import { assertEquals } from "jsr:@std/assert@1";
 
 const PRIMARY_BASE = "http://primary.invalid/v1";
 const FALLBACK_BASE = "http://fallback.invalid/v1";
+const TEST_CHAT_TIMEOUT_MS = 40;
 
 const ENV_KEYS = [
   "DB_PASSWORD",
@@ -47,9 +48,52 @@ function chatOk(obj: unknown): Response {
 }
 
 // Error response with a null body so the test resource sanitizer sees no
-// unconsumed body stream (the production code returns null without reading it).
+// unconsumed body stream (production cancels a non-2xx body without reading it).
 function chatErr(status: number): Response {
   return new Response(null, { status });
+}
+
+function stalledChatResponse(
+  signal: AbortSignal | null | undefined,
+): { response: Response; release: () => void } {
+  const encoder = new TextEncoder();
+  let open = true;
+  let streamController: ReadableStreamDefaultController<Uint8Array>;
+
+  const abortBody = () => {
+    if (!open) return;
+    open = false;
+    streamController.error(
+      signal?.reason ??
+        new DOMException("The operation was aborted", "AbortError"),
+    );
+  };
+
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      streamController = controller;
+      controller.enqueue(encoder.encode("{"));
+      if (signal?.aborted) abortBody();
+      else signal?.addEventListener("abort", abortBody, { once: true });
+    },
+    cancel() {
+      open = false;
+      signal?.removeEventListener("abort", abortBody);
+    },
+  });
+
+  return {
+    response: new Response(body, {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+    release: () => {
+      signal?.removeEventListener("abort", abortBody);
+      if (!open) return;
+      open = false;
+      streamController.error(new Error("stalled-response test cleanup"));
+    },
+  };
 }
 
 function validMetadata(
@@ -70,6 +114,7 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
     ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
   );
   const origFetch = globalThis.fetch;
+  const origWarn = console.warn;
 
   // config.ts module-load requirements + both endpoints configured.
   Deno.env.set("DB_PASSWORD", "test-password");
@@ -78,6 +123,7 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
   Deno.env.set("CHAT_API_BASE", PRIMARY_BASE);
   Deno.env.set("CHAT_MODEL", "local-model");
+  Deno.env.set("CHAT_TIMEOUT_MS", String(TEST_CHAT_TIMEOUT_MS));
   Deno.env.delete("CHAT_API_KEY"); // primary needs no auth (e.g. local ollama)
   Deno.env.set("FALLBACK_CHAT_API_BASE", FALLBACK_BASE);
   Deno.env.set("FALLBACK_CHAT_MODEL", "hosted-model");
@@ -86,7 +132,9 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
 
   const calls: Captured[] = [];
   // Reassigned per step to choose what each endpoint returns.
-  let responder: (c: Captured) => Response = () => chatErr(500);
+  let responder: (c: Captured, init?: RequestInit) => Response = () =>
+    chatErr(500);
+  const warnings: string[] = [];
 
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
@@ -96,8 +144,9 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
     const headers = (init?.headers ?? {}) as Record<string, string>;
     const captured: Captured = { url, body, headers };
     calls.push(captured);
-    return Promise.resolve(responder(captured));
+    return Promise.resolve(responder(captured, init));
   }) as typeof fetch;
+  console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
 
   try {
     // Import inside the try so the finally below always restores fetch + env,
@@ -108,6 +157,7 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
       "primary success returns its result, no fallback call",
       async () => {
         calls.length = 0;
+        warnings.length = 0;
         responder = (c) =>
           c.url.startsWith(PRIMARY_BASE)
             ? chatOk({
@@ -128,6 +178,7 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
           "fallback must NOT be called on primary success",
         );
         assertEquals(calls[0].url, `${PRIMARY_BASE}/chat/completions`);
+        assertEquals(warnings, []);
       },
     );
 
@@ -146,6 +197,7 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
       "primary failure (5xx) falls back to the hosted endpoint",
       async () => {
         calls.length = 0;
+        warnings.length = 0;
         responder = (c) =>
           c.url.startsWith(PRIMARY_BASE) ? chatErr(500) : chatOk({
             type: "idea",
@@ -165,11 +217,109 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
           calls[1].headers.Authorization,
           "Bearer test-fallback-key",
         );
+        assertEquals(
+          warnings[0],
+          "[metadata] primary endpoint failed (non-2xx response) — HTTP 500",
+        );
+      },
+    );
+
+    await t.step(
+      "primary transport failure keeps the legacy endpoint-failed substring",
+      async () => {
+        calls.length = 0;
+        warnings.length = 0;
+        responder = (c) => {
+          if (c.url.startsWith(PRIMARY_BASE)) {
+            throw new TypeError("simulated transport failure");
+          }
+          return chatOk(validMetadata({ topics: ["transport-fallback"] }));
+        };
+
+        const r = await extractMetadata("anything");
+        assertEquals(r.topics, ["transport-fallback"]);
+        assertEquals(
+          warnings[0],
+          "[metadata] primary endpoint failed (transport/timeout)",
+        );
+      },
+    );
+
+    await t.step(
+      "primary invalid response envelope falls back too",
+      async () => {
+        calls.length = 0;
+        warnings.length = 0;
+        responder = (c) =>
+          c.url.startsWith(PRIMARY_BASE)
+            ? new Response("null", { status: 200 })
+            : chatOk(validMetadata({ topics: ["response-fallback"] }));
+
+        const r = await extractMetadata("anything");
+        assertEquals(r.topics, ["response-fallback"]);
+        assertEquals(calls.length, 2);
+        assertEquals(
+          warnings[0],
+          "[metadata] primary endpoint returned an invalid response — falling through",
+        );
+      },
+    );
+
+    await t.step(
+      "primary malformed outer JSON is an invalid response",
+      async () => {
+        calls.length = 0;
+        warnings.length = 0;
+        responder = (c) =>
+          c.url.startsWith(PRIMARY_BASE)
+            ? new Response("{", {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            })
+            : chatOk(validMetadata({ topics: ["malformed-fallback"] }));
+
+        const r = await extractMetadata("anything");
+        assertEquals(r.topics, ["malformed-fallback"]);
+        assertEquals(calls.length, 2);
+        assertEquals(
+          warnings[0],
+          "[metadata] primary endpoint returned an invalid response — falling through",
+        );
+      },
+    );
+
+    await t.step(
+      "primary response body timeout is a transport failure",
+      async () => {
+        calls.length = 0;
+        warnings.length = 0;
+        let releaseBody = () => {};
+        responder = (c, init) => {
+          if (c.url.startsWith(PRIMARY_BASE)) {
+            const stalled = stalledChatResponse(init?.signal);
+            releaseBody = stalled.release;
+            return stalled.response;
+          }
+          return chatOk(validMetadata({ topics: ["timeout-fallback"] }));
+        };
+
+        try {
+          const r = await extractMetadata("anything");
+          assertEquals(r.topics, ["timeout-fallback"]);
+          assertEquals(calls.length, 2);
+          assertEquals(
+            warnings[0],
+            "[metadata] primary endpoint failed (transport/timeout)",
+          );
+        } finally {
+          releaseBody();
+        }
       },
     );
 
     await t.step("primary unparseable output falls back too", async () => {
       calls.length = 0;
+      warnings.length = 0;
       responder = (c) =>
         c.url.startsWith(PRIMARY_BASE)
           // 200 but content isn't valid JSON → parse fails → treated as failure.
@@ -190,10 +340,15 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
       const r = await extractMetadata("save this link");
       assertEquals(r.type, "reference");
       assertEquals(calls.length, 2);
+      assertEquals(
+        warnings[0],
+        "[metadata] primary endpoint returned unparseable metadata — falling through",
+      );
     });
 
     await t.step("primary array output is rejected, falls back", async () => {
       calls.length = 0;
+      warnings.length = 0;
       responder = (c) =>
         c.url.startsWith(PRIMARY_BASE)
           // 200 but content is a JSON array — typeof [] === "object", so this
@@ -213,6 +368,10 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
         calls.length,
         2,
         "an array from the primary must not count as success",
+      );
+      assertEquals(
+        warnings[0],
+        "[metadata] primary endpoint returned schema-invalid metadata — falling through",
       );
     });
 
@@ -247,6 +406,7 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
     for (const { name, value } of invalidMetadataCases) {
       await t.step(`schema-invalid primary (${name}) falls back`, async () => {
         calls.length = 0;
+        warnings.length = 0;
         const fallbackMetadata = validMetadata({
           type: "idea",
           topics: ["validated-fallback"],
@@ -265,6 +425,10 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
             `${FALLBACK_BASE}/chat/completions`,
           ],
         );
+        assertEquals(
+          warnings[0],
+          "[metadata] primary endpoint returned schema-invalid metadata — falling through",
+        );
       });
     }
 
@@ -272,11 +436,17 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
       "schema-invalid primary and fallback outputs reach the stub",
       async () => {
         calls.length = 0;
+        warnings.length = 0;
         responder = () => chatOk({});
 
         const r = await extractMetadata("anything");
         assertEquals(r, { topics: ["uncategorized"], type: "observation" });
         assertEquals(calls.length, 2, "primary then fallback both attempted");
+        assertEquals(warnings, [
+          "[metadata] primary endpoint returned schema-invalid metadata — falling through",
+          "[metadata] fallback endpoint returned schema-invalid metadata — falling through",
+          "[metadata] no endpoint produced metadata; stamping uncategorized stub",
+        ]);
       },
     );
 
@@ -284,15 +454,22 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
       "both endpoints fail → minimal uncategorized stub",
       async () => {
         calls.length = 0;
-        responder = () => chatErr(503);
+        warnings.length = 0;
+        responder = (c) => chatErr(c.url.startsWith(PRIMARY_BASE) ? 401 : 503);
 
         const r = await extractMetadata("anything");
         assertEquals(r, { topics: ["uncategorized"], type: "observation" });
         assertEquals(calls.length, 2, "primary then fallback both attempted");
+        assertEquals(warnings, [
+          "[metadata] primary endpoint failed (non-2xx response) — HTTP 401",
+          "[metadata] fallback endpoint failed (non-2xx response) — HTTP 503",
+          "[metadata] no endpoint produced metadata; stamping uncategorized stub",
+        ]);
       },
     );
   } finally {
     globalThis.fetch = origFetch;
+    console.warn = origWarn;
     for (const [k, v] of origEnv) {
       if (v === undefined) Deno.env.delete(k);
       else Deno.env.set(k, v);
