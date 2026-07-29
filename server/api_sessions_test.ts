@@ -205,7 +205,7 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
           authed({
             method: "POST",
             body: JSON.stringify({
-              toml_text: 'title = "bad date"\nlast_update = "2026-02-30"',
+              toml_text: 'title = "bad date"\nlast_update = 2026-02-30',
             }),
           }),
         );

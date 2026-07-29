@@ -954,7 +954,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
             captureSessionFromToml(
               asPool(capturePool),
               {
-                tomlText: 'title = "bad date"\nlast_update = "2026-02-30"',
+                tomlText: 'title = "bad date"\nlast_update = 2026-02-30',
                 auth: AUTH,
               },
               captureDeps,

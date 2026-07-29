@@ -326,6 +326,9 @@ ended_at = 2026-07-29T17:00:00Z
     ["started_at", 'started_at = "2026-07-29T10:00:00"'],
     ["started_at", 'started_at = "2026-07-29T24:00:00Z"'],
     ["last_update", 'last_update = "not-a-date"'],
+    ["last_update", 'last_update = "2026-07-29T10:00:00+16:00"'],
+    ["session_date", 'session_date = "0001-01-01T00:00:00+15:59"'],
+    ["session_date", 'session_date = "9999-12-31T23:59:59-15:59"'],
     ["ended_at", 'ended_at = ""'],
     ["ended_at", "ended_at = 7"],
   ];
@@ -336,6 +339,51 @@ ended_at = 2026-07-29T17:00:00Z
       field,
     );
   }
+});
+
+Deno.test("parseSessionToml validates bare TOML dates before Date coercion", () => {
+  const { session } = parseSessionToml(`title = "Bare dates"
+session_date = 2026-07-29
+"started_at" = 2026-07-29T10:00:00-04:00
+last_update = 2026-07-29T12:34:56+15:59 # PostgreSQL's largest accepted hour
+ended_at = 2026-07-29T17:00:00Z
+`);
+  assertEquals(session.session_date, "2026-07-29");
+  assertEquals(session.started_at, "2026-07-29T14:00:00.000Z");
+  assertEquals(session.last_update, "2026-07-28T20:35:56.000Z");
+  assertEquals(session.ended_at, "2026-07-29T17:00:00.000Z");
+
+  const invalid = [
+    ["session_date", "session_date = 2026-02-30"],
+    ["started_at", "started_at = 2026-02-30T10:00:00Z"],
+    ["started_at", "started_at = 2026-07-29T10:00:00"],
+    ["last_update", "last_update = 2026-07-29T10:00:00+16:00"],
+    ["ended_at", "ended_at = 0001-01-01T00:00:00+15:59"],
+    ["ended_at", "ended_at = 9999-12-31T23:59:59-15:59"],
+  ];
+  for (const [field, declaration] of invalid) {
+    assertThrows(
+      () => parseSessionToml(`title = "Bare dates"\n${declaration}`),
+      Error,
+      field,
+    );
+  }
+});
+
+Deno.test("bare TOML date validation ignores comments and string contents", () => {
+  const { session } = parseSessionToml(`title = "Scanner boundaries"
+# last_update = 2026-02-30
+summary = "A literal example: started_at = 2026-02-30T10:00:00Z"
+resume_context = '''
+session_date = 2026-02-30
+'''
+goal = """
+An example must not be treated as an assignment:
+ended_at = 2026-02-30T10:00:00Z
+"""
+last_update = 2026-07-29T17:00:00Z # ended_at = 2026-02-30
+`);
+  assertEquals(session.last_update, "2026-07-29T17:00:00.000Z");
 });
 
 Deno.test("parseSessionToml rejects malformed input", () => {
