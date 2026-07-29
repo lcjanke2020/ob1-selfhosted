@@ -45,7 +45,17 @@ requested final `limit` when it is larger. Each search raises transaction-local
 `hnsw.ef_search` to that candidate depth; filtered searches also enable
 `hnsw.iterative_scan = strict_order`. Both legs apply the same provenance
 include/exclude predicates and the same resolved memory-space audience *before*
-assigning ranks. The production fusion is:
+assigning ranks.
+
+pgvector still bounds an iterative HNSW leg with `hnsw.max_scan_tuples` and its
+scan-memory allowance. Thought search treats that as an approximate candidate
+bound before hybrid fusion. Session semantic search uses the same iterative
+settings for its fast path, but owns a stronger cardinality contract: when ANN
+returns fewer rows than requested, it retries through a materialized exact path
+over the RLS-visible, filter-eligible rows. Thus a selective session query does
+not silently underfill merely because the approximate scan reached its bound.
+
+The production fusion is:
 
 ```text
 rrf_score = sum(1 / (60 + rank_in_leg))
