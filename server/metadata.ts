@@ -101,22 +101,19 @@ interface ChatEndpoint {
   model: string;
 }
 
-type ClassificationFailureReason =
-  | "transport_or_timeout"
-  | "non_2xx"
-  | "invalid_response"
-  | "unparseable_output"
-  | "schema_rejection";
+type ClassificationFailure =
+  | { reason: "transport_or_timeout" }
+  | { reason: "non_2xx"; status: number }
+  | { reason: "invalid_response" }
+  | { reason: "unparseable_output" }
+  | { reason: "schema_rejection" };
 
 type ClassificationAttempt =
   | {
     ok: true;
     metadata: z.infer<typeof THOUGHT_METADATA_RUNTIME_SCHEMA>;
   }
-  | {
-    ok: false;
-    reason: ClassificationFailureReason;
-  };
+  | ({ ok: false } & ClassificationFailure);
 
 // One classification attempt against a single OpenAI-compatible endpoint.
 // Returns either validated metadata or the reason this attempt failed so the
@@ -167,7 +164,7 @@ async function classifyOnce(
         // The response status is already authoritative; cleanup failure must
         // not hide the non-2xx reason or break capture.
       }
-      return { ok: false, reason: "non_2xx" };
+      return { ok: false, reason: "non_2xx", status: r.status };
     }
 
     let d: unknown;
@@ -212,9 +209,9 @@ type EndpointRole = "primary" | "fallback";
 
 function logClassificationFailure(
   endpoint: EndpointRole,
-  reason: ClassificationFailureReason,
+  failure: ClassificationFailure,
 ): void {
-  switch (reason) {
+  switch (failure.reason) {
     case "transport_or_timeout":
       console.warn(
         `[metadata] ${endpoint} endpoint failed (transport/timeout)`,
@@ -222,7 +219,7 @@ function logClassificationFailure(
       return;
     case "non_2xx":
       console.warn(
-        `[metadata] ${endpoint} endpoint failed (non-2xx response)`,
+        `[metadata] ${endpoint} endpoint failed (non-2xx response) — HTTP ${failure.status}`,
       );
       return;
     case "invalid_response":
@@ -241,7 +238,7 @@ function logClassificationFailure(
       );
       return;
     default:
-      reason satisfies never;
+      failure satisfies never;
   }
 }
 
@@ -275,7 +272,7 @@ export async function extractMetadata(
       console.log("[metadata] classified via primary endpoint");
       return primaryAttempt.metadata;
     }
-    logClassificationFailure("primary", primaryAttempt.reason);
+    logClassificationFailure("primary", primaryAttempt);
   }
 
   // Fallback runs whenever it is configured — after a primary failure OR as the
@@ -293,7 +290,7 @@ export async function extractMetadata(
       );
       return fallbackAttempt.metadata;
     }
-    logClassificationFailure("fallback", fallbackAttempt.reason);
+    logClassificationFailure("fallback", fallbackAttempt);
   }
 
   console.warn(

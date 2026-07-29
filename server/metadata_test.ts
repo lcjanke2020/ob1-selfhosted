@@ -219,7 +219,7 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
         );
         assertEquals(
           warnings[0],
-          "[metadata] primary endpoint failed (non-2xx response)",
+          "[metadata] primary endpoint failed (non-2xx response) — HTTP 500",
         );
       },
     );
@@ -455,14 +455,14 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
       async () => {
         calls.length = 0;
         warnings.length = 0;
-        responder = () => chatErr(503);
+        responder = (c) => chatErr(c.url.startsWith(PRIMARY_BASE) ? 401 : 503);
 
         const r = await extractMetadata("anything");
         assertEquals(r, { topics: ["uncategorized"], type: "observation" });
         assertEquals(calls.length, 2, "primary then fallback both attempted");
         assertEquals(warnings, [
-          "[metadata] primary endpoint failed (non-2xx response)",
-          "[metadata] fallback endpoint failed (non-2xx response)",
+          "[metadata] primary endpoint failed (non-2xx response) — HTTP 401",
+          "[metadata] fallback endpoint failed (non-2xx response) — HTTP 503",
           "[metadata] no endpoint produced metadata; stamping uncategorized stub",
         ]);
       },

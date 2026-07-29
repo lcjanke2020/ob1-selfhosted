@@ -429,10 +429,11 @@ in front of a capture. Two companion settings, same qube:
   `[metadata] classified via primary endpoint`. Failure lines now identify the
   broad cause: `primary endpoint failed (transport/timeout)` is an availability
   signal, `primary endpoint failed (non-2xx response)` is a server or request-
-  compatibility failure, and lines beginning `primary endpoint returned …`
-  identify an invalid completion envelope, unparseable model output, or
-  runtime-schema-rejected metadata. Check the model server's own logs for the
-  detail within that class.
+  compatibility failure with the final HTTP status appended, and lines
+  beginning `primary endpoint returned …` identify an invalid completion
+  envelope, unparseable model output, or runtime-schema-rejected metadata.
+  Check the model server's own logs for detail beyond that status or within the
+  output-quality class.
 - This plumbing exists only to keep content on a **loopback-only** GPU qube. A
   reachable OpenAI-compatible server (local or over the tailnet) used directly
   as `CHAT_API_BASE` needs none of it.

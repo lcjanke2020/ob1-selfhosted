@@ -242,8 +242,9 @@ export function createMcpServer(
     // the same UUID contract as REST before database work.
     // 1.12.0: MCP recall results enforce one 120,000-byte serialized budget,
     // preserve whole-record boundaries, and publish scope-safe recovery paths.
-    // 1.13.0: metadata classification logs distinguish endpoint availability,
-    // malformed responses, unparseable output, and runtime-schema rejection.
+    // 1.13.0: metadata classification logs preserve non-2xx HTTP statuses and
+    // distinguish endpoint availability, malformed responses, unparseable
+    // output, and runtime-schema rejection.
     version: "1.13.0",
   });
 
