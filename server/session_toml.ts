@@ -258,6 +258,17 @@ export function isSessionTimestamp(value: string): boolean {
   }
 }
 
+// TOML permits one space instead of "T" between the date and time in a bare
+// datetime literal. Normalize that delimiter only for raw TOML validation;
+// quoted strings and list bounds retain the documented ISO-8601 contract.
+function validateBareSessionTimestamp(value: string, field: string): void {
+  const timestamp = value.replace(
+    /^(\d{4}-\d{2}-\d{2}) (\d{2}:)/,
+    "$1T$2",
+  );
+  normalizeSessionTimestamp(timestamp, field);
+}
+
 type TomlLexState =
   | "normal"
   | "comment"
@@ -387,7 +398,7 @@ function validateBareSessionTimestamps(source: string): Set<string> {
     // spelling would otherwise be lost when @std/toml constructs a Date.
     const bareValue = visible.slice(equals + 1).trim();
     if (!bareValue) continue;
-    normalizeSessionTimestamp(bareValue, field);
+    validateBareSessionTimestamp(bareValue, field);
     bareFields.add(field);
   }
 

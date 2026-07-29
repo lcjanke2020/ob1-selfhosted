@@ -344,7 +344,7 @@ ended_at = 2026-07-29T17:00:00Z
 Deno.test("parseSessionToml validates bare TOML dates before Date coercion", () => {
   const { session } = parseSessionToml(`title = "Bare dates"
 session_date = 2026-07-29
-"started_at" = 2026-07-29T10:00:00-04:00
+"started_at" = 2026-07-29 10:00:00-04:00
 last_update = 2026-07-29T12:34:56+15:59 # PostgreSQL's largest accepted hour
 ended_at = 2026-07-29T17:00:00Z
 `);
@@ -355,9 +355,10 @@ ended_at = 2026-07-29T17:00:00Z
 
   const invalid = [
     ["session_date", "session_date = 2026-02-30"],
-    ["started_at", "started_at = 2026-02-30T10:00:00Z"],
+    ["started_at", "started_at = 2026-02-30 10:00:00Z"],
     ["started_at", "started_at = 2026-07-29T10:00:00"],
-    ["last_update", "last_update = 2026-07-29T10:00:00+16:00"],
+    ["started_at", "started_at = 2026-07-29 10:00:00"],
+    ["last_update", "last_update = 2026-07-29 10:00:00+16:00"],
     ["ended_at", "ended_at = 0001-01-01T00:00:00+15:59"],
     ["ended_at", "ended_at = 9999-12-31T23:59:59-15:59"],
   ];
