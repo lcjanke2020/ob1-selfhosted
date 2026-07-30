@@ -722,7 +722,21 @@ jobs:
           report_dir="$smoke_root/reports"
           env_file="$smoke_root/funnel-summary.env"
           psql_shim="$smoke_root/psql"
-          install -d -m 0700 "$smoke_root" "$report_dir"
+          probe_bin="$smoke_root/bin"
+          install -d -m 0700 "$smoke_root" "$report_dir" "$probe_bin"
+
+          # The job environment already exports OPENBRAIN_APP_PASSWORD. Assert
+          # that the wrapper strips that attribute before its first external
+          # command, not merely before the eventual database client.
+          cat > "$probe_bin/dirname" <<'SH'
+          #!/usr/bin/env bash
+          if [[ -v OPENBRAIN_APP_PASSWORD ]]; then
+            echo "OPENBRAIN_APP_PASSWORD leaked into the first external child" >&2
+            exit 39
+          fi
+          exec /usr/bin/dirname "$@"
+          SH
+          chmod 0755 "$probe_bin/dirname"
 
           # Exercise the production host-psql argument path while reusing this
           # job's initialized Postgres fixture. The shim crosses into pgci and
@@ -753,7 +767,8 @@ jobs:
           } > "$env_file"
           chmod 0600 "$env_file"
 
-          FUNNEL_SUMMARY_ENV_FILE="$env_file" scripts/funnel_daily_summary.sh
+          PATH="$probe_bin:$PATH" FUNNEL_SUMMARY_ENV_FILE="$env_file" \
+            scripts/funnel_daily_summary.sh
 
           mapfile -t reports < <(find "$report_dir" -maxdepth 1 -type f -name 'funnel-summary-*.md' -print)
           if [ "${#reports[@]}" -ne 1 ]; then
@@ -771,7 +786,8 @@ jobs:
           # Rejection happens before report staging or the external client.
           chmod 0644 "$env_file"
           set +e
-          FUNNEL_SUMMARY_ENV_FILE="$env_file" scripts/funnel_daily_summary.sh \
+          PATH="$probe_bin:$PATH" FUNNEL_SUMMARY_ENV_FILE="$env_file" \
+            scripts/funnel_daily_summary.sh \
             >"$smoke_root/insecure.out" 2>"$smoke_root/insecure.err"
           insecure_rc=$?
           set -e
@@ -785,7 +801,7 @@ jobs:
           # the configured path itself must be the inspected regular file.
           ln -s "$env_file" "$smoke_root/symlink.env"
           set +e
-          FUNNEL_SUMMARY_ENV_FILE="$smoke_root/symlink.env" \
+          PATH="$probe_bin:$PATH" FUNNEL_SUMMARY_ENV_FILE="$smoke_root/symlink.env" \
             scripts/funnel_daily_summary.sh \
             >"$smoke_root/symlink.out" 2>"$smoke_root/symlink.err"
           symlink_rc=$?
@@ -804,7 +820,8 @@ jobs:
           SH
           chmod 0755 "$psql_shim"
           set +e
-          FUNNEL_SUMMARY_ENV_FILE="$env_file" scripts/funnel_daily_summary.sh
+          PATH="$probe_bin:$PATH" FUNNEL_SUMMARY_ENV_FILE="$env_file" \
+            scripts/funnel_daily_summary.sh
           failed_rc=$?
           set -e
           test "$failed_rc" -eq 1

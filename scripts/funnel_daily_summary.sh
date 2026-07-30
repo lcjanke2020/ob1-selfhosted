@@ -47,12 +47,12 @@
 set -euo pipefail
 umask 077
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 # Preserve an inherited value for configuration precedence, but strip its
 # export attribute before stat or any other child process can inherit it. The
 # check is repeated after sourcing in case a hand-written env file uses export.
 export -n OPENBRAIN_APP_PASSWORD 2>/dev/null || true
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # The split deployment keeps the job's app-role credential in a narrow 0600
 # file instead of exporting the app compose .env (which also contains admin,
