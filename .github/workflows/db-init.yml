@@ -760,7 +760,9 @@ jobs:
             printf 'DB_HOST=127.0.0.1\n'
             printf 'DB_PORT=5432\n'
             printf 'POSTGRES_DB=%q\n' "$POSTGRES_DB"
-            printf 'OPENBRAIN_APP_PASSWORD=%q\n' "$OPENBRAIN_APP_PASSWORD"
+            # Exercise the second guard too: a sourced file may explicitly
+            # restore the credential's export attribute after the first-child check.
+            printf 'export OPENBRAIN_APP_PASSWORD=%q\n' "$OPENBRAIN_APP_PASSWORD"
             printf 'SUMMARY_SQL_FILE=%q\n' "$GITHUB_WORKSPACE/db/summarize_funnel.sql"
             printf 'SUMMARY_DIR=%q\n' "$report_dir"
             printf 'PSQL_BIN=%q\n' "$psql_shim"
