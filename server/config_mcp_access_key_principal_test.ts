@@ -11,6 +11,7 @@ const ENV_KEYS = [
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
+  "METADATA_FALLBACK_POLICY",
 ];
 
 Deno.test("config.ts: shared-key principal requires the shared-key door", async () => {
@@ -18,6 +19,7 @@ Deno.test("config.ts: shared-key principal requires the shared-key door", async 
     ENV_KEYS.map((key) => [key, Deno.env.get(key)]),
   );
   Deno.env.set("DB_PASSWORD", "test-password");
+  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
   Deno.env.delete("MCP_ACCESS_KEY");
   Deno.env.set("MCP_ACCESS_KEY_PRINCIPAL", "local-operator");
   Deno.env.set("AUTH0_ISSUER", "https://example.auth0.com/");

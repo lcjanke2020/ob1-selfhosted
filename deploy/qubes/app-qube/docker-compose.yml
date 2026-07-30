@@ -79,14 +79,15 @@ services:
       CHAT_API_KEY: ${CHAT_API_KEY:-}
       CHAT_MODEL: ${CHAT_MODEL:-}
       CHAT_TIMEOUT_MS: ${CHAT_TIMEOUT_MS:-60000}
-      # Fallback chat endpoint — tried only when the primary CHAT_* call above
-      # fails (unreachable/error/timeout/unparseable). Lets a local-first
-      # primary (e.g. a GPU box reached via the forwarder below) degrade to a
-      # hosted model instead of dropping metadata when that box is down. Blank
-      # = disabled. NOTE: the fallback path CAN send thought content off-box.
+      # Fallback chat endpoint — available only under an explicit alert/allow
+      # policy, after the primary fails or as a fallback-only deployment.
+      # Blank = disabled. NOTE: this path CAN send thought content off-box.
       FALLBACK_CHAT_API_BASE: ${FALLBACK_CHAT_API_BASE:-}
       FALLBACK_CHAT_API_KEY: ${FALLBACK_CHAT_API_KEY:-}
       FALLBACK_CHAT_MODEL: ${FALLBACK_CHAT_MODEL:-}
+      # Required privacy choice. There is intentionally no compose or server
+      # default; see .env.example for off / alert / allow semantics.
+      METADATA_FALLBACK_POLICY: ${METADATA_FALLBACK_POLICY:?set METADATA_FALLBACK_POLICY to off, alert, or allow}
       # Optional server-side successor to the host log monitor. Event rows are
       # durable regardless; a non-empty channel list enables delivery.
       METADATA_NOTIFY_CHANNELS: ${METADATA_NOTIFY_CHANNELS:-}
@@ -100,9 +101,9 @@ services:
       METADATA_NTFY_TOPIC: ${METADATA_NTFY_TOPIC:-}
       METADATA_NTFY_TOKEN: ${METADATA_NTFY_TOKEN:-}
       # Opt-in safety gate for the PRIMARY (CHAT_*) call. Off unless "true": when
-      # off, extraction skips the primary and uses the fallback (or the
-      # uncategorized stub if no fallback is configured). Leave off until the
-      # primary endpoint is verified reachable + safe.
+      # off, extraction skips the primary and then follows the selected fallback
+      # policy (or uses the uncategorized stub). Leave off until the primary
+      # endpoint is verified reachable + safe.
       ENABLE_PRIMARY_EXTRACTION: ${ENABLE_PRIMARY_EXTRACTION:-}
       # OAuth-only deployment: no x-brain-key door (MCP_ACCESS_KEY omitted),
       # so a leaked static key can't be used against this public install.

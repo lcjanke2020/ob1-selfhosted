@@ -47,6 +47,7 @@ const ENV_KEYS = [
   "AUTH0_AUDIENCE",
   // see auth_brainkey_test.ts for why this is here.
   "OBS_AUTH_EVENTS_ENABLED",
+  "METADATA_FALLBACK_POLICY",
   // bound the boot-time JWKS reachability probe with a short
   // timeout so this test suite stays fast even if the mock somehow
   // doesn't intercept the probe fetch.
@@ -145,6 +146,7 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
   Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
   // disable audit emission; the audit module reads this at load.
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
+  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
   // short JWKS fetch timeout so the boot probe (intercepted by
   // the fetch mock above) and any per-request refresh fail fast in tests
   // rather than waiting the production 10 s default.

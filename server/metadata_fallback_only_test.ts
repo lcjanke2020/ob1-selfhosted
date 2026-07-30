@@ -23,6 +23,7 @@ const ENV_KEYS = [
   "FALLBACK_CHAT_API_KEY",
   "FALLBACK_CHAT_MODEL",
   "ENABLE_PRIMARY_EXTRACTION",
+  "METADATA_FALLBACK_POLICY",
 ];
 
 Deno.test("extractMetadata: fallback-only (primary blank) classifies via the fallback", async () => {
@@ -43,6 +44,7 @@ Deno.test("extractMetadata: fallback-only (primary blank) classifies via the fal
   Deno.env.set("FALLBACK_CHAT_API_BASE", FALLBACK_BASE);
   Deno.env.set("FALLBACK_CHAT_MODEL", "hosted-model");
   Deno.env.set("FALLBACK_CHAT_API_KEY", "test-fallback-key");
+  Deno.env.set("METADATA_FALLBACK_POLICY", "allow");
 
   const urls: string[] = [];
   globalThis.fetch = ((input: string | URL | Request) => {

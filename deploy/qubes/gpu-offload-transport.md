@@ -39,13 +39,13 @@ ollama port; substitute your server's port throughout.
 This transport is **optional and easy to disable**. If the GPU qube becomes
 unavailable, leave the safety knobs below in place — the `autostart=no` **policy
 option** (step 1), with the forwarder unit left enabled and running (it has no
-`autostart` setting of its own) — and OB1 degrades cleanly to its
-`FALLBACK_CHAT_*` endpoint: captures keep working, and the halted qube is never
-started as a side effect.
-This degradation path is field-verified: with the GPU qube halted, a capture's
-primary attempt fails fast (the forwarder accepts the TCP connection, the qrexec
-call is refused, the connection closes — no timeout burn), the fallback
-classifies in the same request, and the GPU qube stays halted. Re-enable by
+`autostart` setting of its own). The primary attempt then fails fast without
+starting the halted qube. OB1 follows `METADATA_FALLBACK_POLICY`: `off` stores a
+local stub, while `alert` or `allow` may classify through `FALLBACK_CHAT_*`.
+The permitted-fallback path is field-verified: with the GPU qube halted, the
+forwarder accepts the TCP connection, the qrexec call is refused, the connection
+closes with no timeout burn, fallback classifies in the same request, and the
+GPU qube stays halted. Re-enable by
 starting the GPU qube; no code or config change is required (the extractor is
 endpoint-agnostic). To park the transport entirely, additionally stop + disable
 the forwarder unit, remove its rc.local restage lines, and drop the step-3
@@ -236,8 +236,11 @@ CHAT_MODEL=<your-served-model>
 ENABLE_PRIMARY_EXTRACTION=true
 ```
 
-Keep `FALLBACK_CHAT_*` configured so a downed GPU qube degrades to a hosted
-model instead of dropping metadata. See
+Choose `METADATA_FALLBACK_POLICY` explicitly. Use `off` to keep a downed GPU
+qube from sending content anywhere else, `alert` to permit the configured
+fallback only with a notification channel, or `allow` to permit fallback
+without requiring delivery. Configure `FALLBACK_CHAT_*` only for the latter two
+choices. See
 [`app-qube/.env.example`](app-qube/.env.example) for the full block and the
 `ENABLE_PRIMARY_EXTRACTION` safety gate (off unless exactly `true`).
 
@@ -273,8 +276,8 @@ deployment's profile):
   ballooning), so nothing rescues a spike: the kernel OOM killer kills the
   server. `Restart=always` brings it back in seconds — **empty**. The resident
   model is gone, a `keep_alive=-1` pin died with the process, and nothing looks
-  wrong until the next capture pays a cold load or times out into
-  `FALLBACK_CHAT_*` — content off-box.
+  wrong until the next capture pays a cold load, then stores a stub under `off`
+  or may use `FALLBACK_CHAT_*` under `alert`/`allow`.
 
 The symptom set masquerades as an eviction or keep-alive bug, which is the
 trap: `/api/ps` shows the model pinned with a far-future `expires_at` on one
@@ -421,10 +424,11 @@ in front of a capture. Two companion settings, same qube:
   proves the path, but the extractor actually POSTs `/chat/completions` with a
   strict `response_format: {type: "json_schema", …}`
   ([`server/metadata.ts`](../../server/metadata.ts)); a server can list the
-  model yet reject that request shape, after which every capture falls through
-  to `FALLBACK_CHAT_*` — thought content leaves the box, the outcome this
-  transport exists to prevent. Captures still succeed; the extractor writes a
-  durable event and warns on every fallback classification. For a transport
+  model yet reject that request shape. Under policy `off`, the capture stores a
+  local stub and never calls `FALLBACK_CHAT_*`; under `alert` or `allow`, it may
+  fall through to that endpoint and thought content may leave the box. Captures
+  still succeed; the extractor writes a durable event and warns on every
+  fallback classification. For a transport
   smoke test, also check the immediate log deliberately: capture a test thought
   and look for `[metadata] classified via primary endpoint`. Failure lines now
   identify the broad cause: `primary endpoint failed (transport/timeout)` is an

@@ -13,7 +13,7 @@ the [Qubes README](../README.md) first; this directory is the app-qube-specific 
 ## Run
 
 ```sh
-cp .env.example .env && $EDITOR .env     # fill DB_HOST + the three passwords
+cp .env.example .env && $EDITOR .env     # fill required values + choose the fallback policy
 docker compose up -d
 ```
 
@@ -42,6 +42,14 @@ qrexec `ConnectTCP` transport, with the firewall/`custom-input`, persistence, an
 `autostart=no` safety notes. It is a deliberate tradeoff, not a default — the why and the
 costs are covered in
 [Serving From a Qube With No Network-Facing Listener](https://github.com/lcjanke2020/qubes-os-explorations/blob/master/qrexec-connecttcp-service-qube.md).
+
+`METADATA_FALLBACK_POLICY` is required and has no default. Choose `off` to
+guarantee that a primary failure stores placeholder metadata without calling
+`FALLBACK_CHAT_*`; choose `alert` to permit fallback only when at least one
+Pushover/ntfy adapter is configured; choose `allow` to permit fallback without
+requiring delivery. `alert` and `allow` also support a fallback-only deployment,
+but `allow` is the privacy-weakest posture. On every restart, verify the log line
+`[metadata] fallback policy: ...` reports the intended value.
 
 ## Credentials (per-qube split)
 
@@ -72,6 +80,8 @@ durably; this app qube can then deliver optional Pushover/ntfy alerts from the
 ledger. Apply the migration and run `db/03-grants-assertion.sql` before
 recreating the MCP container. See
 [Metadata degradation monitoring](../../../docs/metadata-degradation-monitoring.md).
+Upgrades also require an explicit `METADATA_FALLBACK_POLICY` in the app-qube
+`.env`; an unset value deliberately prevents the new container from starting.
 
 ## Host firewall (scope the `0.0.0.0:8787` bind)
 

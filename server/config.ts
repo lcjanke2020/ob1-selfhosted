@@ -99,19 +99,40 @@ export const ENABLE_PRIMARY_EXTRACTION = Boolean(
   PRIMARY_EXTRACTION_OPT_IN && CHAT_API_BASE && CHAT_MODEL,
 );
 
-// Optional FALLBACK chat endpoint, tried when the primary is disabled or fails
-// (unreachable, non-2xx, timeout, or unparseable output) before giving up to
-// the minimal stub. This lets a local-first primary (e.g. a GPU box that keeps
-// thought content on your network) degrade to a hosted OpenAI-compatible model
-// instead of losing metadata when that box is down. It is also valid on its
-// own: a fallback-only deployment (CHAT_* blank, primary off) classifies via
-// this endpoint. Disabled unless BOTH base and model are set. NOT gated by
-// ENABLE_PRIMARY_EXTRACTION — that is what makes a fallback-only deployment work.
+// The fallback privacy posture is always an explicit operator choice. There is
+// deliberately no default: upgrading or adding endpoint variables must never
+// silently decide whether captured thought content may reach another endpoint.
+export type MetadataFallbackPolicy = "off" | "alert" | "allow";
+
+function metadataFallbackPolicy(): MetadataFallbackPolicy {
+  const value = optionalTrimmed("METADATA_FALLBACK_POLICY");
+  if (!value) {
+    throw new Error(
+      "Missing required env var: METADATA_FALLBACK_POLICY " +
+        "(expected off, alert, or allow)",
+    );
+  }
+  if (value !== "off" && value !== "alert" && value !== "allow") {
+    throw new Error(
+      "METADATA_FALLBACK_POLICY must be exactly off, alert, or allow " +
+        "(lowercase)",
+    );
+  }
+  return value;
+}
+
+export const METADATA_FALLBACK_POLICY = metadataFallbackPolicy();
+
+// Optional FALLBACK chat endpoint. `off` keeps it inert even when its endpoint
+// variables are populated; `alert` and `allow` permit it after the primary is
+// disabled or fails. It remains valid on its own for an explicit fallback-only
+// deployment. BOTH base and model are required to make the endpoint available.
 export const FALLBACK_CHAT_API_BASE = optionalTrimmed("FALLBACK_CHAT_API_BASE");
 export const FALLBACK_CHAT_API_KEY = optionalTrimmed("FALLBACK_CHAT_API_KEY");
 export const FALLBACK_CHAT_MODEL = optionalTrimmed("FALLBACK_CHAT_MODEL");
 export const ENABLE_FALLBACK_EXTRACTION = Boolean(
-  FALLBACK_CHAT_API_BASE && FALLBACK_CHAT_MODEL,
+  METADATA_FALLBACK_POLICY !== "off" && FALLBACK_CHAT_API_BASE &&
+    FALLBACK_CHAT_MODEL,
 );
 
 // Metadata extraction runs when EITHER path is active; with neither configured,
@@ -244,6 +265,20 @@ if (METADATA_NOTIFY_CHANNELS.includes("ntfy")) {
   ) {
     throw new Error("METADATA_NTFY_TOKEN is not a valid bearer token");
   }
+}
+
+// `alert` promises that notification plumbing is configured before fallback
+// classification is permitted. Runtime delivery remains best-effort. A
+// selected but incomplete adapter already fails above; an empty channel list
+// must fail too rather than quietly behaving like `allow`.
+if (
+  METADATA_FALLBACK_POLICY === "alert" &&
+  !ENABLE_METADATA_NOTIFICATIONS
+) {
+  throw new Error(
+    "METADATA_FALLBACK_POLICY=alert requires at least one configured " +
+      "METADATA_NOTIFY_CHANNELS adapter",
+  );
 }
 
 // Opt-in REST gateway (/api/v1). Default OFF; when off the router is never

@@ -19,6 +19,7 @@ const ENV_KEYS = [
   // importing auth.ts pulls in auth_audit.ts which would
   // otherwise construct a postgres pool. Defensively disable for tests.
   "OBS_AUTH_EVENTS_ENABLED",
+  "METADATA_FALLBACK_POLICY",
 ];
 
 Deno.test("deriveProtectedResourceMetadata (RFC 9728 §3.1)", async (t) => {
@@ -40,6 +41,7 @@ Deno.test("deriveProtectedResourceMetadata (RFC 9728 §3.1)", async (t) => {
   // disable audit emission for the same reason as the other
   // auth_*_test files.
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
+  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 
   const {
     buildProtectedResourceMetadata,

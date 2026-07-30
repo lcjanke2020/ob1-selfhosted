@@ -140,12 +140,15 @@ services:
       CHAT_API_KEY: ${CHAT_API_KEY:-}
       CHAT_MODEL: ${CHAT_MODEL:-}
       CHAT_TIMEOUT_MS: ${CHAT_TIMEOUT_MS:-60000}
-      # Fallback chat endpoint — tried only when the primary CHAT_* call above
-      # fails (unreachable/error/timeout/unparseable), before the minimal stub.
-      # Blank = disabled. NOTE: the fallback path CAN send content off-box.
+      # Fallback chat endpoint — available only under an explicit alert/allow
+      # policy, after the primary fails or as a fallback-only deployment.
+      # Blank = disabled. NOTE: this path CAN send content off-box.
       FALLBACK_CHAT_API_BASE: ${FALLBACK_CHAT_API_BASE:-}
       FALLBACK_CHAT_API_KEY: ${FALLBACK_CHAT_API_KEY:-}
       FALLBACK_CHAT_MODEL: ${FALLBACK_CHAT_MODEL:-}
+      # Required privacy choice. There is intentionally no compose or server
+      # default; see .env.example for off / alert / allow semantics.
+      METADATA_FALLBACK_POLICY: ${METADATA_FALLBACK_POLICY:?set METADATA_FALLBACK_POLICY to off, alert, or allow}
       # Durable, content-free metadata degradation notifications. Empty channel
       # list records audit rows without sending. See .env.example.
       METADATA_NOTIFY_CHANNELS: ${METADATA_NOTIFY_CHANNELS:-}
@@ -159,8 +162,8 @@ services:
       METADATA_NTFY_TOPIC: ${METADATA_NTFY_TOPIC:-}
       METADATA_NTFY_TOKEN: ${METADATA_NTFY_TOKEN:-}
       # Opt-in safety gate for the PRIMARY (CHAT_*) call. Off unless "true": when
-      # off, extraction skips the primary and uses the fallback (or the
-      # uncategorized stub if no fallback is configured).
+      # off, extraction skips the primary and then follows the selected fallback
+      # policy (or uses the uncategorized stub).
       ENABLE_PRIMARY_EXTRACTION: ${ENABLE_PRIMARY_EXTRACTION:-}
       # REST gateway (/api/v1) behind the same auth doors as /mcp. On by
       # default for the docker-compose installs; set ENABLE_REST_API=false in

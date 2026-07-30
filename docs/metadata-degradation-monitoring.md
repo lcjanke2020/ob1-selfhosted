@@ -6,6 +6,11 @@ The privacy-sensitive fallback class can mean **a thought's full text left your
 network** (whether it did depends on where `FALLBACK_CHAT_API_BASE` points).
 The server intentionally never blocks a capture on classification.
 
+`METADATA_FALLBACK_POLICY` decides whether that fallback path may run: `off`
+uses the local stub after a primary failure, `alert` permits fallback only with a
+configured notification channel, and `allow` permits it without delivery. The
+setting is required and has no default.
+
 Server 1.16.0 makes these outcomes durable. Each degraded capture writes a
 content-free audit record, every newly captured thought carries a server-owned
 classifier stamp, and an optional Pushover/ntfy worker delivers
@@ -219,8 +224,11 @@ private content for this test.
 
 ## Diagnostic log trigger lines
 
-All lines below come from [`server/metadata.ts`](../server/metadata.ts) and
-contain no thought content; grep for the stable substrings shown.
+The boot-time posture line comes from [`server/index.ts`](../server/index.ts):
+`[metadata] fallback policy: off|alert|allow`. Verify it after every restart,
+but do not count it as a per-capture degradation trigger. The lines below come
+from [`server/metadata.ts`](../server/metadata.ts), contain no thought content,
+and use the stable substrings shown.
 
 | log line (substring) | what it means | suggested priority |
 |---|---|---|
@@ -230,7 +238,7 @@ contain no thought content; grep for the stable substrings shown.
 | `primary endpoint failed (non-2xx response)` | The endpoint was reachable but rejected or failed the request. The line appends the final HTTP status (for example, `— HTTP 401`) so authentication/configuration failures, rate limits, and server failures can be distinguished before consulting the endpoint's logs. | normal |
 | `primary endpoint returned an invalid response` | The endpoint returned 2xx, but not a usable OpenAI-compatible completion envelope. | normal |
 | `primary endpoint returned unparseable metadata` | The completion envelope was usable, but the model's content was not JSON. This is an output-quality signal, not an availability signal. | normal |
-| `primary endpoint returned schema-invalid metadata` | The model returned JSON that failed the local runtime schema. A recurring rejection is a model-quality or compatibility regression; when fallback is configured it can systematically route capture content to that fallback. | high |
+| `primary endpoint returned schema-invalid metadata` | The model returned JSON that failed the local runtime schema. A recurring rejection is a model-quality or compatibility regression; when fallback is configured and policy permits it, this can systematically route capture content to that fallback. | high |
 
 **Upgrade note:** if you deployed an earlier revision of the monitor sketch,
 replace its `grep -c "primary endpoint failed"` expression when this server
@@ -240,10 +248,11 @@ fallback-classified and stub counters are unchanged.
 
 The reference monitor deliberately aggregates all five primary failure forms
 into one `primary-fail` counter. When schema rejection actually routes content
-to a configured fallback, that capture also emits the high-priority
-`classified via FALLBACK endpoint` line; without a fallback, it stubs locally
-and remains a normal-priority quality event. That companion signal is why the
-sketch does not need a second schema-only counter to honor the table's priority.
+to a configured, policy-permitted fallback, that capture also emits the
+high-priority `classified via FALLBACK endpoint` line; without a fallback, it
+stubs locally and remains a normal-priority quality event. That companion signal
+is why the sketch does not need a second schema-only counter to honor the table's
+priority.
 
 These are all `console.warn` lines, which Deno emits on **stderr**; only the
 healthy `classified via primary endpoint` confirmation goes to stdout. The
@@ -476,14 +485,25 @@ Two caveats worth knowing:
   governs that path is the app qube's own Qubes-firewall egress policy —
   check there first if the probe fails.
 
-## Next policy layer
+## Fallback policy
 
-The durable signal and notification channel make a future operator-selected
-fallback policy enforceable. An `off` / `alert` / `allow` setting can decide
-whether capture stubs locally, uses fallback only with a configured channel, or
-permits fallback without delivery. That policy is intentionally separate from
-this observability layer; current primary → fallback → stub behavior is
-unchanged.
+Set `METADATA_FALLBACK_POLICY` to exactly one of:
+
+| value | behavior |
+|---|---|
+| `off` | Never call `FALLBACK_CHAT_*`. A failed enabled primary records `primary_failure` + `stub_used` and stores placeholder metadata. With no enabled primary, suppressing a configured fallback is an intentional disabled-extraction posture: each thought keeps stub provenance, but no degradation row is emitted. |
+| `alert` | Permit the configured fallback, but refuse to boot unless `METADATA_NOTIFY_CHANNELS` contains at least one fully configured adapter. Boot validates configuration, not provider reachability; delivery remains best-effort. |
+| `allow` | Permit the configured fallback without requiring delivery. Durable audit rows are still written; this is the privacy-weakest mode. |
+
+There is deliberately no default. Missing or invalid policy values stop the
+server at boot, and compose deployments require the variable before rendering
+the MCP service. `alert` and `allow` preserve fallback-only deployments where
+`CHAT_*` is blank; under `alert`, each successful fallback classification enters
+the existing first-occurrence/rollup notification flow. Confirm provider egress
+with the live-fire procedure above and watch delivery failures plus
+`last_failed_channels`; `alert` does not turn a best-effort provider into a
+guaranteed channel. The active policy is printed at boot beside the extraction
+posture.
 
 Related reading: [`docs/why-local-only.md`](why-local-only.md) for why the
 fallback exists at all, and the [GPU-qube transport

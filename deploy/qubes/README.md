@@ -85,7 +85,7 @@ The app qube runs the application half only — mcp + Ollama (CPU-only), no Cadd
 
 ```sh
 cd app-qube
-cp .env.example .env && $EDITOR .env     # DB_HOST (db qube) + admin/app/readonly passwords
+cp .env.example .env && $EDITOR .env     # required values + METADATA_FALLBACK_POLICY
 docker compose up -d                     # services: mcp, ollama
 ```
 

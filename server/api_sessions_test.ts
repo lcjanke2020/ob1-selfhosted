@@ -24,6 +24,7 @@ const ENV_KEYS = [
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
   "OBS_AUTH_EVENTS_ENABLED",
+  "METADATA_FALLBACK_POLICY",
 ];
 
 function authed(init: RequestInit = {}): RequestInit {
@@ -76,6 +77,7 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
   Deno.env.set("MCP_ACCESS_KEY", KEY);
   Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
+  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 
   const { createApiRouter } = await import("./api.ts");
 

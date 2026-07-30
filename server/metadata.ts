@@ -346,8 +346,10 @@ export async function extractMetadata(
   const degradationEvents: MetadataDegradationEvent[] = [];
 
   // An intentionally extraction-free deployment is a stable configuration,
-  // not a classifier failure. Keep the explicit per-thought stub provenance,
-  // but do not grow the degradation audit or page the operator forever.
+  // not a classifier failure. This includes a fallback-only endpoint that the
+  // operator deliberately suppresses with policy `off`. Keep the explicit
+  // per-thought stub provenance, but do not grow the degradation audit or page
+  // the operator forever.
   if (!ENABLE_PRIMARY_EXTRACTION && !ENABLE_FALLBACK_EXTRACTION) {
     console.log(
       "[metadata] extraction disabled; using uncategorized metadata",
@@ -388,9 +390,10 @@ export async function extractMetadata(
     );
   }
 
-  // Fallback runs whenever it is configured — after a primary failure OR as the
-  // sole extractor in a fallback-only deployment. NB this path can send thought
-  // content off-box (the privacy trade-off documented in .env.example).
+  // Fallback runs only when configured AND allowed by the explicit policy —
+  // after a primary failure OR as the sole extractor in a fallback-only
+  // deployment. This path can send thought content off-box (the privacy
+  // trade-off documented in .env.example).
   if (ENABLE_FALLBACK_EXTRACTION) {
     const fallbackEndpoint = {
       base: FALLBACK_CHAT_API_BASE,

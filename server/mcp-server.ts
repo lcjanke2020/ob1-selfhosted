@@ -258,7 +258,9 @@ export function createMcpServer(
     // 1.16.0: metadata extraction stamps classifier role/model and writes
     // durable degradation events; an optional outbox/ledger-backed
     // Pushover/ntfy worker sends content-free first/rollup alerts.
-    version: "1.16.0",
+    // 1.17.0: METADATA_FALLBACK_POLICY makes off/alert/allow an explicit,
+    // required privacy choice; alert fails boot without a notification channel.
+    version: "1.17.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names

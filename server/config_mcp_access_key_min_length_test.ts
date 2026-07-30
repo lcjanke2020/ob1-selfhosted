@@ -24,6 +24,7 @@ const ENV_KEYS = [
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
   "OBS_AUTH_EVENTS_ENABLED",
+  "METADATA_FALLBACK_POLICY",
 ];
 
 Deno.test(
@@ -42,6 +43,7 @@ Deno.test(
     Deno.env.delete("AUTH0_AUDIENCE");
     Deno.env.set("DB_PASSWORD", "test-password");
     Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
+    Deno.env.set("METADATA_FALLBACK_POLICY", "off");
     // The weak literal the ticket calls out. 8 chars < 32 → must throw.
     Deno.env.set("MCP_ACCESS_KEY", "password");
     Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");

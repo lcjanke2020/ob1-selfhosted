@@ -28,7 +28,9 @@ All three of `AUTH0_ISSUER`, `AUTH0_JWKS_URI`, `AUTH0_AUDIENCE` must be set — 
 
 ### Start the stack
 
-Copy your filled-in `.env` into this directory (Pattern B needs the extra variables: the `AUTH0_*` trio and `OPENBRAIN_INGESTER_PASSWORD`), then either run with explicit flags:
+Copy your filled-in `.env` into this directory (including the required
+`METADATA_FALLBACK_POLICY`; Pattern B also needs the `AUTH0_*` trio and
+`OPENBRAIN_INGESTER_PASSWORD`), then either run with explicit flags:
 
 ```bash
 cd deploy/compose-tailnet

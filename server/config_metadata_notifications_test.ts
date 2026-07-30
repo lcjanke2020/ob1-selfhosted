@@ -9,6 +9,8 @@ const SCRIPT = `
     channels: c.METADATA_NOTIFY_CHANNELS,
     label: c.METADATA_NOTIFY_LABEL,
     enabled: c.ENABLE_METADATA_NOTIFICATIONS,
+    fallbackEnabled: c.ENABLE_FALLBACK_EXTRACTION,
+    policy: c.METADATA_FALLBACK_POLICY,
     ntfyUrl: c.METADATA_NTFY_SERVER_URL,
     pollMs: c.METADATA_NOTIFY_POLL_INTERVAL_MS,
     rollupMs: c.METADATA_NOTIFY_ROLLUP_MS,
@@ -31,6 +33,7 @@ const BASE_ENV: Record<string, string> = {
   FALLBACK_CHAT_API_BASE: "",
   FALLBACK_CHAT_API_KEY: "",
   FALLBACK_CHAT_MODEL: "",
+  METADATA_FALLBACK_POLICY: "off",
   METADATA_NOTIFY_CHANNELS: "",
   METADATA_NOTIFY_LABEL: "",
   METADATA_NOTIFY_POLL_INTERVAL_MS: "",
@@ -67,6 +70,8 @@ Deno.test("metadata notification config: disabled default and valid dual-channel
       channels: [],
       label: "OpenBrain",
       enabled: false,
+      fallbackEnabled: false,
+      policy: "off",
       ntfyUrl: "https://ntfy.sh",
       pollMs: 300_000,
       rollupMs: 1_800_000,
@@ -92,6 +97,8 @@ Deno.test("metadata notification config: disabled default and valid dual-channel
         channels: ["pushover", "ntfy"],
         label: "Private memory",
         enabled: true,
+        fallbackEnabled: false,
+        policy: "off",
         ntfyUrl: "https://notify.example/base",
         pollMs: 2_147_483_647,
         rollupMs: 1_800_000,
@@ -99,6 +106,86 @@ Deno.test("metadata notification config: disabled default and valid dual-channel
       });
     },
   );
+});
+
+Deno.test("metadata fallback policy: required, bounded, and notification-aware", async (t) => {
+  await t.step("unset policy refuses to boot", async () => {
+    const result = await runConfig({ METADATA_FALLBACK_POLICY: "" });
+    assertEquals(result.code, 1);
+    assertStringIncludes(result.stderr, "Missing required env var");
+    assertStringIncludes(result.stderr, "METADATA_FALLBACK_POLICY");
+  });
+
+  await t.step("unknown policy refuses to boot", async () => {
+    const result = await runConfig({ METADATA_FALLBACK_POLICY: "silent" });
+    assertEquals(result.code, 1);
+    assertStringIncludes(
+      result.stderr,
+      "METADATA_FALLBACK_POLICY must be exactly off, alert, or allow",
+    );
+  });
+
+  await t.step("policy values are exact lowercase", async () => {
+    const result = await runConfig({ METADATA_FALLBACK_POLICY: "Off" });
+    assertEquals(result.code, 1);
+    assertStringIncludes(result.stderr, "(lowercase)");
+  });
+
+  await t.step("off keeps a configured fallback inert", async () => {
+    const result = await runConfig({
+      METADATA_FALLBACK_POLICY: "off",
+      FALLBACK_CHAT_API_BASE: "https://fallback.example/v1",
+      FALLBACK_CHAT_MODEL: "fallback-model",
+    });
+    assertEquals(result.code, 0, result.stderr);
+    const config = JSON.parse(result.stdout);
+    assertEquals(config.policy, "off");
+    assertEquals(config.fallbackEnabled, false);
+  });
+
+  await t.step(
+    "allow activates a configured fallback without delivery",
+    async () => {
+      const result = await runConfig({
+        METADATA_FALLBACK_POLICY: "allow",
+        FALLBACK_CHAT_API_BASE: "https://fallback.example/v1",
+        FALLBACK_CHAT_MODEL: "fallback-model",
+      });
+      assertEquals(result.code, 0, result.stderr);
+      const config = JSON.parse(result.stdout);
+      assertEquals(config.policy, "allow");
+      assertEquals(config.fallbackEnabled, true);
+      assertEquals(config.enabled, false);
+    },
+  );
+
+  await t.step(
+    "alert without a notification channel refuses to boot",
+    async () => {
+      const result = await runConfig({ METADATA_FALLBACK_POLICY: "alert" });
+      assertEquals(result.code, 1);
+      assertStringIncludes(
+        result.stderr,
+        "METADATA_FALLBACK_POLICY=alert requires at least one configured",
+      );
+      assertStringIncludes(result.stderr, "METADATA_NOTIFY_CHANNELS");
+    },
+  );
+
+  await t.step("alert activates fallback with a valid channel", async () => {
+    const result = await runConfig({
+      METADATA_FALLBACK_POLICY: "alert",
+      FALLBACK_CHAT_API_BASE: "https://fallback.example/v1",
+      FALLBACK_CHAT_MODEL: "fallback-model",
+      METADATA_NOTIFY_CHANNELS: "ntfy",
+      METADATA_NTFY_TOPIC: "private-topic",
+    });
+    assertEquals(result.code, 0, result.stderr);
+    const config = JSON.parse(result.stdout);
+    assertEquals(config.policy, "alert");
+    assertEquals(config.fallbackEnabled, true);
+    assertEquals(config.enabled, true);
+  });
 });
 
 Deno.test("metadata extraction config: explicit primary opt-in fails closed", async (t) => {
