@@ -118,7 +118,7 @@ Once Funnel is live, the box has a public surface for the first time — this st
 
 **What's NOT logged:** no `Authorization`/`x-brain-key`/`Cookie` values (redacted by Caddy's `format filter` — if you ever see them on disk, the Caddyfile has drifted), no request bodies, no query strings, no JWT contents.
 
-**Daily summary.** `scripts/funnel_daily_summary.sh` rolls up yesterday's rows, enforces retention, and writes a fenced-markdown report to `SUMMARY_DIR` (default `~/openbrain-funnel-summaries`; point it at a directory you replicate off-box for a free backup of the trail). Run it from cron or a systemd timer:
+**Daily summary.** `scripts/funnel_daily_summary.sh` rolls up completed days, enforces retention, and atomically writes a fenced-markdown report to `SUMMARY_DIR` (default `~/openbrain-funnel-summaries`; point it at a trusted directory you replicate off-box for a backup of the trail). Its default `SUMMARY_BACKEND=compose` runs `psql` inside this single-host stack's Postgres container. Run it from cron or a systemd timer:
 
 ```ini
 # /etc/systemd/system/funnel-summary.service
@@ -136,7 +136,14 @@ ExecStart=/path/to/repo/scripts/funnel_daily_summary.sh
 [Timer]
 OnCalendar=*-*-* 00:30:00 UTC
 Persistent=true
+
+[Install]
+WantedBy=timers.target
 ```
+
+The three-qube deployment has no Postgres container on its app qube. It instead ships a
+user service, timer, scoped environment template, and direct-Postgres installation recipe
+in [`deploy/qubes/app-qube/`](../qubes/app-qube/README.md#daily-funnel-rollup-and-retention-host-side).
 
 **Ad-hoc queries** (the `openbrain_readonly` role can read all three tables):
 

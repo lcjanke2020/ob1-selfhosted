@@ -62,9 +62,10 @@ app→db OS pivot — not just the app role; accepted for now since this compart
 memory application and the db qube is highly contained (the runtime app role itself is
 still restricted by memory-space RLS) — see
 [`../db-qube/README.md`](../db-qube/README.md) and [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15)).
-At runtime the app qube also connects as `openbrain_app` (mcp writes thoughts) and
-`openbrain_readonly` (the backup job). It does **not** carry the log-ingester credential —
-that lives only on the ingress qube.
+At runtime the app qube also connects as `openbrain_app` (mcp writes thoughts; the
+[daily rollup](#daily-funnel-rollup-and-retention-host-side) summarizes and retires
+observability rows) and `openbrain_readonly` (the backup job). It does **not** carry the
+log-ingester credential — that lives only on the ingress qube.
 
 OAuth's verified `sub` supplies personal identity automatically. The seeded
 `sensitive` workspace is therefore available without a shared-key principal:
@@ -88,6 +89,72 @@ Server 1.19.0 also requires `db/08-access-tokens.sql` on the DB qube followed by
 absent, so the new schema does not add an accepted credential at the
 public edge. See [Native access
 tokens](../../../docs/native-access-tokens.md#existing-database-upgrade).
+
+## Daily Funnel rollup and retention (host-side)
+
+The access-log schema retains raw rows for 30 days and daily aggregates for one year, but
+those policies are active only when [`scripts/funnel_daily_summary.sh`](../../../scripts/funnel_daily_summary.sh)
+runs. In this split topology Postgres is not in the app compose project, so the shipped job
+uses the wrapper's explicit `postgres` backend: host `psql` connects to the db qube as
+`openbrain_app`, the existing role whose observability grants cover the transactional
+rollup and retention deletes. The internet-adjacent ingress qube never receives that
+credential.
+
+The job reads a dedicated environment file containing only its database settings. Do not
+point it at this directory's `.env`: exporting the full app environment would needlessly
+expose the database administrator, OAuth, model-provider, and notification settings to the
+rollup process.
+
+Fedora's `postgresql` package provides the host `psql` client; it is commonly already
+present beside the `pg_dump` client used by the encrypted backup. If it is absent, install
+the package in this qube's Fedora **template** and restart the app qube—an AppVM-local
+package install disappears on reboot.
+
+**Install on the app qube** as the regular user, from the repository checkout:
+
+```sh
+mkdir -p ~/.config/systemd/user
+install -m 0755 scripts/funnel_daily_summary.sh ~/funnel_daily_summary.sh
+install -m 0644 db/summarize_funnel.sql ~/summarize_funnel.sql
+install -m 0600 deploy/qubes/app-qube/funnel-summary.env.example ~/.config/funnel-summary.env
+$EDITOR ~/.config/funnel-summary.env       # set DB_HOST + OPENBRAIN_APP_PASSWORD
+install -d -m 0700 ~/openbrain-funnel-summaries
+install -m 0644 deploy/qubes/app-qube/funnel-summary.service ~/.config/systemd/user/
+install -m 0644 deploy/qubes/app-qube/funnel-summary.timer   ~/.config/systemd/user/
+sudo loginctl enable-linger "$USER"
+systemctl --user daemon-reload
+```
+
+Run the service once before enabling the schedule. This is the catch-up pass: it builds the
+previous daily summaries before transactionally removing raw rows beyond the retention
+horizon. A failure before the SQL transaction commits leaves the raw rows intact; any
+failed run leaves the last complete Markdown artifact intact instead of replacing it with
+partial output. If a connection fails after the database commit but while the report
+queries are streaming, the database may be ahead of the artifact; the next idempotent run
+regenerates the report.
+
+```sh
+systemctl --user start funnel-summary.service
+systemctl --user show funnel-summary.service -p Result -p ExecMainStatus
+journalctl --user -u funnel-summary.service -n 50 --no-pager
+ls -l ~/openbrain-funnel-summaries/
+
+systemctl --user enable --now funnel-summary.timer
+systemctl --user list-timers funnel-summary.timer --no-pager
+```
+
+The timer runs at 00:30 UTC, matching the SQL's UTC day boundaries. `Persistent=true`
+causes one missed occurrence to run after a suspended app qube wakes; user lingering keeps
+the unit eligible when no shell is open. Reports default to the local, mode-0700
+`~/openbrain-funnel-summaries` directory because they contain request metadata. To retain
+an off-box copy, set `SUMMARY_DIR` in `~/.config/funnel-summary.env` to a trusted replicated
+directory and protect that destination accordingly.
+
+When updating the rollup implementation, reinstall **both** the wrapper and
+`summarize_funnel.sql`, then manually start the service once and inspect its journal before
+waiting for the next timer occurrence. When rotating `OPENBRAIN_APP_PASSWORD`, update the
+mode-0600 summary env at the same time as the app compose `.env` so the unattended job does
+not silently retain the old credential.
 
 ## Host firewall (scope the `0.0.0.0:8787` bind)
 

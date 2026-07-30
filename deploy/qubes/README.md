@@ -48,16 +48,25 @@ Fedora-templated qubes enforce SELinux, which bites this stack in exactly two pl
 
 ### Persisting systemd units
 
-`/etc/systemd/system/*` is wiped on every AppVM reboot. To persist the [daily-summary timer](../compose-tailnet/README.md#observability-pattern-b) (or any other unit), stash the unit files under `/rw/config/<your-dir>/` and have `/rw/config/rc.local` copy them back and enable them at boot:
+`/etc/systemd/system/*` is wiped on every AppVM reboot. To persist a **system** unit such as
+the app qube's encrypted-backup timer, stash its unit files under
+`/rw/config/<your-dir>/` and have `/rw/config/rc.local` copy them back and enable them at
+boot:
 
 ```sh
 # in /rw/config/rc.local
 cp /rw/config/openbrain-units/*.{service,timer} /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now funnel-summary.timer
+systemctl enable --now ob1-db-backup.timer
 ```
 
-For **user** timers, two extra Qubes-isms: idle app qubes get suspended (timers resume on wake), and user units only run without an open shell session if linger is on — `sudo loginctl enable-linger user`. If a timer "stopped firing", check `loginctl show-user user | grep Linger` and `systemctl --user is-enabled <timer>` before suspecting anything else.
+User units under `~/.config/systemd/user/` live in the persistent home and do not need that
+`rc.local` copy. The app qube's shipped [daily-summary timer](app-qube/README.md#daily-funnel-rollup-and-retention-host-side)
+is one. Two extra Qubes-isms apply: idle app qubes get suspended (`Persistent=true` runs a
+missed calendar occurrence after wake), and user units only run without an open shell
+session if linger is on — `sudo loginctl enable-linger user`. If a timer stopped firing,
+check `loginctl show-user user | grep Linger` and `systemctl --user is-enabled <timer>`
+before suspecting the script.
 
 ## Networking posture
 

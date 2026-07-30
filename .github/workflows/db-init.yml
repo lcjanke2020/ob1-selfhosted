@@ -56,6 +56,10 @@ on:
       - "server/deno.json"
       - "server/deno.lock"
       - "deploy/compose-local/docker-compose.yml"
+      - "scripts/funnel_daily_summary.sh"
+      - "deploy/qubes/app-qube/funnel-summary.env.example"
+      - "deploy/qubes/app-qube/funnel-summary.service"
+      - "deploy/qubes/app-qube/funnel-summary.timer"
       - ".github/workflows/db-init.yml"
   push:
     branches: [main]
@@ -79,6 +83,10 @@ on:
       - "server/deno.json"
       - "server/deno.lock"
       - "deploy/compose-local/docker-compose.yml"
+      - "scripts/funnel_daily_summary.sh"
+      - "deploy/qubes/app-qube/funnel-summary.env.example"
+      - "deploy/qubes/app-qube/funnel-summary.service"
+      - "deploy/qubes/app-qube/funnel-summary.timer"
       - ".github/workflows/db-init.yml"
   workflow_dispatch:
 
@@ -702,6 +710,69 @@ jobs:
             exit 1
           }
           echo "sketch pinned: request_count exact (34+5=39), below-3rd /d stays out of tops, raw retired"
+
+      - name: Smoke test — app-qube wrapper publishes remote rollups atomically
+        run: |
+          systemd-analyze verify \
+            deploy/qubes/app-qube/funnel-summary.service \
+            deploy/qubes/app-qube/funnel-summary.timer
+          systemd-analyze calendar '*-*-* 00:30:00 UTC' >/dev/null
+
+          smoke_root="$RUNNER_TEMP/funnel-summary-wrapper"
+          report_dir="$smoke_root/reports"
+          env_file="$smoke_root/funnel-summary.env"
+          psql_shim="$smoke_root/psql"
+          install -d -m 0700 "$smoke_root" "$report_dir"
+
+          # Exercise the production host-psql argument path while reusing this
+          # job's initialized Postgres fixture. The shim crosses into pgci and
+          # forwards stdin, args, and PGPASSWORD unchanged.
+          cat > "$psql_shim" <<'SH'
+          #!/usr/bin/env bash
+          exec docker exec -i -e PGPASSWORD pgci psql "$@"
+          SH
+          chmod 0755 "$psql_shim"
+
+          {
+            printf 'SUMMARY_BACKEND=postgres\n'
+            printf 'DB_HOST=127.0.0.1\n'
+            printf 'DB_PORT=5432\n'
+            printf 'POSTGRES_DB=%q\n' "$POSTGRES_DB"
+            printf 'OPENBRAIN_APP_PASSWORD=%q\n' "$OPENBRAIN_APP_PASSWORD"
+            printf 'SUMMARY_SQL_FILE=%q\n' "$GITHUB_WORKSPACE/db/summarize_funnel.sql"
+            printf 'SUMMARY_DIR=%q\n' "$report_dir"
+            printf 'PSQL_BIN=%q\n' "$psql_shim"
+          } > "$env_file"
+          chmod 0600 "$env_file"
+
+          FUNNEL_SUMMARY_ENV_FILE="$env_file" scripts/funnel_daily_summary.sh
+
+          mapfile -t reports < <(find "$report_dir" -maxdepth 1 -type f -name 'funnel-summary-*.md' -print)
+          if [ "${#reports[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one published summary, got ${#reports[@]}"
+            find "$report_dir" -maxdepth 1 -ls
+            exit 1
+          fi
+          report=${reports[0]}
+          grep -Fq '# Funnel observability report' "$report"
+          test "$(grep -Fc '````' "$report")" -eq 2
+          test "$(stat -c '%a' "$report")" = 600
+          first_hash=$(sha256sum "$report" | awk '{print $1}')
+
+          # A failed same-day rerun must leave the prior complete report in
+          # place and remove its unpublished staging file.
+          cat > "$psql_shim" <<'SH'
+          #!/usr/bin/env bash
+          exit 42
+          SH
+          chmod 0755 "$psql_shim"
+          if FUNNEL_SUMMARY_ENV_FILE="$env_file" scripts/funnel_daily_summary.sh; then
+            echo "::error::wrapper returned success when psql failed"
+            exit 1
+          fi
+          test "$(sha256sum "$report" | awk '{print $1}')" = "$first_hash"
+          test -z "$(find "$report_dir" -maxdepth 1 -type f -name '.funnel-summary-*' -print -quit)"
+          echo "remote wrapper produced one private report; failed rerun preserved it atomically"
 
       - name: Container logs on failure
         if: failure()
