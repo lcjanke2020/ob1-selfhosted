@@ -27,6 +27,7 @@ assert(
 // minimum runtime values as the shipped server before loading that graph.
 Deno.env.set("DB_PASSWORD", appPassword);
 Deno.env.set("MCP_ACCESS_KEY", "session-hnsw-smoke-key".repeat(4));
+Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 
 const [{ searchSessions }, { getClient }, { withScopeClient }] = await Promise
   .all([
