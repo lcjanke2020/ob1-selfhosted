@@ -33,11 +33,11 @@ existing="$(docker compose exec -T postgres \
   | tr -d '[:space:]')"
 
 if [[ -n "$existing" ]]; then
-  action="enabled LOGIN and reconciled its password"
-  sql="ALTER ROLE openbrain_token_admin WITH LOGIN PASSWORD :'token_admin_password';"
+  action="enabled LOGIN and reconciled its password and privilege flags"
+  sql="ALTER ROLE openbrain_token_admin WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD :'token_admin_password';"
 else
   action="created the LOGIN role"
-  sql="CREATE ROLE openbrain_token_admin LOGIN PASSWORD :'token_admin_password';"
+  sql="CREATE ROLE openbrain_token_admin LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD :'token_admin_password';"
 fi
 
 docker compose exec -T postgres \

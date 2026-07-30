@@ -49,11 +49,16 @@ function toHex(bytes: Uint8Array): string {
   );
 }
 
-let fixturePrefix: string | null = null;
+const fixturePrefixes: string[] = [];
 try {
   const created = await createAccessToken(tokenAdminPool, "CI driver smoke");
-  fixturePrefix = created.prefix;
+  fixturePrefixes.push(created.prefix);
   assertMatch(created.token, /^ob1_[A-Za-z0-9_-]{8}_[A-Za-z0-9_-]{43}$/);
+
+  const astralLabel = "😀".repeat(65);
+  const astral = await createAccessToken(tokenAdminPool, astralLabel);
+  fixturePrefixes.push(astral.prefix);
+  assertEquals([...astral.label].length, 65);
 
   const postgres = await postgresPool.connect();
   try {
@@ -80,14 +85,22 @@ try {
   }
 
   const inventory = await listAccessTokens(tokenAdminPool);
-  assertEquals(inventory.length, 1);
-  assertEquals(inventory[0].prefix, created.prefix);
-  assertEquals(inventory[0].label, "CI driver smoke");
-  assertEquals(inventory[0].revoked_at, null);
+  assertEquals(inventory.length, 2);
+  const standardMetadata = inventory.find((row) =>
+    row.prefix === created.prefix
+  );
+  const astralMetadata = inventory.find((row) => row.prefix === astral.prefix);
+  assertEquals(standardMetadata?.label, "CI driver smoke");
+  assertEquals(standardMetadata?.revoked_at, null);
+  assertEquals(astralMetadata?.label, astralLabel);
+  assertEquals(astralMetadata?.revoked_at, null);
   assertEquals("token" in inventory[0], false);
 
   assertEquals(await authenticateAccessToken(appPool, created.token), {
     label: "CI driver smoke",
+  });
+  assertEquals(await authenticateAccessToken(appPool, astral.token), {
+    label: astralLabel,
   });
 
   const revoked = await revokeAccessToken(tokenAdminPool, created.prefix);
@@ -97,12 +110,12 @@ try {
 
   console.log("Deno/Postgres native-token lifecycle passed");
 } finally {
-  if (fixturePrefix) {
+  if (fixturePrefixes.length > 0) {
     const postgres = await postgresPool.connect();
     try {
       await postgres.queryArray(
-        "DELETE FROM native_auth.access_token WHERE prefix = $1",
-        [fixturePrefix],
+        "DELETE FROM native_auth.access_token WHERE prefix = ANY($1::text[])",
+        [fixturePrefixes],
       );
     } finally {
       postgres.release();

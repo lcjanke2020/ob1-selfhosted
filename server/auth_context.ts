@@ -50,13 +50,16 @@ export function isOAuthSubject(value: unknown): value is string {
 export function isNativeTokenLabel(value: unknown): value is string {
   if (
     typeof value !== "string" || value.length === 0 ||
-    value.length > MAX_NATIVE_TOKEN_LABEL_LENGTH || value.trim() !== value
+    [...value].length > MAX_NATIVE_TOKEN_LABEL_LENGTH || value.trim() !== value
   ) {
     return false;
   }
   for (const character of value) {
     const codePoint = character.codePointAt(0)!;
-    if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) {
+    if (
+      codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f) ||
+      (codePoint >= 0xd800 && codePoint <= 0xdfff)
+    ) {
       return false;
     }
   }

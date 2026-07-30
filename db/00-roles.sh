@@ -78,13 +78,16 @@ if [ -n "${OPENBRAIN_TOKEN_ADMIN_PASSWORD:-}" ]; then
     --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
     --set=token_admin_password="$OPENBRAIN_TOKEN_ADMIN_PASSWORD" \
     <<-'EOSQL'
-    CREATE ROLE openbrain_token_admin LOGIN PASSWORD :'token_admin_password';
+    CREATE ROLE openbrain_token_admin LOGIN NOSUPERUSER NOCREATEDB
+      NOCREATEROLE NOREPLICATION NOBYPASSRLS
+      PASSWORD :'token_admin_password';
 EOSQL
 else
   psql -v ON_ERROR_STOP=1 \
     --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
     <<-'EOSQL'
-    CREATE ROLE openbrain_token_admin NOLOGIN;
+    CREATE ROLE openbrain_token_admin NOLOGIN NOSUPERUSER NOCREATEDB
+      NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 EOSQL
   echo "[00-roles] OPENBRAIN_TOKEN_ADMIN_PASSWORD not set; openbrain_token_admin is NOLOGIN"
 fi

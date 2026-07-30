@@ -62,17 +62,34 @@ function printHumanList(
   }
 }
 
+export type TokenAdminArgs = {
+  command: string;
+  value: string | undefined;
+  json: boolean;
+};
+
+export function parseTokenAdminArgs(args: string[]): TokenAdminArgs | null {
+  // Treat a trailing --json as the flag except when it is create's sole label.
+  // Thus `create --json` creates that literal label, while
+  // `create --json --json` requests JSON for it.
+  const json = args.at(-1) === "--json" &&
+    (args[0] !== "create" || args.length > 2);
+  const positional = json ? args.slice(0, -1) : args;
+  const [command, value, ...extra] = positional;
+  if (!command || extra.length > 0) return null;
+  return { command, value, json };
+}
+
 export async function runTokenAdmin(
   args: string[],
   pool: Pool,
 ): Promise<number> {
-  const json = args.includes("--json");
-  const positional = args.filter((arg) => arg !== "--json");
-  const [command, value, ...extra] = positional;
-  if (!command || extra.length > 0) {
+  const parsed = parseTokenAdminArgs(args);
+  if (!parsed) {
     console.error(usage());
     return 2;
   }
+  const { command, value, json } = parsed;
 
   if (command === "create") {
     if (!value) {

@@ -274,12 +274,21 @@ BEGIN
       'grants assertion failed: native access-token schema, sequence, functions, or administrator role is missing; apply db/08-access-tokens.sql first.';
   END IF;
 
-  IF (
-    SELECT rolsuper OR rolbypassrls
-    FROM pg_roles WHERE oid = admin_oid
-  ) THEN
+  SELECT concat_ws(
+    ', ',
+    CASE WHEN rolsuper THEN 'SUPERUSER' END,
+    CASE WHEN rolcreatedb THEN 'CREATEDB' END,
+    CASE WHEN rolcreaterole THEN 'CREATEROLE' END,
+    CASE WHEN rolreplication THEN 'REPLICATION' END,
+    CASE WHEN rolbypassrls THEN 'BYPASSRLS' END
+  )
+    INTO bad
+  FROM pg_roles
+  WHERE oid = admin_oid;
+  IF bad <> '' THEN
     RAISE EXCEPTION
-      'grants assertion failed: openbrain_token_admin can bypass row-level security.';
+      'grants assertion failed: openbrain_token_admin has unsafe cluster-level role attributes: %.',
+      bad;
   END IF;
   SELECT string_agg(roleid::regrole::text, ', ' ORDER BY roleid::regrole::text)
     INTO bad FROM pg_auth_members WHERE member = admin_oid;
@@ -315,7 +324,25 @@ BEGIN
   SELECT string_agg(exposed.object_name, ', ' ORDER BY exposed.object_name)
     INTO bad
   FROM (
-    SELECT format('%I.%I', namespace.nspname, relation.relname) AS object_name
+    SELECT format(
+      '%I.%I%s',
+      namespace.nspname,
+      relation.relname,
+      CASE
+        WHEN EXISTS (
+          SELECT 1
+          FROM aclexplode(relation.relacl) public_acl
+          WHERE public_acl.grantee = 0
+        ) OR EXISTS (
+          SELECT 1
+          FROM pg_attribute attribute
+          CROSS JOIN LATERAL aclexplode(attribute.attacl) public_acl
+          WHERE attribute.attrelid = relation.oid
+            AND public_acl.grantee = 0
+        ) THEN ' (via PUBLIC)'
+        ELSE ''
+      END
+    ) AS object_name
     FROM pg_class relation
     JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     WHERE namespace.nspname <> 'information_schema'

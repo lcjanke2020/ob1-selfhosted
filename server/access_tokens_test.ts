@@ -60,6 +60,14 @@ Deno.test("native token generation uses a public prefix and 256-bit secret", () 
 
 Deno.test("native token label and prefix validation are bounded", () => {
   assertEquals(normalizeAccessTokenLabel("  nightly agent  "), "nightly agent");
+  assertEquals(
+    normalizeAccessTokenLabel("\u00a0nightly agent\u00a0"),
+    "nightly agent",
+  );
+  assertEquals(
+    normalizeAccessTokenLabel("😀".repeat(65)),
+    "😀".repeat(65),
+  );
   assertEquals(normalizeAccessTokenPrefix(" ob1_AAECAwQF "), "ob1_AAECAwQF");
   assertThrows(
     () => normalizeAccessTokenLabel("bad\nlabel"),
@@ -72,7 +80,17 @@ Deno.test("native token label and prefix validation are bounded", () => {
     "control characters",
   );
   assertThrows(
+    () => normalizeAccessTokenLabel("bad\ud800label"),
+    Error,
+    "unpaired UTF-16 surrogates",
+  );
+  assertThrows(
     () => normalizeAccessTokenLabel("x".repeat(129)),
+    Error,
+    "1-128",
+  );
+  assertThrows(
+    () => normalizeAccessTokenLabel("😀".repeat(129)),
     Error,
     "1-128",
   );
@@ -173,6 +191,16 @@ Deno.test("authenticate rejects malformed, unknown, and hash-mismatched tokens",
     }],
   }));
   assertEquals(await authenticateAccessToken(mismatch.pool, token), null);
+
+  const tokenHash = await hashAccessToken(token);
+  const malformedLabel = fakePool(() => ({
+    rows: [{
+      token_hash: tokenHash,
+      label: "\u00a0padded in storage\u00a0",
+      revoked_at: null,
+    }],
+  }));
+  assertEquals(await authenticateAccessToken(malformedLabel.pool, token), null);
 });
 
 Deno.test("list never selects hashes and revoke targets one validated prefix", async () => {

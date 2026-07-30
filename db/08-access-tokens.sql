@@ -15,10 +15,17 @@
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'openbrain_token_admin') THEN
-    CREATE ROLE openbrain_token_admin NOLOGIN;
+    CREATE ROLE openbrain_token_admin NOLOGIN NOSUPERUSER NOCREATEDB
+      NOCREATEROLE NOREPLICATION NOBYPASSRLS;
   END IF;
 END;
 $$ LANGUAGE plpgsql;
+
+-- Preserve the intentional LOGIN/NOLOGIN state while converging every
+-- cluster-level privilege flag on existing databases. The upgrade helper
+-- separately provisions LOGIN and its password when the operator opts in.
+ALTER ROLE openbrain_token_admin WITH NOSUPERUSER NOCREATEDB NOCREATEROLE
+  NOREPLICATION NOBYPASSRLS;
 
 CREATE SCHEMA IF NOT EXISTS native_auth;
 REVOKE ALL ON SCHEMA native_auth FROM PUBLIC;
@@ -34,15 +41,35 @@ CREATE TABLE IF NOT EXISTS native_auth.access_token (
     prefix ~ '^ob1_[A-Za-z0-9_-]{8}$'
   ),
   CONSTRAINT access_token_hash_shape CHECK (octet_length(token_hash) = 32),
-  CONSTRAINT access_token_label_shape CHECK (
-    char_length(label) BETWEEN 1 AND 128
-    AND label = btrim(label)
-    AND label !~ '[[:cntrl:]]'
-  ),
   CONSTRAINT access_token_revocation_order CHECK (
     revoked_at IS NULL OR revoked_at >= created_at
   )
 );
+
+-- PostgreSQL char_length and JavaScript code-point iteration now share the
+-- same 1-128 definition. Use JavaScript's complete trim-character set rather
+-- than btrim's default ASCII space, and remove an explicit C0/C1 code-point
+-- set from consideration so behavior is independent of locale character
+-- classes. PostgreSQL text cannot contain U+0000, so the set starts at U+0001.
+-- Drop/re-add converges preview or existing databases that applied an earlier
+-- version of this idempotent migration.
+ALTER TABLE native_auth.access_token
+  DROP CONSTRAINT IF EXISTS access_token_label_shape,
+  ADD CONSTRAINT access_token_label_shape CHECK (
+    char_length(label) BETWEEN 1 AND 128
+    AND label = btrim(
+      label,
+      U&'\0009\000A\000B\000C\000D\0020\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF'
+    )
+    AND label = translate(
+      label,
+      U&'\0001\0002\0003\0004\0005\0006\0007\0008\0009\000A\000B\000C\000D\000E\000F' ||
+      U&'\0010\0011\0012\0013\0014\0015\0016\0017\0018\0019\001A\001B\001C\001D\001E\001F' ||
+      U&'\007F\0080\0081\0082\0083\0084\0085\0086\0087\0088\0089\008A\008B\008C\008D\008E\008F' ||
+      U&'\0090\0091\0092\0093\0094\0095\0096\0097\0098\0099\009A\009B\009C\009D\009E\009F',
+      ''
+    )
+  );
 
 -- The CLI generates the secret and digest, then calls this function with only
 -- the non-recoverable hash. SECURITY DEFINER keeps INSERT away from the login

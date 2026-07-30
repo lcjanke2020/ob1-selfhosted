@@ -8,6 +8,10 @@
 
 import { timingSafeEqual } from "node:crypto";
 import type { Pool } from "postgres";
+import {
+  isNativeTokenLabel,
+  MAX_NATIVE_TOKEN_LABEL_LENGTH,
+} from "./auth_context.ts";
 import { getClient } from "./db_pool.ts";
 
 const TOKEN_PREFIX_RANDOM_BYTES = 6;
@@ -17,7 +21,6 @@ const TOKEN_SECRET_LENGTH = 43;
 const TOKEN_PREFIX_PATTERN = /^ob1_[A-Za-z0-9_-]{8}$/;
 const TOKEN_PATTERN = /^ob1_([A-Za-z0-9_-]{8})_([A-Za-z0-9_-]{43})$/;
 const TOKEN_HASH_BYTES = 32;
-const MAX_TOKEN_LABEL_LENGTH = 128;
 
 // A fixed 32-byte value keeps the comparison path intact when the public
 // prefix is unknown. It need not be secret; it only prevents the lookup miss
@@ -57,18 +60,24 @@ function base64Url(bytes: Uint8Array): string {
 
 export function normalizeAccessTokenLabel(value: string): string {
   const label = value.trim();
-  if (!label || label.length > MAX_TOKEN_LABEL_LENGTH) {
+  if (!label || [...label].length > MAX_NATIVE_TOKEN_LABEL_LENGTH) {
     throw new Error(
-      `token label must contain 1-${MAX_TOKEN_LABEL_LENGTH} characters after trimming`,
+      `token label must contain 1-${MAX_NATIVE_TOKEN_LABEL_LENGTH} Unicode code points after trimming`,
     );
   }
-  for (const character of label) {
-    const codePoint = character.codePointAt(0)!;
-    if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) {
-      throw new Error("token label must not contain control characters");
-    }
+  if (!isNativeTokenLabel(label)) {
+    throw new Error(
+      "token label must not contain control characters or unpaired UTF-16 surrogates",
+    );
   }
   return label;
+}
+
+function accessTokenLabelFromStore(value: unknown): string {
+  if (!isNativeTokenLabel(value)) {
+    throw new Error("token store returned an invalid label");
+  }
+  return value;
 }
 
 export function normalizeAccessTokenPrefix(value: string): string {
@@ -151,7 +160,7 @@ export async function authenticateAccessToken(
     if (!matches || !row || row.revoked_at !== null) return null;
 
     try {
-      return { label: normalizeAccessTokenLabel(row.label) };
+      return { label: accessTokenLabelFromStore(row.label) };
     } catch {
       // A malformed label means the database invariant drifted. Never let it
       // enter durable provenance; authentication fails closed.
@@ -174,7 +183,7 @@ function metadataFromRow(row: TokenMetadataRow): AccessTokenMetadata {
   return {
     id: String(row.id),
     prefix: normalizeAccessTokenPrefix(row.prefix),
-    label: normalizeAccessTokenLabel(row.label),
+    label: accessTokenLabelFromStore(row.label),
     created_at: timestamp(row.created_at),
     revoked_at: row.revoked_at == null ? null : timestamp(row.revoked_at),
   };

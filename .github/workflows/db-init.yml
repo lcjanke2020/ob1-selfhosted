@@ -11,9 +11,10 @@
 #
 # The same completed init is also the integration fixture for the edge monitor
 # allowlist. The assertion is mounted last, then deliberately re-run after
-# an application-role membership, direct monitor table/sequence grants, a
-# standing default grant, and a PUBLIC grant on a new non-public-schema table;
-# each drift must fail without changing the assertion's allowlist.
+# unsafe token-admin role flags, an application-role membership, direct monitor
+# table/sequence grants, a standing default grant, and a PUBLIC grant on a new
+# non-public-schema table; each drift must fail without changing the assertion's
+# allowlist.
 #
 # Rather than enumerate privileges in a static assertion (which lags the next
 # new object type, and can't see an object created later by a different
@@ -42,6 +43,7 @@ on:
       - "server/metadata_notifications.ts"
       - "server/metadata_notifications_db_smoke.ts"
       - "server/access_tokens.ts"
+      - "server/auth_context.ts"
       - "server/access_tokens_db_smoke.ts"
       - "server/session_search_db_smoke.ts"
       - "server/scoped_db.ts"
@@ -64,6 +66,7 @@ on:
       - "server/metadata_notifications.ts"
       - "server/metadata_notifications_db_smoke.ts"
       - "server/access_tokens.ts"
+      - "server/auth_context.ts"
       - "server/access_tokens_db_smoke.ts"
       - "server/session_search_db_smoke.ts"
       - "server/scoped_db.ts"
@@ -238,6 +241,30 @@ jobs:
           # after 02-observability.sql.
           run_assertion >/dev/null
 
+          # An existing deployment may contain a pre-created or drifted role.
+          # The migration must preserve LOGIN while removing every unsafe
+          # cluster-level privilege flag, and the assertion must reject drift
+          # before that reconciliation happens.
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -c \
+            "ALTER ROLE openbrain_token_admin CREATEDB CREATEROLE REPLICATION"
+          expect_rejected "token-admin privilege flags" \
+            "openbrain_token_admin has unsafe cluster-level role attributes" \
+            "CREATEDB, CREATEROLE, REPLICATION"
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/08-access-tokens.sql >/dev/null
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -tAc \
+            "SELECT rolcanlogin AND NOT (
+               rolsuper OR rolcreatedb OR rolcreaterole OR
+               rolreplication OR rolbypassrls
+             )
+             FROM pg_roles WHERE rolname = 'openbrain_token_admin'" | grep -q t
+          run_assertion >/dev/null
+
           # Direct flags are not the only way to reach BYPASSRLS: membership
           # would also confer inherited privileges and allow SET ROLE.
           docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
@@ -306,7 +333,7 @@ jobs:
              DROP SCHEMA monitor_assertion_probe CASCADE"
 
           run_assertion >/dev/null
-          echo "protected-role assertions accepted the clean catalog and rejected all five drift fixtures"
+          echo "protected-role assertions accepted the clean catalog and rejected all six drift fixtures"
 
       - name: Smoke test — metadata audit is append-only and coherent
         run: |
