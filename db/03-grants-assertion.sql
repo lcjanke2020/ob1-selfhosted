@@ -38,9 +38,9 @@
 --   (d) the app may read but not mutate the memory-space registry, and only
 --       it may execute the two reviewed memory_scope helpers (never PUBLIC or
 --       the edge-resident monitor).
---   (e) metadata degradation history is append-only to the app; its transient
---       outbox is enqueue/consume-only, and only the singleton notification
---       ledger is otherwise mutable.
+--   (e) metadata degradation history is append-only to the app; its pending-
+--       delivery outbox is enqueue/consume-only, and only the singleton
+--       notification ledger is otherwise mutable.
 --
 -- The openbrain_app check is deliberately scoped to thoughts:
 -- 02-observability.sql and 04-sessions.sql legitimately grant it access to
@@ -96,6 +96,70 @@ BEGIN
      OR to_regclass('public.metadata_degradation_events_id_seq') IS NULL THEN
     RAISE EXCEPTION
       'grants assertion failed: metadata degradation schema is missing; apply db/07-metadata-degradation.sql first.';
+  END IF;
+
+  IF EXISTS (
+       SELECT 1
+       FROM (VALUES
+         ('singleton'),
+         ('pending_counts'),
+         ('notified_event_types'),
+         ('last_notified_at'),
+         ('last_delivery_attempt_at'),
+         ('last_failed_channels'),
+         ('updated_at')
+       ) AS required(attname)
+       WHERE NOT EXISTS (
+         SELECT 1
+         FROM pg_attribute
+         WHERE attrelid =
+                 'public.metadata_degradation_notification_state'::regclass
+           AND pg_attribute.attname::text = required.attname
+           AND attnum > 0
+           AND NOT attisdropped
+       )
+     ) OR EXISTS (
+       SELECT 1
+       FROM pg_attribute
+       WHERE attrelid =
+               'public.metadata_degradation_notification_state'::regclass
+         AND attname = 'last_event_id'
+         AND attnum > 0
+         AND NOT attisdropped
+     ) OR NOT EXISTS (
+       SELECT 1
+       FROM pg_attribute
+       WHERE attrelid = 'public.metadata_degradation_outbox'::regclass
+         AND attname = 'created_at'
+         AND attnum > 0
+         AND NOT attisdropped
+     ) OR NOT EXISTS (
+       SELECT 1
+       FROM pg_constraint
+       WHERE conrelid =
+               'public.metadata_degradation_notification_state'::regclass
+         AND conname = 'metadata_degradation_failed_channels_shape'
+     ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: metadata degradation ledger/outbox columns are incomplete; reapply db/07-metadata-degradation.sql.';
+  END IF;
+
+  IF COALESCE((
+       SELECT attnotnull
+       FROM pg_attribute
+       WHERE attrelid = 'public.metadata_degradation_events'::regclass
+         AND attname = 'thought_id'
+         AND attnum > 0
+         AND NOT attisdropped
+     ), true) OR NOT EXISTS (
+       SELECT 1
+       FROM pg_constraint
+       WHERE conrelid = 'public.metadata_degradation_events'::regclass
+         AND conname = 'metadata_degradation_events_thought_id_fkey'
+         AND confdeltype = 'n'
+     ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: metadata degradation thought link must be nullable with ON DELETE SET NULL; reapply db/07-metadata-degradation.sql.';
   END IF;
 
   IF NOT (

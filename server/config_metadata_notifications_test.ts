@@ -1,5 +1,5 @@
-// Subprocess tests for notification config's fail-fast contract. Each case
-// gets a fresh config.ts module instance and no real network access.
+// Subprocess tests for extraction and notification config's fail-fast
+// contracts. Each case gets a fresh config.ts instance and no network access.
 
 import { assertEquals, assertStringIncludes } from "@std/assert";
 
@@ -24,6 +24,13 @@ const BASE_ENV: Record<string, string> = {
   AUTH0_JWKS_URI: "",
   AUTH0_AUDIENCE: "",
   OBS_AUTH_EVENTS_ENABLED: "false",
+  CHAT_API_BASE: "",
+  CHAT_API_KEY: "",
+  CHAT_MODEL: "",
+  ENABLE_PRIMARY_EXTRACTION: "",
+  FALLBACK_CHAT_API_BASE: "",
+  FALLBACK_CHAT_API_KEY: "",
+  FALLBACK_CHAT_MODEL: "",
   METADATA_NOTIFY_CHANNELS: "",
   METADATA_NOTIFY_LABEL: "",
   METADATA_NOTIFY_POLL_INTERVAL_MS: "",
@@ -92,6 +99,27 @@ Deno.test("metadata notification config: disabled default and valid dual-channel
       });
     },
   );
+});
+
+Deno.test("metadata extraction config: explicit primary opt-in fails closed", async (t) => {
+  await t.step("enabled primary requires both endpoint and model", async () => {
+    const result = await runConfig({
+      ENABLE_PRIMARY_EXTRACTION: "true",
+      CHAT_API_BASE: "http://classifier.example/v1",
+    });
+    assertEquals(result.code, 1);
+    assertStringIncludes(result.stderr, "ENABLE_PRIMARY_EXTRACTION=true");
+    assertStringIncludes(result.stderr, "CHAT_API_BASE and CHAT_MODEL");
+  });
+
+  await t.step("misspelled primary gate is rejected", async () => {
+    const result = await runConfig({
+      ENABLE_PRIMARY_EXTRACTION: "ture",
+    });
+    assertEquals(result.code, 1);
+    assertStringIncludes(result.stderr, "must be true or false");
+    assertEquals(result.stderr.includes("ture"), false);
+  });
 });
 
 Deno.test("metadata notification config: incomplete or unsafe channel config fails fast", async (t) => {

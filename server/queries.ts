@@ -342,9 +342,9 @@ export async function captureThought(
 
     if (input.degradationEvents.length > 0) {
       // One UUID groups every event emitted by this capture attempt. The
-      // thought upsert, immutable history, and transient outbox enqueue share
-      // withScopeClient's transaction. The outbox makes notification claiming
-      // commit-safe even when concurrent BIGSERIAL ids commit out of order.
+      // thought upsert, immutable history, and pending-delivery outbox enqueue
+      // share withScopeClient's transaction. The outbox makes notification
+      // claiming commit-safe when BIGSERIAL ids commit out of order.
       await client.queryArray(
         `WITH inserted_events AS (
            INSERT INTO metadata_degradation_events (

@@ -173,7 +173,79 @@ export async function probeDbAtBoot(
              ) IS NOT NULL
              AND to_regclass(
                'public.metadata_degradation_events_id_seq'
-             ) IS NOT NULL`,
+             ) IS NOT NULL
+             AND NOT EXISTS (
+               SELECT 1
+               FROM (VALUES
+                 ('singleton'),
+                 ('pending_counts'),
+                 ('notified_event_types'),
+                 ('last_notified_at'),
+                 ('last_delivery_attempt_at'),
+                 ('last_failed_channels'),
+                 ('updated_at')
+               ) AS required(attname)
+               WHERE NOT EXISTS (
+                 SELECT 1
+                 FROM pg_attribute
+                 WHERE attrelid = to_regclass(
+                         'public.metadata_degradation_notification_state'
+                       )
+                   AND pg_attribute.attname::text = required.attname
+                   AND attnum > 0
+                   AND NOT attisdropped
+               )
+             )
+             AND NOT EXISTS (
+               SELECT 1
+               FROM pg_attribute
+               WHERE attrelid = to_regclass(
+                       'public.metadata_degradation_notification_state'
+                     )
+                 AND attname = 'last_event_id'
+                 AND attnum > 0
+                 AND NOT attisdropped
+             )
+             AND EXISTS (
+               SELECT 1
+               FROM pg_attribute
+               WHERE attrelid = to_regclass(
+                       'public.metadata_degradation_outbox'
+                     )
+                 AND attname = 'created_at'
+                 AND attnum > 0
+                 AND NOT attisdropped
+             )
+             AND EXISTS (
+               SELECT 1
+               FROM pg_attribute
+               WHERE attrelid = to_regclass(
+                       'public.metadata_degradation_events'
+                     )
+                 AND attname = 'thought_id'
+                 AND attnum > 0
+                 AND NOT attisdropped
+                 AND NOT attnotnull
+             )
+             AND EXISTS (
+               SELECT 1
+               FROM pg_constraint
+               WHERE conrelid = to_regclass(
+                       'public.metadata_degradation_events'
+                     )
+                 AND conname =
+                       'metadata_degradation_events_thought_id_fkey'
+                 AND confdeltype = 'n'
+             )
+             AND EXISTS (
+               SELECT 1
+               FROM pg_constraint
+               WHERE conrelid = to_regclass(
+                       'public.metadata_degradation_notification_state'
+                     )
+                 AND conname =
+                       'metadata_degradation_failed_channels_shape'
+             )`,
       );
       const [
         hasFtsIndex,
@@ -184,7 +256,7 @@ export async function probeDbAtBoot(
         hasAudienceIndexes,
         hasScopedSearch,
         hasRlsEnforcement,
-        hasMetadataDegradationRelations,
+        hasMetadataDegradationSchema,
       ] = schema.rows[0] ?? [
         false,
         false,
@@ -229,10 +301,10 @@ export async function probeDbAtBoot(
             `(for example, postgres) before starting this server version.`,
         );
       }
-      if (!hasMetadataDegradationRelations) {
+      if (!hasMetadataDegradationSchema) {
         throw new RequiredSchemaError(
-          `[db] Postgres at ${target} is missing metadata-degradation audit ` +
-            `schema or its notification ledger row. Apply ` +
+          `[db] Postgres at ${target} has missing or incompatible ` +
+            `metadata-degradation audit schema or notification ledger. Apply ` +
             `db/07-metadata-degradation.sql as the database owner before ` +
             `starting this server version.`,
         );

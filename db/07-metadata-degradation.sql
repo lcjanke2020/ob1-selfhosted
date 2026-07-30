@@ -15,8 +15,8 @@ BEGIN;
 
 CREATE TABLE IF NOT EXISTS metadata_degradation_events (
   id              BIGSERIAL PRIMARY KEY,
-  -- Preserve the content-free audit if an owner later deletes a thought,
-  -- without making a future forget/retention feature fight this foreign key.
+  -- Capture always supplies a thought id. NULL is the tombstone left only when
+  -- a database owner later deletes that thought; the app cannot update history.
   thought_id      UUID REFERENCES thoughts(id) ON DELETE SET NULL,
   capture_id      UUID NOT NULL,
   event_type      TEXT NOT NULL CHECK (event_type IN (
@@ -78,6 +78,30 @@ CREATE TABLE IF NOT EXISTS metadata_degradation_events (
   )
 );
 
+-- `CREATE TABLE IF NOT EXISTS` does not update a table created by an earlier
+-- preview of this migration. Converge that preview's restrictive, NOT NULL
+-- link to the current deletion-safe contract without rebuilding history.
+ALTER TABLE metadata_degradation_events
+  ALTER COLUMN thought_id DROP NOT NULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid = 'public.metadata_degradation_events'::regclass
+      AND conname = 'metadata_degradation_events_thought_id_fkey'
+      AND confdeltype = 'n' -- ON DELETE SET NULL
+  ) THEN
+    ALTER TABLE metadata_degradation_events
+      DROP CONSTRAINT IF EXISTS metadata_degradation_events_thought_id_fkey;
+    ALTER TABLE metadata_degradation_events
+      ADD CONSTRAINT metadata_degradation_events_thought_id_fkey
+      FOREIGN KEY (thought_id) REFERENCES thoughts(id) ON DELETE SET NULL;
+  END IF;
+END;
+$$;
+
 CREATE INDEX IF NOT EXISTS idx_metadata_degradation_thought_ts
   ON metadata_degradation_events (thought_id, created_at DESC);
 
@@ -90,8 +114,27 @@ CREATE INDEX IF NOT EXISTS idx_metadata_degradation_type_ts
 -- so an older transaction that commits after a newer event can never be skipped.
 CREATE TABLE IF NOT EXISTS metadata_degradation_outbox (
   event_id BIGINT PRIMARY KEY
-             REFERENCES metadata_degradation_events(id) ON DELETE CASCADE
+             REFERENCES metadata_degradation_events(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE metadata_degradation_outbox
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
+
+-- Preserve meaningful queue age when upgrading the round-two preview, whose
+-- outbox existed without this column. Every queued id has immutable history.
+UPDATE metadata_degradation_outbox AS outbox
+SET created_at = event.created_at
+FROM metadata_degradation_events AS event
+WHERE event.id = outbox.event_id
+  AND outbox.created_at IS NULL;
+
+ALTER TABLE metadata_degradation_outbox
+  ALTER COLUMN created_at SET DEFAULT now(),
+  ALTER COLUMN created_at SET NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_metadata_degradation_outbox_created_at
+  ON metadata_degradation_outbox (created_at, event_id);
 
 -- One durable cooldown/count row coordinates every server process. A worker
 -- takes FOR UPDATE SKIP LOCKED on this singleton before claiming outbox rows,
@@ -113,6 +156,7 @@ CREATE TABLE IF NOT EXISTS metadata_degradation_notification_state (
   last_notified_at      TIMESTAMPTZ,
   last_delivery_attempt_at TIMESTAMPTZ,
   last_failed_channels  TEXT[] NOT NULL DEFAULT '{}'::text[]
+                          CONSTRAINT metadata_degradation_failed_channels_shape
                           CHECK (
                             last_failed_channels <@ ARRAY[
                               'pushover',
@@ -122,13 +166,70 @@ CREATE TABLE IF NOT EXISTS metadata_degradation_notification_state (
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE metadata_degradation_notification_state
+  ADD COLUMN IF NOT EXISTS last_delivery_attempt_at TIMESTAMPTZ;
+
+ALTER TABLE metadata_degradation_notification_state
+  ADD COLUMN IF NOT EXISTS last_failed_channels TEXT[]
+    NOT NULL DEFAULT '{}'::text[];
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid =
+            'public.metadata_degradation_notification_state'::regclass
+      AND conname = 'metadata_degradation_failed_channels_shape'
+  ) THEN
+    ALTER TABLE metadata_degradation_notification_state
+      ADD CONSTRAINT metadata_degradation_failed_channels_shape
+      CHECK (
+        last_failed_channels <@ ARRAY['pushover', 'ntfy']::text[]
+      );
+  END IF;
+END;
+$$;
+
 INSERT INTO metadata_degradation_notification_state (singleton)
 VALUES (TRUE)
 ON CONFLICT (singleton) DO NOTHING;
 
+-- Migrate the preview revision's sequence cursor once. Cursor order was not
+-- commit order, so no exact processed/unprocessed split can be reconstructed.
+-- Requeue every immutable history row and clear its aggregated pending counts:
+-- this can repeat a preview alert, but it cannot silently lose one or double
+-- count a retained batch. Dropping the marker makes reapplication a no-op.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_attribute
+    WHERE attrelid =
+            'public.metadata_degradation_notification_state'::regclass
+      AND attname = 'last_event_id'
+      AND attnum > 0
+      AND NOT attisdropped
+  ) THEN
+    INSERT INTO metadata_degradation_outbox (event_id, created_at)
+    SELECT id, created_at
+    FROM metadata_degradation_events
+    ON CONFLICT (event_id) DO NOTHING;
+
+    UPDATE metadata_degradation_notification_state
+    SET pending_counts = '{}'::jsonb,
+        updated_at = now()
+    WHERE singleton;
+
+    ALTER TABLE metadata_degradation_notification_state
+      DROP COLUMN last_event_id;
+  END IF;
+END;
+$$;
+
 -- Re-applying the ordered migrations after 01-schema.sql must restore exactly
 -- these narrow privileges: append/read immutable history, enqueue/consume the
--- transient outbox, and mutate only the delivery ledger.
+-- pending-delivery outbox, and mutate only the delivery ledger.
 REVOKE ALL ON metadata_degradation_events
   FROM openbrain_app;
 REVOKE ALL ON metadata_degradation_outbox

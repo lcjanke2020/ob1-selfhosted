@@ -75,13 +75,26 @@ export const CHAT_API_KEY = optionalTrimmed("CHAT_API_KEY");
 export const CHAT_MODEL = optionalTrimmed("CHAT_MODEL");
 
 // Safety gate for the PRIMARY (CHAT_*) extractor call. Default OFF: the primary
-// is attempted ONLY when ENABLE_PRIMARY_EXTRACTION is set EXACTLY to "true" AND
-// the primary endpoint is configured. The opt-in exists so a primary that is
+// is attempted ONLY when ENABLE_PRIMARY_EXTRACTION is set to "true" AND the
+// primary endpoint is configured. The opt-in exists so a primary that is
 // misconfigured or fronted by a dangerous transport can't fire on the hot
 // capture path — e.g. a qrexec forwarder whose call would auto-start a downed
 // GPU qube. Set to "true" only once the primary endpoint is known-good.
-const PRIMARY_EXTRACTION_OPT_IN =
-  optionalTrimmed("ENABLE_PRIMARY_EXTRACTION").toLowerCase() === "true";
+const PRIMARY_EXTRACTION_SETTING = optionalTrimmed(
+  "ENABLE_PRIMARY_EXTRACTION",
+).toLowerCase();
+if (
+  PRIMARY_EXTRACTION_SETTING &&
+  !["true", "false"].includes(PRIMARY_EXTRACTION_SETTING)
+) {
+  throw new Error("ENABLE_PRIMARY_EXTRACTION must be true or false");
+}
+const PRIMARY_EXTRACTION_OPT_IN = PRIMARY_EXTRACTION_SETTING === "true";
+if (PRIMARY_EXTRACTION_OPT_IN && (!CHAT_API_BASE || !CHAT_MODEL)) {
+  throw new Error(
+    "ENABLE_PRIMARY_EXTRACTION=true requires CHAT_API_BASE and CHAT_MODEL",
+  );
+}
 export const ENABLE_PRIMARY_EXTRACTION = Boolean(
   PRIMARY_EXTRACTION_OPT_IN && CHAT_API_BASE && CHAT_MODEL,
 );
@@ -108,11 +121,11 @@ export const ENABLE_METADATA_EXTRACTION = ENABLE_PRIMARY_EXTRACTION ||
   ENABLE_FALLBACK_EXTRACTION;
 
 // Optional durable metadata-degradation notifications. Empty means real
-// degradation rows are still recorded but no delivery worker runs. A comma-
-// separated list enables one or both pluggable adapters. Multiple adapters are
-// best-effort fan-out, not independent per-channel queues: the batch succeeds
-// when at least one adapter accepts it, while failed channel names are retained
-// in the delivery ledger for diagnosis.
+// degradation rows and their pending outbox entries are retained, but no
+// delivery worker runs. A comma-separated list enables one or both pluggable
+// adapters. Multiple adapters are best-effort fan-out, not independent per-
+// channel queues: the batch succeeds when at least one adapter accepts it,
+// while failed channel names are retained in the delivery ledger for diagnosis.
 export type MetadataNotificationChannel = "pushover" | "ntfy";
 
 function metadataNotificationChannels(): MetadataNotificationChannel[] {

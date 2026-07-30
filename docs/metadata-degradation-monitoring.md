@@ -29,10 +29,12 @@ relations:
   insertion so those common credential-bearing components cannot enter the
   table. Do not put a secret in an endpoint path or model name; those fields are
   audit data and remain verbatim.
-- `metadata_degradation_outbox` is a transient, content-free queue populated in
-  the same transaction as history. The worker deletes only committed rows, so
-  concurrent captures that commit out of sequence-number order cannot be
-  skipped. A rollback restores a claimed row.
+- `metadata_degradation_outbox` is a durable, content-free pending-delivery
+  queue populated in the same transaction as history. Its `created_at` records
+  queue age. The worker deletes only committed rows, so concurrent captures that
+  commit out of sequence-number order cannot be skipped. A rollback restores a
+  claimed row. With delivery disabled, rows intentionally remain queued for a
+  later enablement or explicit owner discard.
 - `metadata_degradation_notification_state` is a singleton pending-count,
   cooldown, first-occurrence, and latest delivery-attempt ledger. Workers lock
   it with `FOR UPDATE SKIP LOCKED`, so multiple server processes cannot send the
@@ -78,8 +80,9 @@ degradation event or alert; only a configured path that actually fails produces
 the privacy audit across container replacement and configuration changes. It is
 included in normal database backups.
 
-If an operator deliberately does not need old stub-only history, the database
-owner may prune already-consumed rows without weakening the off-box audit:
+With delivery enabled, successfully accounted-for queue rows are consumed. If
+an operator deliberately does not need old stub-only history, the database
+owner may then prune already-consumed rows without weakening the off-box audit:
 
 ```sql
 DELETE FROM metadata_degradation_events AS event
@@ -95,10 +98,41 @@ Never prune `fallback_used` if historical enumeration of off-box candidates is
 required. Deleting an unconsumed event would cascade its outbox row and suppress
 the corresponding alert, which is why the guard above is load-bearing.
 
+When `METADATA_NOTIFY_CHANNELS` is blank, no worker consumes the outbox. This
+preserves degradation events for delivery if notifications are enabled later,
+but the pending queue grows with them. Inspect its depth and oldest age with:
+
+```sql
+SELECT count(*) AS pending, min(created_at) AS oldest_pending
+FROM metadata_degradation_outbox;
+```
+
+An operator choosing permanent audit-only mode may explicitly discard old
+delivery intent while retaining history:
+
+```sql
+DELETE FROM metadata_degradation_outbox
+WHERE created_at < now() - interval '90 days';
+```
+
+That action is irreversible for notification purposes: it suppresses future
+alerts for the deleted queue entries, including fallback events. Review the
+audit first. Afterward, the guarded stub-history prune above can remove matching
+stub rows if desired.
+
 Existing databases must apply migration 07 as the database owner and run
 `db/03-grants-assertion.sql` last before starting server 1.16.0. The boot probe
-fails closed when an audit/outbox relation, its sequence, or the singleton
-ledger row is missing.
+fails closed when an audit/outbox relation, required column/constraint, sequence,
+or the singleton ledger row is missing. Reapplying migration 07 also converges
+the earlier preview schema: because its unsafe sequence cursor cannot reveal
+which history rows it skipped, the upgrade requeues all existing history once
+and clears old aggregate counts. That may repeat a preview alert, choosing
+at-least-once delivery over silent loss.
+
+This release also makes every positive-integer environment setting strict.
+Values with trailing text or scientific notation that older `parseInt` behavior
+accepted now fail at boot; correct them to complete decimal integers before the
+restart.
 
 ## Durable notification worker
 
@@ -157,7 +191,7 @@ real end-to-end delivery:
    worker. For Pushover, for example, run
 
    ```bash
-   docker compose exec mcp deno eval --allow-net=api.pushover.net \
+   docker compose exec mcp deno eval \
      'const r = await fetch("https://api.pushover.net"); console.log(r.status)'
    ```
 
@@ -166,7 +200,7 @@ real end-to-end delivery:
    Qubes firewall govern this container path, even when a host-side probe works.
 3. Put one adapter's credentials and a generic label in the deployment's real
    `0600` `.env`, enable its channel, and recreate the MCP container. Existing
-   unread audit rows may cause the first alert immediately.
+   queued degradation rows may cause the first alert immediately.
 4. If no historical alert arrives, make one capture containing only an explicit
    harmless fixture such as `metadata alert live-fire fixture` while the primary
    is enabled but pointed at a known-dead local port and the fallback is blank.

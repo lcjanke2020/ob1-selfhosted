@@ -116,6 +116,15 @@ Deno.test("probeDbAtBoot: success path validates connectivity and hybrid schema"
   assert(client.queryCalls[1].includes("idx_thoughts_content_trgm"));
   assert(client.queryCalls[1].includes("metadata_degradation_events_id_seq"));
   assert(client.queryCalls[1].includes("metadata_degradation_outbox"));
+  assert(client.queryCalls[1].includes("last_delivery_attempt_at"));
+  assert(client.queryCalls[1].includes("last_failed_channels"));
+  assert(client.queryCalls[1].includes("last_event_id"));
+  assert(client.queryCalls[1].includes("created_at"));
+  assert(
+    client.queryCalls[1].includes(
+      "metadata_degradation_failed_channels_shape",
+    ),
+  );
   assert(
     client.queryCalls[2].includes("metadata_degradation_notification_state"),
   );
@@ -199,7 +208,7 @@ Deno.test("probeDbAtBoot: missing audience indexes rejects before serving", asyn
   assertEquals(client.releaseCalls, 1);
 });
 
-Deno.test("probeDbAtBoot: missing metadata audit schema rejects with migration guidance", async () => {
+Deno.test("probeDbAtBoot: missing or incomplete metadata audit schema rejects with migration guidance", async () => {
   const client = new FakeClient([
     true,
     true,
@@ -219,6 +228,7 @@ Deno.test("probeDbAtBoot: missing metadata audit schema rejects with migration g
     () => probeDbAtBoot(fakePool, "db:5432"),
     Error,
   );
+  assertStringIncludes(err.message, "missing or incompatible");
   assertStringIncludes(err.message, "metadata-degradation audit schema");
   assertStringIncludes(err.message, "db/07-metadata-degradation.sql");
   assertEquals(client.releaseCalls, 1);

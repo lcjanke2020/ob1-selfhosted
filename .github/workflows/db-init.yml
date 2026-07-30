@@ -279,10 +279,24 @@ jobs:
 
       - name: Smoke test — metadata audit is append-only and coherent
         run: |
-          # Reapply the upgrade migration to exercise its live-database path,
-          # then use the real app role and audience settings. The fixture rolls
-          # back, including outbox consumption and the notification-ledger
-          # update.
+          # Recreate the first preview's committed schema/data, apply current
+          # migration 07 over it, and prove that columns, constraints, queued
+          # history, and grants converge before cleaning the fixture.
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/metadata-degradation-legacy-fixture.sql >/dev/null
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/07-metadata-degradation.sql >/dev/null
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/03-grants-assertion.sql >/dev/null
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/metadata-degradation-upgrade-smoke.sql >/dev/null
+
+          # Reapply once more to pin idempotency, then use the real app role.
+          # The SQL fixture rolls back outbox consumption and ledger updates.
           docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
             -v ON_ERROR_STOP=1 < db/07-metadata-degradation.sql >/dev/null
@@ -293,7 +307,7 @@ jobs:
             --allow-env \
             --allow-net=127.0.0.1:55439 \
             server/metadata_notifications_db_smoke.ts
-          echo "metadata audit/outbox, immutable-history, shape, and ledger checks passed"
+          echo "metadata preview upgrade, audit/outbox, immutable-history, shape, and ledger checks passed"
 
       - name: Smoke test — spaces isolate every audience and pooled reuse
         run: |
