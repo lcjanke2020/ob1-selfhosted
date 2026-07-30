@@ -77,11 +77,17 @@ and the required `db/06-spaces.sql` migration are in
 Server 1.16.0 also requires `db/07-metadata-degradation.sql` on the DB qube.
 It records content-free classifier degradation and enqueues committed events
 durably; this app qube can then deliver optional Pushover/ntfy alerts from the
-ledger. Apply the migration and run `db/03-grants-assertion.sql` before
-recreating the MCP container. See
+ledger. Apply it before migration 08 below. See
 [Metadata degradation monitoring](../../../docs/metadata-degradation-monitoring.md).
 Upgrades also require an explicit `METADATA_FALLBACK_POLICY` in the app-qube
 `.env`; an unset value deliberately prevents the new container from starting.
+
+Server 1.19.0 also requires `db/08-access-tokens.sql` on the DB qube followed by
+`db/03-grants-assertion.sql`. This Qubes posture stays OAuth-only:
+`ENABLE_NATIVE_TOKENS=false` is pinned in compose and `MCP_ACCESS_KEY` remains
+absent, so the new schema does not add an accepted credential at the
+public edge. See [Native access
+tokens](../../../docs/native-access-tokens.md#existing-database-upgrade).
 
 ## Host firewall (scope the `0.0.0.0:8787` bind)
 

@@ -55,8 +55,9 @@ the existing classification keys:
     "model": "local-chat-model"
   },
   "source": "rest",
-  "door": "funnel",
-  "sub": "verified-oauth-subject",
+  "door": "tailnet",
+  "sub": null,
+  "token_label": "laptop client",
   "provenance": {
     "schema_version": 1,
     "caller_asserted": {
@@ -75,13 +76,15 @@ The trust boundary is:
 | --------------------------------------- | -------------------- | ------------------------------------------------------- |
 | `metadata.source`                       | Server               | Validated transport: `mcp` or `rest`                    |
 | `metadata.door`                         | Server               | Credential label: `tailnet`, `funnel`, or `service`     |
-| `metadata.sub`                          | Server               | Verified OAuth `sub`, or `null` for the shared-key door |
+| `metadata.sub`                          | Server               | Verified OAuth `sub`, or `null` for the native/static door |
+| `metadata.token_label`                  | Server               | Verified native-token label, otherwise `null`           |
 | `metadata.metadata_extraction`          | Server               | Classifier path and model                               |
 | `metadata.provenance.schema_version`    | Server               | Version of the nested caller-claims contract            |
 | `metadata.provenance.caller_asserted.*` | Authenticated caller | Validated but unverified author/work-context claims     |
 
-The top-level `source`, `door`, and `sub` keys remain canonical compatibility
-keys; they are not copied from caller input. `metadata_extraction` is versioned
+The top-level `source`, `door`, `sub`, and `token_label` keys remain canonical
+compatibility keys; they are not copied from caller input.
+`metadata_extraction` is versioned
 and uses `endpoint: "stub"` without a model field when no endpoint classified
 the thought. Classifier base URLs remain in the owner-visible degradation audit
 rather than this client-visible metadata. The metadata extractor is prevented
@@ -89,7 +92,9 @@ from populating any of these reserved keys, `metadata_extraction`, or
 `provenance`.
 
 `funnel` identifies a verified OAuth user token, `service` a verified OAuth
-client-credentials identity, and `tailnet` the shared-key credential. These
+client-credentials identity, and `tailnet` the native/static `x-brain-key`
+door. A native token adds its server-verified non-secret `token_label`; the
+legacy static key records `null`. These
 historical names are provenance labels rather than proof of the Caddy socket;
 an OAuth service can arrive through the private tailnet route. A verified
 `gty=client-credentials` claim (emitted by Auth0's default token profile)
@@ -110,7 +115,7 @@ old readers continue to interpret every existing key correctly.
   object in place because the JSONB upsert merges only supplied top-level keys.
 - Supplying claims on a duplicate capture replaces the previous versioned
   object, matching the existing last-writer-wins behavior of `source`, `door`,
-  and `sub`.
+  `sub`, and `token_label`.
 - One deduplicated thought row therefore records the most recent explicit
   capture context, not a history of every contributor who submitted identical
   content.

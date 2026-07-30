@@ -263,7 +263,9 @@ export function createMcpServer(
     // required privacy choice; alert fails boot without a notification channel.
     // 1.18.0: OAuth client-credentials identities receive a distinct `service`
     // provenance label while retaining the verified JWT subject as principal.
-    version: "1.18.0",
+    // 1.19.0: native rotatable access tokens add hash-only per-client
+    // credentials while preserving the existing transport and tool contract.
+    version: "1.19.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names

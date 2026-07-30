@@ -1,6 +1,10 @@
 # Install path 1 — Local docker-compose
 
-The simplest deployment: Postgres + pgvector, the MCP server, and Ollama on one machine, every port bound to `127.0.0.1`, gated by a shared `x-brain-key` header. Nothing here needs Tailscale, a GPU, or even an always-on box — it runs fine on a laptop or a locked-down work machine where all you have is Docker.
+The simplest deployment: Postgres + pgvector, the MCP server, and Ollama on one
+machine, every port bound to `127.0.0.1`, gated by labeled, independently
+revocable tokens in the `x-brain-key` header. Nothing here needs Tailscale, an
+identity provider, a GPU, or even an always-on box — it runs fine on a laptop or
+a locked-down work machine where all you have is Docker.
 
 If you later want other devices (or claude.ai / your phone) to reach the same store, the [tailnet install](../compose-tailnet/README.md) reuses this compose file unchanged — you upgrade by adding files, not editing them.
 
@@ -23,13 +27,18 @@ cp .env.example .env
 openssl rand -hex 24    # POSTGRES_PASSWORD
 openssl rand -hex 24    # OPENBRAIN_APP_PASSWORD
 openssl rand -hex 24    # OPENBRAIN_READONLY_PASSWORD
-openssl rand -hex 32    # MCP_ACCESS_KEY  (minimum 32 chars — enforced at boot)
+openssl rand -hex 24    # OPENBRAIN_TOKEN_ADMIN_PASSWORD
 ```
 
+Keep `ENABLE_NATIVE_TOKENS=true`, paste the four generated database passwords,
+and leave `MCP_ACCESS_KEY` empty on a new install. That static key is supported
+as a migration bridge for older clients.
+
 To use personal visibility and the seeded `sensitive` space on this single-user
-shared-key install, also set a stable, non-secret `MCP_ACCESS_KEY_PRINCIPAL`
-(for example `local-owner`). Without it, personal scope fails closed because a
-shared key is not an identity. See [Memory spaces](../../docs/spaces.md).
+native-token install, also set a stable, non-secret
+`MCP_ACCESS_KEY_PRINCIPAL` (for example `local-owner`). Per-client token labels
+provide attribution, not separate authorization identities; without the stable
+principal, personal scope fails closed. See [Memory spaces](../../docs/spaces.md).
 
 Also choose `METADATA_FALLBACK_POLICY` explicitly; there is no default. Use
 `off` for a local-only posture (a primary-classifier failure stores placeholder
@@ -64,9 +73,25 @@ docker compose up -d
 docker compose logs -f mcp
 ```
 
-You should see `open-brain-homelab listening on :8787`. The Postgres init scripts (roles, pgvector schema, observability tables, sessions schema, hybrid-search indexes, fail-closed spaces/RLS) run on the first startup only.
+You should see `open-brain-homelab listening on :8787`. The Postgres init
+scripts (roles, pgvector schema, observability tables, sessions schema,
+hybrid-search indexes, fail-closed spaces/RLS, and hash-only token storage) run
+on the first startup only.
 
-### 4. Smoke-test
+### 4. Issue a client token
+
+The profile-gated administrator runs only for an explicit lifecycle command and
+has no access to memories or token hashes:
+
+```bash
+docker compose --profile tools run --rm token-admin create "laptop client"
+```
+
+Copy the printed token now; Open Brain stores only its SHA-256 digest and cannot
+show it again. See [Native access tokens](../../docs/native-access-tokens.md)
+for list, revoke, rotation, recovery, and existing-database procedures.
+
+### 5. Smoke-test
 
 ```bash
 # Public health endpoint (no auth, doesn't touch the DB):
@@ -78,9 +103,14 @@ curl http://127.0.0.1:8787/health
 curl http://127.0.0.1:8787/ready
 ```
 
-### 5. Connect a client
+### 6. Connect a client
 
-The server is gated by an `x-brain-key` header, and is deliberately header-only (no query-string auth — query strings leak into logs and referrers). Claude Desktop's custom-connector UI only offers OAuth fields, so wire the connection through the `mcpServers` config block instead, using [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) as a stdio→HTTP bridge that injects the header:
+The server accepts the issued token in `x-brain-key` and is deliberately
+header-only (no query-string auth — query strings leak into logs and
+referrers). Claude Desktop's custom-connector UI only offers OAuth fields, so
+wire the connection through the `mcpServers` config block instead, using
+[`mcp-remote`](https://www.npmjs.com/package/mcp-remote) as a stdio→HTTP bridge
+that injects the header:
 
 | Client | OS | Config file |
 |---|---|---|
@@ -96,7 +126,7 @@ The server is gated by an `x-brain-key` header, and is deliberately header-only 
       "args": [
         "-y", "mcp-remote",
         "http://127.0.0.1:8787/mcp",
-        "--header", "x-brain-key: <the value you set in .env>"
+        "--header", "x-brain-key: <the one-time token from step 4>"
       ]
     }
   }
@@ -124,9 +154,11 @@ so the connector fetches the new scope-aware tool schemas. It should then list
 6. Capture a thought from your client; `SELECT id, vector_dims(embedding) FROM thoughts` shows `768` (or your `EMBED_DIM`).
 7. Ask the client "what have I captured?" — hybrid search returns the thought by meaning or exact text.
 8. Capture the *same* text again — the row count stays at 1 (dedupe by `content_fingerprint`).
-9. `docker compose restart` — thoughts survive.
+9. `docker compose --profile tools run --rm token-admin list` shows the client
+   label and prefix but no plaintext or hash.
+10. `docker compose restart` — thoughts and the active token survive.
 
-## Upgrading an existing database for hybrid search, spaces, and metadata audit
+## Upgrading an existing database
 
 Postgres init files run only when the data directory is first created. Before
 deploying a server version that uses hybrid thought search, verify pgvector is
@@ -146,6 +178,11 @@ docker compose exec -T postgres \
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/07-metadata-degradation.sql
+# After setting OPENBRAIN_TOKEN_ADMIN_PASSWORD in .env:
+bash ../../scripts/upgrade-enable-token-admin-role.sh
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/08-access-tokens.sql
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/03-grants-assertion.sql
@@ -161,10 +198,12 @@ indexes.
 `06-spaces.sql` requires PostgreSQL 15 or newer and the `postgres` superuser. It
 then backfills legacy thoughts and sessions into the `default` workspace, adds
 audience-aware indexes, and forces RLS; it also takes table locks, so keep the
-same maintenance window through both migrations. Migration 07 then adds the
+same maintenance window through both migrations. Migration 07 adds the
 append-only metadata-degradation audit, transactional outbox, and notification
-ledger; it does not rewrite `thoughts` or build an index over that table. The
-updated server refuses to boot until all three schema contracts exist.
+ledger; it does not rewrite `thoughts` or build an index over that table.
+Migration 08 adds hash-only native-token storage and the dedicated lifecycle
+role/functions. The updated server refuses to boot until all four schema
+contracts exist.
 It also refuses to boot until `METADATA_FALLBACK_POLICY` is explicitly set;
 choose `off`, `alert`, or `allow` in `.env` before recreating the container.
 Re-running the files is safe,
@@ -173,6 +212,8 @@ full lock window and index headroom. Details are in
 [`docs/hybrid-search.md`](../../docs/hybrid-search.md) and
 [`docs/spaces.md`](../../docs/spaces.md); alert configuration and audit queries
 are in [metadata degradation monitoring](../../docs/metadata-degradation-monitoring.md).
+Native token rollout and static-key migration are in
+[Native access tokens](../../docs/native-access-tokens.md).
 
 ## Common gotchas
 
@@ -207,16 +248,15 @@ If you switch embedding models later, old embeddings are mathematically incompat
 
 ## Key rotation
 
-`MCP_ACCESS_KEY` is the door to every registered non-personal audience (and to
-the one configured personal principal, when bound). Rotate it on a regular
-cadence and immediately if it ever leaves trusted hands:
+Native tokens rotate without restarting Open Brain or disrupting other clients:
 
 ```bash
-NEW_KEY=$(openssl rand -hex 32)
-sed -i.bak "s|^MCP_ACCESS_KEY=.*|MCP_ACCESS_KEY=$NEW_KEY|" .env && rm .env.bak
-docker compose up -d --force-recreate mcp
-echo "$NEW_KEY"   # paste into each client config, then forget it
-unset NEW_KEY
+docker compose --profile tools run --rm token-admin create "laptop replacement"
+# Update and smoke-test that client, then revoke the old public prefix:
+docker compose --profile tools run --rm token-admin revoke ob1_AAAAAAAA
 ```
 
-Data at rest is untouched — the key only gates the MCP transport.
+The revoked credential receives HTTP 401 on its next request. Data at rest is
+untouched. If an older deployment still uses `MCP_ACCESS_KEY`, migrate clients
+one at a time, then remove that variable and recreate `mcp`; the static key is
+not represented in the token inventory and cannot be revoked there.

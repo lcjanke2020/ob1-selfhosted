@@ -19,7 +19,7 @@
 -- Putting the assertion in its own file solves both cases:
 --   1. Fresh init: the Compose/CI paths mount this source file as
 --      99-grants-assertion.sql, after every schema migration. Native
---      provisioning applies 01-, 02-, 04-, 05-, 06-, and 07-, then invokes
+--      provisioning applies 01-, 02-, 04-, 05-, 06-, 07-, and 08-, then invokes
 --      this stable source path last. In both cases the assertion sees the
 --      completed catalog, so an init file that widens a protected role fails
 --      loudly.
@@ -243,6 +243,234 @@ BEGIN
   ) THEN
     RAISE EXCEPTION
       'grants assertion failed: PUBLIC can access metadata degradation relations or sequence.';
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Native access-token invariants. The runtime may perform only the bounded
+-- hash lookup; the dedicated administrator may list non-secret metadata and
+-- execute exactly two fixed-search-path SECURITY DEFINER lifecycle functions.
+-- Neither role may inherit privileges, and PUBLIC receives nothing.
+DO $$
+DECLARE
+  token_table oid := to_regclass('native_auth.access_token');
+  token_sequence oid := to_regclass('native_auth.access_token_id_seq');
+  register_fn oid := to_regprocedure(
+    'native_auth.register_access_token(text,bytea,text)'
+  );
+  revoke_fn oid := to_regprocedure(
+    'native_auth.revoke_access_token(text)'
+  );
+  app_oid oid := to_regrole('openbrain_app');
+  admin_oid oid := to_regrole('openbrain_token_admin');
+  readonly_oid oid := to_regrole('openbrain_readonly');
+  relation_owner oid;
+  function_oid oid;
+  bad text;
+BEGIN
+  IF token_table IS NULL OR token_sequence IS NULL
+     OR register_fn IS NULL OR revoke_fn IS NULL OR admin_oid IS NULL THEN
+    RAISE EXCEPTION
+      'grants assertion failed: native access-token schema, sequence, functions, or administrator role is missing; apply db/08-access-tokens.sql first.';
+  END IF;
+
+  IF (
+    SELECT rolsuper OR rolbypassrls
+    FROM pg_roles WHERE oid = admin_oid
+  ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_token_admin can bypass row-level security.';
+  END IF;
+  SELECT string_agg(roleid::regrole::text, ', ' ORDER BY roleid::regrole::text)
+    INTO bad FROM pg_auth_members WHERE member = admin_oid;
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_token_admin is a member of: %. It must remain standalone.',
+      bad;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM pg_namespace namespace
+    CROSS JOIN LATERAL aclexplode(
+      COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))
+    ) acl
+    WHERE namespace.oid = 'native_auth'::regnamespace
+      AND acl.grantee = 0
+  ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: PUBLIC can access the native_auth schema.';
+  END IF;
+  IF NOT has_schema_privilege(app_oid, 'native_auth', 'USAGE')
+     OR has_schema_privilege(app_oid, 'native_auth', 'CREATE')
+     OR NOT has_schema_privilege(admin_oid, 'native_auth', 'USAGE')
+     OR has_schema_privilege(admin_oid, 'native_auth', 'CREATE') THEN
+    RAISE EXCEPTION
+      'grants assertion failed: native-auth roles have incorrect schema privileges.';
+  END IF;
+
+  -- The lifecycle credential must not become a sideways memory credential.
+  -- Scan effective privileges (including PUBLIC) across every non-system
+  -- relation instead of maintaining a memory-table denylist.
+  SELECT string_agg(exposed.object_name, ', ' ORDER BY exposed.object_name)
+    INTO bad
+  FROM (
+    SELECT format('%I.%I', namespace.nspname, relation.relname) AS object_name
+    FROM pg_class relation
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname <> 'information_schema'
+      AND namespace.nspname !~ '^pg_'
+      AND relation.oid <> token_table
+      AND (
+        relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+        AND (
+          has_table_privilege(
+            admin_oid, relation.oid,
+            'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+          )
+          OR has_any_column_privilege(
+            admin_oid, relation.oid, 'SELECT, INSERT, UPDATE, REFERENCES'
+          )
+        )
+        OR relation.relkind = 'S'
+          AND has_sequence_privilege(
+            admin_oid, relation.oid, 'USAGE, SELECT, UPDATE'
+          )
+      )
+  ) exposed;
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_token_admin can access non-token relations: %.',
+      bad;
+  END IF;
+
+  SELECT string_agg(routine.oid::regprocedure::text, ', '
+                    ORDER BY routine.oid::regprocedure::text)
+    INTO bad
+  FROM pg_proc routine
+  JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
+  WHERE namespace.nspname <> 'information_schema'
+    AND namespace.nspname !~ '^pg_'
+    AND routine.prosecdef
+    AND routine.oid <> ALL (ARRAY[register_fn, revoke_fn])
+    AND has_function_privilege(admin_oid, routine.oid, 'EXECUTE');
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_token_admin can execute unrelated SECURITY DEFINER functions: %.',
+      bad;
+  END IF;
+
+  IF NOT (
+       has_column_privilege(app_oid, token_table, 'prefix', 'SELECT')
+       AND has_column_privilege(app_oid, token_table, 'token_hash', 'SELECT')
+       AND has_column_privilege(app_oid, token_table, 'label', 'SELECT')
+       AND has_column_privilege(app_oid, token_table, 'revoked_at', 'SELECT')
+     ) OR has_column_privilege(app_oid, token_table, 'id', 'SELECT')
+       OR has_column_privilege(app_oid, token_table, 'created_at', 'SELECT')
+       OR has_table_privilege(
+         app_oid, token_table,
+         'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+       )
+       OR has_any_column_privilege(
+         app_oid, token_table, 'INSERT, UPDATE, REFERENCES'
+       ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_app must have SELECT only on the four native-token verification columns.';
+  END IF;
+
+  IF NOT (
+       has_column_privilege(admin_oid, token_table, 'id', 'SELECT')
+       AND has_column_privilege(admin_oid, token_table, 'prefix', 'SELECT')
+       AND has_column_privilege(admin_oid, token_table, 'label', 'SELECT')
+       AND has_column_privilege(admin_oid, token_table, 'created_at', 'SELECT')
+       AND has_column_privilege(admin_oid, token_table, 'revoked_at', 'SELECT')
+     ) OR has_column_privilege(admin_oid, token_table, 'token_hash', 'SELECT')
+       OR has_table_privilege(
+         admin_oid, token_table,
+         'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+       )
+       OR has_any_column_privilege(
+         admin_oid, token_table, 'INSERT, UPDATE, REFERENCES'
+       )
+       OR has_sequence_privilege(
+         admin_oid, token_sequence, 'USAGE, SELECT, UPDATE'
+       ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_token_admin must list non-secret metadata and mutate only through reviewed functions.';
+  END IF;
+
+  SELECT relowner INTO relation_owner FROM pg_class WHERE oid = token_table;
+  FOREACH function_oid IN ARRAY ARRAY[register_fn, revoke_fn] LOOP
+    IF NOT COALESCE((
+         SELECT prosecdef
+           AND proowner = relation_owner
+           AND COALESCE(proconfig, ARRAY[]::text[])
+                 @> ARRAY['search_path=pg_catalog, native_auth']
+         FROM pg_proc WHERE oid = function_oid
+       ), false) THEN
+      RAISE EXCEPTION
+        'grants assertion failed: native-auth function % must be SECURITY DEFINER, table-owner-owned, with fixed search_path.',
+        function_oid::regprocedure;
+    END IF;
+    IF EXISTS (
+         SELECT 1
+         FROM pg_proc p
+         CROSS JOIN LATERAL aclexplode(
+           COALESCE(p.proacl, acldefault('f', p.proowner))
+         ) acl
+         WHERE p.oid = function_oid AND acl.grantee = 0
+       ) OR has_function_privilege(app_oid, function_oid, 'EXECUTE')
+       OR NOT has_function_privilege(admin_oid, function_oid, 'EXECUTE') THEN
+      RAISE EXCEPTION
+        'grants assertion failed: native-auth function % execution is not restricted to openbrain_token_admin.',
+        function_oid::regprocedure;
+    END IF;
+    IF EXISTS (
+      SELECT 1
+      FROM pg_proc p
+      CROSS JOIN LATERAL aclexplode(p.proacl) acl
+      WHERE p.oid = function_oid
+        AND acl.grantee = admin_oid
+        AND acl.is_grantable
+    ) THEN
+      RAISE EXCEPTION
+        'grants assertion failed: openbrain_token_admin has grant option on %.',
+        function_oid::regprocedure;
+    END IF;
+  END LOOP;
+
+  IF EXISTS (
+    SELECT 1
+    FROM pg_class relation
+    CROSS JOIN LATERAL aclexplode(
+      COALESCE(
+        relation.relacl,
+        acldefault(
+          (CASE WHEN relation.relkind = 'S' THEN 'S' ELSE 'r' END)::"char",
+          relation.relowner
+        )
+      )
+    ) acl
+    WHERE relation.oid = ANY (ARRAY[token_table, token_sequence])
+      AND acl.grantee = 0
+  ) OR EXISTS (
+    SELECT 1
+    FROM pg_attribute attribute
+    CROSS JOIN LATERAL aclexplode(attribute.attacl) acl
+    WHERE attribute.attrelid = token_table
+      AND acl.grantee = 0
+  ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: PUBLIC can access native token storage.';
+  END IF;
+
+  IF NOT has_table_privilege(readonly_oid, token_table, 'SELECT')
+     OR has_table_privilege(readonly_oid, token_table,
+       'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+     OR NOT has_sequence_privilege(readonly_oid, token_sequence, 'SELECT')
+     OR has_sequence_privilege(readonly_oid, token_sequence, 'USAGE, UPDATE') THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_readonly cannot safely dump native token storage.';
   END IF;
 END;
 $$ LANGUAGE plpgsql;

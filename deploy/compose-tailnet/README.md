@@ -2,9 +2,13 @@
 
 This path takes the [local install](../compose-local/README.md) and puts it on your tailnet — and, if you want claude.ai / Claude mobile to reach it, on the public internet behind a hardened edge. It reuses `../compose-local/docker-compose.yml` as the base; the files in this directory only *add* to it.
 
-This directory is the **public Funnel + OAuth edge**. Auth here is **OAuth (RS256 JWT) only** — there is no static `x-brain-key` on a publicly-reachable deployment (that door lives only in the [local install](../compose-local/README.md)). It adds Caddy (single `:9787` listener that discriminates tailnet vs Funnel traffic — **Pattern Y**), removes the MCP server's host port so Caddy is the only entry point, validates RS256 JWTs on the public door, enforces an Anthropic egress IP allowlist, and ships observability (access logs → Postgres, daily rollups). This is what claude.ai and Claude mobile need, since they reach MCP servers from Anthropic's cloud, not from your device.
+This directory is the **public Funnel + OAuth edge**. Auth here is **OAuth (RS256 JWT) only** — both static and native `x-brain-key` verification are disabled on a publicly-reachable deployment (that door lives only in the [local install](../compose-local/README.md)). It adds Caddy (single `:9787` listener that discriminates tailnet vs Funnel traffic — **Pattern Y**), removes the MCP server's host port so Caddy is the only entry point, validates RS256 JWTs on the public door, enforces an Anthropic egress IP allowlist, and ships observability (access logs → Postgres, daily rollups). This is what claude.ai and Claude mobile need, since they reach MCP servers from Anthropic's cloud, not from your device.
 
-Prerequisite: Tailscale installed on the host, plus the [local install](../compose-local/README.md) working (start there — all five setup steps apply unchanged). Leave `MCP_ACCESS_KEY` **unset** here and set the `AUTH0_*` trio instead.
+Prerequisite: Tailscale installed on the host, plus the base services from the
+[local install](../compose-local/README.md) working. The public steps below
+replace that guide's native-token client setup: set the `AUTH0_*` trio, and the
+overlay clears `MCP_ACCESS_KEY` and disables native tokens regardless of copied
+local values.
 
 Interactive clients and [headless service accounts](../../docs/service-account-oauth-client.md)
 use this same OAuth verifier. Scheduled agents normally connect over the private
@@ -19,7 +23,7 @@ tailnet branch; the public Funnel branch remains restricted to Anthropic egress.
 `docker-compose.pattern-b.yml` does three things:
 
 1. **Removes mcp's host port mapping** (`ports: !reset null`) — the raw `:8787` becomes unreachable from the host, so a stray `tailscale funnel http://127.0.0.1:8787` physically cannot reach mcp past the Caddy perimeter (IP allowlist, body cap, logging). Requires compose v2.20+ (the `!reset` YAML tag).
-2. **Blanks `MCP_ACCESS_KEY`** (`MCP_ACCESS_KEY: ""`) — a backstop for the "leave it unset" instruction above. The base compose inherits `MCP_ACCESS_KEY: ${MCP_ACCESS_KEY:-}`, so copying a working local `.env` into this directory would otherwise re-open the static-key door on a public box; pinning it empty here makes OAuth the only door regardless.
+2. **Disables the complete `x-brain-key` door** — it blanks `MCP_ACCESS_KEY` and pins `ENABLE_NATIVE_TOKENS=false`. The base compose enables native tokens and may inherit a static key, so both overrides are required to make OAuth the only door even when an operator copies a working local `.env` onto a public box.
 3. **Starts the `log-ingester` sidecar**, which tails Caddy's JSON access logs into Postgres (see Observability below).
 
 The `caddy` service itself lives in the base compose file, gated behind the `pattern-b` profile, with its build context and Caddyfile in this directory.
@@ -177,7 +181,8 @@ docker compose exec -T postgres \
 ```
 
 **New schema files** (observability, sessions, hybrid search, spaces, metadata
-degradation audit) apply cleanly and are idempotent. The spaces migration is not
+degradation audit, native-token storage) apply cleanly and are idempotent. The
+spaces migration is not
 a cheap no-op on reapplication; it rebuilds its fingerprint index each time:
 
 ```bash
@@ -188,6 +193,7 @@ docker compose exec -T postgres psql -U postgres -d openbrain < ../../db/04-sess
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/05-hybrid-search.sql
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/06-spaces.sql
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/07-metadata-degradation.sql
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/08-access-tokens.sql
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
 docker compose build mcp && docker compose up -d
 ```
@@ -217,6 +223,12 @@ server 1.16.0; the boot probe refuses a partial catalog. See [Metadata
 degradation monitoring](../../docs/metadata-degradation-monitoring.md) for audit
 queries and optional Pushover/ntfy configuration.
 
+`08-access-tokens.sql` is required by the server catalog probe, but the public
+Pattern B override pins `ENABLE_NATIVE_TOKENS=false` and clears the static key,
+so every `x-brain-key` remains rejected. Its dedicated administrator role may
+remain `NOLOGIN` on this OAuth-only deployment. See [Native access
+tokens](../../docs/native-access-tokens.md#existing-database-upgrade).
+
 Optional: the SELECT-only role for the host-side funnel monitor follows the same shape —
 set `OPENBRAIN_MONITOR_PASSWORD` in `.env`, run `bash ../../scripts/upgrade-add-monitor-role.sh`,
 then re-apply `db/02-observability.sql` as above for its grants and run
@@ -236,7 +248,7 @@ docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
 ```
 
-A non-zero exit means a grant drifted. Prefer a targeted fix (e.g. `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). To re-sync wholesale, re-apply `01-schema.sql` → `02-observability.sql`, apply any pending later schema migrations (`04`, `05`, `06`, `07`, and future files), then run `03-grants-assertion.sql` **last** — never `01` alone, since its REVOKE-all block strips observability grants until `02` restores them.
+A non-zero exit means a grant drifted. Prefer a targeted fix (e.g. `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). To re-sync wholesale, re-apply `01-schema.sql` → `02-observability.sql`, apply any pending later schema migrations (`04`, `05`, `06`, `07`, `08`, and future files), then run `03-grants-assertion.sql` **last** — never `01` alone, since its REVOKE-all block strips observability grants until `02` restores them.
 
 To retire the unused historical thought-search RPC without a full schema replay,
 run `DROP FUNCTION IF EXISTS match_thoughts(vector, double precision, integer, jsonb);`

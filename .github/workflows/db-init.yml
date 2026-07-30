@@ -41,6 +41,8 @@ on:
       - "server/queries.ts"
       - "server/metadata_notifications.ts"
       - "server/metadata_notifications_db_smoke.ts"
+      - "server/access_tokens.ts"
+      - "server/access_tokens_db_smoke.ts"
       - "server/session_search_db_smoke.ts"
       - "server/scoped_db.ts"
       - "server/scope_contract.ts"
@@ -61,6 +63,8 @@ on:
       - "server/queries.ts"
       - "server/metadata_notifications.ts"
       - "server/metadata_notifications_db_smoke.ts"
+      - "server/access_tokens.ts"
+      - "server/access_tokens_db_smoke.ts"
       - "server/session_search_db_smoke.ts"
       - "server/scoped_db.ts"
       - "server/scope_contract.ts"
@@ -97,6 +101,8 @@ jobs:
       # Same for the optional SELECT-only funnel-monitor role (and the
       # monitor assertions in 03-grants-assertion.sql).
       OPENBRAIN_MONITOR_PASSWORD: ci_monitor_pw
+      # Dedicated create/list/revoke role for the native-token smoke.
+      OPENBRAIN_TOKEN_ADMIN_PASSWORD: ci_token_admin_pw
     steps:
       # Same fork-safe ref pattern as ci.yml.
       - name: Checkout PR head safely
@@ -131,6 +137,7 @@ jobs:
             -e POSTGRES_DB -e POSTGRES_USER -e POSTGRES_PASSWORD \
             -e OPENBRAIN_APP_PASSWORD -e OPENBRAIN_READONLY_PASSWORD \
             -e OPENBRAIN_INGESTER_PASSWORD -e OPENBRAIN_MONITOR_PASSWORD \
+            -e OPENBRAIN_TOKEN_ADMIN_PASSWORD \
             -v "$GITHUB_WORKSPACE/db/00-roles.sh:/docker-entrypoint-initdb.d/00-roles.sh:ro" \
             -v "$GITHUB_WORKSPACE/db/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/02-observability.sql:/docker-entrypoint-initdb.d/02-observability.sql:ro" \
@@ -138,6 +145,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/db/05-hybrid-search.sql:/docker-entrypoint-initdb.d/05-hybrid-search.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/06-spaces.sql:/docker-entrypoint-initdb.d/06-spaces.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/07-metadata-degradation.sql:/docker-entrypoint-initdb.d/07-metadata-degradation.sql:ro" \
+            -v "$GITHUB_WORKSPACE/db/08-access-tokens.sql:/docker-entrypoint-initdb.d/08-access-tokens.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro" \
             "$PG_IMAGE"
 
@@ -174,6 +182,29 @@ jobs:
           docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
             "SELECT 1 FROM metadata_degradation_notification_state WHERE singleton" | grep -q 1
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT to_regclass('native_auth.access_token') IS NOT NULL" | grep -q t
+
+      - name: Smoke test — native token lifecycle is hash-only and least-privilege
+        run: |
+          # Reapply the migration to pin the existing-database/idempotency path,
+          # re-check catalog grants, then exercise register/list/revoke through
+          # the real dedicated and application roles inside a rollback.
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/08-access-tokens.sql >/dev/null
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/03-grants-assertion.sql >/dev/null
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/access-tokens-smoke.sql >/dev/null
+          deno run --config server/deno.json --frozen \
+            --allow-env \
+            --allow-net=127.0.0.1:55439 \
+            server/access_tokens_db_smoke.ts
+          echo "native token registration, driver hashing, redacted listing, one-way revocation, and grants passed"
 
       - name: Smoke test — protected roles reject grant drift
         run: |

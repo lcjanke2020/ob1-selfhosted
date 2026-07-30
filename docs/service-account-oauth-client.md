@@ -24,7 +24,7 @@ After verification, the server assigns one of three provenance labels:
 |---|---|---|
 | `funnel` | OAuth user token | verified JWT `sub` |
 | `service` | OAuth client-credentials token | verified JWT `sub` |
-| `tailnet` | shared `x-brain-key` | configured shared-key principal, or none |
+| `tailnet` | native/static `x-brain-key` | configured deployment-wide principal, or none |
 
 The historical `funnel` and `tailnet` names are compatibility labels, not proof
 of the Caddy network route. A service-account request normally arrives through
@@ -75,11 +75,12 @@ issuer must publish RSA signing keys at the configured HTTPS JWKS URI. Open
 Brain does not accept opaque tokens, token introspection, symmetric signatures,
 or algorithms other than RS256.
 
-On the Tailnet/Funnel and Qubes deployments, keep `MCP_ACCESS_KEY` unset. The
-machine flow uses OAuth; it is not a reason to reopen the static-key public
-door. A scheduled agent outside Anthropic's egress range must connect over the
-tailnet route, because the public Funnel branch will correctly reject it at
-Caddy with 403 before OAuth is attempted.
+On the Tailnet/Funnel and Qubes deployments, keep `MCP_ACCESS_KEY` unset and
+`ENABLE_NATIVE_TOKENS=false`. The machine flow uses OAuth; it is not a reason
+to reopen either `x-brain-key` credential type on the public deployment. A
+scheduled agent outside Anthropic's egress range must connect over the tailnet
+route, because the public Funnel branch will correctly reject it at Caddy with
+403 before OAuth is attempted.
 
 ## Auth0 procedure
 
@@ -194,7 +195,7 @@ the Auth0 RFC 9068 or generic-issuer discovery run, then unset it.
 A successful Auth0 run ends like this, without disclosing the credential:
 
 ```text
-OK: browserless client_credentials authenticated to open-brain-homelab 1.18.0
+OK: browserless client_credentials authenticated to open-brain-homelab 1.19.0
 Attribution signal: signed gty=client-credentials present; expected server label is service.
 ```
 

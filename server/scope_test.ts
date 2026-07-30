@@ -16,12 +16,21 @@ const {
 } = await import("./services.ts");
 const { resolveReadScope, resolveWriteScope } = await import("./scope.ts");
 
-const OAUTH_ALICE = { door: "funnel" as const, sub: "auth0|alice" };
+const OAUTH_ALICE = {
+  door: "funnel" as const,
+  sub: "auth0|alice",
+  tokenLabel: null,
+};
 const SERVICE_AGENT = {
   door: "service" as const,
   sub: "automation-client@clients",
+  tokenLabel: null,
 };
-const SHARED_KEY = { door: "tailnet" as const, sub: null };
+const SHARED_KEY = {
+  door: "tailnet" as const,
+  sub: null,
+  tokenLabel: null,
+};
 
 function registryPool() {
   return new FakePool((sql, params) => {

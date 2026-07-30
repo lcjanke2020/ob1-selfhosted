@@ -205,7 +205,7 @@ Deno.test("MCP read tools enforce one serialized result budget", async () => {
     });
     const server = createMcpServer(
       asPool(pool),
-      { door: "tailnet", sub: null },
+      { door: "tailnet", sub: null, tokenLabel: null },
       makeDeps(),
     );
     const client = new Client({ name: "budget-test", version: "1.0.0" });

@@ -32,7 +32,7 @@ Deno.test("configured shared-key principal owns sensitive personal scope", async
         : undefined
     ),
   );
-  const auth = { door: "tailnet" as const, sub: null };
+  const auth = { door: "tailnet" as const, sub: null, tokenLabel: null };
 
   assertEquals(trustedPrincipal(auth), "local-owner");
   assertEquals(

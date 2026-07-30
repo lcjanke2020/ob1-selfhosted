@@ -123,15 +123,17 @@ once per cluster:
 sudo -u postgres psql -c "CREATE DATABASE openbrain;"
 sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
 # then create the openbrain_app / openbrain_ingester / openbrain_readonly /
-# openbrain_monitor roles — see db/00-roles.sh for the exact, up-to-date
-# statements (Pattern A vs B, passwords, grants; ingester + monitor are
-# optional) — and apply the SQL files in this order:
+# openbrain_monitor / openbrain_token_admin roles — see db/00-roles.sh for the
+# exact, up-to-date statements (Pattern A vs B, passwords, grants; ingester +
+# monitor are optional, and token admin may remain NOLOGIN) — and apply the SQL
+# files in this order:
 #   db/01-schema.sql
 #   db/02-observability.sql
 #   db/04-sessions.sql
 #   db/05-hybrid-search.sql
 #   db/06-spaces.sql
 #   db/07-metadata-degradation.sql
+#   db/08-access-tokens.sql
 #   db/03-grants-assertion.sql  # always last
 ```
 
@@ -180,14 +182,22 @@ it needs the same table-lock window and index headroom. It must land before the
 scoped app server starts; the server boot probe refuses a partial catalog. See
 [Memory spaces](../../../docs/spaces.md).
 
-Finally, apply
+Next, apply
 [`db/07-metadata-degradation.sql`](../../../db/07-metadata-degradation.sql) as
-the database owner, then run `db/03-grants-assertion.sql` last. It adds the
-append-only, content-free metadata-classification audit, transactional outbox,
-and singleton notification ledger without rewriting `thoughts`. Server 1.16.0
-refuses to start until all three relations and the seeded ledger row exist.
-Audit queries and the optional Pushover/ntfy worker are documented in [Metadata
-degradation monitoring](../../../docs/metadata-degradation-monitoring.md).
+the database owner. It adds the append-only, content-free
+metadata-classification audit, transactional outbox, and singleton notification
+ledger without rewriting `thoughts`. Server 1.16.0 refuses to start until all
+three relations and the seeded ledger row exist. Audit queries and the optional
+Pushover/ntfy worker are documented in [Metadata degradation
+monitoring](../../../docs/metadata-degradation-monitoring.md).
+
+Then apply
+[`db/08-access-tokens.sql`](../../../db/08-access-tokens.sql) as the database
+owner, then run `db/03-grants-assertion.sql` last. The server catalog probe
+requires this schema, but the Qubes app remains OAuth-only: it does not enable
+native token verification, and the dedicated administrator role can stay
+`NOLOGIN`. See [Native access
+tokens](../../../docs/native-access-tokens.md#existing-database-upgrade).
 
 ## Template note
 

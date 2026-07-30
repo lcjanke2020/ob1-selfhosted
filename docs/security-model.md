@@ -4,11 +4,36 @@ What this stack trusts, what it doesn't, and what each layer is allowed to do af
 
 ## Trust boundaries
 
-The system has **two auth doors, chosen per deployment** — typically one, though the local single-box install may run both (it's the only place that's intended; the boot log warns when both are on). They're independently toggleable (`MCP_ACCESS_KEY` enables the static-key door; the three `AUTH0_*` vars enable the OAuth door), and the server refuses to boot with neither configured.
+The system has **two auth doors, chosen per deployment** — typically one,
+though the local single-box install may run both (it's the only place that's
+intended; the boot log warns when both are on). `ENABLE_NATIVE_TOKENS` and the
+legacy `MCP_ACCESS_KEY` independently enable credential types on the local
+`x-brain-key` door; the three `AUTH0_*` vars enable the OAuth door. The server
+refuses to boot with neither door configured.
 
-**Local single-box install (`x-brain-key`).** The simple shared-key door, intended for loopback/LAN (or your tailnet if you front it with `tailscale serve`). Anyone who can reach the box and present the `x-brain-key` can read/write registered workspace and project audiences — treat the key like a database password and your network ACLs as the firewall. The shared key is not a per-user identity, so personal spaces fail closed unless the operator binds the deployment to one stable `MCP_ACCESS_KEY_PRINCIPAL`; every key holder then acts as that same principal. This door exists only on the local install; the publicly-reachable deployments leave it off.
+**Local single-box install (`x-brain-key`).** The private door is intended for
+loopback/LAN (or your tailnet if you front it with `tailscale serve`). Its
+default credentials are labeled native tokens: 256-bit random secrets shown
+once, stored only as SHA-256 digests, looked up on every request, and revoked
+independently. The static shared key remains a migration bridge. Anyone who can
+reach the box and present any active credential can read/write registered
+workspace and project audiences — treat every token like a database password
+and your network ACLs as the firewall. Token labels are attribution, not
+per-user identity, so personal spaces fail closed unless the operator binds the
+deployment to one stable `MCP_ACCESS_KEY_PRINCIPAL`; every token holder then
+acts as that same principal. See [Native access tokens](native-access-tokens.md).
 
-**Funnel / Qubes (OAuth-only).** The static key is removed entirely — the server does not accept an `x-brain-key` at all (a presented one is ignored, since no key is configured to match). Public Funnel callers must originate from Anthropic's published egress range `160.79.104.0/21`; private tailnet callers bypass that public matcher. Both paths must present a valid RS256 JWT with the configured issuer, audience, `exp`, and `sub`. The subject may represent an interactive user or a [client-credentials service account](service-account-oauth-client.md); identity rests entirely on OAuth tenant administration and credential hygiene. PostgreSQL RLS partitions `personal` rows by the verified `sub`; workspace/project audiences remain shared because this release has no membership ACL. Collapsing to a single OAuth verifier on every publicly-reachable deployment removes a second static credential to rotate and leak; the local install keeps the `x-brain-key` door for environments where standing up an OAuth tenant isn't practical.
+**Funnel / Qubes (OAuth-only).** The static key is empty and native token
+verification is explicitly disabled — the server ignores every presented
+`x-brain-key`. Public Funnel callers must originate from Anthropic's published
+egress range `160.79.104.0/21`; private tailnet callers bypass that public
+matcher. Both paths must present a valid RS256 JWT with the configured issuer,
+audience, `exp`, and `sub`. The subject may represent an interactive user or a
+[client-credentials service account](service-account-oauth-client.md); identity
+rests entirely on OAuth tenant administration and credential hygiene.
+PostgreSQL RLS partitions `personal` rows by the verified `sub`;
+workspace/project audiences remain shared because this release has no
+membership ACL.
 
 The complete audience union, seeded personal-only `sensitive` workspace, and
 operator contract are in [Memory spaces](spaces.md). `sensitive` is access
@@ -22,29 +47,30 @@ dumps can still read it.
 - On the single-host install paths every service binds `127.0.0.1` only — the LAN can't reach any port directly; exposure is an explicit `tailscale serve`/`funnel` act. **Split-Qubes exception:** the app qube publishes `mcp` on `0.0.0.0:8787` (all host interfaces) so the ingress qube's Caddy can reach it across qubes. That port is kept private not by a loopback bind but by the Tailscale ACL (only the ingress qube may reach it) + the app qube's `DOCKER-USER` host-firewall rule (docker DNAT bypasses the Qubes `INPUT` chain) + mcp's OAuth — see the [Qubes README](../deploy/qubes/README.md).
 - In Pattern B the override file **removes** mcp's host port (`ports: !reset null`). The raw backend is unreachable from the host, so a misconfigured `tailscale funnel` pointed at `:8787` fails closed instead of reaching mcp directly past the Caddy perimeter (IP allowlist, body cap, logging).
 - **Primary public perimeter — the Anthropic IP allowlist.** Caddy's funnel branch enforces `client_ip 160.79.104.0/21` (XFF-resolved), with `trusted_proxies static private_ranges` + `trusted_proxies_strict` so forwarding headers are honored only from the loopback proxy peer. This is the *only* network-layer control between the public internet and the MCP server — non-Anthropic funnel traffic is `403`'d before the backend is touched. It must never be silently dropped; a CI guard (`.github/workflows/allowlist-guard.yml`) fails the build if the CIDR disappears from the Caddyfile. A tailnet client can't escalate into the funnel branch either: the discriminating `Tailscale-Funnel-Request` header is injected by `tailscaled` itself, not controllable by clients.
-- **Credentials are not stripped per-branch.** The server decides per deployment which door it accepts: on the OAuth-only funnel/Qubes deployments `MCP_ACCESS_KEY` is unset, so a presented `x-brain-key` is ignored (no key to match); the local install accepts it. Either way the access-log `format filter` deletes both credential headers (`X-Brain-Key`, `Authorization`) so neither reaches disk. App-layer `requireAuth` is the load-bearing check.
+- **Credentials are not stripped per-branch.** The server decides per deployment which door it accepts: on OAuth-only Funnel/Qubes deployments `MCP_ACCESS_KEY` is unset and `ENABLE_NATIVE_TOKENS=false`, so every presented `x-brain-key` is ignored; the local install accepts configured native/static credentials. Either way the access-log `format filter` deletes both credential headers (`X-Brain-Key`, `Authorization`) so neither reaches disk. App-layer `requireAuth` is the load-bearing check.
 
 ### Application layer
 
-- At least one auth door must be configured or the server refuses to boot — there is no accidental no-auth deployment. When the `x-brain-key` door is enabled, `MCP_ACCESS_KEY` minimum length 32 is enforced at boot; weak keys refuse to start. The boot log states which door(s) are active and warns if both are on (intended for the local install only — a public deployment should be OAuth-only).
+- At least one auth door must be configured or the server refuses to boot — there is no accidental no-auth deployment. Native tokens are opt-in at the server and default on only in local compose; invalid flag values fail startup. When the legacy static credential is set, its minimum length of 32 is enforced at boot. Native tokens have a fixed format and 256-bit random secret; authentication hashes before a prefix-indexed lookup and uses a constant-time digest comparison, including a dummy comparison for unknown prefixes. Every request re-reads revocation state, and storage errors fail closed. The boot log states which door(s) are active and warns if the `x-brain-key` and OAuth doors are both on (intended for a private local install only).
 - Bearer validation pins issuer, audience, algorithm (RS256), and requires `exp` plus a bounded, non-empty, control-free string `sub`; verification fails closed before any source-marker stamping runs. Only after verification does a signed `gty=client-credentials` claim (including Auth0's default token profile)—or an exact operator-configured subject for Auth0's RFC 9068 profile or another issuer—select the `service` provenance label. That mapping changes neither authentication nor authorization.
 - A boot-time JWKS reachability probe (with an explicit wall-clock timeout that also caps every later refresh) surfaces a typo'd JWKS URI at startup rather than at the first attacker request.
 - Auth-failure responses are uniform: **every** rejection — missing, invalid, or expired credentials — gets HTTP 401 + `WWW-Authenticate` (RFC 6750 / MCP authorization spec), with a JSON-RPC error envelope body for MCP id correlation. The transport-level 401 is what OAuth-capable clients key credential refresh and re-authorization off; an earlier revision answered tried-but-invalid credentials with HTTP 200 + envelope (a keep-alive theory) and stranded connectors after token expiry until a human reauthenticated. Operator-facing messages are collapsed to a single "unauthorized" — the granular reason goes to the audit table, not to the caller, closing a credential-status side-channel.
 - Captured content is hard-capped (100,000 UTF-8 bytes) on both `capture_thought` and `session_capture`; the REST gateway enforces the identical cap via the same shared schema module, plus a 1 MiB request-body limit for tailnet-direct callers that have no Caddy edge in front of them.
-- Session provenance (`source`, `source_node`) is stamped server-side from the credential context; caller-supplied values are ignored. Thought transport provenance (`metadata.source`, `door`, `sub`) and classifier provenance (`metadata.metadata_extraction`) are likewise server-stamped. OAuth user writes use `door=funnel`, OAuth machine writes use `door=service`, and shared-key writes use `door=tailnet`; these compatibility labels do not assert which Caddy socket carried the request. Optional thought `author` / `agent` / `repo` / `branch` values live under a [versioned `metadata.provenance.caller_asserted` contract](thought-provenance.md): authenticated input, but explicitly **not** verified identity.
+- Session provenance (`source`, `source_node`) is stamped server-side from the credential context; caller-supplied values are ignored. Thought transport provenance (`metadata.source`, `door`, `sub`, `token_label`) and classifier provenance (`metadata.metadata_extraction`) are likewise server-stamped. OAuth user writes use `door=funnel`, OAuth machine writes use `door=service`, and native/static writes use `door=tailnet`; a native token's non-secret label is also stamped while the static key has `token_label=null`. These compatibility labels do not assert which Caddy socket carried the request. Optional thought `author` / `agent` / `repo` / `branch` values live under a [versioned `metadata.provenance.caller_asserted` contract](thought-provenance.md): authenticated input, but explicitly **not** verified identity.
 - Every thought/session operation resolves one registered workspace before upstream embedding work, then installs its workspace, optional project, verified principal, and allowed visibility union as transaction-local PostgreSQL settings. Omission selects one configured default workspace, never every workspace. Unknown or misspelled scope fails validation; personal scope without a principal fails closed.
 - The REST gateway (`/api/v1`) is opt-in (`ENABLE_REST_API`, default off) and sits behind the same `requireAuth` doors and audit path as `/mcp`. When the flag is unset — as on the Qubes deployment, which deliberately never sets it — the router is not mounted and the surface does not exist. On the Funnel deployment Caddy 404s `/api/v1*` on the public branch (same mechanism as `/ready`), so REST is tailnet-only even where enabled; auth failures on REST return a plain HTTP 401 JSON error instead of the MCP JSON-RPC envelope body, with the same collapsed "unauthorized" message.
 
 ### Database layer
 
-Five roles, least privilege, with drift detection:
+Six roles, least privilege, with drift detection:
 
 | Role | Privileges | Used by |
 |---|---|---|
 | `postgres` | superuser | init + DB admin (role provisioning / migrations) — never the app runtime. In the three-qube split it's reachable from the app qube's IP only for remote admin — a deliberate trade-off (a compromised app qube then has full DB admin, including an app→db OS pivot via `COPY … TO/FROM PROGRAM`); see [db-qube/README.md](../deploy/qubes/db-qube/README.md) and [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15) |
-| `openbrain_app` | SELECT/INSERT/UPDATE on `thoughts` (+ scoped observability/sessions grants); SELECT/INSERT-only on metadata-degradation history, SELECT/INSERT/DELETE on its pending-delivery outbox, and SELECT/UPDATE on its singleton delivery ledger; **no thought/history DELETE**, no schema-wide DML, and no role memberships | MCP server, daily summary, metadata notification worker |
+| `openbrain_app` | SELECT/INSERT/UPDATE on `thoughts` (+ scoped observability/sessions grants); SELECT/INSERT-only on metadata-degradation history, SELECT/INSERT/DELETE on its pending-delivery outbox, SELECT/UPDATE on its singleton delivery ledger, and SELECT of only the four native-token verification fields; **no thought/history DELETE or token mutation**, no schema-wide DML, and no role memberships | MCP server, daily summary, metadata notification worker |
 | `openbrain_ingester` | INSERT-only on `funnel_access_log` | log-ingester sidecar — it parses attacker-influenced log lines, so its blast radius is one table |
 | `openbrain_monitor` | SELECT on `funnel_access_log` + `mcp_auth_events` only | host-side funnel monitor ([`scripts/funnel_monitor.sh`](../scripts/funnel_monitor.sh)) — its credential sits on the internet-adjacent edge, so it reads request metadata but can never reach a thought. Optional, like the ingester |
+| `openbrain_token_admin` | Lists token ID/prefix/label/timestamps and executes fixed register/revoke functions; cannot read hashes, memories, or mutate the table directly | profile-gated one-shot `token-admin` CLI; `NOLOGIN` when no password is provisioned |
 | `openbrain_readonly` | SELECT on everything + `BYPASSRLS` so full `pg_dump` works; no DML | trusted backup job, humans with psql/DBeaver |
 
 `db/06-spaces.sql` forces RLS on thoughts, sessions, and artifacts for the application role. Missing transaction context matches no rows, personal rows require the current trusted principal, and project/workspace rows must match the resolved registered scope. The application cannot mutate the workspace registry. Hybrid search's narrowly scoped `SECURITY DEFINER` candidate function uses fixed SQL, returns IDs/ranks only, explicitly reapplies the audience, and revokes PostgreSQL's default `PUBLIC` execute grant; returned content is rechecked through the RLS-protected table. The trusted read-only backup role has SELECT grants plus `BYPASSRLS`, which PostgreSQL's full `pg_dump` requires after it sets `row_security=off`; it has no permissive RLS policy and no DML. The grants assertion requires `openbrain_app` to have neither direct bypass flags nor any role membership, closing both inherited-privilege and `SET ROLE` paths.
@@ -60,11 +86,20 @@ history link instead of erasing the audit or blocking deletion. The grant
 assertion covers all three relations and the event sequence, including
 effective `PUBLIC` access.
 
+`db/08-access-tokens.sql` isolates credential material in `native_auth`. The
+application role can perform only its bounded prefix/hash/revocation lookup; the
+dedicated administrator lists non-secret metadata and mutates lifecycle state
+only through two owner-controlled, fixed-search-path `SECURITY DEFINER`
+functions. PostgreSQL's default `PUBLIC` function execution is revoked. The
+grant assertion verifies exact column privileges, function ownership/config,
+standalone role membership, sequence access, and backup visibility.
+
 `db/01-schema.sql` actively REVOKEs historical broad grants (idempotent, safe on live DBs), and `db/03-grants-assertion.sql` is a read-only invariant check you can run any time — because init scripts only run on a fresh data directory, a tightened grant **does not** reach an existing deployment by itself. Its monitor check scans every non-system application relation across schemas, rejects default ACLs that would grant future relations to the monitor or `PUBLIC`, and permits only the two observability tables, so future relation grants fail closed without extending a denylist. The assertion is how you notice. This invariant is relation-scoped: PostgreSQL grants function execution to `PUBLIC` by default, so any future `SECURITY DEFINER` routine must revoke that default and receive a separate security review.
 
 ### Container layer
 
 - `mcp` and `log-ingester`: non-root user, `cap_drop: [ALL]`, `read_only: true` rootfs, size-capped tmpfs, `no-new-privileges`.
+- `token-admin`: the same container hardening, profile-gated and one-shot. Only it receives the dedicated lifecycle password; the long-running MCP container never does.
 - `caddy`: a derived image strips the binary's file capability so a genuinely empty capability set works; read-only rootfs; logs on a dedicated volume the ingester mounts **read-only** (a compromised ingester can't tamper with the on-disk audit evidence — its cursors live on a separate volume).
 - `ollama`/`postgres`: `no-new-privileges`; lighter hardening where init or GPU paths need it, with the reasoning inline in the compose file.
 
