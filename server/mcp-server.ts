@@ -6,6 +6,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Pool } from "postgres";
+import type { AuthContext } from "./auth_context.ts";
 
 import { CITATION_BASE_URL } from "./config.ts";
 import {
@@ -205,7 +206,7 @@ title = "Tool inventory"
 // mutates an instance-scoped transport reference on connect() — see the
 // file header. That per-request lifecycle gives the tool callbacks a
 // natural enclosing scope to read door + sub from without an ALS hop.
-export type RequestAuth = { door: "funnel" | "tailnet"; sub: string | null };
+export type RequestAuth = AuthContext;
 
 export function createMcpServer(
   pool: Pool,
@@ -260,7 +261,11 @@ export function createMcpServer(
     // Pushover/ntfy worker sends content-free first/rollup alerts.
     // 1.17.0: METADATA_FALLBACK_POLICY makes off/alert/allow an explicit,
     // required privacy choice; alert fails boot without a notification channel.
-    version: "1.17.0",
+    // 1.18.0: OAuth client-credentials identities receive a distinct `service`
+    // provenance label while retaining the verified JWT subject as principal.
+    // 1.19.0: native rotatable access tokens add hash-only per-client
+    // credentials while preserving the existing transport and tool contract.
+    version: "1.19.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names

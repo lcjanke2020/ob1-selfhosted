@@ -2,9 +2,17 @@
 
 This path takes the [local install](../compose-local/README.md) and puts it on your tailnet — and, if you want claude.ai / Claude mobile to reach it, on the public internet behind a hardened edge. It reuses `../compose-local/docker-compose.yml` as the base; the files in this directory only *add* to it.
 
-This directory is the **public Funnel + OAuth edge**. Auth here is **OAuth (RS256 JWT) only** — there is no static `x-brain-key` on a publicly-reachable deployment (that door lives only in the [local install](../compose-local/README.md)). It adds Caddy (single `:9787` listener that discriminates tailnet vs Funnel traffic — **Pattern Y**), removes the MCP server's host port so Caddy is the only entry point, validates RS256 JWTs on the public door, enforces an Anthropic egress IP allowlist, and ships observability (access logs → Postgres, daily rollups). This is what claude.ai and Claude mobile need, since they reach MCP servers from Anthropic's cloud, not from your device.
+This directory is the **public Funnel + OAuth edge**. Auth here is **OAuth (RS256 JWT) only** — both static and native `x-brain-key` verification are disabled on a publicly-reachable deployment (that door lives only in the [local install](../compose-local/README.md)). It adds Caddy (single `:9787` listener that discriminates tailnet vs Funnel traffic — **Pattern Y**), removes the MCP server's host port so Caddy is the only entry point, validates RS256 JWTs on the public door, enforces an Anthropic egress IP allowlist, and ships observability (access logs → Postgres, daily rollups). This is what claude.ai and Claude mobile need, since they reach MCP servers from Anthropic's cloud, not from your device.
 
-Prerequisite: Tailscale installed on the host, plus the [local install](../compose-local/README.md) working (start there — all five setup steps apply unchanged). Leave `MCP_ACCESS_KEY` **unset** here and set the `AUTH0_*` trio instead.
+Prerequisite: Tailscale installed on the host, plus the base services from the
+[local install](../compose-local/README.md) working. The public steps below
+replace that guide's native-token client setup: set the `AUTH0_*` trio, and the
+overlay clears `MCP_ACCESS_KEY` and disables native tokens regardless of copied
+local values.
+
+Interactive clients and [headless service accounts](../../docs/service-account-oauth-client.md)
+use this same OAuth verifier. Scheduled agents normally connect over the private
+tailnet branch; the public Funnel branch remains restricted to Anthropic egress.
 
 > **Just want tailnet reach, no public internet?** You don't need this directory. Front the [local install](../compose-local/README.md) (x-brain-key auth) with `sudo tailscale serve --bg --https=443 http://127.0.0.1:8787` and connect tailnet devices at `https://homebox.tailnet-name.ts.net/mcp` with the `x-brain-key` header — only WireGuard-authenticated tailnet peers (gated by your ACLs) can reach it. The rest of this guide is the public Funnel + OAuth door.
 
@@ -15,7 +23,7 @@ Prerequisite: Tailscale installed on the host, plus the [local install](../compo
 `docker-compose.pattern-b.yml` does three things:
 
 1. **Removes mcp's host port mapping** (`ports: !reset null`) — the raw `:8787` becomes unreachable from the host, so a stray `tailscale funnel http://127.0.0.1:8787` physically cannot reach mcp past the Caddy perimeter (IP allowlist, body cap, logging). Requires compose v2.20+ (the `!reset` YAML tag).
-2. **Blanks `MCP_ACCESS_KEY`** (`MCP_ACCESS_KEY: ""`) — a backstop for the "leave it unset" instruction above. The base compose inherits `MCP_ACCESS_KEY: ${MCP_ACCESS_KEY:-}`, so copying a working local `.env` into this directory would otherwise re-open the static-key door on a public box; pinning it empty here makes OAuth the only door regardless.
+2. **Disables the complete `x-brain-key` door** — it blanks `MCP_ACCESS_KEY` and pins `ENABLE_NATIVE_TOKENS=false`. The base compose enables native tokens and may inherit a static key, so both overrides are required to make OAuth the only door even when an operator copies a working local `.env` onto a public box.
 3. **Starts the `log-ingester` sidecar**, which tails Caddy's JSON access logs into Postgres (see Observability below).
 
 The `caddy` service itself lives in the base compose file, gated behind the `pattern-b` profile, with its build context and Caddyfile in this directory.
@@ -25,6 +33,11 @@ The `caddy` service itself lives in the base compose file, gated behind the `pat
 All three of `AUTH0_ISSUER`, `AUTH0_JWKS_URI`, `AUTH0_AUDIENCE` must be set — partial config throws at boot. The dashboard steps live in `../compose-local/.env.example` next to the variables. The one irreversible decision:
 
 > `AUTH0_AUDIENCE` MUST equal your API Identifier byte-for-byte AND your public Funnel URL — `https://homebox.tailnet-name.ts.net/mcp`, no port. The Identifier is immutable once the API is created; getting it wrong means deleting and recreating the API.
+
+The variable names are retained for compatibility, but any issuer that produces
+the documented RS256 JWT profile can be used. Auth0 M2M, Okta API Services, the
+generic subject mapping, and a browserless verification command are covered in
+[OAuth service accounts](../../docs/service-account-oauth-client.md).
 
 ### Start the stack
 
@@ -82,6 +95,15 @@ If the connector fails after a successful consent screen, the most common cause 
 > **Connecting a local Codex CLI instead?** That's a different client shape — a public PKCE client with no secret, authorized per Codex account, per machine. See [`docs/codex-oauth-client.md`](../../docs/codex-oauth-client.md).
 >
 > **Connecting a local Kimi Code CLI?** Same public-PKCE shape, but registered exclusively through a time-boxed Dynamic Client Registration window (Kimi Code has no pre-registered-client option). See [`docs/kimi-code-oauth-client.md`](../../docs/kimi-code-oauth-client.md).
+
+### Connect an unattended agent
+
+Create a dedicated provider application using the OAuth `client_credentials`
+grant, keep its secret in the agent's secret store, and connect over the
+tailnet. Follow the complete [service-account runbook](../../docs/service-account-oauth-client.md),
+including the tracked headless smoke test. Successful machine writes land with
+`metadata.door = 'service'` and `metadata.sub = <verified client subject>`;
+interactive user writes remain `door = 'funnel'`.
 
 ## Observability (Pattern B)
 
@@ -159,7 +181,8 @@ docker compose exec -T postgres \
 ```
 
 **New schema files** (observability, sessions, hybrid search, spaces, metadata
-degradation audit) apply cleanly and are idempotent. The spaces migration is not
+degradation audit, native-token storage) apply cleanly and are idempotent. The
+spaces migration is not
 a cheap no-op on reapplication; it rebuilds its fingerprint index each time:
 
 ```bash
@@ -170,6 +193,7 @@ docker compose exec -T postgres psql -U postgres -d openbrain < ../../db/04-sess
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/05-hybrid-search.sql
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/06-spaces.sql
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/07-metadata-degradation.sql
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/08-access-tokens.sql
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
 docker compose build mcp && docker compose up -d
 ```
@@ -199,6 +223,12 @@ server 1.16.0; the boot probe refuses a partial catalog. See [Metadata
 degradation monitoring](../../docs/metadata-degradation-monitoring.md) for audit
 queries and optional Pushover/ntfy configuration.
 
+`08-access-tokens.sql` is required by the server catalog probe, but the public
+Pattern B override pins `ENABLE_NATIVE_TOKENS=false` and clears the static key,
+so every `x-brain-key` remains rejected. Its dedicated administrator role may
+remain `NOLOGIN` on this OAuth-only deployment. See [Native access
+tokens](../../docs/native-access-tokens.md#existing-database-upgrade).
+
 Optional: the SELECT-only role for the host-side funnel monitor follows the same shape —
 set `OPENBRAIN_MONITOR_PASSWORD` in `.env`, run `bash ../../scripts/upgrade-add-monitor-role.sh`,
 then re-apply `db/02-observability.sql` as above for its grants and run
@@ -218,7 +248,7 @@ docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
 ```
 
-A non-zero exit means a grant drifted. Prefer a targeted fix (e.g. `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). To re-sync wholesale, re-apply `01-schema.sql` → `02-observability.sql`, apply any pending later schema migrations (`04`, `05`, `06`, `07`, and future files), then run `03-grants-assertion.sql` **last** — never `01` alone, since its REVOKE-all block strips observability grants until `02` restores them.
+A non-zero exit means a grant drifted. Prefer a targeted fix (e.g. `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). To re-sync wholesale, re-apply `01-schema.sql` → `02-observability.sql`, apply any pending later schema migrations (`04`, `05`, `06`, `07`, `08`, and future files), then run `03-grants-assertion.sql` **last** — never `01` alone, since its REVOKE-all block strips observability grants until `02` restores them.
 
 To retire the unused historical thought-search RPC without a full schema replay,
 run `DROP FUNCTION IF EXISTS match_thoughts(vector, double precision, integer, jsonb);`
@@ -226,4 +256,9 @@ as the database owner during the next maintenance window.
 
 ## Key rotation
 
-This OAuth-only deployment has no `MCP_ACCESS_KEY` to rotate. Rotate the OAuth client secret in your provider's dashboard and re-paste it into claude.ai; nothing in this stack stores it.
+This OAuth-only deployment has no `MCP_ACCESS_KEY` to rotate. Rotate interactive
+client secrets in the provider and re-paste them into the hosted connector.
+Rotate each M2M secret in the provider and the corresponding agent secret store,
+verify the new credential, then revoke the old one; nothing in this stack stores
+either secret. Already-issued JWTs remain valid until expiration because the
+server performs local verification rather than introspection.

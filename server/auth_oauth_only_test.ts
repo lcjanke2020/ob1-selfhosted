@@ -21,11 +21,13 @@ const JWKS_URL = "https://test.invalid/.well-known/jwks.json";
 
 const ENV_KEYS = [
   "DB_PASSWORD",
+  "ENABLE_NATIVE_TOKENS",
   "MCP_ACCESS_KEY",
   "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
+  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
   "OBS_AUTH_EVENTS_ENABLED",
   "METADATA_FALLBACK_POLICY",
   "JWKS_FETCH_TIMEOUT_MS",
@@ -72,11 +74,13 @@ Deno.test("requireAuth (OAuth only — x-brain-key door disabled)", async (t) =>
 
   // OAuth door ON, x-brain-key door OFF (MCP_ACCESS_KEY deliberately deleted).
   Deno.env.delete("MCP_ACCESS_KEY");
+  Deno.env.set("ENABLE_NATIVE_TOKENS", "false");
   Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("AUTH0_ISSUER", ISSUER);
   Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
   Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
+  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
   Deno.env.set("METADATA_FALLBACK_POLICY", "off");
   Deno.env.set("JWKS_FETCH_TIMEOUT_MS", "2000");

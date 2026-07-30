@@ -1,9 +1,9 @@
 // Open Brain MCP server — Homelab + Tailscale variant.
 //
 // HTTP transport: Streamable HTTP at /mcp, gated by `requireAuth`, which accepts
-// whichever auth doors the deployment enabled — the static x-brain-key door
+// whichever auth doors the deployment enabled — native/static x-brain-key
 // (compose-local) and/or an Auth0 RS256 Bearer JWT (the OAuth door used by the
-// funnel + Qubes deployments). On a publicly-reachable deployment Caddy fronts
+// Funnel + Qubes deployments). On a publicly reachable deployment Caddy fronts
 // the server (the Anthropic IP allowlist, body cap, access logging with
 // credential redaction) but does not strip credentials per branch — the server
 // accepts only the door(s) the deployment enabled, so `requireAuth` is the
@@ -19,12 +19,15 @@
 
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { type Context, Hono } from "hono";
+import { authenticateAccessToken } from "./access_tokens.ts";
+import { type AuthContext, authContextFromValues } from "./auth_context.ts";
 
 import {
   ENABLE_BRAIN_KEY,
   ENABLE_FALLBACK_EXTRACTION,
   ENABLE_METADATA_EXTRACTION,
   ENABLE_METADATA_NOTIFICATIONS,
+  ENABLE_NATIVE_TOKENS,
   ENABLE_OAUTH,
   ENABLE_PRIMARY_EXTRACTION,
   ENABLE_REST_API,
@@ -47,9 +50,9 @@ import { createApiRouter } from "./api.ts";
 import { pool } from "./db.ts";
 import {
   type AppVariables,
+  createRequireAuth,
   PROTECTED_RESOURCE_METADATA_PATH,
   protectedResourceMetadata,
-  requireAuth,
 } from "./auth.ts";
 import { createMcpServer } from "./mcp-server.ts";
 import {
@@ -60,11 +63,14 @@ import {
 } from "./metadata_notifications.ts";
 import { pingDb } from "./queries.ts";
 
-// Hono Variables typed so `c.set/c.get` on door/sub are checked
+// Hono Variables typed so `c.set/c.get` on door/sub/tokenLabel are checked
 // at the boundaries (requireAuth sets, /mcp + / handlers get). Without
 // this the handler-side `c.get("door")` would be `unknown` and the
 // defensive 500-guard's type-narrow would not compile.
 const app = new Hono<{ Variables: AppVariables }>();
+const requireRequestAuth = createRequireAuth(
+  (token) => authenticateAccessToken(pool, token),
+);
 
 // Public health endpoint (no auth) — used by docker healthcheck and quick
 // curl-from-the-tailnet smoke tests. Does NOT touch the DB to keep it cheap.
@@ -105,33 +111,37 @@ if (PROTECTED_RESOURCE_METADATA_PATH) {
 // the router is never mounted and the surface does not exist. requireAuth is
 // mounted inside the router, so the gate travels with it.
 if (ENABLE_REST_API) {
-  app.route("/api/v1", createApiRouter(pool));
+  app.route("/api/v1", createApiRouter(pool, undefined, requireRequestAuth));
 }
 
-// MCP transport. requireAuth accepts either x-brain-key (tailnet) or
-// Authorization: Bearer with an Auth0 RS256 JWT (OAuth/Funnel). A new
+// MCP transport. requireAuth accepts x-brain-key (native/static `tailnet`)
+// or Authorization: Bearer with a valid RS256 JWT (OAuth user `funnel` or
+// OAuth machine `service`). A new
 // McpServer is constructed per request — the SDK's connect() mutates an
 // instance-scoped transport reference and is not safe to share under
 // concurrent load.
 //
-// `requireAuth` populates door + sub on the request-scoped
+// `requireAuth` populates door + sub + tokenLabel on the request-scoped
 // Hono context; we read them here and pass to the per-request McpServer
 // factory so capture_thought can stamp them into thoughts.metadata.
 // The 500-guard is defense in depth: a future refactor that drops the
 // `c.set` calls in `requireAuth` would otherwise stuff `door: undefined`
 // into the JSONB and silently break the Phase 7 telemetry tile.
 function authContextOr500(c: Context<{ Variables: AppVariables }>):
-  | { door: "funnel" | "tailnet"; sub: string | null }
+  | AuthContext
   | Response {
-  const door = c.get("door");
-  const sub = c.get("sub") ?? null;
-  if (door !== "funnel" && door !== "tailnet") {
+  const auth = authContextFromValues(
+    c.get("door"),
+    c.get("sub"),
+    c.get("tokenLabel"),
+  );
+  if (!auth) {
     return c.json({ error: "auth_context_missing" }, 500);
   }
-  return { door, sub };
+  return auth;
 }
 
-app.all("/mcp", requireAuth, async (c) => {
+app.all("/mcp", requireRequestAuth, async (c) => {
   const auth = authContextOr500(c);
   if (auth instanceof Response) return auth;
   const transport = new StreamableHTTPTransport();
@@ -142,7 +152,7 @@ app.all("/mcp", requireAuth, async (c) => {
 
 // Backward-compat: also serve the MCP transport at the root for clients
 // that don't add /mcp to the URL.
-app.all("/", requireAuth, async (c) => {
+app.all("/", requireRequestAuth, async (c) => {
   const auth = authContextOr500(c);
   if (auth instanceof Response) return auth;
   const transport = new StreamableHTTPTransport();
@@ -158,16 +168,18 @@ console.log(`open-brain-homelab listening on :${PORT}`);
 // On a publicly-reachable funnel / Qubes deployment the static x-brain-key door
 // should be OFF — warn so an accidental MCP_ACCESS_KEY on a public box is visible
 // in the boot log rather than silently widening the attack surface.
-if (ENABLE_BRAIN_KEY && ENABLE_OAUTH) {
+if ((ENABLE_BRAIN_KEY || ENABLE_NATIVE_TOKENS) && ENABLE_OAUTH) {
   console.warn(
-    "[auth] both doors enabled (x-brain-key AND OAuth). Intended for the " +
-      "single-box / LAN install only — on a public funnel/Qubes deployment, " +
-      "unset MCP_ACCESS_KEY so OAuth is the sole auth path.",
+    "[auth] both x-brain-key AND OAuth doors enabled. Intended for the single-box " +
+      "/ LAN install only — on a public funnel/Qubes deployment, unset " +
+      "MCP_ACCESS_KEY and disable native tokens so OAuth is the sole path.",
   );
-} else if (ENABLE_BRAIN_KEY) {
+} else if (ENABLE_BRAIN_KEY || ENABLE_NATIVE_TOKENS) {
   console.log(
-    "[auth] x-brain-key door only (OAuth off). Keep this install on loopback/" +
-      "LAN, or behind the Anthropic IP allowlist if funnel-exposed.",
+    `[auth] x-brain-key door only (OAuth off; static key ${
+      ENABLE_BRAIN_KEY ? "on" : "off"
+    }; rotatable tokens ${ENABLE_NATIVE_TOKENS ? "on" : "off"}). Keep this ` +
+      "install on loopback/LAN or a private tailnet.",
   );
 } else {
   console.log("[auth] OAuth door only (x-brain-key disabled).");

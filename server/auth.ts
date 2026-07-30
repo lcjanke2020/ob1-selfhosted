@@ -1,28 +1,38 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { createRemoteJWKSet, type JWTPayload, jwtVerify } from "jose";
+import {
+  type AuthContext,
+  type AuthDoor,
+  isNativeTokenLabel,
+  isOAuthSubject,
+} from "./auth_context.ts";
 
 // Hono request-context variables set by `requireAuth` after a
 // successful authentication. Downstream handlers read these to attribute
-// captures to the door of origin and (for OAuth) the JWT subject. Tool
+// captures to the credential class, OAuth subject, and native-token label. Tool
 // handlers receive them as the auth closure argument via
-// createMcpServer(pool, { door, sub }) rather than via Hono context directly,
+// createMcpServer(pool, auth) rather than via Hono context directly,
 // because the @modelcontextprotocol/sdk tool callbacks are not
 // Hono-context-aware.
 //   - door:  "tailnet" when authenticated via x-brain-key;
-//            "funnel"  when authenticated via Auth0 Bearer (JWT).
-//   - sub:   null on x-brain-key (shared tailnet credential, no per-user id);
-//            the verified JWT `sub` claim on Bearer (guaranteed present —
+//            "funnel"  for an OAuth user Bearer;
+//            "service" for an OAuth client-credentials Bearer.
+//   - sub:   null on x-brain-key (native/static credential, no per-user id);
+//            the verified JWT `sub` claim on either Bearer label (guaranteed —
 //            see `verifyBearer` below, which puts "sub" in jose's requiredClaims).
-export type AppVariables = { door: "funnel" | "tailnet"; sub: string | null };
+//   - tokenLabel: the verified native-token label, otherwise null.
+export type AppVariables = AuthContext;
 
 import {
   AUTH0_AUDIENCE,
   AUTH0_ISSUER,
   AUTH0_JWKS_URI,
   ENABLE_BRAIN_KEY,
+  ENABLE_NATIVE_TOKENS,
   ENABLE_OAUTH,
   JWKS_FETCH_TIMEOUT_MS,
   MCP_ACCESS_KEY,
+  OAUTH_SERVICE_ACCOUNT_SUBJECTS,
 } from "./config.ts";
 import { type AuthFailureReason, logAuthFailure } from "./auth_audit.ts";
 import { parseInetCandidate } from "./inet.ts";
@@ -194,7 +204,13 @@ function checkBrainKey(provided: string | undefined): boolean {
   return safeEqual(provided, MCP_ACCESS_KEY);
 }
 
-async function verifyBearer(token: string): Promise<JWTPayload> {
+export type NativeAccessTokenVerifier = (
+  token: string,
+) => Promise<{ label: string } | null>;
+
+type VerifiedBearerPayload = JWTPayload & { sub: string };
+
+async function verifyBearer(token: string): Promise<VerifiedBearerPayload> {
   if (!jwks) throw new Error("OAuth not enabled");
   // `requiredClaims: ["exp"]` forces the token to carry an
   // expiration claim. jose's default behavior validates `exp` only when
@@ -217,7 +233,31 @@ async function verifyBearer(token: string): Promise<JWTPayload> {
     algorithms: ["RS256"],
     requiredClaims: ["exp", "sub"],
   });
-  return payload;
+  // `requiredClaims` checks presence, not the claim's runtime type or value.
+  // Validate before classification so an empty/non-string/unsafe identity can
+  // never cross into RLS ownership or durable provenance.
+  if (!isOAuthSubject(payload.sub)) {
+    throw new Error("OAuth token subject is invalid");
+  }
+  return payload as VerifiedBearerPayload;
+}
+
+// Classify only a successfully-verified payload. Auth0's default token profile
+// supplies the signed `gty` automatic path; its RFC 9068 profile and generic
+// providers may instead require the exact-subject mapping. Neither path changes
+// the verified subject or grants access — it only makes machine identity
+// explicit in provenance.
+export function oauthDoorFor(payload: VerifiedBearerPayload): Extract<
+  AuthDoor,
+  "funnel" | "service"
+> {
+  if (
+    payload.gty === "client-credentials" ||
+    OAUTH_SERVICE_ACCOUNT_SUBJECTS.has(payload.sub)
+  ) {
+    return "service";
+  }
+  return "funnel";
 }
 
 // JSON-RPC error code for unauthorized requests. Per JSON-RPC
@@ -438,8 +478,8 @@ async function unauthorized(
   );
 }
 
-// Accepts the x-brain-key door (when enabled, MCP_ACCESS_KEY set) OR
-// Authorization: Bearer with a valid Auth0 RS256 JWT (OAuth door, when enabled).
+// Accepts the x-brain-key door (native token and/or legacy static key) OR
+// Authorization: Bearer with a valid RS256 JWT (OAuth door, when enabled).
 // Which doors are live is per-deployment: compose-local enables x-brain-key only;
 // the funnel + Qubes deployments enable OAuth only. Caddy in front of a
 // publicly-reachable deployment does not strip credentials per branch — the
@@ -453,22 +493,44 @@ async function unauthorized(
 // request carrying BOTH headers authenticates if EITHER is valid — an attacker
 // who could attach a stale x-brain-key can't suppress a valid Bearer in the same
 // request.
-export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> =
-  async (c, next) => {
+export function createRequireAuth(
+  verifyNativeToken: NativeAccessTokenVerifier | null = null,
+): MiddlewareHandler<{ Variables: AppVariables }> {
+  return async (c, next) => {
     // x-brain-key fast path — cheaper than JWT crypto, but only short-circuit
     // on success, and only when the door is enabled. Failure / disabled falls
     // through to the Bearer attempt below.
     const brainKey = c.req.header("x-brain-key");
     if (ENABLE_BRAIN_KEY && brainKey && checkBrainKey(brainKey)) {
-      // tag the tailnet door. The shared x-brain-key is not a
-      // per-user identity (every tailnet agent uses the same secret), so
-      // sub is null here. Downstream capture path stamps these into
-      // thoughts.metadata for the source-attribution "mobile-originated
-      // writes" dashboard tile (which discriminates funnel vs tailnet).
+      // Tag the shared-key credential as `tailnet`. The shared x-brain-key is
+      // not a per-user identity (every key holder uses the same secret), so sub
+      // is null here. Downstream capture paths stamp this server-owned context
+      // into durable provenance.
       c.set("door", "tailnet");
       c.set("sub", null);
+      c.set("tokenLabel", null);
       await next();
       return;
+    }
+
+    // Native-token path. Token verification is injected by index.ts so this
+    // auth module stays unit-testable without importing db.ts (whose startup
+    // probe intentionally connects at module load). No verifier means no
+    // native credential can match, even if a future caller mis-wires config.
+    if (ENABLE_NATIVE_TOKENS && brainKey && verifyNativeToken) {
+      try {
+        const identity = await verifyNativeToken(brainKey);
+        if (identity && isNativeTokenLabel(identity.label)) {
+          c.set("door", "tailnet");
+          c.set("sub", null);
+          c.set("tokenLabel", identity.label);
+          await next();
+          return;
+        }
+      } catch {
+        // Store/query failures fail closed and still permit an independently
+        // valid OAuth Bearer in the same request to authenticate below.
+      }
     }
 
     let bearerTried = false;
@@ -478,16 +540,17 @@ export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> =
       if (m) {
         bearerTried = true;
         try {
-          // capture the verified payload's `sub` claim and tag
-          // the funnel door. `verifyBearer` now requires `sub` via jose's
-          // requiredClaims (see above), so payload.sub is guaranteed
-          // non-undefined here; the non-null assertion is a type narrow,
-          // not a runtime gamble. the single-vs-dual-door decision (deliberately open)
+          // Capture the verified payload's `sub` claim, then classify the
+          // OAuth credential as a user (`funnel`) or machine (`service`).
+          // `verifyBearer` requires and runtime-validates `sub` (see above),
+          // so only a bounded non-empty string reaches either context field.
+          // The single-vs-dual-door decision (deliberately open)
           // remains separate scope — the source-marker work doesn't
           // depend on either outcome of that deliberation.
           const payload = await verifyBearer(m[1].trim());
-          c.set("door", "funnel");
-          c.set("sub", payload.sub!);
+          c.set("door", oauthDoorFor(payload));
+          c.set("sub", payload.sub);
+          c.set("tokenLabel", null);
           await next();
           return;
         } catch (_err) {
@@ -503,8 +566,8 @@ export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> =
     // Auth0-only deployment a presented x-brain-key is ignored, so a request
     // with only that header reads as missing_credentials (the honest signal:
     // no credential this server accepts was offered).
-    const brainKeyTried = ENABLE_BRAIN_KEY && brainKey !== undefined &&
-      brainKey !== "";
+    const brainKeyTried = (ENABLE_BRAIN_KEY || ENABLE_NATIVE_TOKENS) &&
+      brainKey !== undefined && brainKey !== "";
     let code: AuthFailureReason;
     if (brainKeyTried && bearerTried) code = "invalid_credentials";
     else if (brainKeyTried) code = "invalid_brain_key";
@@ -513,6 +576,12 @@ export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> =
 
     return unauthorized(c, code);
   };
+}
+
+// Backward-compatible default for unit-test and library consumers. Production
+// wiring uses createRequireAuth(authenticateAccessToken(pool)) in index.ts.
+// When native tokens are disabled (the server default), behavior is identical.
+export const requireAuth = createRequireAuth();
 
 // Public metadata endpoint per RFC 9728. Wired in index.ts only when
 // ENABLE_OAUTH is true — no point advertising an authorization server when

@@ -118,19 +118,24 @@ its three scope fields stay inside `toml_text`.
 
 ## What counts as a personal principal
 
-OAuth requests use the verified JWT `sub`. The shared `x-brain-key` is one
-credential used by every holder, so it is not an identity by itself. A local
-shared-key deployment can opt into personal/sensitive memory by binding that
-door to one stable, server-controlled subject:
+OAuth requests use the verified JWT `sub`; this applies equally to user tokens
+and [client-credentials service accounts](service-account-oauth-client.md). A
+dedicated M2M application therefore owns its personal rows under its stable
+client subject. Native `x-brain-key` tokens have distinct server-verified labels
+and revocation state, but those labels are attribution rather than authorization
+identities; the legacy static key likewise identifies no person. A local
+native/static deployment can opt into personal/sensitive memory by binding that
+whole door to one stable, server-controlled subject:
 
 ```dotenv
 MCP_ACCESS_KEY_PRINCIPAL=local-owner
 ```
 
 The value is deployment-wide, is never accepted from caller input, and requires
-`MCP_ACCESS_KEY` to be enabled. Leave it blank when different key holders should
-not be treated as one person. Without a verified or configured principal,
-personal scope and the `sensitive` workspace fail with a validation error.
+native tokens or `MCP_ACCESS_KEY` to be enabled. Leave it blank when different
+credential holders should not be treated as one person. Without a verified or
+configured principal, personal scope and the `sensitive` workspace fail with a
+validation error.
 
 ## Registering workspaces and projects
 
@@ -188,9 +193,10 @@ administration and `pg_dump`: PostgreSQL's dump client sets `row_security=off`
 and otherwise refuses to copy an RLS-protected table. It needs no permissive RLS
 policy and receives no DML. `openbrain_app` is explicitly required to be a
 standalone role with no memberships, superuser flag, or `BYPASSRLS`; this also
-closes inherited privileges and `SET ROLE` paths. `openbrain_monitor` and
-`openbrain_ingester` receive no memory-space access. The grants assertion is the
-completed-catalog check for these invariants.
+closes inherited privileges and `SET ROLE` paths. `openbrain_monitor`,
+`openbrain_ingester`, and `openbrain_token_admin` receive no memory-space
+access. The grants assertion is the completed-catalog check for these
+invariants.
 
 ## Existing-database migration
 
@@ -208,14 +214,21 @@ docker compose exec -T postgres \
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/07-metadata-degradation.sql
+# After setting OPENBRAIN_TOKEN_ADMIN_PASSWORD in .env:
+bash ../../scripts/upgrade-enable-token-admin-role.sh
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/08-access-tokens.sql
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/03-grants-assertion.sql
 ```
 
-Migration 07 is the next required server schema and is included here so the
-completed-catalog grant assertion remains last. It does not extend or weaken
-the space boundary; see [Metadata degradation monitoring](metadata-degradation-monitoring.md).
+Migrations 07 and 08 are the next required server schemas and are included here
+so the completed-catalog grant assertion remains last. Neither extends or
+weakens the space boundary; see [Metadata degradation
+monitoring](metadata-degradation-monitoring.md) and [Native access
+tokens](native-access-tokens.md).
 
 The migration backfills existing thoughts and sessions into the `default`
 workspace at workspace visibility. It takes table locks while adding and

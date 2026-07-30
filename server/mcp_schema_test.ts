@@ -15,6 +15,7 @@ const ENV_KEYS = [
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
+  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
   "METADATA_FALLBACK_POLICY",
 ];
 
@@ -28,6 +29,7 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
   Deno.env.delete("AUTH0_ISSUER");
   Deno.env.delete("AUTH0_JWKS_URI");
   Deno.env.delete("AUTH0_AUDIENCE");
+  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
   Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
@@ -81,7 +83,7 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
     const deps = makeDeps();
     const server = createMcpServer(
       asPool(pool),
-      { door: "tailnet", sub: null },
+      { door: "tailnet", sub: null, tokenLabel: null },
       deps,
     );
     const client = new Client({ name: "schema-test", version: "1.0.0" });
@@ -93,7 +95,7 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
       await client.connect(clientTransport);
       assertEquals(client.getServerVersion(), {
         name: "open-brain-homelab",
-        version: "1.17.0",
+        version: "1.19.0",
       });
       const listed = await client.listTools();
       const capture = listed.tools.find((tool) =>

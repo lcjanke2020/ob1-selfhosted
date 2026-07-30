@@ -6,11 +6,13 @@ import { assertEquals, assertStringIncludes } from "@std/assert";
 
 const ENV_KEYS = [
   "DB_PASSWORD",
+  "ENABLE_NATIVE_TOKENS",
   "MCP_ACCESS_KEY",
   "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
+  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
   "METADATA_FALLBACK_POLICY",
 ];
 
@@ -21,6 +23,7 @@ Deno.test("config.ts: shared-key principal requires the shared-key door", async 
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("METADATA_FALLBACK_POLICY", "off");
   Deno.env.delete("MCP_ACCESS_KEY");
+  Deno.env.delete("ENABLE_NATIVE_TOKENS");
   Deno.env.set("MCP_ACCESS_KEY_PRINCIPAL", "local-operator");
   Deno.env.set("AUTH0_ISSUER", "https://example.auth0.com/");
   Deno.env.set(
@@ -28,6 +31,7 @@ Deno.test("config.ts: shared-key principal requires the shared-key door", async 
     "https://example.auth0.com/.well-known/jwks.json",
   );
   Deno.env.set("AUTH0_AUDIENCE", "https://brain.example.test/mcp");
+  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
 
   try {
     let message = "";

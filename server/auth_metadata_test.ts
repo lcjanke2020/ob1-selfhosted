@@ -16,6 +16,7 @@ const ENV_KEYS = [
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
+  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
   // importing auth.ts pulls in auth_audit.ts which would
   // otherwise construct a postgres pool. Defensively disable for tests.
   "OBS_AUTH_EVENTS_ENABLED",
@@ -33,6 +34,7 @@ Deno.test("deriveProtectedResourceMetadata (RFC 9728 §3.1)", async (t) => {
   Deno.env.delete("AUTH0_ISSUER");
   Deno.env.delete("AUTH0_JWKS_URI");
   Deno.env.delete("AUTH0_AUDIENCE");
+  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
 
   // config.ts requires these to be present (else throws at module load).
   Deno.env.set("DB_PASSWORD", "test-password");

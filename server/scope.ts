@@ -8,6 +8,7 @@
 // released.
 
 import type { Pool } from "postgres";
+import type { AuthContext } from "./auth_context.ts";
 import { DEFAULT_WORKSPACE_ID, MCP_ACCESS_KEY_PRINCIPAL } from "./config.ts";
 import { getClient } from "./db_pool.ts";
 import { ValidationError } from "./errors.ts";
@@ -25,11 +26,7 @@ export {
   type ScopeInput,
 } from "./scope_contract.ts";
 
-export type AuthIdentity = {
-  door: "funnel" | "tailnet";
-  // Verified JWT subject on funnel; always null on the shared-key door.
-  sub: string | null;
-};
+export type AuthIdentity = AuthContext;
 
 type WorkspaceRow = {
   default_visibility: MemoryVisibility;
@@ -38,7 +35,7 @@ type WorkspaceRow = {
 };
 
 export function trustedPrincipal(auth: AuthIdentity): string | null {
-  if (auth.door === "funnel") return auth.sub;
+  if (auth.door !== "tailnet") return auth.sub;
   // The static key is shared and therefore is not an identity by itself. Only
   // explicit server configuration may bind that door to a stable principal.
   return MCP_ACCESS_KEY_PRINCIPAL || null;

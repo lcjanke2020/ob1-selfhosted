@@ -12,8 +12,8 @@ This repo is one codebase with **three install paths**, from "docker on a laptop
 
 | Install path | What you get | Start here |
 |---|---|---|
-| **Local compose** | Postgres + MCP server + Ollama on one box (bound to loopback only by default — the LAN can't reach it directly), simple shared `x-brain-key` auth (no Auth0 tenant needed). Runs anywhere Docker runs — including a work machine where a tailnet or hosted IdP isn't practical. | [`deploy/compose-local/`](deploy/compose-local/README.md) |
-| **Tailnet / Funnel** | The same stack exposed to claude.ai and Claude mobile over the public internet via Tailscale Funnel + Caddy + OAuth (RS256 JWT) + an Anthropic egress IP allowlist. **OAuth is the only auth door** here — no static key on the public edge. | [`deploy/compose-tailnet/`](deploy/compose-tailnet/README.md) |
+| **Local compose** | Postgres + MCP server + Ollama on one box (bound to loopback only by default — the LAN can't reach it directly), with labeled, independently revocable native tokens (no Auth0 tenant needed). Runs anywhere Docker runs — including a work machine where a tailnet or hosted IdP isn't practical. | [`deploy/compose-local/`](deploy/compose-local/README.md) |
+| **Tailnet / Funnel** | The same stack exposed to claude.ai and Claude mobile over the public internet via Tailscale Funnel + Caddy + OAuth (RS256 JWT) + an Anthropic egress IP allowlist. **OAuth is the only auth door** here — native and static `x-brain-key` verification are disabled on the public edge. | [`deploy/compose-tailnet/`](deploy/compose-tailnet/README.md) |
 | **Qubes OS** | The stack split across ingress / app / database qubes, with the persistence and SELinux gotchas solved. Also OAuth-only, like the Funnel path. | [`deploy/qubes/`](deploy/qubes/README.md) |
 
 > [!IMPORTANT]
@@ -23,6 +23,36 @@ This repo is one codebase with **three install paths**, from "docker on a laptop
 > - An **OAuth identity provider that issues RS256 JWTs** — the guides walk through a free **Auth0 tenant**, but any issuer with a JWKS endpoint works. You'll register one API whose identifier must equal your public MCP URL byte-for-byte (it's immutable — pick the hostname first) and one confidential application whose client id + secret you paste into claude.ai.
 >
 > The Funnel overlay also needs **Docker Compose v2.20+** (the `!reset` YAML tag); the Qubes path additionally assumes a working **Qubes OS** machine with Docker-capable templates.
+
+## Supported authentication methods
+
+There are two separate authentication boundaries:
+
+- **Requests to Open Brain:** the local install issues
+  [native access tokens](docs/native-access-tokens.md), sent in `x-brain-key`.
+  Each token is labeled, hash-only at rest, shown once, and independently
+  revocable; the older static key remains available for migration. OAuth
+  deployments accept an `Authorization: Bearer` access token. OAuth access
+  tokens must be RS256 JWTs with the configured issuer and audience plus a valid
+  expiration and subject. Open Brain does not receive an OAuth application's
+  client secret.
+- **A service application requesting that token from the issuer:** Auth0 or the
+  configured issuer authenticates the application at its token endpoint. The
+  tracked browserless helper supports the following methods:
+
+| Token-endpoint application auth | Shipped helper support | Guidance |
+|---|---|---|
+| Client Secret (Post), `client_secret_post` | **Yes — default** | Choose **Client Secret (Post)** for the documented Auth0 M2M path. |
+| Client Secret (Basic), `client_secret_basic` | **Yes** | Set `OAUTH_CLIENT_AUTH_METHOD=client_secret_basic`; this is the documented Okta-style path. |
+| Private Key JWT, `private_key_jwt` | **No** | Auth0 can provide it, but this repository does not generate client assertions. A custom client is outside the verified runbook. |
+| Mutual TLS (mTLS) | **No** | The helper does not present a client certificate and Open Brain does not enforce sender-constrained tokens. |
+| No client authentication, `none` | **No** | Not supported for unattended service accounts. |
+
+Both supported secret methods produce the same bearer-token validation at Open
+Brain; the difference exists only between the service application and its
+issuer. See [OAuth service accounts](docs/service-account-oauth-client.md) for
+the provider setup, Auth0 token-profile distinction, secret-safe smoke test,
+and failure modes.
 
 ## Architecture at a glance
 
@@ -72,13 +102,13 @@ In text: clients reach tailscaled's single Funnel listener on the ingress qube; 
 - **Bounded MCP recall** — lookup, list, and search results are capped at 120,000 serialized UTF-8 bytes, leaving framing headroom below hosted-connector limits. Results that fit retain their existing shape; an oversized result keeps complete records where possible and reports omitted IDs or fields plus a deterministic `fetch`, `session_lookup`, narrower-query, or tailnet REST recovery path. Truncated `session_search` and `session_list` responses use `{results, truncation}` instead of their fitting bare-array shape. MCP follow-ups must reuse the originating scope, and any REST recovery path includes its resolved workspace/project/visibility query. REST payloads are not subject to this MCP-only budget.
 - **REST gateway (`/api/v1`)** — the same thoughts + sessions operations as structured-JSON HTTP endpoints, behind the same auth doors, for CLI/cron/dashboard consumers that don't speak MCP. Opt-in per deployment (`ENABLE_REST_API`): on by default in the docker-compose installs, deliberately absent from the Qubes install, and never served over the public Funnel. See [REST API](#rest-api-apiv1) below.
 - **Local embeddings** — Ollama (`nomic-embed-text`, 768-dim by default), in-stack or on another box.
-- **Two auth modes, one per deployment** — a static `x-brain-key` header for the simple single-box local install (also usable over your tailnet if you front it with `tailscale serve`), or OAuth 2.1 resource-server validation (RS256 JWT via JWKS) as the single door on the publicly-reachable Funnel and Qubes deployments. The two doors are independently toggleable and the server refuses to boot with neither, so a public deployment carries no static key. Every write is stamped server-side with the door it came through.
+- **Two auth doors, one per deployment** — hash-only, labeled, [rotatable native tokens](docs/native-access-tokens.md) in `x-brain-key` for the simple single-box local install (with the static key retained as a migration bridge), or OAuth resource-server validation (RS256 JWT via JWKS) as the sole door on publicly reachable Funnel and Qubes deployments. OAuth supports interactive users and [headless `client_credentials` service accounts](docs/service-account-oauth-client.md); verified writes distinguish `funnel` user identities from `service` machine identities while retaining the JWT `sub`. The doors are independently toggleable and the server refuses to boot with neither; the public overlay explicitly disables both native-token and static-key verification.
 - **Observability** — Caddy JSON access logs, an auth-failure audit table, a log-ingester sidecar, and a daily rollup with retention, so a public endpoint is *measured*, not guessed at.
 - **Defense in depth** — loopback-only binds, dropped capabilities, read-only rootfs, least-privilege DB roles with a drift assertion, an Anthropic-egress IP allowlist at the proxy edge (the primary public perimeter, CI-guarded so it can't be silently dropped), credential redaction in access logs, fail-fast misconfiguration guards. The full inventory is in [`docs/security-model.md`](docs/security-model.md).
 
 ## Request flow in detail
 
-The Tailnet/Funnel and Qubes deployments front the MCP server with Caddy + Tailscale Funnel and authenticate with OAuth (RS256 JWT) — the single auth door on any publicly-reachable install. Caddy's single `:9787` listener discriminates Funnel vs tailnet traffic via the `Tailscale-Funnel-Request` header that Tailscale injects only on funnel-originated requests (the single-listener design we call **Pattern Y**); that split scopes the Anthropic IP allowlist to public traffic and keeps the internal `/ready` probe off the public door — it no longer routes credentials, since both branches now carry the same Bearer JWT. (The local single-box install skips Caddy entirely and uses the simple `x-brain-key` door.)
+The Tailnet/Funnel and Qubes deployments front the MCP server with Caddy + Tailscale Funnel and authenticate with OAuth (RS256 JWT) — the single auth door on any publicly-reachable install. Caddy's single `:9787` listener discriminates Funnel vs tailnet traffic via the `Tailscale-Funnel-Request` header that Tailscale injects only on funnel-originated requests (the single-listener design we call **Pattern Y**); that split scopes the Anthropic IP allowlist to public traffic and keeps the internal `/ready` probe off the public door — it no longer routes credentials, since both branches now carry the same Bearer JWT. (The local single-box install skips Caddy entirely and uses rotatable native tokens in the `x-brain-key` door.)
 
 > **Why Tailscale Funnel and not a Cloudflare Tunnel?** Cloudflare is a reasonable — for many people, better — choice; this project picks Funnel so TLS terminates on your own hardware (no edge with plaintext capability in the routine path) and so no vendor is added beyond the Tailscale account the private door already needs. The full trade-off, the honest caveats to that argument, and a sketch of the Cloudflare variant are in [`docs/why-not-cloudflare.md`](docs/why-not-cloudflare.md). A companion note, [`docs/why-local-only.md`](docs/why-local-only.md), covers the other axis — a hosted **connector** whose edge filter can *reject* a tool call, not just read it — and why executing MCP through a local runtime removes that hop.
 
@@ -143,8 +173,8 @@ sequenceDiagram
 │                              (/api/v1), unit tests, Dockerfiles for mcp and
 │                              the log-ingester sidecar
 ├── db/                        Postgres init: roles, pgvector + lexical-search schema,
-│                              observability, sessions, fail-closed spaces, grants
-│                              assertion, daily rollup
+│                              observability, sessions, fail-closed spaces,
+│                              hash-only token storage, grants assertion, daily rollup
 ├── deploy/
 │   ├── compose-local/         Install path 1 — base docker-compose.yml + .env.example
 │   ├── compose-tailnet/       Install path 2 — Pattern B overlay, Caddyfile, caddy image
@@ -158,7 +188,7 @@ sequenceDiagram
 │                              Stable CI boundaries for ANN search behavior
 ├── docs/                      Memory spaces, threat/security models, Funnel-as-MCP-
 │                              perimeter guide, "why not Cloudflare?" rationale,
-│                              Codex-over-OAuth client setup
+│                              OAuth user + service-account client setup
 └── .github/workflows/         CI (deno tests, --allow-env drift guard) + leak gate
 ```
 
@@ -232,27 +262,28 @@ CORS-terminating layer in front.
 
 ```sh
 curl -s -X POST http://127.0.0.1:8787/api/v1/thoughts \
-  -H "x-brain-key: $MCP_ACCESS_KEY" -H "content-type: application/json" \
+  -H "x-brain-key: $OPENBRAIN_TOKEN" -H "content-type: application/json" \
   -d '{"content":"REST smoke test","provenance":{"author":"release engineering","agent":"codex","repo":"example/open-brain","branch":"main"}}'
 # → {"id":"…","metadata":{…,"source":"rest","door":"tailnet","sub":null,
+#      "token_label":"laptop client",
 #      "provenance":{"schema_version":1,"caller_asserted":{"author":"release engineering",…}}}}
 
 curl -s -X POST http://127.0.0.1:8787/api/v1/thoughts/search \
-  -H "x-brain-key: $MCP_ACCESS_KEY" -H "content-type: application/json" \
+  -H "x-brain-key: $OPENBRAIN_TOKEN" -H "content-type: application/json" \
   -d '{"query":"REST rollout","filter":{"include":{"repo":"example/open-brain"},"exclude":{"author":"release engineering","agent":"codex"}}}'
 # → hybrid semantic/exact-text matches from that repo, excluding rows whose author OR agent matches
 ```
 
-With `MCP_ACCESS_KEY_PRINCIPAL` configured on a local shared-key deployment, a
+With `MCP_ACCESS_KEY_PRINCIPAL` configured on a local native-token deployment, a
 particularly sensitive capture is explicit and personal:
 
 ```sh
 curl -s -X POST http://127.0.0.1:8787/api/v1/thoughts \
-  -H "x-brain-key: $MCP_ACCESS_KEY" -H "content-type: application/json" \
+  -H "x-brain-key: $OPENBRAIN_TOKEN" -H "content-type: application/json" \
   -d '{"content":"A particularly sensitive thought","scope":{"workspace_id":"sensitive","visibility":"personal"}}'
 ```
 
-`source`, `door`, and `sub` are stamped by the server. Values under
+`source`, `door`, `sub`, and `token_label` are stamped by the server. Values under
 `provenance.caller_asserted` are explicit claims from the authenticated caller,
 validated but not independently verified; omit unknown values rather than guessing.
 The full key schema, search-filter semantics, compatibility behavior, and
@@ -265,14 +296,16 @@ The five-minute version (full guide in [`deploy/compose-local/`](deploy/compose-
 ```bash
 git clone https://github.com/lcjanke2020/ob1-selfhosted.git
 cd ob1-selfhosted/deploy/compose-local
-cp .env.example .env       # fill four secrets and choose METADATA_FALLBACK_POLICY
+cp .env.example .env       # fill DB secrets and choose METADATA_FALLBACK_POLICY
 docker compose up -d ollama
 docker compose exec ollama ollama pull nomic-embed-text
 docker compose up -d
+docker compose --profile tools run --rm token-admin create "laptop client"
 curl http://127.0.0.1:8787/health
 ```
 
-Then point any MCP client at `http://127.0.0.1:8787/mcp` with your `x-brain-key`.
+Then point any MCP client at `http://127.0.0.1:8787/mcp` with the one-time token
+in `x-brain-key`.
 
 ## See it working
 
@@ -288,7 +321,24 @@ And what the observability stack is for — one week of real data from a live de
 
 ## Trust model, in one paragraph
 
-On the **local single-box install**, anyone who can present your `x-brain-key` (loopback, your LAN, or your tailnet if you front it with `tailscale serve`) enters the same shared-key trust boundary — treat the key like a database password. Personal spaces are disabled on that door unless the operator deliberately binds it to one deployment-wide `MCP_ACCESS_KEY_PRINCIPAL`. On any **Funnel or Qubes** deployment there is no static key at all: a valid RS256 JWT supplies a verified `sub`, and PostgreSQL RLS partitions personal rows by that subject while workspace/project rows follow the requested registered scope. The Anthropic-egress IP allowlist still restricts the public door before auth. Thought `author` / `agent` / `repo` / `branch` provenance remains a caller assertion, not authenticated identity. The longer version is in [`docs/security-model.md`](docs/security-model.md), with the scope contract in [`docs/spaces.md`](docs/spaces.md).
+On the **local single-box install**, anyone with network reach and an active
+native token can enter the same workspace/project trust boundary. Tokens are
+individually labeled and revocable, but labels are attribution—not separate
+authorization principals—so personal spaces remain disabled unless the
+operator deliberately binds the door to one deployment-wide
+`MCP_ACCESS_KEY_PRINCIPAL`. Treat each token like a database password. On any
+**Funnel or Qubes** deployment the entire `x-brain-key` door is disabled: a
+valid RS256 JWT supplies a verified `sub`, whether it represents an interactive
+user or a [client-credentials service account](docs/service-account-oauth-client.md),
+and PostgreSQL RLS partitions personal rows by that subject while
+workspace/project rows follow the requested registered scope. Successful
+writes stamp native-token labels, machine JWTs as `service`, and user JWTs as
+`funnel`; these are credential/provenance labels, not Caddy route evidence. The
+Anthropic-egress IP allowlist still restricts the public door before auth.
+Thought `author` / `agent` / `repo` / `branch` provenance remains a caller
+assertion, not authenticated identity. The longer version is in
+[`docs/security-model.md`](docs/security-model.md), with the scope contract in
+[`docs/spaces.md`](docs/spaces.md).
 
 ## Status & roadmap
 
@@ -304,7 +354,7 @@ Contributions are welcome — [`docs/why-not-cloudflare.md`](docs/why-not-cloudf
 This project is a self-hosted derivative of [Open Brain (OB1)](https://github.com/NateBJones-Projects/OB1) by Nate B. Jones. It began as a private working fork of OB1 (the *OB1-homelab* line, since retired) and deliberately keeps a smaller footprint than upstream — no web dashboard, no Supabase, just the memory layer and its perimeter. It is licensed under the same **FSL-1.1-MIT** terms (see [LICENSE.md](LICENSE.md)): free for any non-competing use, converting to MIT two years after release. The `thoughts` table layout stays compatible with upstream OB1, so schema extensions from that community work here too.
 
 [MihaiBuilds/memory-vault](https://github.com/MihaiBuilds/memory-vault) was also
-inspirational to this project's memory-spaces work and parts of its search
-improvements. That design influence is gratefully acknowledged; the
-fail-closed RLS and hybrid-search implementation here was written for Open
-Brain's own contract and deployment model.
+inspirational to this project's memory spaces, parts of its search work, and
+the hash-only native-token lifecycle. That design influence is gratefully
+acknowledged; Open Brain's RLS, search, database roles, authentication wiring,
+and deployment gates are implemented for this repository's own contract.

@@ -45,6 +45,7 @@ const ENV_KEYS = [
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
+  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
   // see auth_brainkey_test.ts for why this is here.
   "OBS_AUTH_EVENTS_ENABLED",
   "METADATA_FALLBACK_POLICY",
@@ -144,6 +145,7 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
   Deno.env.set("AUTH0_ISSUER", ISSUER);
   Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
   Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
+  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
   // disable audit emission; the audit module reads this at load.
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
   Deno.env.set("METADATA_FALLBACK_POLICY", "off");

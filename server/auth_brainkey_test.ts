@@ -32,11 +32,13 @@ const TEST_BODY_READ_TIMEOUT_MS = "150";
 
 const ENV_KEYS = [
   "DB_PASSWORD",
+  "ENABLE_NATIVE_TOKENS",
   "MCP_ACCESS_KEY",
   "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
+  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
   // the auth middlewares now fire-and-forget an audit row into
   // postgres on auth-fail. Disable that here so the test suite doesn't
   // try to open a DB connection it can't reach.
@@ -106,7 +108,9 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
   Deno.env.delete("AUTH0_ISSUER");
   Deno.env.delete("AUTH0_JWKS_URI");
   Deno.env.delete("AUTH0_AUDIENCE");
+  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
   Deno.env.set("DB_PASSWORD", "test-password");
+  Deno.env.delete("ENABLE_NATIVE_TOKENS");
   Deno.env.set("MCP_ACCESS_KEY", KEY);
   Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   // disable audit emission so unauthorized() doesn't try to open

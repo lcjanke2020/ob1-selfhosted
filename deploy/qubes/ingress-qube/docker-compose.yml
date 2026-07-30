@@ -141,6 +141,7 @@ services:
       - ../../../db/05-hybrid-search.sql:/docker-entrypoint-initdb.d/05-hybrid-search.sql:ro
       - ../../../db/06-spaces.sql:/docker-entrypoint-initdb.d/06-spaces.sql:ro
       - ../../../db/07-metadata-degradation.sql:/docker-entrypoint-initdb.d/07-metadata-degradation.sql:ro
+      - ../../../db/08-access-tokens.sql:/docker-entrypoint-initdb.d/08-access-tokens.sql:ro
       # Run the catalog assertion after every schema migration while keeping
       # its stable operator-facing source path.
       - ../../../db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro

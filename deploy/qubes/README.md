@@ -64,6 +64,9 @@ For **user** timers, two extra Qubes-isms: idle app qubes get suspended (timers 
 - All compose services bind loopback; tailnet exposure goes through `tailscale serve`/`funnel` exactly as in the [tailnet install](../compose-tailnet/README.md). **Split-deployment exception:** the app qube's `mcp` is published on `0.0.0.0:8787` — all of the qube's host interfaces, not the tailnet alone — so the ingress qube's Caddy can reach it across qubes. The bind itself grants no protection; that port is scoped to the ingress qube by Tailscale ACL (only the ingress qube may reach it) + the app qube's host firewall (a `DOCKER-USER` rule, since docker DNAT bypasses the Qubes `INPUT` chain) + mcp's app auth (OAuth Bearer JWT — the only auth door on this OAuth-only deployment; no x-brain-key). See [`app-qube/docker-compose.yml`](app-qube/docker-compose.yml) and the shipped [`app-qube/qubes-firewall-user-script`](app-qube/qubes-firewall-user-script) for the three layers.
 - Gate reachability with Tailscale ACL tags (e.g. a tag for "may reach the memory store on :443" and the standard ssh-target tag if you administer over the tailnet). Remember the qube's own firewall script (`/rw/config/qubes-firewall-user-script`) only opens what you add — `:22` is not open by default.
 - The public Funnel door additionally needs the `funnel` node attribute on this device in the Tailscale admin console.
+- Unattended agents use the same OAuth verifier over the private tailnet branch;
+  provision and verify them with the
+  [client-credentials service-account runbook](../../docs/service-account-oauth-client.md).
 
 ## Verified deployment
 

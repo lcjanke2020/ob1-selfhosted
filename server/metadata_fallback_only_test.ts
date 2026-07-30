@@ -15,6 +15,7 @@ const ENV_KEYS = [
   "DB_PASSWORD",
   "MCP_ACCESS_KEY",
   "MCP_ACCESS_KEY_PRINCIPAL",
+  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
   "OBS_AUTH_EVENTS_ENABLED",
   "CHAT_API_BASE",
   "CHAT_API_KEY",
@@ -35,6 +36,7 @@ Deno.test("extractMetadata: fallback-only (primary blank) classifies via the fal
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
   Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
+  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
   // Primary endpoint deliberately unconfigured; only the fallback is set.
   Deno.env.delete("CHAT_API_BASE");

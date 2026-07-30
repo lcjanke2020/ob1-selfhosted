@@ -69,7 +69,9 @@ class FakeClient {
       boolean,
       boolean,
       boolean,
+      boolean,
     ] = [
+      true,
       true,
       true,
       true,
@@ -120,6 +122,7 @@ Deno.test("probeDbAtBoot: success path validates connectivity and hybrid schema"
   assert(client.queryCalls[1].includes("last_failed_channels"));
   assert(client.queryCalls[1].includes("last_event_id"));
   assert(client.queryCalls[1].includes("created_at"));
+  assert(client.queryCalls[1].includes("native_auth.access_token"));
   assert(
     client.queryCalls[1].includes(
       "metadata_degradation_failed_channels_shape",
@@ -136,6 +139,7 @@ Deno.test("probeDbAtBoot: missing hybrid schema rejects with migration guidance"
   const client = new FakeClient([
     true,
     false,
+    true,
     true,
     true,
     true,
@@ -168,6 +172,7 @@ Deno.test("probeDbAtBoot: missing spaces schema rejects with migration guidance"
     true,
     true,
     true,
+    true,
   ]);
   const fakePool = {
     connect: () => Promise.resolve(client),
@@ -194,6 +199,7 @@ Deno.test("probeDbAtBoot: missing audience indexes rejects before serving", asyn
     true,
     true,
     true,
+    true,
   ]);
   const fakePool = {
     connect: () => Promise.resolve(client),
@@ -208,8 +214,9 @@ Deno.test("probeDbAtBoot: missing audience indexes rejects before serving", asyn
   assertEquals(client.releaseCalls, 1);
 });
 
-Deno.test("probeDbAtBoot: missing or incomplete metadata audit schema rejects with migration guidance", async () => {
+Deno.test("probeDbAtBoot: missing native token schema rejects with migration guidance", async () => {
   const client = new FakeClient([
+    true,
     true,
     true,
     true,
@@ -228,6 +235,32 @@ Deno.test("probeDbAtBoot: missing or incomplete metadata audit schema rejects wi
     () => probeDbAtBoot(fakePool, "db:5432"),
     Error,
   );
+  assertStringIncludes(err.message, "native access-token schema");
+  assertStringIncludes(err.message, "db/08-access-tokens.sql");
+  assertEquals(client.releaseCalls, 1);
+});
+
+Deno.test("probeDbAtBoot: missing or incomplete metadata audit schema rejects with migration guidance", async () => {
+  const client = new FakeClient([
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+    true,
+  ]);
+  const fakePool = {
+    connect: () => Promise.resolve(client),
+  } as unknown as Pool;
+
+  const err = await assertRejects(
+    () => probeDbAtBoot(fakePool, "db:5432"),
+    Error,
+  );
   assertStringIncludes(err.message, "missing or incompatible");
   assertStringIncludes(err.message, "metadata-degradation audit schema");
   assertStringIncludes(err.message, "db/07-metadata-degradation.sql");
@@ -236,7 +269,7 @@ Deno.test("probeDbAtBoot: missing or incomplete metadata audit schema rejects wi
 
 Deno.test("probeDbAtBoot: missing metadata notification singleton rejects with migration guidance", async () => {
   const client = new FakeClient(
-    [true, true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true, true, true],
     true,
     false,
   );
@@ -255,7 +288,7 @@ Deno.test("probeDbAtBoot: missing metadata notification singleton rejects with m
 
 Deno.test("probeDbAtBoot: unknown configured workspace rejects before serving", async () => {
   const client = new FakeClient(
-    [true, true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true, true, true],
     false,
   );
   const fakePool = {

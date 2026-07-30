@@ -29,10 +29,13 @@ services:
       # so an operator who copies a working local `.env` into this directory
       # (and forgets to blank the key) would otherwise leave the static
       # x-brain-key door open on a publicly-reachable box. Pinning it empty
-      # here makes OAuth the only door, matching the Qubes app-qube compose
-      # which omits the variable entirely. (An empty key sets ENABLE_BRAIN_KEY
+      # here makes OAuth the only door, matching the Qubes app-qube compose,
+      # which also omits the static-key variable. (An empty key sets ENABLE_BRAIN_KEY
       # false, so the server ignores any presented x-brain-key.)
       MCP_ACCESS_KEY: ""
+      # Native x-brain-key tokens are also deliberately absent from the public
+      # edge. Bearer OAuth remains the sole accepted credential class.
+      ENABLE_NATIVE_TOKENS: "false"
       # The base compose may inherit a local single-user principal binding.
       # Clear it together with the key or config.ts correctly refuses the
       # otherwise-unused binding on this OAuth-only public deployment.

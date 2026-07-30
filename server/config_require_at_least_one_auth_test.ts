@@ -1,6 +1,6 @@
-// Negative test for the "at least one auth door" guard in config.ts. With both
-// MCP_ACCESS_KEY (x-brain-key door) and AUTH0_* (OAuth door) now optional, a
-// deployment that configures NEITHER would boot with no authentication at all —
+// Negative test for the "at least one auth door" guard in config.ts. With the
+// static key, native tokens, and Auth0 all optional, a deployment that configures
+// none of them would boot with no authentication at all —
 // config.ts must refuse to start in that state.
 //
 // The positive cases are covered implicitly elsewhere: auth_brainkey_test.ts
@@ -16,11 +16,13 @@ import { assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 
 const ENV_KEYS = [
   "DB_PASSWORD",
+  "ENABLE_NATIVE_TOKENS",
   "MCP_ACCESS_KEY",
   "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
+  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
   "OBS_AUTH_EVENTS_ENABLED",
   "METADATA_FALLBACK_POLICY",
 ];
@@ -32,13 +34,16 @@ Deno.test(
       ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
     );
 
-    // Disable BOTH doors: no x-brain-key, no OAuth. DB_PASSWORD is set so the
+    // Disable every door: no static key, native token verifier, or OAuth.
+    // DB_PASSWORD is set so the
     // throw we observe is the auth guard, not the unrelated DB_PASSWORD required().
     Deno.env.delete("MCP_ACCESS_KEY");
+    Deno.env.delete("ENABLE_NATIVE_TOKENS");
     Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
     Deno.env.delete("AUTH0_ISSUER");
     Deno.env.delete("AUTH0_JWKS_URI");
     Deno.env.delete("AUTH0_AUDIENCE");
+    Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
     Deno.env.set("DB_PASSWORD", "test-password");
     Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
     Deno.env.set("METADATA_FALLBACK_POLICY", "off");
@@ -61,6 +66,11 @@ Deno.test(
         message,
         "MCP_ACCESS_KEY",
         "error must name the x-brain-key option",
+      );
+      assertStringIncludes(
+        message,
+        "ENABLE_NATIVE_TOKENS",
+        "error must name the native-token option",
       );
       assertStringIncludes(
         message,

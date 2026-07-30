@@ -1,7 +1,8 @@
 # Connecting Kimi Code to an OAuth deployment
 
 The [tailnet/Funnel](../deploy/compose-tailnet/README.md) and [Qubes](../deploy/qubes/README.md)
-install paths are **OAuth-only** — no static `x-brain-key` on the public door. The
+install paths are **OAuth-only** — native and static `x-brain-key` verification
+are disabled. The
 [compose-tailnet runbook](../deploy/compose-tailnet/README.md#connect-claudeai--claude-mobile)
 covers connecting **claude.ai / Claude mobile** (a confidential client), and
 [codex-oauth-client.md](codex-oauth-client.md) covers a local **Codex CLI** (a public PKCE client
@@ -38,7 +39,7 @@ and a refresh token persisted in the credential store.
   doors a deployment enables — an OAuth-only deployment ignores `X-Brain-Key` entirely.
 - This does **not** authorize cloud-hosted agent workers. Keep public cloud ingress disabled.
 - Kimi Code supports `bearerTokenEnvVar` for HTTP MCP servers — it is **not** an alternative here,
-  because this deployment enables no static-key door.
+  because this deployment enables no `x-brain-key` door.
 
 ## Prerequisites
 

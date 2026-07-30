@@ -14,6 +14,7 @@ import { bodyLimit } from "hono/body-limit";
 import type { Pool } from "postgres";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { z } from "zod";
+import { authContextFromValues } from "./auth_context.ts";
 
 import {
   type AppVariables,
@@ -108,11 +109,15 @@ const restifyAuthFailure: MiddlewareHandler<{ Variables: AppVariables }> =
 // requireAuth before a handler runs; if a future refactor drops the c.set
 // calls, fail as a 500 (via onError) rather than persisting door: undefined.
 function authOr500(c: ApiContext): AuthContext {
-  const door = c.get("door");
-  if (door !== "funnel" && door !== "tailnet") {
+  const auth = authContextFromValues(
+    c.get("door"),
+    c.get("sub"),
+    c.get("tokenLabel"),
+  );
+  if (!auth) {
     throw new Error("auth context missing after requireAuth");
   }
-  return { door, sub: c.get("sub") ?? null };
+  return auth;
 }
 
 async function readJsonBody(c: ApiContext): Promise<unknown> {
@@ -146,13 +151,14 @@ function parseOr400<S extends z.ZodType>(
 export function createApiRouter(
   pool: Pool,
   deps: ServiceDeps = defaultDeps,
+  authMiddleware: MiddlewareHandler<{ Variables: AppVariables }> = requireAuth,
 ): Hono<{ Variables: AppVariables }> {
   const api = new Hono<{ Variables: AppVariables }>();
 
   // Order matters: restifyAuthFailure wraps requireAuth (outermost), and the
   // body cap runs only for authenticated requests.
   api.use("*", restifyAuthFailure);
-  api.use("*", requireAuth);
+  api.use("*", authMiddleware);
   api.use(
     "*",
     bodyLimit({

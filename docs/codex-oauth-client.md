@@ -1,7 +1,8 @@
 # Connecting Codex to an OAuth deployment
 
 The [tailnet/Funnel](../deploy/compose-tailnet/README.md) and [Qubes](../deploy/qubes/README.md)
-install paths are **OAuth-only** — no static `x-brain-key` on the public door. The
+install paths are **OAuth-only** — native and static `x-brain-key` verification
+are disabled. The
 [compose-tailnet runbook](../deploy/compose-tailnet/README.md#connect-claudeai--claude-mobile)
 covers connecting **claude.ai / Claude mobile** (a confidential client, `client_id` + `client_secret`
 pasted into a custom connector). This doc covers the other client we run: a **local
@@ -38,8 +39,9 @@ was verified on 2026-07-12 with **Codex CLI 0.144.1** on tailnet-connected Linux
   different network route to the same door.
 - Header forwarding is transport behavior, not auth acceptance. Caddy forwards `Authorization` (and
   `X-Brain-Key`) on both allowed branches; the **server** decides which doors a deployment enables.
-  An OAuth-only deployment leaves `MCP_ACCESS_KEY` unset, so a forwarded `X-Brain-Key` is ignored —
-  see [security-model.md](security-model.md).
+  An OAuth-only deployment leaves `MCP_ACCESS_KEY` unset and sets
+  `ENABLE_NATIVE_TOKENS=false`, so a forwarded `X-Brain-Key` is ignored — see
+  [security-model.md](security-model.md).
 - This does **not** authorize cloud-hosted Codex workers. Keep public cloud ingress disabled until
   the OAuth path and an automated source-range control are independently verified. If you ever do
   allowlist a cloud provider's egress, **source the CIDRs from that provider's official published
@@ -280,9 +282,10 @@ FROM sessions.session
 WHERE id = <session-id>;
 ```
 
-`source = 'funnel'` here is an **authentication-door** label, not a proof of network path: every
-verified Auth0 bearer gets `door = 'funnel'` in request context, which `session_capture` persists as
-`source` (with the JWT subject in `source_node`). It does **not** mean Caddy handled the request on
+`source = 'funnel'` here is an **authentication-door** label, not a proof of network path: Codex's
+verified user bearer gets `door = 'funnel'` in request context, which `session_capture` persists as
+`source` (with the JWT subject in `source_node`). Client-credentials identities instead use
+`source = 'service'`. Neither label means Caddy handled the request on
 its public `@anthropic_funnel` branch — a local tailnet client is expected to reach the door through
 `@tailnet` (bypassing the Anthropic CIDR matcher) while still needing a valid token. To determine the
 actual network path, compare Caddy's `tailnet-access.log` vs `funnel-access.log`; a request forced

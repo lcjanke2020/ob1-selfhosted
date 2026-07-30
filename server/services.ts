@@ -9,6 +9,7 @@
 // rest of the suite.
 
 import type { Pool } from "postgres";
+import type { AuthContext } from "./auth_context.ts";
 import type { ThoughtMatch, ThoughtRecord } from "./db.ts";
 import { embed as defaultEmbed } from "./embeddings.ts";
 export { NotFoundError, UpstreamError, ValidationError } from "./errors.ts";
@@ -59,9 +60,7 @@ import {
   parseSessionToml,
 } from "./session_toml.ts";
 
-// Same shape as auth.ts AppVariables / mcp-server.ts RequestAuth; declared
-// standalone so this module depends on neither transport layer.
-export type AuthContext = { door: "funnel" | "tailnet"; sub: string | null };
+export type { AuthContext } from "./auth_context.ts";
 
 function validateThoughtProvenance(
   provenance: ThoughtProvenanceClaims | undefined,
@@ -203,6 +202,7 @@ export async function captureThoughtWithMetadata(
       "source",
       "door",
       "sub",
+      "token_label",
       "provenance",
       "metadata_extraction",
     ]
@@ -229,6 +229,7 @@ export async function captureThoughtWithMetadata(
     source: input.via,
     door: input.auth.door,
     sub: input.auth.sub,
+    token_label: input.auth.tokenLabel,
     metadata_extraction: extraction.classifier,
   };
   const persisted = await captureThought(pool, {
@@ -397,14 +398,17 @@ export async function captureSessionFromToml(
     contentHash,
     embedding,
     provenance: {
-      // Store the transport door faithfully ('funnel' | 'tailnet'),
-      // mirroring how capture_thought stamps thoughts.metadata.door. The
-      // funnel door carries every Anthropic surface (web/desktop/mobile),
-      // indistinguishable server-side (requests arrive from Anthropic
-      // egress, not the device), so 'funnel' is the honest label — not
-      // 'mobile'.
+      // Store the server-verified credential label faithfully, mirroring how
+      // capture_thought stamps thoughts.metadata.door. OAuth user surfaces
+      // remain indistinguishable from each other and use `funnel`; OAuth
+      // client-credentials identities use `service`; static keys and native
+      // tokens use `tailnet`. These are auth/provenance labels, not Caddy
+      // route evidence.
       source: input.auth.door,
-      sourceNode: input.auth.sub,
+      // OAuth stamps its verified subject. A native token has no identity
+      // principal, but its server-verified label is still useful attribution.
+      // The legacy static key has neither and remains null.
+      sourceNode: input.auth.sub ?? input.auth.tokenLabel,
     },
     rawToml,
     scope,

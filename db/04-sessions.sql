@@ -94,11 +94,11 @@ CREATE TABLE IF NOT EXISTS sessions.session (
   resume_context    TEXT,
   summary           TEXT,
 
-  -- provenance: stamped server-side from the transport, NEVER trusted from the
-  -- caller. source is 'tailnet' | 'funnel' (the door, matching
-  -- thoughts.metadata.door — NOT 'mobile': the Funnel carries every Anthropic
-  -- surface and the server can't tell them apart). source_node is the JWT sub
-  -- on the funnel path, null on tailnet.
+  -- provenance: stamped server-side from verified auth context, NEVER trusted
+  -- from the caller. source is 'tailnet' (shared key), 'funnel' (OAuth user),
+  -- or 'service' (OAuth client credentials), matching thoughts.metadata.door.
+  -- These are credential labels, not Caddy routes. source_node is the verified
+  -- JWT sub on either OAuth label, null on the shared-key label.
   source            TEXT,
   source_node       TEXT,
 

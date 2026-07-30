@@ -291,13 +291,24 @@ if (
 export const ENABLE_REST_API =
   optionalTrimmed("ENABLE_REST_API").toLowerCase() === "true";
 
+// Native rotatable tokens share the non-OIDC x-brain-key header with the
+// legacy static key, but are independently enabled so public OAuth deployments
+// can pin the entire native door off. The server default is deliberately off;
+// compose-local opts in and the Funnel override pins false.
+const NATIVE_TOKEN_SETTING = optionalTrimmed(
+  "ENABLE_NATIVE_TOKENS",
+).toLowerCase();
+if (NATIVE_TOKEN_SETTING && !["true", "false"].includes(NATIVE_TOKEN_SETTING)) {
+  throw new Error("ENABLE_NATIVE_TOKENS must be true or false");
+}
+export const ENABLE_NATIVE_TOKENS = NATIVE_TOKEN_SETTING === "true";
+
 // MCP_ACCESS_KEY enables the static x-brain-key auth door. It is OPTIONAL:
-// set it to turn the x-brain-key path ON (the `compose-local` single-box
-// install uses it as its sole auth, for environments where a tailnet / Auth0
-// tenant isn't practical), or leave it empty to turn the path OFF entirely so
-// the server accepts no x-brain-key at all. The `compose-tailnet` (funnel) and
-// `qubes` deployments leave it empty and rely on Auth0 (OAuth) alone — the
-// single-door posture recommended for any publicly-reachable install.
+// set it to turn the legacy static matcher ON, or leave it empty to disable
+// that matcher. Native tokens can independently keep the same header door on.
+// The `compose-tailnet` (Funnel) and `qubes` deployments leave it empty, disable
+// native tokens, and rely on OAuth alone — the single-door posture recommended
+// for any publicly reachable install.
 //
 // When set, a minimum length is enforced. `.env.example` documents
 // `openssl rand -hex 32` (64 hex chars = 256 bits) as the generator; a weak key
@@ -327,20 +338,22 @@ export const MCP_ACCESS_KEY: string | null = rawBrainKey
   : null;
 export const ENABLE_BRAIN_KEY = MCP_ACCESS_KEY !== null;
 
-// The x-brain-key is a shared credential, not a principal. Personal memory is
-// therefore disabled on that door unless the operator explicitly binds the
-// whole deployment to one stable server-trusted subject. This value is never
-// read from caller input and does not alter the historical metadata.sub stamp
-// (which remains null for tailnet/shared-key captures).
+// Neither the static x-brain-key nor a native token label is a principal.
+// Personal memory is therefore disabled on that door unless the operator
+// explicitly binds the whole deployment to one stable server-trusted subject.
+// This value is never read from caller input and does not alter metadata.sub
+// (which remains null for every tailnet/native-door capture).
 export const MCP_ACCESS_KEY_PRINCIPAL = optionalTrimmed(
   "MCP_ACCESS_KEY_PRINCIPAL",
 );
 if (MCP_ACCESS_KEY_PRINCIPAL.length > 1024) {
   throw new Error("MCP_ACCESS_KEY_PRINCIPAL must be at most 1024 characters");
 }
-if (MCP_ACCESS_KEY_PRINCIPAL && !ENABLE_BRAIN_KEY) {
+if (
+  MCP_ACCESS_KEY_PRINCIPAL && !ENABLE_BRAIN_KEY && !ENABLE_NATIVE_TOKENS
+) {
   throw new Error(
-    "MCP_ACCESS_KEY_PRINCIPAL requires MCP_ACCESS_KEY; refusing an unused principal binding",
+    "MCP_ACCESS_KEY_PRINCIPAL requires MCP_ACCESS_KEY or ENABLE_NATIVE_TOKENS=true; refusing an unused principal binding",
   );
 }
 export const PORT = requiredInt("PORT", 8787);
@@ -368,20 +381,69 @@ if ((AUTH0_ISSUER || AUTH0_JWKS_URI || AUTH0_AUDIENCE) && !ENABLE_OAUTH) {
   );
 }
 
-// At least one auth door must be enabled. With both MCP_ACCESS_KEY (x-brain-key)
-// and AUTH0_* (OAuth) now optional, a deployment that configures neither would
-// boot wide open — refuse that. compose-local sets MCP_ACCESS_KEY; the funnel +
+// Auth0's default access-token profile identifies client-credentials tokens
+// with the signed `gty = "client-credentials"` claim. Its RFC 9068 profile and
+// many other issuers provide no grant-type claim even when the JWT is otherwise
+// valid. This optional exact-subject allowlist supplies that fallback.
+//
+// It changes attribution only, never authentication or authorization: every
+// token still has to pass signature/issuer/audience/algorithm/exp/sub checks,
+// and the verified `sub` remains the RLS principal. Values are not logged.
+function oauthServiceAccountSubjects(): ReadonlySet<string> {
+  const raw = optionalTrimmed("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
+  if (!raw) return new Set();
+
+  const entries = raw.split(",").map((value) => value.trim());
+  if (entries.some((value) => !value)) {
+    throw new Error(
+      "OAUTH_SERVICE_ACCOUNT_SUBJECTS must be a comma-separated list of non-empty exact JWT subjects",
+    );
+  }
+  if (entries.length > 256) {
+    throw new Error(
+      "OAUTH_SERVICE_ACCOUNT_SUBJECTS must contain at most 256 subjects",
+    );
+  }
+
+  const subjects = new Set<string>();
+  for (const entry of entries) {
+    const subject = noControlCharacters(
+      "OAUTH_SERVICE_ACCOUNT_SUBJECTS entry",
+      entry,
+      1024,
+    );
+    if (subjects.has(subject)) {
+      throw new Error(
+        "OAUTH_SERVICE_ACCOUNT_SUBJECTS must not contain duplicate subjects",
+      );
+    }
+    subjects.add(subject);
+  }
+  return subjects;
+}
+
+export const OAUTH_SERVICE_ACCOUNT_SUBJECTS = oauthServiceAccountSubjects();
+if (OAUTH_SERVICE_ACCOUNT_SUBJECTS.size > 0 && !ENABLE_OAUTH) {
+  throw new Error(
+    "OAUTH_SERVICE_ACCOUNT_SUBJECTS requires the OAuth door (all three AUTH0_* variables)",
+  );
+}
+
+// At least one auth door must be enabled. With MCP_ACCESS_KEY, native-token
+// verification, and AUTH0_* (OAuth) all optional, a deployment with none would
+// boot wide open — refuse that. compose-local enables native tokens; Funnel +
 // Qubes deployments set AUTH0_*. (This replaces the old PATTERN_B guard, whose
 // only job was to stop a leaked x-brain-key going public over the funnel — moot
 // now that funnel deployments carry no x-brain-key. Keeping Caddy as the sole
 // entry point — not publishing mcp's raw host port — is now a deployment-hygiene
 // measure handled by the compose override structure + docs, not a boot check.)
-if (!ENABLE_BRAIN_KEY && !ENABLE_OAUTH) {
+if (!ENABLE_BRAIN_KEY && !ENABLE_NATIVE_TOKENS && !ENABLE_OAUTH) {
   throw new Error(
-    "No auth door configured: set MCP_ACCESS_KEY (x-brain-key door — e.g. the " +
-      "compose-local single-box install) and/or all three AUTH0_* vars (OAuth " +
-      "door — used by the funnel + Qubes deployments). Refusing to start with " +
-      "no authentication.",
+    "No auth door configured: set MCP_ACCESS_KEY and/or " +
+      "ENABLE_NATIVE_TOKENS=true (non-OIDC x-brain-key door — e.g. the " +
+      "compose-local single-box install), and/or all three AUTH0_* vars " +
+      "(OAuth door — used by the funnel + Qubes deployments). Refusing to " +
+      "start with no authentication.",
   );
 }
 
