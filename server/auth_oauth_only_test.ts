@@ -21,6 +21,7 @@ const JWKS_URL = "https://test.invalid/.well-known/jwks.json";
 
 const ENV_KEYS = [
   "DB_PASSWORD",
+  "ENABLE_NATIVE_TOKENS",
   "MCP_ACCESS_KEY",
   "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
@@ -73,6 +74,7 @@ Deno.test("requireAuth (OAuth only — x-brain-key door disabled)", async (t) =>
 
   // OAuth door ON, x-brain-key door OFF (MCP_ACCESS_KEY deliberately deleted).
   Deno.env.delete("MCP_ACCESS_KEY");
+  Deno.env.set("ENABLE_NATIVE_TOKENS", "false");
   Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("AUTH0_ISSUER", ISSUER);

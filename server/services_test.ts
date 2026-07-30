@@ -27,7 +27,7 @@ const ENV_KEYS = [
   "METADATA_FALLBACK_POLICY",
 ];
 
-const AUTH = { door: "tailnet" as const, sub: null };
+const AUTH = { door: "tailnet" as const, sub: null, tokenLabel: null };
 
 function persistedSession(status: string, sessionId: string | null = null) {
   return {
@@ -119,6 +119,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         assertEquals(out.metadata.source, "rest");
         assertEquals(out.metadata.door, "tailnet");
         assertEquals(out.metadata.sub, null);
+        assertEquals(out.metadata.token_label, null);
         assertEquals(out.metadata.type, "observation");
         assertEquals(out.metadata.metadata_extraction, {
           schema_version: 1,
@@ -161,7 +162,11 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           asPool(pool),
           {
             content: "x",
-            auth: { door: "funnel", sub: "auth0|abc" },
+            auth: {
+              door: "funnel",
+              sub: "auth0|abc",
+              tokenLabel: null,
+            },
             via: "mcp",
           },
           makeDeps(),
@@ -169,6 +174,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         assertEquals(out.metadata.source, "mcp");
         assertEquals(out.metadata.door, "funnel");
         assertEquals(out.metadata.sub, "auth0|abc");
+        assertEquals(out.metadata.token_label, null);
         assertEquals(out.metadata.provenance, undefined);
         assertEquals(out.metadata.metadata_extraction, {
           schema_version: 1,
@@ -199,6 +205,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
             auth: {
               door: "service",
               sub: "nightly-indexer-client@clients",
+              tokenLabel: null,
             },
             via: "mcp",
           },
@@ -207,10 +214,43 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         assertEquals(out.metadata.source, "mcp");
         assertEquals(out.metadata.door, "service");
         assertEquals(out.metadata.sub, "nightly-indexer-client@clients");
+        assertEquals(out.metadata.token_label, null);
         assertEquals(out.metadata.provenance, {
           schema_version: 1,
           caller_asserted: { agent: "nightly-indexer" },
         });
+      },
+    );
+
+    await t.step(
+      "thought capture: native token label is server-owned attribution",
+      async () => {
+        const pool = new FakePool((sql, params) =>
+          sql.includes("INSERT INTO thoughts")
+            ? {
+              rows: [{
+                id: "uuid-native-token",
+                metadata: JSON.parse(params[2] as string),
+              }],
+            }
+            : undefined
+        );
+        const out = await captureThoughtWithMetadata(
+          asPool(pool),
+          {
+            content: "automated private capture",
+            auth: {
+              door: "tailnet",
+              sub: null,
+              tokenLabel: "nightly agent",
+            },
+            via: "mcp",
+          },
+          makeDeps(),
+        );
+        assertEquals(out.metadata.door, "tailnet");
+        assertEquals(out.metadata.sub, null);
+        assertEquals(out.metadata.token_label, "nightly agent");
       },
     );
 
@@ -240,6 +280,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
                 source: "forged-source",
                 door: "forged-door",
                 sub: "forged-sub",
+                token_label: "forged-token-label",
                 provenance: { forged: true },
                 metadata_extraction: { endpoint: "forged-endpoint" },
               },
@@ -263,7 +304,11 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           {
             content: "x",
             provenance: { author: "caller claim" },
-            auth: { door: "funnel", sub: "verified-sub" },
+            auth: {
+              door: "funnel",
+              sub: "verified-sub",
+              tokenLabel: null,
+            },
             via: "mcp",
           },
           deps,
@@ -271,6 +316,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         assertEquals(out.metadata.source, "mcp");
         assertEquals(out.metadata.door, "funnel");
         assertEquals(out.metadata.sub, "verified-sub");
+        assertEquals(out.metadata.token_label, null);
         assertEquals(out.metadata.provenance, {
           schema_version: 1,
           caller_asserted: { author: "caller claim" },
@@ -910,12 +956,41 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
             auth: {
               door: "service",
               sub: "scheduler-client@clients",
+              tokenLabel: null,
             },
           },
           makeDeps(),
         );
         assertEquals(insertParams[24], "service");
         assertEquals(insertParams[25], "scheduler-client@clients");
+      },
+    );
+
+    await t.step(
+      "session capture: native token label supplies non-secret source attribution",
+      async () => {
+        let insertParams: unknown[] = [];
+        const pool = new FakePool((sql, params) => {
+          if (sql.includes("INSERT INTO sessions.session")) {
+            insertParams = params;
+            return { rows: [persistedSession("active")] };
+          }
+          return undefined;
+        });
+        await captureSessionFromToml(
+          asPool(pool),
+          {
+            tomlText: 'title = "native token session"\nstatus = "active"',
+            auth: {
+              door: "tailnet",
+              sub: null,
+              tokenLabel: "nightly agent",
+            },
+          },
+          makeDeps(),
+        );
+        assertEquals(insertParams[24], "tailnet");
+        assertEquals(insertParams[25], "nightly agent");
       },
     );
 

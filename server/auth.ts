@@ -3,22 +3,24 @@ import { createRemoteJWKSet, type JWTPayload, jwtVerify } from "jose";
 import {
   type AuthContext,
   type AuthDoor,
+  isNativeTokenLabel,
   isOAuthSubject,
 } from "./auth_context.ts";
 
 // Hono request-context variables set by `requireAuth` after a
 // successful authentication. Downstream handlers read these to attribute
-// captures to the door of origin and (for OAuth) the JWT subject. Tool
+// captures to the credential class, OAuth subject, and native-token label. Tool
 // handlers receive them as the auth closure argument via
-// createMcpServer(pool, { door, sub }) rather than via Hono context directly,
+// createMcpServer(pool, auth) rather than via Hono context directly,
 // because the @modelcontextprotocol/sdk tool callbacks are not
 // Hono-context-aware.
 //   - door:  "tailnet" when authenticated via x-brain-key;
 //            "funnel"  for an OAuth user Bearer;
 //            "service" for an OAuth client-credentials Bearer.
-//   - sub:   null on x-brain-key (shared tailnet credential, no per-user id);
+//   - sub:   null on x-brain-key (native/static credential, no per-user id);
 //            the verified JWT `sub` claim on either Bearer label (guaranteed —
 //            see `verifyBearer` below, which puts "sub" in jose's requiredClaims).
+//   - tokenLabel: the verified native-token label, otherwise null.
 export type AppVariables = AuthContext;
 
 import {
@@ -26,6 +28,7 @@ import {
   AUTH0_ISSUER,
   AUTH0_JWKS_URI,
   ENABLE_BRAIN_KEY,
+  ENABLE_NATIVE_TOKENS,
   ENABLE_OAUTH,
   JWKS_FETCH_TIMEOUT_MS,
   MCP_ACCESS_KEY,
@@ -200,6 +203,10 @@ function checkBrainKey(provided: string | undefined): boolean {
   if (!provided || MCP_ACCESS_KEY === null) return false;
   return safeEqual(provided, MCP_ACCESS_KEY);
 }
+
+export type NativeAccessTokenVerifier = (
+  token: string,
+) => Promise<{ label: string } | null>;
 
 type VerifiedBearerPayload = JWTPayload & { sub: string };
 
@@ -471,7 +478,7 @@ async function unauthorized(
   );
 }
 
-// Accepts the x-brain-key door (when enabled, MCP_ACCESS_KEY set) OR
+// Accepts the x-brain-key door (native token and/or legacy static key) OR
 // Authorization: Bearer with a valid RS256 JWT (OAuth door, when enabled).
 // Which doors are live is per-deployment: compose-local enables x-brain-key only;
 // the funnel + Qubes deployments enable OAuth only. Caddy in front of a
@@ -486,8 +493,10 @@ async function unauthorized(
 // request carrying BOTH headers authenticates if EITHER is valid — an attacker
 // who could attach a stale x-brain-key can't suppress a valid Bearer in the same
 // request.
-export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> =
-  async (c, next) => {
+export function createRequireAuth(
+  verifyNativeToken: NativeAccessTokenVerifier | null = null,
+): MiddlewareHandler<{ Variables: AppVariables }> {
+  return async (c, next) => {
     // x-brain-key fast path — cheaper than JWT crypto, but only short-circuit
     // on success, and only when the door is enabled. Failure / disabled falls
     // through to the Bearer attempt below.
@@ -499,8 +508,29 @@ export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> =
       // into durable provenance.
       c.set("door", "tailnet");
       c.set("sub", null);
+      c.set("tokenLabel", null);
       await next();
       return;
+    }
+
+    // Native-token path. Token verification is injected by index.ts so this
+    // auth module stays unit-testable without importing db.ts (whose startup
+    // probe intentionally connects at module load). No verifier means no
+    // native credential can match, even if a future caller mis-wires config.
+    if (ENABLE_NATIVE_TOKENS && brainKey && verifyNativeToken) {
+      try {
+        const identity = await verifyNativeToken(brainKey);
+        if (identity && isNativeTokenLabel(identity.label)) {
+          c.set("door", "tailnet");
+          c.set("sub", null);
+          c.set("tokenLabel", identity.label);
+          await next();
+          return;
+        }
+      } catch {
+        // Store/query failures fail closed and still permit an independently
+        // valid OAuth Bearer in the same request to authenticate below.
+      }
     }
 
     let bearerTried = false;
@@ -520,6 +550,7 @@ export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> =
           const payload = await verifyBearer(m[1].trim());
           c.set("door", oauthDoorFor(payload));
           c.set("sub", payload.sub);
+          c.set("tokenLabel", null);
           await next();
           return;
         } catch (_err) {
@@ -535,8 +566,8 @@ export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> =
     // Auth0-only deployment a presented x-brain-key is ignored, so a request
     // with only that header reads as missing_credentials (the honest signal:
     // no credential this server accepts was offered).
-    const brainKeyTried = ENABLE_BRAIN_KEY && brainKey !== undefined &&
-      brainKey !== "";
+    const brainKeyTried = (ENABLE_BRAIN_KEY || ENABLE_NATIVE_TOKENS) &&
+      brainKey !== undefined && brainKey !== "";
     let code: AuthFailureReason;
     if (brainKeyTried && bearerTried) code = "invalid_credentials";
     else if (brainKeyTried) code = "invalid_brain_key";
@@ -545,6 +576,12 @@ export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> =
 
     return unauthorized(c, code);
   };
+}
+
+// Backward-compatible default for unit-test and library consumers. Production
+// wiring uses createRequireAuth(authenticateAccessToken(pool)) in index.ts.
+// When native tokens are disabled (the server default), behavior is identical.
+export const requireAuth = createRequireAuth();
 
 // Public metadata endpoint per RFC 9728. Wired in index.ts only when
 // ENABLE_OAUTH is true — no point advertising an authorization server when

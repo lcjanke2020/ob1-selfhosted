@@ -1,4 +1,4 @@
-// Tests for the door + sub Hono context vars that `requireAuth`
+// Tests for the door + identity Hono context vars that `requireAuth`
 // sets on each successful auth branch. Downstream tool handlers read these
 // (indirectly, via the createMcpServer(pool, { door, sub }) factory closure
 // in mcp-server.ts) and stamp them into thoughts.metadata so a
@@ -37,6 +37,7 @@ const JWKS_URL = "https://test.invalid/.well-known/jwks.json";
 
 const ENV_KEYS = [
   "DB_PASSWORD",
+  "ENABLE_NATIVE_TOKENS",
   "MCP_ACCESS_KEY",
   "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
@@ -61,6 +62,7 @@ function makeApp(
     c.json({
       door: c.get("door"),
       sub: c.get("sub"),
+      tokenLabel: c.get("tokenLabel"),
       subType: c.get("sub") === null ? "null" : typeof c.get("sub"),
     }));
   return app;
@@ -100,6 +102,7 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
   }) as typeof fetch;
 
   Deno.env.set("DB_PASSWORD", "test-password");
+  Deno.env.delete("ENABLE_NATIVE_TOKENS");
   Deno.env.set("MCP_ACCESS_KEY", BRAIN_KEY);
   Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   Deno.env.set("AUTH0_ISSUER", ISSUER);
@@ -124,6 +127,7 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
         const body = await res.json();
         assertEquals(body.door, "tailnet");
         assertEquals(body.sub, null);
+        assertEquals(body.tokenLabel, null);
         assertEquals(
           body.subType,
           "null",
@@ -150,6 +154,7 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
         const body = await res.json();
         assertEquals(body.door, "funnel");
         assertEquals(body.sub, expectedSub);
+        assertEquals(body.tokenLabel, null);
         assertEquals(body.subType, "string");
       },
     );
@@ -175,6 +180,7 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
         const body = await res.json();
         assertEquals(body.door, "service");
         assertEquals(body.sub, expectedSub);
+        assertEquals(body.tokenLabel, null);
       },
     );
 

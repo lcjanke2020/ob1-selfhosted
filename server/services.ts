@@ -202,6 +202,7 @@ export async function captureThoughtWithMetadata(
       "source",
       "door",
       "sub",
+      "token_label",
       "provenance",
       "metadata_extraction",
     ]
@@ -228,6 +229,7 @@ export async function captureThoughtWithMetadata(
     source: input.via,
     door: input.auth.door,
     sub: input.auth.sub,
+    token_label: input.auth.tokenLabel,
     metadata_extraction: extraction.classifier,
   };
   const persisted = await captureThought(pool, {
@@ -399,10 +401,14 @@ export async function captureSessionFromToml(
       // Store the server-verified credential label faithfully, mirroring how
       // capture_thought stamps thoughts.metadata.door. OAuth user surfaces
       // remain indistinguishable from each other and use `funnel`; OAuth
-      // client-credentials identities use `service`; the shared key uses
-      // `tailnet`. These are auth/provenance labels, not Caddy route evidence.
+      // client-credentials identities use `service`; static keys and native
+      // tokens use `tailnet`. These are auth/provenance labels, not Caddy
+      // route evidence.
       source: input.auth.door,
-      sourceNode: input.auth.sub,
+      // OAuth stamps its verified subject. A native token has no identity
+      // principal, but its server-verified label is still useful attribution.
+      // The legacy static key has neither and remains null.
+      sourceNode: input.auth.sub ?? input.auth.tokenLabel,
     },
     rawToml,
     scope,

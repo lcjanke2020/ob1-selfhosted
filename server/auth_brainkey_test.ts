@@ -32,6 +32,7 @@ const TEST_BODY_READ_TIMEOUT_MS = "150";
 
 const ENV_KEYS = [
   "DB_PASSWORD",
+  "ENABLE_NATIVE_TOKENS",
   "MCP_ACCESS_KEY",
   "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
@@ -109,6 +110,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
   Deno.env.delete("AUTH0_AUDIENCE");
   Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
   Deno.env.set("DB_PASSWORD", "test-password");
+  Deno.env.delete("ENABLE_NATIVE_TOKENS");
   Deno.env.set("MCP_ACCESS_KEY", KEY);
   Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   // disable audit emission so unauthorized() doesn't try to open

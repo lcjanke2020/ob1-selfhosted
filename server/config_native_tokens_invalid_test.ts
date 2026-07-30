@@ -1,6 +1,5 @@
-// A shared-key principal is meaningful only when that auth door exists. A
-// stale binding on an OAuth-only deployment must fail boot instead of creating
-// an ambiguous personal-memory identity.
+// The native-token flag accepts an exact boolean spelling. A typo must fail
+// startup instead of silently disabling the only intended authentication door.
 
 import { assertEquals, assertStringIncludes } from "@std/assert";
 
@@ -16,21 +15,18 @@ const ENV_KEYS = [
   "METADATA_FALLBACK_POLICY",
 ];
 
-Deno.test("config.ts: shared-key principal requires the shared-key door", async () => {
+Deno.test("config.ts: invalid native-token flag fails startup", async () => {
   const original = new Map(
     ENV_KEYS.map((key) => [key, Deno.env.get(key)]),
   );
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("METADATA_FALLBACK_POLICY", "off");
+  Deno.env.set("ENABLE_NATIVE_TOKENS", "yes");
   Deno.env.delete("MCP_ACCESS_KEY");
-  Deno.env.delete("ENABLE_NATIVE_TOKENS");
-  Deno.env.set("MCP_ACCESS_KEY_PRINCIPAL", "local-operator");
-  Deno.env.set("AUTH0_ISSUER", "https://example.auth0.com/");
-  Deno.env.set(
-    "AUTH0_JWKS_URI",
-    "https://example.auth0.com/.well-known/jwks.json",
-  );
-  Deno.env.set("AUTH0_AUDIENCE", "https://brain.example.test/mcp");
+  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
+  Deno.env.delete("AUTH0_ISSUER");
+  Deno.env.delete("AUTH0_JWKS_URI");
+  Deno.env.delete("AUTH0_AUDIENCE");
   Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
 
   try {
@@ -38,11 +34,10 @@ Deno.test("config.ts: shared-key principal requires the shared-key door", async 
     try {
       await import("./config.ts");
     } catch (error) {
-      message = (error as Error).message;
+      message = error instanceof Error ? error.message : String(error);
     }
     assertEquals(message.length > 0, true);
-    assertStringIncludes(message, "MCP_ACCESS_KEY_PRINCIPAL");
-    assertStringIncludes(message, "requires MCP_ACCESS_KEY");
+    assertStringIncludes(message, "ENABLE_NATIVE_TOKENS must be true or false");
   } finally {
     for (const [key, value] of original) {
       if (value === undefined) Deno.env.delete(key);

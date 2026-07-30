@@ -105,8 +105,9 @@ services:
       # policy (or uses the uncategorized stub). Leave off until the primary
       # endpoint is verified reachable + safe.
       ENABLE_PRIMARY_EXTRACTION: ${ENABLE_PRIMARY_EXTRACTION:-}
-      # OAuth-only deployment: no x-brain-key door (MCP_ACCESS_KEY omitted),
-      # so a leaked static key can't be used against this public install.
+      # OAuth-only deployment: pin native-token verification off and omit
+      # MCP_ACCESS_KEY, so no x-brain-key can be used against this public install.
+      ENABLE_NATIVE_TOKENS: "false"
       #
       # ENABLE_REST_API is DELIBERATELY not set here: the REST gateway
       # (/api/v1) is a docker-compose-install feature and this deployment's

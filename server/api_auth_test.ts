@@ -13,6 +13,7 @@ const KEY = "k".repeat(64);
 
 const ENV_KEYS = [
   "DB_PASSWORD",
+  "ENABLE_NATIVE_TOKENS",
   "MCP_ACCESS_KEY",
   "MCP_ACCESS_KEY_PRINCIPAL",
   "AUTH0_ISSUER",
@@ -53,6 +54,7 @@ Deno.test("REST /api/v1 — auth failure shapes", async (t) => {
   Deno.env.delete("AUTH0_AUDIENCE");
   Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
   Deno.env.set("DB_PASSWORD", "test-password");
+  Deno.env.delete("ENABLE_NATIVE_TOKENS");
   Deno.env.set("MCP_ACCESS_KEY", KEY);
   Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");

@@ -139,9 +139,17 @@ Deno.test("browserless client_credentials authenticates through MCP and REST ser
     );
     mcpApp = new Hono<{ Variables: AppVariables }>();
     mcpApp.post("/mcp", requireAuth, async (c) => {
-      const auth = authContextFromValues(c.get("door"), c.get("sub"));
+      const auth = authContextFromValues(
+        c.get("door"),
+        c.get("sub"),
+        c.get("tokenLabel"),
+      );
       if (!auth) throw new Error("service auth context was not accepted");
-      assertEquals(auth, { door: "service", sub: SUBJECT });
+      assertEquals(auth, {
+        door: "service",
+        sub: SUBJECT,
+        tokenLabel: null,
+      });
 
       const transport = new StreamableHTTPTransport();
       const server = createMcpServer(pool, auth);
@@ -176,7 +184,7 @@ Deno.test("browserless client_credentials authenticates through MCP and REST ser
     assertEquals(output.code, 0, stderr);
     assertStringIncludes(
       stdout,
-      "OK: browserless client_credentials authenticated to open-brain-homelab 1.18.0",
+      "OK: browserless client_credentials authenticated to open-brain-homelab 1.19.0",
     );
     assertStringIncludes(stdout, "signed gty=client-credentials present");
     for (const sensitive of [CLIENT_SECRET, accessToken, SUBJECT]) {

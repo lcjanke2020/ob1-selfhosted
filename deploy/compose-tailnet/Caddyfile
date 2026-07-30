@@ -149,12 +149,11 @@
 
 	# ----- Credentials are NOT stripped per-branch ---------------------
 	# x-brain-key is passed through to the server, which decides whether to
-	# accept it: the funnel + Qubes deployments leave MCP_ACCESS_KEY unset
-	# (the server ignores any x-brain-key — OAuth is the sole door), while
-	# the single-box compose-local install sets it and accepts the key over
-	# this same path, gated by the Anthropic IP allowlist below. Either way
-	# the key never reaches disk — the access-log `format filter` deletes
-	# the X-Brain-Key header (see the loggers below).
+	# accept it. Funnel + Qubes clear MCP_ACCESS_KEY and set
+	# ENABLE_NATIVE_TOKENS=false, so OAuth is the sole door even if the header
+	# is forwarded. A private local install may accept native/static credentials.
+	# Either way the key never reaches disk — the access-log `format filter`
+	# deletes the X-Brain-Key header (see the loggers below).
 
 	# NOTE: the tailnet branch does NOT strip Authorization. This Caddyfile
 	# fronts the OAuth-only deployments (single-box funnel + the Qubes split),

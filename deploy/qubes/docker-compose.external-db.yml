@@ -15,8 +15,8 @@
 #   1. Parks the bundled `postgres` service under a profile that is never
 #      activated, so `docker compose up` does not start it. (DB_HOST in .env
 #      points mcp/log-ingester at the real database instead.)
-#   2. Clears the `depends_on: postgres` health-gate on mcp and log-ingester —
-#      there is no local postgres to wait on. Uses the `!reset` tag (compose
+#   2. Clears the `depends_on: postgres` health-gate on mcp, token-admin, and
+#      log-ingester — there is no local postgres to wait on. Uses the `!reset` tag (compose
 #      needs a Compose v2 that supports `!reset`; v2.24.4 documents it), same mechanism as
 #      docker-compose.pattern-b.yml's `ports: !reset`.
 #   3. Makes DB_HOST mandatory under this override (fail-fast at `docker compose
@@ -57,6 +57,14 @@ services:
       # Fail-fast: with the bundled `postgres` parked, an unset DB_HOST would
       # default to the now-nonexistent `postgres` name and fail only at connect
       # time. `:?` makes compose error at config time with this message instead.
+      DB_HOST: ${DB_HOST:?set DB_HOST to the external Postgres address (e.g. the DB qube) when layering the external-db override}
+
+  # Optional one-shot local native-token lifecycle tool. Keep its profile from
+  # the base file, but point it at the same external database without reviving
+  # the parked bundled Postgres dependency.
+  token-admin:
+    depends_on: !reset null
+    environment:
       DB_HOST: ${DB_HOST:?set DB_HOST to the external Postgres address (e.g. the DB qube) when layering the external-db override}
 
   # Gated behind `pattern-b` (where the service is actually defined) so loading

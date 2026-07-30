@@ -87,6 +87,7 @@ export async function probeDbAtBoot(
         boolean,
         boolean,
         boolean,
+        boolean,
       ]>(
         `SELECT
            to_regclass('public.idx_thoughts_content_tsv') IS NOT NULL,
@@ -234,7 +235,7 @@ export async function probeDbAtBoot(
                        'public.metadata_degradation_events'
                      )
                  AND conname =
-                       'metadata_degradation_events_thought_id_fkey'
+                     'metadata_degradation_events_thought_id_fkey'
                  AND confdeltype = 'n'
              )
              AND EXISTS (
@@ -244,8 +245,16 @@ export async function probeDbAtBoot(
                        'public.metadata_degradation_notification_state'
                      )
                  AND conname =
-                       'metadata_degradation_failed_channels_shape'
-             )`,
+                     'metadata_degradation_failed_channels_shape'
+             ),
+           to_regclass('native_auth.access_token') IS NOT NULL
+             AND to_regclass('native_auth.access_token_id_seq') IS NOT NULL
+             AND to_regprocedure(
+               'native_auth.register_access_token(text,bytea,text)'
+             ) IS NOT NULL
+             AND to_regprocedure(
+               'native_auth.revoke_access_token(text)'
+             ) IS NOT NULL`,
       );
       const [
         hasFtsIndex,
@@ -257,7 +266,9 @@ export async function probeDbAtBoot(
         hasScopedSearch,
         hasRlsEnforcement,
         hasMetadataDegradationSchema,
+        hasNativeAccessTokenSchema,
       ] = schema.rows[0] ?? [
+        false,
         false,
         false,
         false,
@@ -307,6 +318,13 @@ export async function probeDbAtBoot(
             `metadata-degradation audit schema or notification ledger. Apply ` +
             `db/07-metadata-degradation.sql as the database owner before ` +
             `starting this server version.`,
+        );
+      }
+      if (!hasNativeAccessTokenSchema) {
+        throw new RequiredSchemaError(
+          `[db] Postgres at ${target} is missing native access-token schema. ` +
+            `Apply db/08-access-tokens.sql as the database owner, then run ` +
+            `db/03-grants-assertion.sql before starting this server version.`,
         );
       }
       // Only reference the ledger after to_regclass proved it exists. Putting

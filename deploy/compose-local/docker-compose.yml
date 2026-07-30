@@ -68,6 +68,9 @@ services:
       # Optional SELECT-only role for the host-side funnel monitor
       # (scripts/funnel_monitor.sh). Same contract: empty → skipped.
       OPENBRAIN_MONITOR_PASSWORD: ${OPENBRAIN_MONITOR_PASSWORD:-}
+      # Dedicated lifecycle role for native access tokens. Empty creates a
+      # NOLOGIN role; set before first init to use the token-admin profile.
+      OPENBRAIN_TOKEN_ADMIN_PASSWORD: ${OPENBRAIN_TOKEN_ADMIN_PASSWORD:-}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # Init files are mounted individually rather than the whole ../../db
@@ -81,6 +84,7 @@ services:
       - ../../db/05-hybrid-search.sql:/docker-entrypoint-initdb.d/05-hybrid-search.sql:ro
       - ../../db/06-spaces.sql:/docker-entrypoint-initdb.d/06-spaces.sql:ro
       - ../../db/07-metadata-degradation.sql:/docker-entrypoint-initdb.d/07-metadata-degradation.sql:ro
+      - ../../db/08-access-tokens.sql:/docker-entrypoint-initdb.d/08-access-tokens.sql:ro
       # Keep the stable source filename, but run the catalog assertion last so
       # later/future schemas are covered by its monitor relation allowlist.
       - ../../db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro
@@ -173,15 +177,19 @@ services:
       # opt-out.) The Qubes deployment does NOT set this — REST is
       # deliberately absent there (smaller attack surface).
       ENABLE_REST_API: ${ENABLE_REST_API:-true}
-      # x-brain-key door for this single-box install. Empty disables it; set it
-      # (or all three AUTH0_* below) — at least one auth door is required.
+      # Hash-only, labeled, revocable credentials for the same non-OIDC
+      # x-brain-key header. Enabled by default only in this local deployment;
+      # the public Pattern B override pins it false.
+      ENABLE_NATIVE_TOKENS: ${ENABLE_NATIVE_TOKENS:-true}
+      # Legacy static credential for this single-box install. Empty disables
+      # only the static-key matcher; native tokens above keep the door active.
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY:-}
-      # Optional stable identity for this single-user shared-key deployment.
+      # Optional stable identity for this single-user native/static deployment.
       # Required to use personal visibility, including the sensitive space.
       MCP_ACCESS_KEY_PRINCIPAL: ${MCP_ACCESS_KEY_PRINCIPAL:-}
       CITATION_BASE_URL: ${CITATION_BASE_URL:-https://openbrain.local/thoughts}
       # Auth0 OAuth resource-server config. Leave all three empty to keep
-      # x-brain-key as the only auth. Set all three to ALSO enable the
+      # the native/static door as the only auth. Set all three to ALSO enable the
       # OAuth/Funnel door (caddy fronts it and enforces the IP allowlist).
       AUTH0_ISSUER: ${AUTH0_ISSUER:-}
       AUTH0_JWKS_URI: ${AUTH0_JWKS_URI:-}
@@ -206,6 +214,38 @@ services:
     # body cap, access logging).
     ports:
       - "127.0.0.1:8787:8787"
+
+  # Operator-only native-token lifecycle CLI. Profile-gated so the dedicated
+  # credential is absent from the long-running application container and this
+  # process exists only for one explicit create/list/revoke invocation.
+  token-admin:
+    build:
+      context: ../../server
+    profiles:
+      - tools
+    restart: "no"
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=16M,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint:
+      - deno
+      - run
+      - --allow-net
+      - --allow-env
+      - /app/token_admin.ts
+    environment:
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${POSTGRES_DB:-openbrain}
+      DB_USER: openbrain_token_admin
+      DB_PASSWORD: ${OPENBRAIN_TOKEN_ADMIN_PASSWORD:-}
 
   caddy:
     # Derived from caddy:2-alpine — strips the cap_net_bind_service=ep file

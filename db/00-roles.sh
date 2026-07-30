@@ -67,3 +67,27 @@ EOSQL
 else
   echo "[00-roles] OPENBRAIN_MONITOR_PASSWORD not set; skipping openbrain_monitor (no host-side funnel monitor)"
 fi
+
+# Dedicated native-token lifecycle role. It can list non-secret token metadata
+# and execute the reviewed register/revoke functions from db/08-access-tokens.sql,
+# but it cannot read token hashes or any memory relation. Public/OAuth-only
+# deployments may leave the password empty; the NOLOGIN role still exists so
+# the schema and grant assertions converge without creating a usable credential.
+if [ -n "${OPENBRAIN_TOKEN_ADMIN_PASSWORD:-}" ]; then
+  psql -v ON_ERROR_STOP=1 \
+    --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+    --set=token_admin_password="$OPENBRAIN_TOKEN_ADMIN_PASSWORD" \
+    <<-'EOSQL'
+    CREATE ROLE openbrain_token_admin LOGIN NOSUPERUSER NOCREATEDB
+      NOCREATEROLE NOREPLICATION NOBYPASSRLS
+      PASSWORD :'token_admin_password';
+EOSQL
+else
+  psql -v ON_ERROR_STOP=1 \
+    --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+    <<-'EOSQL'
+    CREATE ROLE openbrain_token_admin NOLOGIN NOSUPERUSER NOCREATEDB
+      NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+EOSQL
+  echo "[00-roles] OPENBRAIN_TOKEN_ADMIN_PASSWORD not set; openbrain_token_admin is NOLOGIN"
+fi
