@@ -368,12 +368,10 @@ if ((AUTH0_ISSUER || AUTH0_JWKS_URI || AUTH0_AUDIENCE) && !ENABLE_OAUTH) {
   );
 }
 
-// Auth0 identifies access tokens minted by the client-credentials grant with
-// the signed `gty = "client-credentials"` claim. That gives its M2M tokens an
-// automatic, server-verifiable `service` provenance label. OAuth does not
-// standardize a grant-type claim in access tokens, however, so another issuer
-// may provide no equivalent signal even when its JWT is otherwise valid. This
-// optional exact-subject allowlist supplies the provider-neutral fallback.
+// Auth0's default access-token profile identifies client-credentials tokens
+// with the signed `gty = "client-credentials"` claim. Its RFC 9068 profile and
+// many other issuers provide no grant-type claim even when the JWT is otherwise
+// valid. This optional exact-subject allowlist supplies that fallback.
 //
 // It changes attribution only, never authentication or authorization: every
 // token still has to pass signature/issuer/audience/algorithm/exp/sub checks,

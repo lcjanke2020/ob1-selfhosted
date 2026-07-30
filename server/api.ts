@@ -14,7 +14,7 @@ import { bodyLimit } from "hono/body-limit";
 import type { Pool } from "postgres";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { z } from "zod";
-import { isAuthDoor } from "./auth_context.ts";
+import { authContextFromValues } from "./auth_context.ts";
 
 import {
   type AppVariables,
@@ -109,11 +109,11 @@ const restifyAuthFailure: MiddlewareHandler<{ Variables: AppVariables }> =
 // requireAuth before a handler runs; if a future refactor drops the c.set
 // calls, fail as a 500 (via onError) rather than persisting door: undefined.
 function authOr500(c: ApiContext): AuthContext {
-  const door = c.get("door");
-  if (!isAuthDoor(door)) {
+  const auth = authContextFromValues(c.get("door"), c.get("sub"));
+  if (!auth) {
     throw new Error("auth context missing after requireAuth");
   }
-  return { door, sub: c.get("sub") ?? null };
+  return auth;
 }
 
 async function readJsonBody(c: ApiContext): Promise<unknown> {

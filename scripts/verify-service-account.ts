@@ -62,6 +62,36 @@ export function buildTokenRequest(config: TokenRequestConfig): Request {
     method: "POST",
     headers,
     body,
+    // A 307/308 would otherwise replay the client_secret_post body. Token
+    // endpoints must be configured directly; never forward credentials.
+    redirect: "error",
+  });
+}
+
+export function buildInitializeRequest(mcpUrl: string, token: string): Request {
+  return new Request(mcpUrl, {
+    method: "POST",
+    headers: {
+      "accept": "application/json, text/event-stream",
+      "authorization": `Bearer ${token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: {
+          name: "openbrain-service-account-smoke",
+          version: "1.0.0",
+        },
+      },
+    }),
+    // Authorization is just as sensitive as the client secret. Require the
+    // operator to supply the final MCP URL rather than following redirects.
+    redirect: "error",
   });
 }
 
@@ -196,17 +226,44 @@ function authMethod(): ClientAuthMethod {
   return value;
 }
 
-async function responseText(response: Response): Promise<string> {
-  const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+export async function responseText(response: Response): Promise<string> {
+  const declaredHeader = response.headers.get("content-length");
+  const declared = declaredHeader === null ? null : Number(declaredHeader);
+  if (
+    declared !== null && Number.isFinite(declared) &&
+    declared > MAX_RESPONSE_BYTES
+  ) {
     await response.body?.cancel();
     throw new Error("remote response exceeded the 1 MiB smoke-test limit");
   }
-  const text = await response.text();
-  if (new TextEncoder().encode(text).byteLength > MAX_RESPONSE_BYTES) {
-    throw new Error("remote response exceeded the 1 MiB smoke-test limit");
+
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_RESPONSE_BYTES) {
+      try {
+        await reader.cancel();
+      } catch {
+        // Preserve the deterministic size error even if cancellation races a
+        // peer close.
+      }
+      throw new Error("remote response exceeded the 1 MiB smoke-test limit");
+    }
+    chunks.push(value);
   }
-  return text;
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 function providerErrorCode(body: string): string | null {
@@ -265,28 +322,10 @@ async function main(): Promise<void> {
     throw new Error("access token sub is missing or unsafe to display");
   }
 
-  const initializeResponse = await fetch(mcpUrl, {
-    method: "POST",
-    headers: {
-      "accept": "application/json, text/event-stream",
-      "authorization": `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2025-06-18",
-        capabilities: {},
-        clientInfo: {
-          name: "openbrain-service-account-smoke",
-          version: "1.0.0",
-        },
-      },
-    }),
-    signal: AbortSignal.timeout(timeout),
-  });
+  const initializeResponse = await fetch(
+    buildInitializeRequest(mcpUrl, token),
+    { signal: AbortSignal.timeout(timeout) },
+  );
   const initializeBody = await responseText(initializeResponse);
   if (!initializeResponse.ok) {
     throw new Error(
@@ -310,11 +349,11 @@ async function main(): Promise<void> {
   );
   if (payload.gty === "client-credentials") {
     console.log(
-      "Attribution: signed gty=client-credentials present; Open Brain labels this identity service.",
+      "Attribution signal: signed gty=client-credentials present; expected server label is service.",
     );
   } else {
     console.log(
-      "Attribution: no automatic Auth0 gty claim; service labeling requires this exact subject in OAUTH_SERVICE_ACCOUNT_SUBJECTS.",
+      "Attribution signal: no signed gty=client-credentials claim; service labeling requires this exact subject in OAUTH_SERVICE_ACCOUNT_SUBJECTS.",
     );
   }
   if (Deno.env.get("OAUTH_SMOKE_PRINT_SUBJECT") === "true") {

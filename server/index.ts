@@ -19,7 +19,7 @@
 
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { type Context, Hono } from "hono";
-import { type AuthContext, isAuthDoor } from "./auth_context.ts";
+import { type AuthContext, authContextFromValues } from "./auth_context.ts";
 
 import {
   ENABLE_BRAIN_KEY,
@@ -125,12 +125,11 @@ if (ENABLE_REST_API) {
 function authContextOr500(c: Context<{ Variables: AppVariables }>):
   | AuthContext
   | Response {
-  const door = c.get("door");
-  const sub = c.get("sub") ?? null;
-  if (!isAuthDoor(door)) {
+  const auth = authContextFromValues(c.get("door"), c.get("sub"));
+  if (!auth) {
     return c.json({ error: "auth_context_missing" }, 500);
   }
-  return { door, sub };
+  return auth;
 }
 
 app.all("/mcp", requireAuth, async (c) => {

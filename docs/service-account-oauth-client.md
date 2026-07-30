@@ -13,9 +13,10 @@ signed access-token trust boundary.
 ## Identity and provenance contract
 
 Authentication remains unchanged. Open Brain accepts only an RS256 JWT whose
-signature, issuer, audience, expiration, and non-empty `sub` pass the existing
-checks. A machine identity does not introduce another credential verifier or
-bypass authorization.
+signature, issuer, audience, expiration, and `sub` pass the existing checks.
+The subject must be a non-empty string of at most 1,024 characters with no
+control characters. A machine identity does not introduce another credential
+verifier or bypass authorization.
 
 After verification, the server assigns one of three provenance labels:
 
@@ -30,12 +31,15 @@ of the Caddy network route. A service-account request normally arrives through
 the private tailnet branch but is stamped `service` because its credential is a
 machine JWT.
 
-Auth0 access tokens minted with `client_credentials` include the signed
-`gty=client-credentials` claim, as shown in Auth0's
-[access-token examples](https://auth0.com/docs/manage-users/organizations/using-tokens),
-which Open Brain recognizes automatically. The OAuth access-token standard does
-not define a universal grant-type claim, so a generic issuer may need an exact,
-operator-controlled subject mapping:
+Auth0's **default Auth0 access-token profile** includes the signed
+`gty=client-credentials` claim on M2M tokens, which Open Brain recognizes
+automatically. Auth0's selectable **RFC 9068 profile does not use `gty`**; it
+uses `client_id` instead, and therefore needs the same exact-subject mapping as
+a generic issuer. See Auth0's
+[access-token profile comparison](https://auth0.com/docs/secure/tokens/access-tokens/access-token-profiles).
+The OAuth access-token standard does not define a universal grant-type claim,
+so any token profile without `gty` needs an exact, operator-controlled subject
+mapping:
 
 ```dotenv
 OAUTH_SERVICE_ACCOUNT_SUBJECTS=scheduled-capture-client,search-indexer-client
@@ -86,18 +90,39 @@ Caddy with 403 before OAuth is attempted.
    boundary. Authorize that application for the Open Brain API. Grant only the
    scopes your tenant policy requires; this Open Brain release validates the
    resource audience but does not yet enforce provider scope strings.
-3. Record the tenant token endpoint, client ID, and client secret in the
-   automation's secret store. Do not copy them into this repository or command
-   arguments.
-4. Run the browserless smoke test below with `OAUTH_AUDIENCE` set. Auth0 uses
+3. Check the API's access-token profile. The default Auth0 profile emits the
+   signed `gty` signal; the RFC 9068 profile does not and requires the exact
+   verified M2M subject in `OAUTH_SERVICE_ACCOUNT_SUBJECTS`.
+4. On the application's **Credentials** tab choose **Client Secret (Post)** for
+   the documented path. Record the tenant token endpoint, client ID, and client
+   secret in the automation's secret store. Do not copy them into this
+   repository or command arguments.
+5. Run the browserless smoke test below with `OAUTH_AUDIENCE` set. Auth0 uses
    `client_secret_post` for the documented request, which is the helper's
    default.
-5. Confirm the helper reports `signed gty=client-credentials present`. No
-   `OAUTH_SERVICE_ACCOUNT_SUBJECTS` entry is needed.
+6. If the helper reports `signed gty=client-credentials present`, no subject
+   entry is needed. If it reports no signed `gty` (including the Auth0 RFC 9068
+   profile), perform the one-time verified-subject mapping procedure below.
 
 Auth0's [Machine-to-Machine application guide](https://auth0.com/docs/get-started/auth0-overview/create-applications/machine-to-machine-apps)
 and [client-credentials token request](https://auth0.com/docs/api/authentication/client-credential-flow/get-token)
 are the provider source of truth.
+
+## Supported application authentication methods
+
+Auth0 or the configured issuer authenticates the M2M application at its token
+endpoint; Open Brain sees only the resulting bearer token. The tracked helper
+supports `client_secret_post` (default, and the documented Auth0 choice) and
+`client_secret_basic` (the documented Okta-style choice). It deliberately
+refuses token-endpoint redirects so neither form credentials nor an MCP bearer
+token can be replayed to a second URL.
+
+The helper does not implement `private_key_jwt`, mTLS client certificates, or
+public-client `none` authentication. Auth0 supports Client Secret (Post), Client
+Secret (Basic), and—on eligible plans—Private Key JWT; selecting Private Key JWT
+requires a separate client-assertion implementation outside this verified
+runbook. See Auth0's
+[application credential-method documentation](https://auth0.com/docs/get-started/applications/configure-private-key-jwt).
 
 ## Okta or another enterprise issuer
 
@@ -117,11 +142,11 @@ for authorization-server and policy setup. For any other issuer, determine its
 token endpoint, client authentication method, required audience/resource
 parameter, scopes, and JWT signing profile from its documentation.
 
-Most non-Auth0 tokens will not contain `gty`. Run the smoke once with
-`OAUTH_SMOKE_PRINT_SUBJECT=true`, copy only the reported verified subject into
-`OAUTH_SERVICE_ACCOUNT_SUBJECTS` on the server, recreate the MCP container, and
-run the smoke again. Never infer the subject from a dashboard label: use the
-exact value in the token that Open Brain successfully verified.
+Auth0 RFC 9068 tokens and most non-Auth0 tokens will not contain `gty`. Run the
+smoke once with `OAUTH_SMOKE_PRINT_SUBJECT=true`, copy only the reported verified
+subject into `OAUTH_SERVICE_ACCOUNT_SUBJECTS` on the server, recreate the MCP
+container, and run the smoke again. Never infer the subject from a dashboard
+label: use the exact value in the token that Open Brain successfully verified.
 
 RFC 9068 recommends that a client-credentials JWT `sub` identify the client
 application; it also requires a `client_id` claim for that JWT profile. Open
@@ -129,6 +154,12 @@ Brain deliberately does not treat the mere presence of `client_id`, `azp`, or a
 provider-specific equivalent as proof of a machine grant, because those claims
 can also occur in user flows. Exact subject configuration is the conservative
 generic fallback. See [RFC 9068](https://www.rfc-editor.org/rfc/rfc9068.html).
+
+Open Brain treats a verified literal `gty=client-credentials` as an issuer
+assertion regardless of provider name. If a generic issuer lets applications
+inject a custom claim literally named `gty`, reserve or block that claim at the
+issuer when the human/machine audit distinction matters. This affects
+attribution only, not access or memory scope.
 
 ## Browserless smoke test
 
@@ -158,13 +189,13 @@ Replace both example hosts and narrow `--allow-net` to the real issuer and MCP
 hosts. For Okta-style requests, set `OAUTH_SCOPE` and
 `OAUTH_CLIENT_AUTH_METHOD=client_secret_basic`; `OAUTH_AUDIENCE` may be omitted
 when the provider does not use it. Set `OAUTH_SMOKE_PRINT_SUBJECT=true` only for
-the generic-issuer discovery run, then unset it.
+the Auth0 RFC 9068 or generic-issuer discovery run, then unset it.
 
 A successful Auth0 run ends like this, without disclosing the credential:
 
 ```text
 OK: browserless client_credentials authenticated to open-brain-homelab 1.18.0
-Attribution: signed gty=client-credentials present; Open Brain labels this identity service.
+Attribution signal: signed gty=client-credentials present; expected server label is service.
 ```
 
 The helper proves token issuance and end-to-end MCP authentication. The server
@@ -210,6 +241,7 @@ which occur before Open Brain receives a Bearer token.
 | Symptom | Likely cause and response |
 |---|---|
 | Token endpoint returns `invalid_client` | Wrong secret, wrong client-auth method, disabled application, or a rotated credential. Confirm provider configuration; do not paste the secret into logs. |
+| Helper refuses a token or MCP redirect | Use the final token and MCP endpoint URLs. Redirects are intentionally disabled so a 307/308 cannot replay a client secret or bearer token. |
 | Token endpoint rejects audience or scope | The API was not authorized for the M2M application, the audience differs byte-for-byte, or the authorization-server policy does not grant the requested scope. |
 | Helper reports an opaque/malformed token | The provider did not issue the RS256 JWT access-token profile Open Brain accepts. Configure a custom authorization server/API that emits JWTs; introspection is not supported. |
 | MCP returns 401 | Check `iss`, `aud`, `exp`, `sub`, RS256, the configured JWKS URI, and clock skew. Open Brain deliberately returns the same public message for every validation failure; use the reason-coded auth audit and provider logs. |
@@ -229,5 +261,6 @@ access-token lifetime that bounds that residual window.
 
 Deleting and recreating an application may change its `sub`. For a generic
 issuer, update `OAUTH_SERVICE_ACCOUNT_SUBJECTS` only after a successful verified
-smoke. For Auth0, the signed `gty` signal remains automatic, but a changed `sub`
-still creates a new personal-memory principal.
+smoke. For Auth0's default token profile, the signed `gty` signal remains
+automatic; the RFC 9068 profile still needs the exact mapped subject. Either
+way, a changed `sub` creates a new personal-memory principal.

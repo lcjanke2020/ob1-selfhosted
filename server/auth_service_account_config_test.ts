@@ -54,6 +54,23 @@ Deno.test("service-account subject config is exact, bounded, and OAuth-only", as
     ]);
   });
 
+  await t.step(
+    "exact subject-count and subject-length limits are valid",
+    async () => {
+      const subjects = [
+        ...Array.from({ length: 255 }, (_, index) => `service-${index}`),
+        "s".repeat(1_024),
+      ];
+      const result = await runConfig({
+        OAUTH_SERVICE_ACCOUNT_SUBJECTS: subjects.join(","),
+      });
+      assertEquals(result.code, 0, result.stderr);
+      const parsed = JSON.parse(result.stdout);
+      assertEquals(parsed.length, 256);
+      assertEquals(parsed.at(-1).length, 1_024);
+    },
+  );
+
   for (
     const [name, value, expected] of [
       ["empty entry", "service-a,,service-b", "non-empty exact JWT subjects"],

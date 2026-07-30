@@ -1,12 +1,16 @@
 // End-to-end browserless proof: the tracked operator helper exchanges
 // client_credentials against a local OAuth fixture, then authenticates an MCP
-// initialize request through the real requireAuth JWT verifier. No browser,
-// static brain key, external network, database, or secret-bearing output.
+// initialize request through the real requireAuth verifier and MCP factory. It
+// also drives the same service Bearer through the REST auth-context gate. No
+// browser, static brain key, external network, real database, or secret output.
 
 import { assertEquals, assertStringIncludes } from "@std/assert";
+import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { authContextFromValues } from "./auth_context.ts";
 import type { AppVariables } from "./auth.ts";
+import { asPool, FakePool, makeDeps } from "./api_test_support.ts";
 
 const CLIENT_ID = "headless-test-client";
 const CLIENT_SECRET = "headless-test-secret";
@@ -28,7 +32,7 @@ const ENV_KEYS = [
   "JWKS_FETCH_TIMEOUT_MS",
 ];
 
-Deno.test("browserless client_credentials helper authenticates through requireAuth", async () => {
+Deno.test("browserless client_credentials authenticates through MCP and REST service gates", async () => {
   const original = new Map(
     ENV_KEYS.map((key) => [key, Deno.env.get(key)] as const),
   );
@@ -121,25 +125,28 @@ Deno.test("browserless client_credentials helper authenticates through requireAu
     }) as typeof fetch;
 
     const { requireAuth } = await import("./auth.ts");
+    const { createMcpServer } = await import("./mcp-server.ts");
+    const { createApiRouter } = await import("./api.ts");
+    const pool = asPool(
+      new FakePool((sql) =>
+        sql.includes("COUNT(*)::int AS count")
+          ? { rows: [{ count: 0, earliest: null, latest: null }] }
+          : sql.includes("AS k") || sql.includes("AS topic") ||
+              sql.includes("AS person")
+          ? { rows: [] }
+          : undefined
+      ),
+    );
     mcpApp = new Hono<{ Variables: AppVariables }>();
-    mcpApp.use("*", requireAuth);
-    mcpApp.post("/mcp", async (c) => {
-      const request = await c.req.json();
-      assertEquals(request.method, "initialize");
-      assertEquals(c.get("door"), "service");
-      assertEquals(c.get("sub"), SUBJECT);
-      return c.json({
-        jsonrpc: "2.0",
-        id: request.id,
-        result: {
-          protocolVersion: "2025-06-18",
-          capabilities: {},
-          serverInfo: {
-            name: "open-brain-homelab",
-            version: "1.18.0",
-          },
-        },
-      });
+    mcpApp.post("/mcp", requireAuth, async (c) => {
+      const auth = authContextFromValues(c.get("door"), c.get("sub"));
+      if (!auth) throw new Error("service auth context was not accepted");
+      assertEquals(auth, { door: "service", sub: SUBJECT });
+
+      const transport = new StreamableHTTPTransport();
+      const server = createMcpServer(pool, auth);
+      await server.connect(transport);
+      return transport.handleRequest(c);
     });
 
     const command = new Deno.Command("deno", {
@@ -171,13 +178,23 @@ Deno.test("browserless client_credentials helper authenticates through requireAu
       stdout,
       "OK: browserless client_credentials authenticated to open-brain-homelab 1.18.0",
     );
-    assertStringIncludes(stdout, "Open Brain labels this identity service");
+    assertStringIncludes(stdout, "signed gty=client-credentials present");
     for (const sensitive of [CLIENT_SECRET, accessToken, SUBJECT]) {
       assertEquals(stdout.includes(sensitive), false);
       assertEquals(stderr.includes(sensitive), false);
     }
     assertEquals(tokenRequests, 1);
     assertEquals(mcpRequests, 1);
+
+    // Drive a real REST handler far enough to turn the middleware-populated
+    // service context into a service-layer argument. This pins api.ts's
+    // defensive gate instead of proving only the middleware classifier.
+    const api = createApiRouter(pool, makeDeps());
+    const restResponse = await api.request("/thoughts/stats", {
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+    assertEquals(restResponse.status, 200);
+    assertEquals((await restResponse.json()).count, 0);
   } finally {
     globalThis.fetch = originalFetch;
     await fixture.shutdown();

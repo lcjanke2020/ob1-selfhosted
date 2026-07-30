@@ -1,6 +1,10 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { createRemoteJWKSet, type JWTPayload, jwtVerify } from "jose";
-import type { AuthContext, AuthDoor } from "./auth_context.ts";
+import {
+  type AuthContext,
+  type AuthDoor,
+  isOAuthSubject,
+} from "./auth_context.ts";
 
 // Hono request-context variables set by `requireAuth` after a
 // successful authentication. Downstream handlers read these to attribute
@@ -197,7 +201,9 @@ function checkBrainKey(provided: string | undefined): boolean {
   return safeEqual(provided, MCP_ACCESS_KEY);
 }
 
-async function verifyBearer(token: string): Promise<JWTPayload> {
+type VerifiedBearerPayload = JWTPayload & { sub: string };
+
+async function verifyBearer(token: string): Promise<VerifiedBearerPayload> {
   if (!jwks) throw new Error("OAuth not enabled");
   // `requiredClaims: ["exp"]` forces the token to carry an
   // expiration claim. jose's default behavior validates `exp` only when
@@ -220,20 +226,27 @@ async function verifyBearer(token: string): Promise<JWTPayload> {
     algorithms: ["RS256"],
     requiredClaims: ["exp", "sub"],
   });
-  return payload;
+  // `requiredClaims` checks presence, not the claim's runtime type or value.
+  // Validate before classification so an empty/non-string/unsafe identity can
+  // never cross into RLS ownership or durable provenance.
+  if (!isOAuthSubject(payload.sub)) {
+    throw new Error("OAuth token subject is invalid");
+  }
+  return payload as VerifiedBearerPayload;
 }
 
-// Classify only a successfully-verified payload. Auth0's signed `gty` claim is
-// the automatic path; the exact-subject set covers providers whose access-token
-// profile has no grant-type claim. Neither path changes the verified subject or
-// grants access — it only makes machine identity explicit in provenance.
-export function oauthDoorFor(payload: JWTPayload): Extract<
+// Classify only a successfully-verified payload. Auth0's default token profile
+// supplies the signed `gty` automatic path; its RFC 9068 profile and generic
+// providers may instead require the exact-subject mapping. Neither path changes
+// the verified subject or grants access — it only makes machine identity
+// explicit in provenance.
+export function oauthDoorFor(payload: VerifiedBearerPayload): Extract<
   AuthDoor,
   "funnel" | "service"
 > {
   if (
     payload.gty === "client-credentials" ||
-    (payload.sub && OAUTH_SERVICE_ACCOUNT_SUBJECTS.has(payload.sub))
+    OAUTH_SERVICE_ACCOUNT_SUBJECTS.has(payload.sub)
   ) {
     return "service";
   }
@@ -499,15 +512,14 @@ export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> =
         try {
           // Capture the verified payload's `sub` claim, then classify the
           // OAuth credential as a user (`funnel`) or machine (`service`).
-          // `verifyBearer` requires `sub` via jose's
-          // requiredClaims (see above), so payload.sub is guaranteed
-          // non-undefined here; the non-null assertion is a type narrow,
-          // not a runtime gamble. the single-vs-dual-door decision (deliberately open)
+          // `verifyBearer` requires and runtime-validates `sub` (see above),
+          // so only a bounded non-empty string reaches either context field.
+          // The single-vs-dual-door decision (deliberately open)
           // remains separate scope — the source-marker work doesn't
           // depend on either outcome of that deliberation.
           const payload = await verifyBearer(m[1].trim());
           c.set("door", oauthDoorFor(payload));
-          c.set("sub", payload.sub!);
+          c.set("sub", payload.sub);
           await next();
           return;
         } catch (_err) {

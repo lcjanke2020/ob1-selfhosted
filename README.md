@@ -24,6 +24,33 @@ This repo is one codebase with **three install paths**, from "docker on a laptop
 >
 > The Funnel overlay also needs **Docker Compose v2.20+** (the `!reset` YAML tag); the Qubes path additionally assumes a working **Qubes OS** machine with Docker-capable templates.
 
+## Supported authentication methods
+
+There are two separate authentication boundaries:
+
+- **Requests to Open Brain:** the local install supports the shared
+  `x-brain-key`; OAuth deployments accept an `Authorization: Bearer` access
+  token. OAuth access tokens must be RS256 JWTs with the configured issuer and
+  audience plus a valid expiration and subject. Open Brain does not receive an
+  OAuth application's client secret.
+- **A service application requesting that token from the issuer:** Auth0 or the
+  configured issuer authenticates the application at its token endpoint. The
+  tracked browserless helper supports the following methods:
+
+| Token-endpoint application auth | Shipped helper support | Guidance |
+|---|---|---|
+| Client Secret (Post), `client_secret_post` | **Yes — default** | Choose **Client Secret (Post)** for the documented Auth0 M2M path. |
+| Client Secret (Basic), `client_secret_basic` | **Yes** | Set `OAUTH_CLIENT_AUTH_METHOD=client_secret_basic`; this is the documented Okta-style path. |
+| Private Key JWT, `private_key_jwt` | **No** | Auth0 can provide it, but this repository does not generate client assertions. A custom client is outside the verified runbook. |
+| Mutual TLS (mTLS) | **No** | The helper does not present a client certificate and Open Brain does not enforce sender-constrained tokens. |
+| No client authentication, `none` | **No** | Not supported for unattended service accounts. |
+
+Both supported secret methods produce the same bearer-token validation at Open
+Brain; the difference exists only between the service application and its
+issuer. See [OAuth service accounts](docs/service-account-oauth-client.md) for
+the provider setup, Auth0 token-profile distinction, secret-safe smoke test,
+and failure modes.
+
 ## Architecture at a glance
 
 The hardened shape (the **Qubes OS** install path). Each tinted box is a separate Qubes VM, connected over a firewall-scoped tailnet — a compromised public edge holds no memory store and no app credential. On the **Tailnet / Funnel** path the same components co-locate on one host over the local docker network — same OAuth door, minus the VM boundaries. **Local compose** is simpler still: just Postgres + the MCP server + Ollama behind the `x-brain-key` door, with no public edge at all.
