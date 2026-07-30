@@ -16,6 +16,7 @@ import type { ResolvedReadScope } from "./scope_contract.ts";
 Deno.env.set("DB_PASSWORD", "test-password");
 Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
 Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
+Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 
 const {
   DEFAULT_RRF_K,

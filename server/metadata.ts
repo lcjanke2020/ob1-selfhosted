@@ -388,9 +388,10 @@ export async function extractMetadata(
     );
   }
 
-  // Fallback runs whenever it is configured — after a primary failure OR as the
-  // sole extractor in a fallback-only deployment. NB this path can send thought
-  // content off-box (the privacy trade-off documented in .env.example).
+  // Fallback runs only when configured AND allowed by the explicit policy —
+  // after a primary failure OR as the sole extractor in a fallback-only
+  // deployment. This path can send thought content off-box (the privacy
+  // trade-off documented in .env.example).
   if (ENABLE_FALLBACK_EXTRACTION) {
     const fallbackEndpoint = {
       base: FALLBACK_CHAT_API_BASE,

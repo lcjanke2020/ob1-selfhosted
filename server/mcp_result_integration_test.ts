@@ -15,6 +15,7 @@ const ENV_KEYS = [
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
+  "METADATA_FALLBACK_POLICY",
 ];
 
 const THOUGHT_IDS = [
@@ -65,6 +66,7 @@ Deno.test("MCP read tools enforce one serialized result budget", async () => {
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
   Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
+  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 
   try {
     const { createMcpServer } = await import("./mcp-server.ts");

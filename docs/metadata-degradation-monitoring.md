@@ -6,6 +6,11 @@ The privacy-sensitive fallback class can mean **a thought's full text left your
 network** (whether it did depends on where `FALLBACK_CHAT_API_BASE` points).
 The server intentionally never blocks a capture on classification.
 
+`METADATA_FALLBACK_POLICY` decides whether that fallback path may run: `off`
+uses the local stub after a primary failure, `alert` permits fallback only with a
+configured notification channel, and `allow` permits it without delivery. The
+setting is required and has no default.
+
 Server 1.16.0 makes these outcomes durable. Each degraded capture writes a
 content-free audit record, every newly captured thought carries a server-owned
 classifier stamp, and an optional Pushover/ntfy worker delivers
@@ -476,14 +481,22 @@ Two caveats worth knowing:
   governs that path is the app qube's own Qubes-firewall egress policy —
   check there first if the probe fails.
 
-## Next policy layer
+## Fallback policy
 
-The durable signal and notification channel make a future operator-selected
-fallback policy enforceable. An `off` / `alert` / `allow` setting can decide
-whether capture stubs locally, uses fallback only with a configured channel, or
-permits fallback without delivery. That policy is intentionally separate from
-this observability layer; current primary → fallback → stub behavior is
-unchanged.
+Set `METADATA_FALLBACK_POLICY` to exactly one of:
+
+| value | behavior |
+|---|---|
+| `off` | Never call `FALLBACK_CHAT_*`. A failed enabled primary records `primary_failure` + `stub_used` and stores placeholder metadata. |
+| `alert` | Permit the configured fallback, but refuse to boot unless `METADATA_NOTIFY_CHANNELS` contains at least one fully configured adapter. |
+| `allow` | Permit the configured fallback without requiring delivery. Durable audit rows are still written; this is the privacy-weakest mode. |
+
+There is deliberately no default. Missing or invalid policy values stop the
+server at boot, and compose deployments require the variable before rendering
+the MCP service. `alert` and `allow` preserve fallback-only deployments where
+`CHAT_*` is blank; under `alert`, each successful fallback classification enters
+the existing first-occurrence/rollup notification flow. The active policy is
+printed at boot beside the extraction posture.
 
 Related reading: [`docs/why-local-only.md`](why-local-only.md) for why the
 fallback exists at all, and the [GPU-qube transport

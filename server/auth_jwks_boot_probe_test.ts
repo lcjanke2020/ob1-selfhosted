@@ -37,6 +37,7 @@ const ENV_KEYS = [
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
   "OBS_AUTH_EVENTS_ENABLED",
+  "METADATA_FALLBACK_POLICY",
   "JWKS_FETCH_TIMEOUT_MS",
 ];
 
@@ -79,6 +80,7 @@ Deno.test("probeJwksReachability — negative cases", async (t) => {
   Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
   Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
+  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 
   const { probeJwksReachability } = await import("./auth.ts");
 

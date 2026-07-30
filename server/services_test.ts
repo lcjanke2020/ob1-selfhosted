@@ -23,6 +23,7 @@ const ENV_KEYS = [
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
+  "METADATA_FALLBACK_POLICY",
 ];
 
 const AUTH = { door: "tailnet" as const, sub: null };
@@ -63,6 +64,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
   Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
+  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 
   const {
     captureSessionFromToml,

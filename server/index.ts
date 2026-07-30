@@ -28,6 +28,7 @@ import {
   ENABLE_OAUTH,
   ENABLE_PRIMARY_EXTRACTION,
   ENABLE_REST_API,
+  METADATA_FALLBACK_POLICY,
   METADATA_NOTIFY_CHANNELS,
   METADATA_NOTIFY_LABEL,
   METADATA_NOTIFY_POLL_INTERVAL_MS,
@@ -183,6 +184,7 @@ if (ENABLE_REST_API) {
 // from the startup log, not just per-capture lines.
 // No secrets. "May be off-box" because whether the fallback endpoint is remote
 // vs on-LAN depends on the operator's FALLBACK_CHAT_API_BASE.
+console.log(`[metadata] fallback policy: ${METADATA_FALLBACK_POLICY}`);
 if (!ENABLE_METADATA_EXTRACTION) {
   console.warn(
     "[metadata] extraction disabled (no primary or fallback configured) — captures stamp the uncategorized stub",

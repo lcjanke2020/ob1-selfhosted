@@ -19,6 +19,7 @@ const ENV_KEYS = [
   "FALLBACK_CHAT_API_KEY",
   "FALLBACK_CHAT_MODEL",
   "ENABLE_PRIMARY_EXTRACTION",
+  "METADATA_FALLBACK_POLICY",
 ];
 
 Deno.test("extractMetadata: disabled extraction returns a durable stub outcome", async () => {
@@ -28,6 +29,7 @@ Deno.test("extractMetadata: disabled extraction returns a durable stub outcome",
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
+  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
   for (
     const key of [
       "MCP_ACCESS_KEY_PRINCIPAL",

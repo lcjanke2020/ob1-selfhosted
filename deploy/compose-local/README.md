@@ -31,6 +31,13 @@ shared-key install, also set a stable, non-secret `MCP_ACCESS_KEY_PRINCIPAL`
 (for example `local-owner`). Without it, personal scope fails closed because a
 shared key is not an identity. See [Memory spaces](../../docs/spaces.md).
 
+Also choose `METADATA_FALLBACK_POLICY` explicitly; there is no default. Use
+`off` for a local-only posture (a primary-classifier failure stores placeholder
+metadata and never calls `FALLBACK_CHAT_*`), `alert` to permit fallback only
+with a configured Pushover/ntfy channel, or `allow` to permit fallback without
+requiring delivery. `allow` is the privacy-weakest option. The server prints the
+active choice as `[metadata] fallback policy: ...` at every boot.
+
 ### 2. Pre-pull the embedding model
 
 One-time, so the first capture isn't slow:
@@ -158,6 +165,8 @@ same maintenance window through both migrations. Migration 07 then adds the
 append-only metadata-degradation audit, transactional outbox, and notification
 ledger; it does not rewrite `thoughts` or build an index over that table. The
 updated server refuses to boot until all three schema contracts exist.
+It also refuses to boot until `METADATA_FALLBACK_POLICY` is explicitly set;
+choose `off`, `alert`, or `allow` in `.env` before recreating the container.
 Re-running the files is safe,
 but re-running `06-spaces.sql` still rebuilds its fingerprint index and needs the
 full lock window and index headroom. Details are in
@@ -172,10 +181,11 @@ are in [metadata degradation monitoring](../../docs/metadata-degradation-monitor
 - **Host port already in use.** If the box already runs postgres (or anything else) on `5432`, the stack fails to start with `failed to bind host port 127.0.0.1:5432`. Change the host side of the mapping in `docker-compose.yml` (e.g. `"127.0.0.1:15432:5432"`) — the containers talk over the docker network, so only your direct-psql habits change. Same applies to `8787`/`11434`.
 - **No GPU detected for Ollama.** Install the NVIDIA Container Toolkit, or remove the `deploy: resources:` block from the `ollama` service.
 - **Metadata extraction degrading.** With `CHAT_API_BASE`/`CHAT_MODEL` unset or
-  unreachable, capture still works but thoughts may receive
-  `{topics: [uncategorized], type: observation}`. Intentionally leaving every
-  extractor unset creates no degradation event; a configured path that fails is
-  recorded in the durable audit and can enable content-free Pushover/ntfy alerts.
+  unreachable, capture still works. Policy `off` stores
+  `{topics: [uncategorized], type: observation}` without contacting the
+  fallback; `alert` or `allow` may classify through `FALLBACK_CHAT_*` when it is
+  configured. A configured path that fails is recorded in the durable audit;
+  `alert` additionally requires content-free Pushover/ntfy delivery at boot.
   See [metadata degradation monitoring](../../docs/metadata-degradation-monitoring.md).
 
 ## Backups

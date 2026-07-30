@@ -16,6 +16,7 @@ const ENV_KEYS = [
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
   "OBS_AUTH_EVENTS_ENABLED",
+  "METADATA_FALLBACK_POLICY",
   "FETCH_TIMEOUT_MS",
   "OLLAMA_URL",
   "EMBED_DIM",
@@ -84,6 +85,7 @@ Deno.test("embed: timeout covers response body consumption", async (t) => {
   Deno.env.delete("AUTH0_JWKS_URI");
   Deno.env.delete("AUTH0_AUDIENCE");
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
+  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
   Deno.env.set("FETCH_TIMEOUT_MS", String(FETCH_TIMEOUT_MS));
   Deno.env.set("OLLAMA_URL", OLLAMA_URL);
   Deno.env.set("EMBED_DIM", "1");

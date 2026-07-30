@@ -20,6 +20,7 @@ const ENV_KEYS = [
   "FALLBACK_CHAT_API_KEY",
   "FALLBACK_CHAT_MODEL",
   "ENABLE_PRIMARY_EXTRACTION",
+  "METADATA_FALLBACK_POLICY",
 ];
 
 Deno.test("extractMetadata: primary is skipped when ENABLE_PRIMARY_EXTRACTION is off", async () => {
@@ -39,6 +40,7 @@ Deno.test("extractMetadata: primary is skipped when ENABLE_PRIMARY_EXTRACTION is
   Deno.env.set("FALLBACK_CHAT_MODEL", "hosted-model");
   Deno.env.set("FALLBACK_CHAT_API_KEY", "test-fallback-key");
   Deno.env.delete("ENABLE_PRIMARY_EXTRACTION");
+  Deno.env.set("METADATA_FALLBACK_POLICY", "allow");
 
   const urls: string[] = [];
   globalThis.fetch = ((input: string | URL | Request) => {

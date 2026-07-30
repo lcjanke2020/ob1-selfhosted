@@ -40,6 +40,7 @@ const ENV_KEYS = [
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
   "OBS_AUTH_EVENTS_ENABLED",
+  "METADATA_FALLBACK_POLICY",
   "JWKS_FETCH_TIMEOUT_MS",
 ];
 
@@ -105,6 +106,7 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
   Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
   Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
+  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
   Deno.env.set("JWKS_FETCH_TIMEOUT_MS", "2000");
 
   const { requireAuth } = await import("./auth.ts");

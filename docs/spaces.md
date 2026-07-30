@@ -112,8 +112,9 @@ its three scope fields stay inside `toml_text`.
 > credential, disks, and backups with controls appropriate for the content.
 > The space also does not change the processing pipeline: capture content still
 > reaches the configured embedding and metadata-classification endpoints, and
-> recall queries reach the embedder. Use local endpoints and disable any hosted
-> fallback before storing content that must not leave your network.
+> recall queries reach the embedder. Use local endpoints and set
+> `METADATA_FALLBACK_POLICY=off` before storing content that must not leave your
+> network.
 
 ## What counts as a personal principal
 

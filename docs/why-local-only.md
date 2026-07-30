@@ -14,9 +14,9 @@ away until a write you expected to land simply doesn't.
 The deployment was close to the maximal local configuration this project supports:
 embeddings from a local model, metadata classification from a local model on a GPU host,
 storage in a local database. Once a request reached the store, no server-side processing
-called a third-party model. (A cloud classifier fallback stays wired for when the local model
-is unavailable, but it never fired here; if classification exhausts every endpoint, metadata
-degrades to a placeholder and still can't reject a write.)
+called a third-party model. (The deployment had explicitly allowed a cloud classifier
+fallback for local-model outages, but it never fired here; if classification exhausts every
+permitted endpoint, metadata degrades to a placeholder and still can't reject a write.)
 
 The **client**, though, was a hosted model reaching the store's tools through the **vendor's
 hosted connector** — the cloud-side path a hosted model uses to call your MCP server, as
@@ -84,6 +84,30 @@ So, sorting the wins by where they come from:
 - The **fully local loop** — local model, local client, loopback — is the only configuration
   that removes *both* the connector edge and the inference provider: nothing but your own
   process and disk is in the path.
+
+### Make the metadata fallback decision explicit
+
+The server requires `METADATA_FALLBACK_POLICY` at boot; it never infers this
+privacy decision merely from populated endpoint variables:
+
+- `off` keeps `FALLBACK_CHAT_*` inert. A healthy opted-in primary still
+  classifies locally, but a primary failure stores the uncategorized placeholder
+  and makes no fallback request. Embeddings and semantic search remain local and
+  unaffected; structured topic/type/people filtering is what loses fidelity
+  until metadata is backfilled.
+- `alert` permits the configured fallback but refuses to boot without at least
+  one valid Pushover/ntfy channel. Fallback use enters the durable, content-free
+  audit and notification queue, so the off-box-capable path is never enabled
+  without delivery plumbing.
+- `allow` permits fallback without requiring a notification channel. It supports
+  graceful degradation and fallback-only deployments, but it is the
+  privacy-weakest choice.
+
+The boot log prints the selected policy. A strict local-only claim therefore
+means choosing `off` (or using an `alert`/`allow` fallback endpoint that is itself
+local—not merely assuming its location from the variable name). See
+[metadata degradation monitoring](./metadata-degradation-monitoring.md) for the
+audit, notification, and live-fire details.
 
 ## Honest caveats to our own argument
 

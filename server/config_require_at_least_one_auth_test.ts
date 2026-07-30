@@ -22,6 +22,7 @@ const ENV_KEYS = [
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
   "OBS_AUTH_EVENTS_ENABLED",
+  "METADATA_FALLBACK_POLICY",
 ];
 
 Deno.test(
@@ -40,6 +41,7 @@ Deno.test(
     Deno.env.delete("AUTH0_AUDIENCE");
     Deno.env.set("DB_PASSWORD", "test-password");
     Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
+    Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 
     try {
       let threw = false;

@@ -41,6 +41,7 @@ const ENV_KEYS = [
   // postgres on auth-fail. Disable that here so the test suite doesn't
   // try to open a DB connection it can't reach.
   "OBS_AUTH_EVENTS_ENABLED",
+  "METADATA_FALLBACK_POLICY",
   // Body-read timeout knob; tests pin it short so the slow-
   // stream test runs fast.
   "AUTH_BODY_READ_TIMEOUT_MS",
@@ -112,6 +113,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
   // a DB connection. auth_audit reads this at module load, so it MUST be
   // set before the dynamic-import of auth.ts below.
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
+  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
   // Short timeout so the slow-stream regression test is fast.
   // auth.ts reads this at module load, so it MUST be set before the
   // dynamic-import below.
