@@ -56,7 +56,12 @@ on:
       - "server/deno.json"
       - "server/deno.lock"
       - "deploy/compose-local/docker-compose.yml"
+      - "scripts/funnel_monitor.sh"
+      - "scripts/funnel_monitor_test.sh"
       - "scripts/funnel_daily_summary.sh"
+      - "deploy/qubes/ingress-qube/funnel-monitor.env.example"
+      - "deploy/qubes/ingress-qube/funnel-monitor.service"
+      - "deploy/qubes/ingress-qube/funnel-monitor.timer"
       - "deploy/qubes/app-qube/funnel-summary.env.example"
       - "deploy/qubes/app-qube/funnel-summary.service"
       - "deploy/qubes/app-qube/funnel-summary.timer"
@@ -83,7 +88,12 @@ on:
       - "server/deno.json"
       - "server/deno.lock"
       - "deploy/compose-local/docker-compose.yml"
+      - "scripts/funnel_monitor.sh"
+      - "scripts/funnel_monitor_test.sh"
       - "scripts/funnel_daily_summary.sh"
+      - "deploy/qubes/ingress-qube/funnel-monitor.env.example"
+      - "deploy/qubes/ingress-qube/funnel-monitor.service"
+      - "deploy/qubes/ingress-qube/funnel-monitor.timer"
       - "deploy/qubes/app-qube/funnel-summary.env.example"
       - "deploy/qubes/app-qube/funnel-summary.service"
       - "deploy/qubes/app-qube/funnel-summary.timer"
@@ -126,6 +136,9 @@ jobs:
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.9.4
+
+      - name: Smoke test — funnel monitor cursor, dedupe, and secret handling
+        run: bash scripts/funnel_monitor_test.sh
 
       - name: Derive Postgres image from compose-local (single source of truth)
         run: |
@@ -415,13 +428,25 @@ jobs:
         run: |
           # The two queries scripts/funnel_monitor.sh actually runs, as the
           # role it runs them with. Catches a grant regression the same way
-          # the pg_dump step does for the backup path.
+          # the pg_dump step does for the backup path. The second query pins
+          # the stateful public-door 401 scan (bounded by a row-id cutoff).
           docker exec -e PGPASSWORD="$OPENBRAIN_MONITOR_PASSWORD" pgci \
             psql -h 127.0.0.1 -U openbrain_monitor -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
             "SELECT COUNT(*) FROM funnel_access_log WHERE socket='funnel' AND ts > now() - interval '5 minutes';" >/dev/null
           docker exec -e PGPASSWORD="$OPENBRAIN_MONITOR_PASSWORD" pgci \
             psql -h 127.0.0.1 -U openbrain_monitor -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
-            "SELECT COUNT(*) FROM mcp_auth_events WHERE ts > now() - interval '5 minutes' AND reason <> 'missing_credentials';" >/dev/null
+            "WITH bounds AS MATERIALIZED (
+               SELECT COALESCE(MAX(id), 0)::bigint AS max_id,
+                      FLOOR(EXTRACT(EPOCH FROM now()))::bigint AS cutoff_epoch
+               FROM funnel_access_log
+             )
+             SELECT max_id || '|' || cutoff_epoch || '|' ||
+                    (SELECT COUNT(*) FROM funnel_access_log AS event
+                     WHERE event.id <= bounds.max_id
+                       AND event.socket = 'funnel'
+                       AND event.status = 401
+                       AND event.ts > now() - interval '5 minutes')
+             FROM bounds;" >/dev/null
           # Negative check: the edge-resident credential must NOT reach
           # thought content (03-grants-assertion.sql asserts this in the
           # catalog; this exercises it end-to-end).

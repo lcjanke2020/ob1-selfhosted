@@ -60,10 +60,26 @@ An alert-only host script ([`scripts/funnel_monitor.sh`](../../../scripts/funnel
 probes the db qube every 5 minutes as a dedicated SELECT-only role (`openbrain_monitor`,
 readable tables: `funnel_access_log` + `mcp_auth_events` — request metadata, never thoughts)
 and appends to `~/funnel_monitor.log`: funnel request volume over the window (alert above
-`VOLUME_THRESHOLD`, default 200) and auth failures excluding `missing_credentials` (alert
-above 0). It **fails loud**: an empty/non-numeric probe result — db qube unreachable, role
-or credential broken — is itself an ALERT, so the monitor can't die silently while the
-timer looks healthy.
+`VOLUME_THRESHOLD`, default 200) and newly ingested HTTP 401 responses at the public Funnel
+door (local alert at `AUTH_FAILURE_BURST_THRESHOLD`, default 5). It **fails loud**: an
+empty/non-numeric probe result — db qube unreachable, role or credential broken — is itself
+an ALERT, so the monitor can't die silently while the timer looks healthy.
+
+Pushover delivery is opt-in (`PUSHOVER_ENABLED=1`). A successful interval with at least
+`AUTH_FAILURE_BURST_THRESHOLD` new Funnel 401 rows (default 5) sends one aggregate push;
+later qualifying intervals accumulate and roll up no more often than
+`PUSHOVER_ROLLUP_SECONDS` (default 1800, 30 minutes). The row-id cursor and pending count
+are atomically committed together under `~/.local/state/funnel-monitor/` before delivery,
+so delayed log-ingester rows are not missed, a failed provider call retains its count for
+retry, and a crash can at worst repeat an aggregate alert. Turning delivery on does not
+replay activity observed while it was off.
+
+The provider-visible alert body is deliberately fixed and small: a generic operator label,
+the aggregate Funnel 401-row count, and a statement that no request data is included. It
+never includes a hostname, qube/container name, client IP, path, identity, request content,
+or application/database/client credential. (Pushover necessarily receives its own delivery
+token and user key as authentication form fields.) Pushover is alert-only; the script never
+closes Funnel or changes firewall state.
 
 **Provision the role** (once): on a fresh init, set `OPENBRAIN_MONITOR_PASSWORD` before
 `db/00-roles.sh` runs; on an existing DB, run
@@ -86,12 +102,50 @@ systemctl --user daemon-reload
 systemctl --user enable --now funnel-monitor.timer
 ```
 
+The script enforces that `~/.config/funnel-monitor.env` is a current-user-owned,
+non-symlink regular file with no group/other permissions. Leave `PUSHOVER_ENABLED=0`
+until the provider path below is ready.
+
+### Optional Pushover delivery
+
+Keep the application token and user key out of the sourced env file. Install them as two
+separate, non-empty `0600` files, without trailing newlines:
+
+```sh
+umask 077
+mkdir -p ~/.config/funnel-monitor
+read -rs t && printf %s "$t" > ~/.config/funnel-monitor/pushover-token; unset t
+read -rs u && printf %s "$u" > ~/.config/funnel-monitor/pushover-user; unset u
+chmod 0600 ~/.config/funnel-monitor/pushover-token
+chmod 0600 ~/.config/funnel-monitor/pushover-user
+```
+
+The script rejects symlinks, wrong ownership, empty files, and any mode other than `0600`.
+At send time curl reads each secret directly from its file, so neither value appears in
+process argv or logs.
+
+Verify host egress before enabling delivery. This request sends no credential; any HTTP
+status proves DNS/TLS reachability (the API root need not return 2xx):
+
+```sh
+curl -sS -o /dev/null -w 'Pushover probe HTTP %{http_code}\n' https://api.pushover.net
+```
+
+On Qubes, this host path is governed by the ingress qube's Qubes-firewall policy, not a
+container `DOCKER-USER` chain. Then edit `~/.config/funnel-monitor.env`, choose a generic
+`OB1_MONITOR_LABEL` such as `ob1` (never an infrastructure name), tune the threshold if
+needed, and set `PUSHOVER_ENABLED=1`. Run `~/funnel_monitor.sh` once and inspect its exit
+status plus local log before relying on the timer. A live-fire acceptance test should
+produce a controlled set of invalid-auth requests at or above the configured threshold,
+confirm exactly one content-free push, and then confirm a second qualifying interval is
+held for the rollup rather than pushed request-by-request.
+
 These are **user** units — linger must be on or the timer stops firing without an open
 shell session; see the [Qubes README](../README.md) § user timers. Watch it work with
 `tail -f ~/funnel_monitor.log` (a `vol=N auth_failures=N` line every 5 minutes; probe
-errors accumulate in `~/funnel_monitor.err`). Both files append indefinitely — at 5-minute
-cadence that's slow, but on a long-lived qube add a logrotate rule (or an occasional
-truncate) for the pair.
+errors accumulate in `~/funnel_monitor.err`; successful provider calls append only their
+aggregate count). Both files append indefinitely — at 5-minute cadence that's slow, but on
+a long-lived qube add a logrotate rule (or an occasional truncate) for the pair.
 
 Future note: if the funnel logs ever move into this qube's parked local postgres
 ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)), the volume query's target
