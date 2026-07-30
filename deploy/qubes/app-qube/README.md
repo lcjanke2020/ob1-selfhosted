@@ -103,7 +103,9 @@ credential.
 The job reads a dedicated environment file containing only its database settings. Do not
 point it at this directory's `.env`: exporting the full app environment would needlessly
 expose the database administrator, OAuth, model-provider, and notification settings to the
-rollup process.
+rollup process. The wrapper refuses to source a symlink, a file owned by another user, or a
+file with any group/other permissions; values in this file take precedence over inherited
+environment values.
 
 Fedora's `postgresql` package provides the host `psql` client; it is commonly already
 present beside the `pg_dump` client used by the encrypted backup. If it is absent, install
@@ -127,11 +129,14 @@ systemctl --user daemon-reload
 
 Run the service once before enabling the schedule. This is the catch-up pass: it builds the
 previous daily summaries before transactionally removing raw rows beyond the retention
-horizon. A failure before the SQL transaction commits leaves the raw rows intact; any
-failed run leaves the last complete Markdown artifact intact instead of replacing it with
-partial output. If a connection fails after the database commit but while the report
-queries are streaming, the database may be ahead of the artifact; the next idempotent run
-regenerates the report.
+horizon. That removal is irreversible, so take a database snapshot first if you may need
+the pre-30-day raw rows. A failure before the SQL transaction commits leaves the raw rows
+intact; any failed run leaves the last complete Markdown artifact intact instead of
+replacing it with partial output. If a connection fails after the database commit but while
+the report queries are streaming, the database may be ahead of the artifact; the next
+idempotent run regenerates the report. A multi-day catch-up stores every day in
+`funnel_access_summary`, but publishes one Markdown artifact for the most recently completed
+day rather than recreating a historical report file per day.
 
 ```sh
 systemctl --user start funnel-summary.service
@@ -144,11 +149,21 @@ systemctl --user list-timers funnel-summary.timer --no-pager
 ```
 
 The timer runs at 00:30 UTC, matching the SQL's UTC day boundaries. `Persistent=true`
-causes one missed occurrence to run after a suspended app qube wakes; user lingering keeps
-the unit eligible when no shell is open. Reports default to the local, mode-0700
-`~/openbrain-funnel-summaries` directory because they contain request metadata. To retain
-an off-box copy, set `SUMMARY_DIR` in `~/.config/funnel-summary.env` to a trusted replicated
-directory and protect that destination accordingly.
+causes one missed occurrence to run after a suspended app qube wakes; the service makes up
+to two additional attempts at two-minute intervals so a transient tailnet startup race does
+not consume that occurrence. User lingering keeps the unit eligible when no shell is open.
+Reports default to the local, mode-0700 `~/openbrain-funnel-summaries` directory because
+they contain request metadata. To retain an off-box copy, set `SUMMARY_DIR` in
+`~/.config/funnel-summary.env` to a trusted replicated directory and protect that
+destination accordingly. For Syncthing, add
+`/.funnel-summary-*` to the folder's `.stignore`; final reports have no leading dot, while
+an uncatchable hard kill or qube crash can leave a private staging dotfile behind.
+
+A user service cannot order itself after the system tailnet unit. The bounded retries handle
+the common race, and later successful runs catch up idempotently, but a persistent failure
+still needs a visible signal. Install a user `notify-failure@.service` and uncomment the
+`OnFailure=` example in `funnel-summary.service`, or monitor `systemctl --user --failed` and
+the unit journal.
 
 When updating the rollup implementation, reinstall **both** the wrapper and
 `summarize_funnel.sql`, then manually start the service once and inspect its journal before

@@ -729,6 +729,14 @@ jobs:
           # forwards stdin, args, and PGPASSWORD unchanged.
           cat > "$psql_shim" <<'SH'
           #!/usr/bin/env bash
+          test "${PGPASSWORD:-}" = ci_app_pw || {
+            echo "expected command-scoped PGPASSWORD" >&2
+            exit 40
+          }
+          if [[ -v OPENBRAIN_APP_PASSWORD ]]; then
+            echo "OPENBRAIN_APP_PASSWORD leaked into the external client" >&2
+            exit 41
+          fi
           exec docker exec -i -e PGPASSWORD pgci psql "$@"
           SH
           chmod 0755 "$psql_shim"
@@ -759,20 +767,50 @@ jobs:
           test "$(stat -c '%a' "$report")" = 600
           first_hash=$(sha256sum "$report" | awk '{print $1}')
 
+          # Refuse to source a credential file after its private mode drifts.
+          # Rejection happens before report staging or the external client.
+          chmod 0644 "$env_file"
+          set +e
+          FUNNEL_SUMMARY_ENV_FILE="$env_file" scripts/funnel_daily_summary.sh \
+            >"$smoke_root/insecure.out" 2>"$smoke_root/insecure.err"
+          insecure_rc=$?
+          set -e
+          test "$insecure_rc" -eq 2
+          grep -Fq 'env file must have no group/other permissions' "$smoke_root/insecure.err"
+          chmod 0600 "$env_file"
+          test "$(sha256sum "$report" | awk '{print $1}')" = "$first_hash"
+          test -z "$(find "$report_dir" -maxdepth 1 -type f -name '.funnel-summary-*' -print -quit)"
+
+          # Do not follow even an owner-created symlink to a credential file;
+          # the configured path itself must be the inspected regular file.
+          ln -s "$env_file" "$smoke_root/symlink.env"
+          set +e
+          FUNNEL_SUMMARY_ENV_FILE="$smoke_root/symlink.env" \
+            scripts/funnel_daily_summary.sh \
+            >"$smoke_root/symlink.out" 2>"$smoke_root/symlink.err"
+          symlink_rc=$?
+          set -e
+          test "$symlink_rc" -eq 2
+          grep -Fq 'env file must be a regular, non-symlink file' "$smoke_root/symlink.err"
+          test "$(sha256sum "$report" | awk '{print $1}')" = "$first_hash"
+          test -z "$(find "$report_dir" -maxdepth 1 -type f -name '.funnel-summary-*' -print -quit)"
+
           # A failed same-day rerun must leave the prior complete report in
-          # place and remove its unpublished staging file.
+          # place, remove its unpublished staging file, and normalize the
+          # external client's status to the documented runtime-failure code.
           cat > "$psql_shim" <<'SH'
           #!/usr/bin/env bash
           exit 42
           SH
           chmod 0755 "$psql_shim"
-          if FUNNEL_SUMMARY_ENV_FILE="$env_file" scripts/funnel_daily_summary.sh; then
-            echo "::error::wrapper returned success when psql failed"
-            exit 1
-          fi
+          set +e
+          FUNNEL_SUMMARY_ENV_FILE="$env_file" scripts/funnel_daily_summary.sh
+          failed_rc=$?
+          set -e
+          test "$failed_rc" -eq 1
           test "$(sha256sum "$report" | awk '{print $1}')" = "$first_hash"
           test -z "$(find "$report_dir" -maxdepth 1 -type f -name '.funnel-summary-*' -print -quit)"
-          echo "remote wrapper produced one private report; failed rerun preserved it atomically"
+          echo "remote wrapper confined its credential, rejected mode drift, and preserved its report on failure"
 
       - name: Container logs on failure
         if: failure()

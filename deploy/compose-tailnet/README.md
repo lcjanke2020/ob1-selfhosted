@@ -118,7 +118,7 @@ Once Funnel is live, the box has a public surface for the first time — this st
 
 **What's NOT logged:** no `Authorization`/`x-brain-key`/`Cookie` values (redacted by Caddy's `format filter` — if you ever see them on disk, the Caddyfile has drifted), no request bodies, no query strings, no JWT contents.
 
-**Daily summary.** `scripts/funnel_daily_summary.sh` rolls up completed days, enforces retention, and atomically writes a fenced-markdown report to `SUMMARY_DIR` (default `~/openbrain-funnel-summaries`; point it at a trusted directory you replicate off-box for a backup of the trail). Its default `SUMMARY_BACKEND=compose` runs `psql` inside this single-host stack's Postgres container. Run it from cron or a systemd timer:
+**Daily summary.** `scripts/funnel_daily_summary.sh` rolls up completed days, enforces retention, and atomically writes a fenced-markdown report to `SUMMARY_DIR` (default `~/openbrain-funnel-summaries`; point it at a trusted directory you replicate off-box for a backup of the trail). When using Syncthing, add `/.funnel-summary-*` to the folder's `.stignore` so a staging file left by a hard kill or host crash never replicates. Its default `SUMMARY_BACKEND=compose` runs `psql` inside this single-host stack's Postgres container. Run it from cron or a systemd timer:
 
 ```ini
 # /etc/systemd/system/funnel-summary.service

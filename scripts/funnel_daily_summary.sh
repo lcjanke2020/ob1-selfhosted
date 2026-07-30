@@ -11,13 +11,17 @@
 #   1. stdout (so journald / cron captures it)
 #   2. ${SUMMARY_DIR}/funnel-summary-YYYYMMDD.md — point SUMMARY_DIR at a
 #      trusted directory you replicate off the box (Syncthing, rsync, …) when
-#      you intentionally want an off-host copy of request metadata.
+#      you intentionally want an off-host copy of request metadata. Exclude
+#      `/.funnel-summary-*` from replication so staging files never leave the
+#      host after an uncatchable SIGKILL or qube crash.
 #
-# Environment overrides (default in []):
+# Configuration (default in []):
 #   FUNNEL_SUMMARY_ENV_FILE [~/.config/funnel-summary.env, loaded when present]
 #   SUMMARY_BACKEND  [compose] (`compose` | `postgres`)
 #   SUMMARY_DIR       [~/openbrain-funnel-summaries]
 #   SUMMARY_SQL_FILE  [repo db/summarize_funnel.sql, or adjacent installed copy]
+# Except for selecting FUNNEL_SUMMARY_ENV_FILE itself, values sourced from that
+# file take precedence over inherited environment values.
 #
 # compose backend:
 #   COMPOSE_DIR       [deploy/compose-tailnet, resolved relative to this script]
@@ -45,24 +49,51 @@ umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Preserve an inherited value for configuration precedence, but strip its
+# export attribute before stat or any other child process can inherit it. The
+# check is repeated after sourcing in case a hand-written env file uses export.
+export -n OPENBRAIN_APP_PASSWORD 2>/dev/null || true
+
 # The split deployment keeps the job's app-role credential in a narrow 0600
 # file instead of exporting the app compose .env (which also contains admin,
 # OAuth, and notification secrets). Keep the file optional so the established
 # single-host compose invocation remains zero-config.
 ENV_FILE="${FUNNEL_SUMMARY_ENV_FILE:-$HOME/.config/funnel-summary.env}"
-if [[ -e "$ENV_FILE" ]]; then
+if [[ -e "$ENV_FILE" || -L "$ENV_FILE" ]]; then
+  if [[ ! -f "$ENV_FILE" || -L "$ENV_FILE" ]]; then
+    echo "[funnel_daily_summary] env file must be a regular, non-symlink file: $ENV_FILE" >&2
+    exit 2
+  fi
+  if [[ ! -O "$ENV_FILE" ]]; then
+    echo "[funnel_daily_summary] env file must be owned by the current user: $ENV_FILE" >&2
+    exit 2
+  fi
   if [[ ! -r "$ENV_FILE" ]]; then
     echo "[funnel_daily_summary] env file is unreadable: $ENV_FILE" >&2
     exit 2
   fi
+  ENV_MODE="$(stat -c '%a' -- "$ENV_FILE")" || {
+    echo "[funnel_daily_summary] could not inspect env file permissions: $ENV_FILE" >&2
+    exit 2
+  }
+  if [[ ! "$ENV_MODE" =~ ^[0-7]{3,4}$ ]] || (( (8#$ENV_MODE & 077) != 0 )); then
+    echo "[funnel_daily_summary] env file must have no group/other permissions: $ENV_FILE (mode $ENV_MODE)" >&2
+    exit 2
+  fi
   # shellcheck disable=SC1090
-  set -a
-  . "$ENV_FILE"
-  set +a
+  if ! . "$ENV_FILE"; then
+    echo "[funnel_daily_summary] env file could not be loaded: $ENV_FILE" >&2
+    exit 2
+  fi
 elif [[ -n "${FUNNEL_SUMMARY_ENV_FILE:-}" ]]; then
   echo "[funnel_daily_summary] configured env file does not exist: $ENV_FILE" >&2
   exit 2
 fi
+
+# The credential remains a shell variable for the direct backend, but must not
+# be inherited under its original name by mktemp, tee, docker, or the psql
+# client. The psql invocation below exports only command-scoped PGPASSWORD.
+export -n OPENBRAIN_APP_PASSWORD 2>/dev/null || true
 
 SUMMARY_BACKEND="${SUMMARY_BACKEND:-compose}"
 SUMMARY_DIR="${SUMMARY_DIR:-$HOME/openbrain-funnel-summaries}"
@@ -109,15 +140,14 @@ run_summary() {
       compose_dir="${COMPOSE_DIR:-$(cd "$SCRIPT_DIR/../deploy/compose-tailnet" && pwd)}"
       cd "$compose_dir"
 
-      # Load .env only for POSTGRES_DB / compose interpolation. Although set -a
-      # transiently exports the file, no password crosses the exec boundary:
-      # psql connects to the container-local socket as openbrain_app under the
+      # Load .env only for POSTGRES_DB. Docker Compose reads the same file for
+      # interpolation itself, so none of its secrets need to be allexported by
+      # this wrapper. psql connects to the container-local socket under the
       # image's local trust rule.
       if [[ -f .env ]]; then
-        set -a
         # shellcheck disable=SC1091
         . .env
-        set +a
+        export -n OPENBRAIN_APP_PASSWORD POSTGRES_PASSWORD 2>/dev/null || true
       fi
 
       if ! docker compose ps --status=running postgres | grep -q postgres; then
@@ -127,7 +157,7 @@ run_summary() {
 
       docker compose exec -T postgres \
         psql -X -v ON_ERROR_STOP=1 -U openbrain_app \
-        -d "${POSTGRES_DB:-openbrain}" -f - < "$SQL_FILE"
+        -d "${POSTGRES_DB:-openbrain}" -f - < "$SQL_FILE" || return 1
       ;;
 
     postgres)
@@ -145,14 +175,14 @@ run_summary() {
       fi
 
       # -X ignores a user .psqlrc that could change report formatting; -w
-      # forbids an unattended password prompt. The app-role password exists
-      # only in this command's environment and the 0600 job env file.
+      # forbids an unattended password prompt. The source variable remains
+      # unexported; only command-scoped PGPASSWORD reaches this client.
       PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-10}" \
       PGPASSWORD="$OPENBRAIN_APP_PASSWORD" \
         "$psql_bin" -X -w \
         -h "$DB_HOST" -p "${DB_PORT:-5432}" \
         -U openbrain_app -d "${POSTGRES_DB:-openbrain}" \
-        -v ON_ERROR_STOP=1 -f - < "$SQL_FILE"
+        -v ON_ERROR_STOP=1 -f - < "$SQL_FILE" || return 1
       ;;
 
     *)
@@ -208,7 +238,8 @@ run_summary | tee -a "$TMP_FILE"
 echo '````' | tee -a "$TMP_FILE"
 
 # Publish only a complete report. TMP_FILE is inside SUMMARY_DIR, so rename is
-# same-filesystem and atomic to readers/replicators.
+# same-filesystem and atomic to readers/replicators. Replicated directories
+# should ignore `/.funnel-summary-*`; a hard kill cannot run the EXIT trap.
 mv -f -- "$TMP_FILE" "$OUT_FILE"
 TMP_FILE=""
 trap - EXIT
