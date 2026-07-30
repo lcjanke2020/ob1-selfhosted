@@ -1,0 +1,15 @@
+# systemd USER unit — install at ~/.config/systemd/user/funnel-summary.timer on
+# the app qube. User lingering is required to run without an open login session.
+[Unit]
+Description=Run Open Brain Funnel summary daily
+
+[Timer]
+# UTC matches the SQL's day boundaries and leaves the prior day complete.
+OnCalendar=*-*-* 00:30:00 UTC
+AccuracySec=1min
+# Qubes may suspend an idle app qube. Run one missed occurrence after wake so a
+# suspended night does not become an unbounded retention gap.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

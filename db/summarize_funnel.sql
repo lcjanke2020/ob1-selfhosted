@@ -7,6 +7,8 @@
 -- Manual invocation (after the host wires Pattern B):
 --   docker compose exec -T postgres psql -U openbrain_app -d openbrain \
 --     < db/summarize_funnel.sql > /tmp/funnel.md
+-- The split Qubes deployment uses scripts/funnel_daily_summary.sh's postgres
+-- backend and the shipped app-qube user timer instead of a local container.
 --
 -- The SELECT at the end emits a markdown report on stdout so the cron
 -- wrapper can `tee` it to the summary directory .
@@ -398,10 +400,10 @@ WHERE day < (now() AT TIME ZONE 'UTC')::date - 365;
 COMMIT;
 
 -- ---------- 5. Markdown report (stdout) ----------------------------------
--- Wrapper script captures this output and writes it to the syncthing-replicated
--- directory. Format is intentionally simple — psql's default tabular output
--- with a few `\echo` headers — so it renders well as a fenced text block
--- in any markdown viewer.
+-- The wrapper captures this output in its configured summary directory (local
+-- by default, optionally replicated to a trusted destination). Format is
+-- intentionally simple — psql's default tabular output with a few `\echo`
+-- headers — so it renders well as a fenced text block in any markdown viewer.
 
 \pset format unaligned
 \pset fieldsep ' | '

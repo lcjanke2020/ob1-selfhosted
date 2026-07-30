@@ -56,6 +56,10 @@ on:
       - "server/deno.json"
       - "server/deno.lock"
       - "deploy/compose-local/docker-compose.yml"
+      - "scripts/funnel_daily_summary.sh"
+      - "deploy/qubes/app-qube/funnel-summary.env.example"
+      - "deploy/qubes/app-qube/funnel-summary.service"
+      - "deploy/qubes/app-qube/funnel-summary.timer"
       - ".github/workflows/db-init.yml"
   push:
     branches: [main]
@@ -79,6 +83,10 @@ on:
       - "server/deno.json"
       - "server/deno.lock"
       - "deploy/compose-local/docker-compose.yml"
+      - "scripts/funnel_daily_summary.sh"
+      - "deploy/qubes/app-qube/funnel-summary.env.example"
+      - "deploy/qubes/app-qube/funnel-summary.service"
+      - "deploy/qubes/app-qube/funnel-summary.timer"
       - ".github/workflows/db-init.yml"
   workflow_dispatch:
 
@@ -702,6 +710,126 @@ jobs:
             exit 1
           }
           echo "sketch pinned: request_count exact (34+5=39), below-3rd /d stays out of tops, raw retired"
+
+      - name: Smoke test — app-qube wrapper publishes remote rollups atomically
+        run: |
+          systemd-analyze verify \
+            deploy/qubes/app-qube/funnel-summary.service \
+            deploy/qubes/app-qube/funnel-summary.timer
+          systemd-analyze calendar '*-*-* 00:30:00 UTC' >/dev/null
+
+          smoke_root="$RUNNER_TEMP/funnel-summary-wrapper"
+          report_dir="$smoke_root/reports"
+          env_file="$smoke_root/funnel-summary.env"
+          psql_shim="$smoke_root/psql"
+          probe_bin="$smoke_root/bin"
+          install -d -m 0700 "$smoke_root" "$report_dir" "$probe_bin"
+
+          # The job environment already exports OPENBRAIN_APP_PASSWORD. Assert
+          # that the wrapper strips that attribute before its first external
+          # command, not merely before the eventual database client.
+          cat > "$probe_bin/dirname" <<'SH'
+          #!/usr/bin/env bash
+          if [[ -v OPENBRAIN_APP_PASSWORD ]]; then
+            echo "OPENBRAIN_APP_PASSWORD leaked into the first external child" >&2
+            exit 39
+          fi
+          exec /usr/bin/dirname "$@"
+          SH
+          chmod 0755 "$probe_bin/dirname"
+
+          # Exercise the production host-psql argument path while reusing this
+          # job's initialized Postgres fixture. The shim crosses into pgci and
+          # forwards stdin, args, and PGPASSWORD unchanged.
+          cat > "$psql_shim" <<'SH'
+          #!/usr/bin/env bash
+          test "${PGPASSWORD:-}" = ci_app_pw || {
+            echo "expected command-scoped PGPASSWORD" >&2
+            exit 40
+          }
+          if [[ -v OPENBRAIN_APP_PASSWORD ]]; then
+            echo "OPENBRAIN_APP_PASSWORD leaked into the external client" >&2
+            exit 41
+          fi
+          exec docker exec -i -e PGPASSWORD pgci psql "$@"
+          SH
+          chmod 0755 "$psql_shim"
+
+          {
+            printf 'SUMMARY_BACKEND=postgres\n'
+            printf 'DB_HOST=127.0.0.1\n'
+            printf 'DB_PORT=5432\n'
+            printf 'POSTGRES_DB=%q\n' "$POSTGRES_DB"
+            # Exercise the second guard too: a sourced file may explicitly
+            # restore the credential's export attribute after the first-child check.
+            printf 'export OPENBRAIN_APP_PASSWORD=%q\n' "$OPENBRAIN_APP_PASSWORD"
+            printf 'SUMMARY_SQL_FILE=%q\n' "$GITHUB_WORKSPACE/db/summarize_funnel.sql"
+            printf 'SUMMARY_DIR=%q\n' "$report_dir"
+            printf 'PSQL_BIN=%q\n' "$psql_shim"
+          } > "$env_file"
+          chmod 0600 "$env_file"
+
+          PATH="$probe_bin:$PATH" FUNNEL_SUMMARY_ENV_FILE="$env_file" \
+            scripts/funnel_daily_summary.sh
+
+          mapfile -t reports < <(find "$report_dir" -maxdepth 1 -type f -name 'funnel-summary-*.md' -print)
+          if [ "${#reports[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one published summary, got ${#reports[@]}"
+            find "$report_dir" -maxdepth 1 -ls
+            exit 1
+          fi
+          report=${reports[0]}
+          grep -Fq '# Funnel observability report' "$report"
+          test "$(grep -Fc '````' "$report")" -eq 2
+          test "$(stat -c '%a' "$report")" = 600
+          first_hash=$(sha256sum "$report" | awk '{print $1}')
+
+          # Refuse to source a credential file after its private mode drifts.
+          # Rejection happens before report staging or the external client.
+          chmod 0644 "$env_file"
+          set +e
+          PATH="$probe_bin:$PATH" FUNNEL_SUMMARY_ENV_FILE="$env_file" \
+            scripts/funnel_daily_summary.sh \
+            >"$smoke_root/insecure.out" 2>"$smoke_root/insecure.err"
+          insecure_rc=$?
+          set -e
+          test "$insecure_rc" -eq 2
+          grep -Fq 'env file must have no group/other permissions' "$smoke_root/insecure.err"
+          chmod 0600 "$env_file"
+          test "$(sha256sum "$report" | awk '{print $1}')" = "$first_hash"
+          test -z "$(find "$report_dir" -maxdepth 1 -type f -name '.funnel-summary-*' -print -quit)"
+
+          # Do not follow even an owner-created symlink to a credential file;
+          # the configured path itself must be the inspected regular file.
+          ln -s "$env_file" "$smoke_root/symlink.env"
+          set +e
+          PATH="$probe_bin:$PATH" FUNNEL_SUMMARY_ENV_FILE="$smoke_root/symlink.env" \
+            scripts/funnel_daily_summary.sh \
+            >"$smoke_root/symlink.out" 2>"$smoke_root/symlink.err"
+          symlink_rc=$?
+          set -e
+          test "$symlink_rc" -eq 2
+          grep -Fq 'env file must be a regular, non-symlink file' "$smoke_root/symlink.err"
+          test "$(sha256sum "$report" | awk '{print $1}')" = "$first_hash"
+          test -z "$(find "$report_dir" -maxdepth 1 -type f -name '.funnel-summary-*' -print -quit)"
+
+          # A failed same-day rerun must leave the prior complete report in
+          # place, remove its unpublished staging file, and normalize the
+          # external client's status to the documented runtime-failure code.
+          cat > "$psql_shim" <<'SH'
+          #!/usr/bin/env bash
+          exit 42
+          SH
+          chmod 0755 "$psql_shim"
+          set +e
+          PATH="$probe_bin:$PATH" FUNNEL_SUMMARY_ENV_FILE="$env_file" \
+            scripts/funnel_daily_summary.sh
+          failed_rc=$?
+          set -e
+          test "$failed_rc" -eq 1
+          test "$(sha256sum "$report" | awk '{print $1}')" = "$first_hash"
+          test -z "$(find "$report_dir" -maxdepth 1 -type f -name '.funnel-summary-*' -print -quit)"
+          echo "remote wrapper confined its credential, rejected mode drift, and preserved its report on failure"
 
       - name: Container logs on failure
         if: failure()
