@@ -368,6 +368,56 @@ if ((AUTH0_ISSUER || AUTH0_JWKS_URI || AUTH0_AUDIENCE) && !ENABLE_OAUTH) {
   );
 }
 
+// Auth0 identifies access tokens minted by the client-credentials grant with
+// the signed `gty = "client-credentials"` claim. That gives its M2M tokens an
+// automatic, server-verifiable `service` provenance label. OAuth does not
+// standardize a grant-type claim in access tokens, however, so another issuer
+// may provide no equivalent signal even when its JWT is otherwise valid. This
+// optional exact-subject allowlist supplies the provider-neutral fallback.
+//
+// It changes attribution only, never authentication or authorization: every
+// token still has to pass signature/issuer/audience/algorithm/exp/sub checks,
+// and the verified `sub` remains the RLS principal. Values are not logged.
+function oauthServiceAccountSubjects(): ReadonlySet<string> {
+  const raw = optionalTrimmed("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
+  if (!raw) return new Set();
+
+  const entries = raw.split(",").map((value) => value.trim());
+  if (entries.some((value) => !value)) {
+    throw new Error(
+      "OAUTH_SERVICE_ACCOUNT_SUBJECTS must be a comma-separated list of non-empty exact JWT subjects",
+    );
+  }
+  if (entries.length > 256) {
+    throw new Error(
+      "OAUTH_SERVICE_ACCOUNT_SUBJECTS must contain at most 256 subjects",
+    );
+  }
+
+  const subjects = new Set<string>();
+  for (const entry of entries) {
+    const subject = noControlCharacters(
+      "OAUTH_SERVICE_ACCOUNT_SUBJECTS entry",
+      entry,
+      1024,
+    );
+    if (subjects.has(subject)) {
+      throw new Error(
+        "OAUTH_SERVICE_ACCOUNT_SUBJECTS must not contain duplicate subjects",
+      );
+    }
+    subjects.add(subject);
+  }
+  return subjects;
+}
+
+export const OAUTH_SERVICE_ACCOUNT_SUBJECTS = oauthServiceAccountSubjects();
+if (OAUTH_SERVICE_ACCOUNT_SUBJECTS.size > 0 && !ENABLE_OAUTH) {
+  throw new Error(
+    "OAUTH_SERVICE_ACCOUNT_SUBJECTS requires the OAuth door (all three AUTH0_* variables)",
+  );
+}
+
 // At least one auth door must be enabled. With both MCP_ACCESS_KEY (x-brain-key)
 // and AUTH0_* (OAuth) now optional, a deployment that configures neither would
 // boot wide open — refuse that. compose-local sets MCP_ACCESS_KEY; the funnel +

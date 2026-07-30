@@ -7,6 +7,7 @@ import { asPool, FakePool, makeDeps } from "./api_test_support.ts";
 Deno.env.set("DB_PASSWORD", "test-password");
 Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
 Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
+Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
 Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 
 const {
@@ -16,6 +17,10 @@ const {
 const { resolveReadScope, resolveWriteScope } = await import("./scope.ts");
 
 const OAUTH_ALICE = { door: "funnel" as const, sub: "auth0|alice" };
+const SERVICE_AGENT = {
+  door: "service" as const,
+  sub: "automation-client@clients",
+};
 const SHARED_KEY = { door: "tailnet" as const, sub: null };
 
 function registryPool() {
@@ -61,6 +66,22 @@ Deno.test("scope resolution is fail-closed and sensitive defaults personal", asy
       visibilities: ["personal"],
       principal: "auth0|alice",
       ownerSubject: "auth0|alice",
+    },
+  );
+
+  assertEquals(
+    await resolveWriteScope(
+      asPool(pool),
+      { workspace_id: "sensitive" },
+      SERVICE_AGENT,
+    ),
+    {
+      workspaceId: "sensitive",
+      projectId: null,
+      visibility: "personal",
+      visibilities: ["personal"],
+      principal: "automation-client@clients",
+      ownerSubject: "automation-client@clients",
     },
   );
 

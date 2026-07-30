@@ -118,6 +118,9 @@ services:
       AUTH0_ISSUER: ${AUTH0_ISSUER:?set AUTH0_ISSUER (Qubes deployment is OAuth-only)}
       AUTH0_JWKS_URI: ${AUTH0_JWKS_URI:?set AUTH0_JWKS_URI (Qubes deployment is OAuth-only)}
       AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:?set AUTH0_AUDIENCE (Qubes deployment is OAuth-only)}
+      # Optional exact JWT subjects for non-Auth0 service-account attribution.
+      # Auth0 client-credentials tokens are recognized from their signed gty.
+      OAUTH_SERVICE_ACCOUNT_SUBJECTS: ${OAUTH_SERVICE_ACCOUNT_SUBJECTS:-}
       JWKS_FETCH_TIMEOUT_MS: ${JWKS_FETCH_TIMEOUT_MS:-10000}
       OBS_AUTH_EVENTS_ENABLED: ${OBS_AUTH_EVENTS_ENABLED:-true}
       OBS_AUTH_EVENTS_MAX_IN_FLIGHT: ${OBS_AUTH_EVENTS_MAX_IN_FLIGHT:-500}

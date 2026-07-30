@@ -1,6 +1,6 @@
 // hermetic unit tests for the order_by whitelist (normalizeOrderBy).
 // (The provenance-mapping test was removed when sourceFromDoor was dropped in
-// favor of storing the transport door directly — see session_queries.ts
+// favor of storing the server-verified credential label directly — see session_queries.ts
 // `SessionProvenance.source` and mcp-server.ts `source: auth.door`.)
 
 import { assertEquals } from "jsr:@std/assert@1";

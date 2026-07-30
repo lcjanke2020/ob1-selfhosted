@@ -14,6 +14,7 @@ import { bodyLimit } from "hono/body-limit";
 import type { Pool } from "postgres";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { z } from "zod";
+import { isAuthDoor } from "./auth_context.ts";
 
 import {
   type AppVariables,
@@ -109,7 +110,7 @@ const restifyAuthFailure: MiddlewareHandler<{ Variables: AppVariables }> =
 // calls, fail as a 500 (via onError) rather than persisting door: undefined.
 function authOr500(c: ApiContext): AuthContext {
   const door = c.get("door");
-  if (door !== "funnel" && door !== "tailnet") {
+  if (!isAuthDoor(door)) {
     throw new Error("auth context missing after requireAuth");
   }
   return { door, sub: c.get("sub") ?? null };

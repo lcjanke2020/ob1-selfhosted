@@ -280,9 +280,10 @@ FROM sessions.session
 WHERE id = <session-id>;
 ```
 
-`source = 'funnel'` here is an **authentication-door** label, not a proof of network path: every
-verified Auth0 bearer gets `door = 'funnel'` in request context, which `session_capture` persists as
-`source` (with the JWT subject in `source_node`). It does **not** mean Caddy handled the request on
+`source = 'funnel'` here is an **authentication-door** label, not a proof of network path: Codex's
+verified user bearer gets `door = 'funnel'` in request context, which `session_capture` persists as
+`source` (with the JWT subject in `source_node`). Client-credentials identities instead use
+`source = 'service'`. Neither label means Caddy handled the request on
 its public `@anthropic_funnel` branch — a local tailnet client is expected to reach the door through
 `@tailnet` (bypassing the Anthropic CIDR matcher) while still needing a valid token. To determine the
 actual network path, compare Caddy's `tailnet-access.log` vs `funnel-access.log`; a request forced

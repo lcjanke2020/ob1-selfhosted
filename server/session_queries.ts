@@ -3,6 +3,7 @@
 // getClient(pool) -> client.queryObject<T>(sql, params) -> client.release().
 
 import { Pool } from "postgres";
+import type { AuthDoor } from "./auth_context.ts";
 import { toVectorLiteral } from "./embeddings.ts";
 import { withScopeClient } from "./scoped_db.ts";
 import type {
@@ -23,9 +24,9 @@ import {
 const MIN_SESSION_HNSW_EF_SEARCH = 50;
 
 export type SessionProvenance = {
-  // The transport door: 'funnel' (Auth0 Bearer via Tailscale Funnel — all
-  // Anthropic surfaces) or 'tailnet' (x-brain-key from an on-network client).
-  source: "funnel" | "tailnet";
+  // Server-verified credential label: OAuth user ('funnel'), OAuth machine
+  // ('service'), or shared x-brain-key ('tailnet'). This is not Caddy routing.
+  source: AuthDoor;
   sourceNode: string | null;
 };
 

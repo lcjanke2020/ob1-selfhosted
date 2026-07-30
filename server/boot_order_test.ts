@@ -41,6 +41,7 @@ Deno.test("boot order: unreachable DB → [db] error + exit 1 before the port bi
       DB_USER: "x",
       DB_PASSWORD: "x",
       MCP_ACCESS_KEY: "k".repeat(64),
+      OAUTH_SERVICE_ACCOUNT_SUBJECTS: "",
       METADATA_FALLBACK_POLICY: "off",
       PORT: "18797",
     },

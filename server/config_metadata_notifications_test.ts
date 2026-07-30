@@ -25,6 +25,7 @@ const BASE_ENV: Record<string, string> = {
   AUTH0_ISSUER: "",
   AUTH0_JWKS_URI: "",
   AUTH0_AUDIENCE: "",
+  OAUTH_SERVICE_ACCOUNT_SUBJECTS: "",
   OBS_AUTH_EVENTS_ENABLED: "false",
   CHAT_API_BASE: "",
   CHAT_API_KEY: "",
