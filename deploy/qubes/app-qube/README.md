@@ -66,6 +66,13 @@ the admin credential and read-only backup role can still read it. Scope semantic
 and the required `db/06-spaces.sql` migration are in
 [Memory spaces](../../../docs/spaces.md).
 
+Server 1.16.0 also requires `db/07-metadata-degradation.sql` on the DB qube.
+It records content-free classifier degradation and enqueues committed events
+durably; this app qube can then deliver optional Pushover/ntfy alerts from the
+ledger. Apply the migration and run `db/03-grants-assertion.sql` before
+recreating the MCP container. See
+[Metadata degradation monitoring](../../../docs/metadata-degradation-monitoring.md).
+
 ## Host firewall (scope the `0.0.0.0:8787` bind)
 
 The `0.0.0.0` bind is reachable on every interface (tailnet **and** LAN). Three independent

@@ -1,27 +1,223 @@
 # Alerting when metadata extraction degrades
 
-The metadata extractor has three operator-relevant degradation outcome classes,
-and every event is announced on the mcp container's **stderr** — which nobody
-reads. Primary-attempt failures additionally carry a reason-specific line so
-endpoint availability and model-output quality no longer look identical. The
-privacy-sensitive fallback class can mean **a thought's full text left your
+The metadata extractor has three operator-relevant degradation outcome classes:
+primary failure, fallback classification, and uncategorized stub persistence.
+The privacy-sensitive fallback class can mean **a thought's full text left your
 network** (whether it did depends on where `FALLBACK_CHAT_API_BASE` points).
-The server intentionally never blocks a capture on classification, so without
-an operator-side alert the only "detection" is noticing, days later, that topic
-filters miss recent thoughts — or that your GPU's fans stayed quiet when they
-shouldn't have.
+The server intentionally never blocks a capture on classification.
 
-Until a durable in-server signal exists (see [Where this should go
-eventually](#where-this-should-go-eventually)), a small log-scraping monitor
-gives the operator a push notification within minutes. This doc sketches one
-against [Pushover](https://pushover.net/); [ntfy](https://ntfy.sh/) is
-analogous. An earlier revision was built and live-fire tested on the Qubes
-three-qube deployment; the state protocol below was then hardened in review
-(verified under a stub harness, not yet live-fired). Nothing in it is
-Qubes-specific — any host that can run `docker logs` and a systemd user
-timer can carry it.
+Server 1.16.0 makes these outcomes durable. Each degraded capture writes a
+content-free audit record, every newly captured thought carries a server-owned
+classifier stamp, and an optional Pushover/ntfy worker delivers
+first-occurrence alerts plus periodic rollups from the database ledger. The
+existing stderr lines stay stable for diagnosis and for older log-scraping
+monitors, but container logs are no longer the source of truth.
 
-## The trigger lines
+## Durable audit trail
+
+[`db/07-metadata-degradation.sql`](../db/07-metadata-degradation.sql) adds three
+relations:
+
+- `metadata_degradation_events` is append-only to the application role. One or
+  more rows share a `capture_id` and point at the persisted `thought_id`. If a
+  database owner later deletes that thought, the link becomes null while the
+  content-free audit survives.
+  Failure rows carry the finite reason from `server/metadata.ts` and the HTTP
+  status for `non_2xx`; fallback/stub outcome rows make the three alert classes
+  directly queryable. Endpoint model and base URL are retained for historical
+  audit, but URL userinfo, query parameters, and fragments are stripped before
+  insertion so those common credential-bearing components cannot enter the
+  table. Do not put a secret in an endpoint path or model name; those fields are
+  audit data and remain verbatim.
+- `metadata_degradation_outbox` is a durable, content-free pending-delivery
+  queue populated in the same transaction as history. Its `created_at` records
+  queue age. The worker deletes only committed rows, so concurrent captures that
+  commit out of sequence-number order cannot be skipped. A rollback restores a
+  claimed row. With delivery disabled, rows intentionally remain queued for a
+  later enablement or explicit owner discard.
+- `metadata_degradation_notification_state` is a singleton pending-count,
+  cooldown, first-occurrence, and latest delivery-attempt ledger. Workers lock
+  it with `FOR UPDATE SKIP LOCKED`, so multiple server processes cannot send the
+  same batch concurrently.
+
+The thought itself receives versioned `metadata.metadata_extraction` data:
+
+```json
+{
+  "schema_version": 1,
+  "endpoint": "primary | fallback | stub",
+  "model": "present for primary/fallback"
+}
+```
+
+That client-visible JSON describes the latest capture of a deduplicated thought
+without disclosing an internal classifier URL. Exact credential-scrubbed
+destinations remain in the owner-visible event table. That table is the
+application-append-only, capture-by-capture history, so use it for questions
+about what happened before a later recapture:
+
+```sql
+-- Every thought capture classified by the configured fallback, including the
+-- exact credential-scrubbed destination that was active at that time.
+SELECT created_at, thought_id, endpoint_model, endpoint_base_url
+FROM metadata_degradation_events
+WHERE event_type = 'fallback_used'
+ORDER BY created_at DESC;
+
+-- Reason distribution for primary failures over the last seven days.
+SELECT failure_reason, count(*)
+FROM metadata_degradation_events
+WHERE event_type = 'primary_failure'
+  AND created_at >= now() - interval '7 days'
+GROUP BY failure_reason
+ORDER BY count(*) DESC;
+```
+
+The table deliberately contains no thought content. Intentionally disabled
+extraction still stamps `endpoint: "stub"` on the thought but does not create a
+degradation event or alert; only a configured path that actually fails produces
+`stub_used`. There is no automatic retention window: the point is to preserve
+the privacy audit across container replacement and configuration changes. It is
+included in normal database backups.
+
+With delivery enabled, successfully accounted-for queue rows are consumed. If
+an operator deliberately does not need old stub-only history, the database
+owner may then prune already-consumed rows without weakening the off-box audit:
+
+```sql
+DELETE FROM metadata_degradation_events AS event
+WHERE event.event_type = 'stub_used'
+  AND event.created_at < now() - interval '90 days'
+  AND NOT EXISTS (
+    SELECT 1 FROM metadata_degradation_outbox AS outbox
+    WHERE outbox.event_id = event.id
+  );
+```
+
+Never prune `fallback_used` if historical enumeration of off-box candidates is
+required. Deleting an unconsumed event would cascade its outbox row and suppress
+the corresponding alert, which is why the guard above is load-bearing.
+
+When `METADATA_NOTIFY_CHANNELS` is blank, no worker consumes the outbox. This
+preserves degradation events for delivery if notifications are enabled later,
+but the pending queue grows with them. Inspect its depth and oldest age with:
+
+```sql
+SELECT count(*) AS pending, min(created_at) AS oldest_pending
+FROM metadata_degradation_outbox;
+```
+
+An operator choosing permanent audit-only mode may explicitly discard old
+delivery intent while retaining history:
+
+```sql
+DELETE FROM metadata_degradation_outbox
+WHERE created_at < now() - interval '90 days';
+```
+
+That action is irreversible for notification purposes: it suppresses future
+alerts for the deleted queue entries, including fallback events. Review the
+audit first. Afterward, the guarded stub-history prune above can remove matching
+stub rows if desired.
+
+Existing databases must apply migration 07 as the database owner and run
+`db/03-grants-assertion.sql` last before starting server 1.16.0. The boot probe
+fails closed when an audit/outbox relation, required column/constraint, sequence,
+or the singleton ledger row is missing. Reapplying migration 07 also converges
+the earlier preview schema: because its unsafe sequence cursor cannot reveal
+which history rows it skipped, the upgrade requeues all existing history once
+and clears old aggregate counts. That may repeat a preview alert, choosing
+at-least-once delivery over silent loss.
+
+This release also makes every positive-integer environment setting strict.
+Values with trailing text or scientific notation that older `parseInt` behavior
+accepted now fail at boot; correct them to complete decimal integers before the
+restart.
+
+## Durable notification worker
+
+Delivery is opt-in; real degradation auditing is not. Set
+`METADATA_NOTIFY_CHANNELS` to
+`pushover`, `ntfy`, or `pushover,ntfy`, then provide the selected adapters'
+credentials from the deployment's `0600` `.env` file. The complete variable
+set and defaults live in the two deployment `.env.example` files.
+
+```dotenv
+METADATA_NOTIFY_CHANNELS=pushover
+METADATA_NOTIFY_LABEL=OpenBrain
+METADATA_PUSHOVER_APP_TOKEN=<secret>
+METADATA_PUSHOVER_USER_KEY=<secret>
+```
+
+The label is the only deployment identity sent externally. Keep it generic:
+never use a hostname, address, or topology description. For ntfy, the topic is
+also treated as a credential; an optional bearer token is supported for
+protected/self-hosted topics.
+
+The worker polls every five minutes by default. A trigger class that has never
+been delivered bypasses the cooldown; later occurrences accumulate for a
+30-minute rollup. A delivery batch uses best-effort fan-out to all selected
+adapters and is committed as delivered when at least one succeeds. This is not
+independent per-channel guaranteed delivery: a failed channel is recorded in
+`last_failed_channels` and logged, but that batch is not retried to it after
+another channel accepts it. Configure one channel when delivery through that
+specific provider must be durable. If all adapters fail, pending counts are
+retained and retried on the next poll without rereading or multiplying events.
+The outbox claim and ledger update commit together. A crash after external
+delivery but before that commit can repeat an alert—the deliberate at-least-once
+failure direction—but cannot silently lose one.
+
+The latest partial/all-channel failure remains queryable without exposing any
+credential or provider response:
+
+```sql
+SELECT last_delivery_attempt_at, last_failed_channels
+FROM metadata_degradation_notification_state
+WHERE singleton;
+```
+
+Notification construction sees only finite event codes and counts. It never
+selects thought content, thought IDs, endpoint bases/models, request data, or
+infrastructure identifiers. Fallback counts are labeled `fallback`, not
+`off-box`, because the configured fallback may itself be local.
+
+### Deployment and live-fire
+
+Keep any existing log monitor running until the durable path has completed one
+real end-to-end delivery:
+
+1. Apply migration 07 and the grant assertion before starting server 1.16.0.
+2. Confirm egress **from inside the MCP container** before depending on the
+   worker. For Pushover, for example, run
+
+   ```bash
+   docker compose exec mcp deno eval \
+     'const r = await fetch("https://api.pushover.net"); console.log(r.status)'
+   ```
+
+   Any HTTP status proves DNS/TLS reachability; a timeout or DNS error does not.
+   Use the configured origin for ntfy. `DOCKER-USER` rules and the app qube's
+   Qubes firewall govern this container path, even when a host-side probe works.
+3. Put one adapter's credentials and a generic label in the deployment's real
+   `0600` `.env`, enable its channel, and recreate the MCP container. Existing
+   queued degradation rows may cause the first alert immediately.
+4. If no historical alert arrives, make one capture containing only an explicit
+   harmless fixture such as `metadata alert live-fire fixture` while the primary
+   is enabled but pointed at a known-dead local port and the fallback is blank.
+   That deterministically records a primary failure plus a real stub without
+   sending text to a fallback. Disabling extraction entirely does not emit a
+   degradation event. For a quicker test, temporarily lower the poll and rollup
+   intervals, then recreate the container so it reads the new values.
+5. Confirm the provider received a content-free alert, the MCP log contains
+   `delivered durable alert batch`, and the stub row is queryable in
+   `metadata_degradation_events`. Restore the endpoint and interval settings and
+   recreate the container again.
+6. Only after that success should the legacy log-scraping timer be disabled.
+
+The fixture remains a real thought and audit event by design; never use real or
+private content for this test.
+
+## Diagnostic log trigger lines
 
 All lines below come from [`server/metadata.ts`](../server/metadata.ts) and
 contain no thought content; grep for the stable substrings shown.
@@ -76,7 +272,7 @@ because whether a fallback classification left your network depends entirely
 on where `FALLBACK_CHAT_API_BASE` points — the monitor can't see that, so it
 doesn't claim it.
 
-## Anti-spam, and failing loudly
+## Legacy monitor anti-spam, and failing loudly
 
 - **First occurrence alerts immediately; further events accumulate** and roll
   up no more often than every 30 minutes. When the primary is down, *every*
@@ -95,7 +291,12 @@ doesn't claim it.
   send — so a crash or failed send at any point can at worst repeat an alert,
   never lose events that were already read.
 
-## Sketch: bash + systemd user timer
+## Legacy fallback: bash + systemd user timer
+
+The server-side worker is the normal path. Keep this host-side sketch only for
+older servers, for an independent process-liveness signal, or during a staged
+migration until the durable worker has been live-fired. It remains useful when
+the server process itself cannot run its polling loop.
 
 Secrets live in two `0600` files outside any repo —
 `~/.config/ob1-metadata-monitor/pushover-token` (the application API token)
@@ -266,8 +467,8 @@ Two caveats worth knowing:
   the container, not a mere restart). Everything since the last *successful*
   scan is lost with it — normally one five-minute window, but a blind spell
   or a stopped timer stretches the unread interval, and a recreation during
-  it takes the whole backlog. Either way the log is not an audit trail. See
-  the next section.
+  it takes the whole backlog. Either way the log is not an audit trail; use the
+  durable database history described above.
 - **Egress**: the monitor runs on the *host*, so container-scoped egress
   firewalls (e.g. a `DOCKER-USER` chain) don't apply to it — but check the
   host's own path once: `curl -sI https://api.pushover.net` from the account
@@ -275,23 +476,14 @@ Two caveats worth knowing:
   governs that path is the app qube's own Qubes-firewall egress policy —
   check there first if the probe fails.
 
-## Where this should go eventually
+## Next policy layer
 
-Log scraping is the cheap interim, not the destination. Its source of truth
-resets on every container replacement, and nothing durable records *which*
-thoughts were classified by *which* endpoint — so "which of my thoughts have
-ever been sent off-box?" is unanswerable after the fact. The better shape,
-sketched here so the interim doesn't calcify:
-
-- the server records each degradation event durably (the auth-audit table
-  pattern already in [`db/`](../db/) is the in-repo precedent), and/or stamps
-  the classifying endpoint into the thought's stored metadata at capture time;
-- the alerter reads that record instead of scraping container logs, and grows
-  pluggable
-  delivery (Pushover / ntfy / SMTP) rather than one hardcoded transport;
-- an operator-selected fallback policy (`off` / `alert` / `allow`) makes the
-  privacy stance explicit instead of emergent from which env vars happen to be
-  set — with `alert` refusing to boot when no channel is configured.
+The durable signal and notification channel make a future operator-selected
+fallback policy enforceable. An `off` / `alert` / `allow` setting can decide
+whether capture stubs locally, uses fallback only with a configured channel, or
+permits fallback without delivery. That policy is intentionally separate from
+this observability layer; current primary → fallback → stub behavior is
+unchanged.
 
 Related reading: [`docs/why-local-only.md`](why-local-only.md) for why the
 fallback exists at all, and the [GPU-qube transport

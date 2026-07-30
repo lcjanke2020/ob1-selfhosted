@@ -72,8 +72,21 @@ Deno.test("extractMetadata: fallback-only (primary blank) classifies via the fal
     const { extractMetadata } = await import("./metadata.ts");
     const r = await extractMetadata("anything");
     // The fallback classified it — NOT the uncategorized stub.
-    assertEquals(r.type, "idea");
-    assertEquals(r.topics, ["fallback-only"]);
+    assertEquals(r.metadata.type, "idea");
+    assertEquals(r.metadata.topics, ["fallback-only"]);
+    assertEquals(r.classifier, {
+      schema_version: 1,
+      endpoint: "fallback",
+      model: "hosted-model",
+    });
+    assertEquals(r.degradation_events, [{
+      event_type: "fallback_used",
+      endpoint_role: "fallback",
+      failure_reason: null,
+      http_status: null,
+      endpoint_model: "hosted-model",
+      endpoint_base_url: FALLBACK_BASE,
+    }]);
     // Exactly one call, to the fallback endpoint; the (blank) primary was
     // never contacted.
     assertEquals(urls.length, 1);

@@ -12,8 +12,9 @@
 -- visibility. The reserved `sensitive` workspace defaults new application
 -- captures to personal visibility and rejects broader application writes.
 --
--- Apply after 04-sessions.sql and 05-hybrid-search.sql, then run the stable
--- 03-grants-assertion.sql source last. This migration takes table locks while
+-- Apply after 04-sessions.sql and 05-hybrid-search.sql. Apply any subsequent
+-- numbered migrations, then run the stable 03-grants-assertion.sql source last.
+-- This migration takes table locks while
 -- adding/backfilling audience columns and rebuilding the thought fingerprint
 -- unique index; use a full application maintenance window on an existing DB.
 

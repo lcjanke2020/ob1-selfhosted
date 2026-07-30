@@ -130,7 +130,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 -- The grants-invariant assertion lives at db/03-grants-assertion.sql; the
 -- Compose/CI init paths mount it as 99-grants-assertion.sql so it runs after
 -- this file, 02-observability.sql, and every later schema migration. Native
--- provisioning must likewise invoke the stable source path last, after 04-
--- and 05-. It can also be run standalone against a deployed DB to check for
--- drift without the REVOKE+GRANT block above wiping that drift first. See
--- that file's doc-comment for the rationale.
+-- provisioning must likewise invoke the stable source path last, after every
+-- later numbered migration. It can also be run standalone against a deployed
+-- DB to check for drift without the REVOKE+GRANT block above wiping that drift
+-- first. See that file's doc-comment for the rationale.

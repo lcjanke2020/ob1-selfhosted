@@ -15,8 +15,8 @@ The deployment was close to the maximal local configuration this project support
 embeddings from a local model, metadata classification from a local model on a GPU host,
 storage in a local database. Once a request reached the store, no server-side processing
 called a third-party model. (A cloud classifier fallback stays wired for when the local model
-is unavailable, but it never fired here — and even on failure it only stamps a placeholder; it
-can't reject a write.)
+is unavailable, but it never fired here; if classification exhausts every endpoint, metadata
+degrades to a placeholder and still can't reject a write.)
 
 The **client**, though, was a hosted model reaching the store's tools through the **vendor's
 hosted connector** — the cloud-side path a hosted model uses to call your MCP server, as

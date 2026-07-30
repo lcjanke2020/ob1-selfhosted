@@ -409,9 +409,9 @@ in front of a capture. Two companion settings, same qube:
   that keeps it off the capture path, and §6 explains why an undersized qube
   silently undoes both.
 - **Know when it degrades.** Every fallback classification is a privacy event
-  logged as a single line to the container's stderr that nobody reads. A small
-  operator alert channel over those lines — triggers, no-content alert policy,
-  a Pushover sketch — is in
+  recorded in the durable, content-free database audit and still logged to
+  stderr for diagnosis. Optional Pushover/ntfy first-occurrence alerts and
+  rollups, plus the legacy log-monitor fallback, are in
   [`docs/metadata-degradation-monitoring.md`](../../docs/metadata-degradation-monitoring.md).
 - **Verify the transport:** from the app-qube host, `curl http://<compose-gw>:11434/v1/models`
   (should list the model); from inside the container,
@@ -423,12 +423,12 @@ in front of a capture. Two companion settings, same qube:
   ([`server/metadata.ts`](../../server/metadata.ts)); a server can list the
   model yet reject that request shape, after which every capture falls through
   to `FALLBACK_CHAT_*` — thought content leaves the box, the outcome this
-  transport exists to prevent. Captures still succeed and the extractor *does*
-  warn on every fallback classification, but only in the container logs — so
-  check them deliberately: capture a test thought and look for
-  `[metadata] classified via primary endpoint`. Failure lines now identify the
-  broad cause: `primary endpoint failed (transport/timeout)` is an availability
-  signal, `primary endpoint failed (non-2xx response)` is a server or request-
+  transport exists to prevent. Captures still succeed; the extractor writes a
+  durable event and warns on every fallback classification. For a transport
+  smoke test, also check the immediate log deliberately: capture a test thought
+  and look for `[metadata] classified via primary endpoint`. Failure lines now
+  identify the broad cause: `primary endpoint failed (transport/timeout)` is an
+  availability signal, `primary endpoint failed (non-2xx response)` is a server or request-
   compatibility failure with the final HTTP status appended, and lines
   beginning `primary endpoint returned …` identify an invalid completion
   envelope, unparseable model output, or runtime-schema-rejected metadata.

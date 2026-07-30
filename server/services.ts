@@ -14,6 +14,7 @@ import { embed as defaultEmbed } from "./embeddings.ts";
 export { NotFoundError, UpstreamError, ValidationError } from "./errors.ts";
 import { NotFoundError, UpstreamError, ValidationError } from "./errors.ts";
 import { extractMetadata as defaultExtractMetadata } from "./metadata.ts";
+import type { MetadataExtractionResult } from "./metadata.ts";
 import {
   type CaptureOutcome,
   captureThought,
@@ -147,7 +148,7 @@ function validateMemoryScope(
 
 export type ServiceDeps = {
   embed: (text: string) => Promise<number[]>;
-  extractMetadata: (text: string) => Promise<Record<string, unknown>>;
+  extractMetadata: (text: string) => Promise<MetadataExtractionResult>;
 };
 
 export const defaultDeps: ServiceDeps = {
@@ -189,15 +190,23 @@ export async function captureThoughtWithMetadata(
   // Unknown/misspelled registry targets and missing personal principals fail
   // before content reaches either the embedder or metadata extractor.
   const scope = await resolveWriteScope(pool, scopeInput, input.auth);
-  const [embedding, extracted] = await Promise.all([
+  const [embedding, extraction] = await Promise.all([
     embedOrUpstreamError(deps.embed, input.content),
     deps.extractMetadata(input.content),
   ]);
   // Treat these keys as reserved even though metadata.ts's strict runtime
   // schema already excludes them. This defense keeps injected test/custom
   // extractors from impersonating server stamps or caller claims.
-  const classified = { ...extracted };
-  for (const reserved of ["source", "door", "sub", "provenance"]) {
+  const classified = { ...extraction.metadata };
+  for (
+    const reserved of [
+      "source",
+      "door",
+      "sub",
+      "provenance",
+      "metadata_extraction",
+    ]
+  ) {
     delete classified[reserved];
   }
 
@@ -220,11 +229,13 @@ export async function captureThoughtWithMetadata(
     source: input.via,
     door: input.auth.door,
     sub: input.auth.sub,
+    metadata_extraction: extraction.classifier,
   };
   const persisted = await captureThought(pool, {
     content: input.content,
     embedding,
     metadata,
+    degradationEvents: extraction.degradation_events,
     scope,
   });
   // The upsert may preserve top-level keys omitted by this capture (notably

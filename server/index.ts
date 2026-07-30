@@ -12,10 +12,10 @@
 // Embeddings: local Ollama (default model nomic-embed-text, 768 dim).
 //
 // Architecture is split into queries.ts (pure DB), embeddings.ts (Ollama),
-// metadata.ts (optional chat-LLM extraction), auth.ts (header / JWT
-// checks), mcp-server.ts (tool registration factory), and this file
-// (Hono app + Deno serve). A future REST gateway, CLI, or dashboard would
-// import queries.ts directly.
+// metadata.ts (optional chat-LLM extraction), metadata_notifications.ts
+// (durable degradation delivery), auth.ts (header / JWT checks), mcp-server.ts
+// (tool registration factory), and this file (Hono app + Deno serve). A future
+// REST gateway, CLI, or dashboard would import queries.ts directly.
 
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { type Context, Hono } from "hono";
@@ -24,9 +24,20 @@ import {
   ENABLE_BRAIN_KEY,
   ENABLE_FALLBACK_EXTRACTION,
   ENABLE_METADATA_EXTRACTION,
+  ENABLE_METADATA_NOTIFICATIONS,
   ENABLE_OAUTH,
   ENABLE_PRIMARY_EXTRACTION,
   ENABLE_REST_API,
+  METADATA_NOTIFY_CHANNELS,
+  METADATA_NOTIFY_LABEL,
+  METADATA_NOTIFY_POLL_INTERVAL_MS,
+  METADATA_NOTIFY_ROLLUP_MS,
+  METADATA_NOTIFY_TIMEOUT_MS,
+  METADATA_NTFY_SERVER_URL,
+  METADATA_NTFY_TOKEN,
+  METADATA_NTFY_TOPIC,
+  METADATA_PUSHOVER_APP_TOKEN,
+  METADATA_PUSHOVER_USER_KEY,
   PORT,
 } from "./config.ts";
 import { createApiRouter } from "./api.ts";
@@ -38,6 +49,12 @@ import {
   requireAuth,
 } from "./auth.ts";
 import { createMcpServer } from "./mcp-server.ts";
+import {
+  type MetadataNotificationAdapter,
+  NtfyMetadataNotificationAdapter,
+  PushoverMetadataNotificationAdapter,
+  startMetadataNotificationWorker,
+} from "./metadata_notifications.ts";
 import { pingDb } from "./queries.ts";
 
 // Hono Variables typed so `c.set/c.get` on door/sub are checked
@@ -161,9 +178,9 @@ if (ENABLE_REST_API) {
   );
 }
 
-// Announce the metadata-extraction mode at boot so the two silent degradations
-// (every capture stamping the stub; every capture going to the fallback, which
-// may be off-box) are obvious from the startup log, not just per-capture lines.
+// Announce the metadata-extraction mode at boot so an intentionally disabled
+// extractor and a fallback-only deployment (which may be off-box) are obvious
+// from the startup log, not just per-capture lines.
 // No secrets. "May be off-box" because whether the fallback endpoint is remote
 // vs on-LAN depends on the operator's FALLBACK_CHAT_API_BASE.
 if (!ENABLE_METADATA_EXTRACTION) {
@@ -184,17 +201,67 @@ if (!ENABLE_METADATA_EXTRACTION) {
 
 const httpServer = Deno.serve({ port: PORT }, app.fetch);
 
+const metadataNotificationAdapters: MetadataNotificationAdapter[] = [];
+for (const channel of METADATA_NOTIFY_CHANNELS) {
+  if (channel === "pushover") {
+    metadataNotificationAdapters.push(
+      new PushoverMetadataNotificationAdapter(
+        METADATA_PUSHOVER_APP_TOKEN,
+        METADATA_PUSHOVER_USER_KEY,
+        METADATA_NOTIFY_TIMEOUT_MS,
+      ),
+    );
+  } else {
+    metadataNotificationAdapters.push(
+      new NtfyMetadataNotificationAdapter(
+        METADATA_NTFY_SERVER_URL,
+        METADATA_NTFY_TOPIC,
+        METADATA_NTFY_TOKEN,
+        METADATA_NOTIFY_TIMEOUT_MS,
+      ),
+    );
+  }
+}
+
+const metadataNotificationWorker = ENABLE_METADATA_NOTIFICATIONS
+  ? startMetadataNotificationWorker(pool, metadataNotificationAdapters, {
+    label: METADATA_NOTIFY_LABEL,
+    pollIntervalMs: METADATA_NOTIFY_POLL_INTERVAL_MS,
+    rollupMs: METADATA_NOTIFY_ROLLUP_MS,
+  })
+  : null;
+
+if (metadataNotificationWorker) {
+  console.log(
+    `[metadata_notify] durable notifications enabled via ${
+      METADATA_NOTIFY_CHANNELS.join(",")
+    }`,
+  );
+}
+
 // Graceful shutdown — stop accepting new connections, drain in-flight
 // requests, then release the DB pool. `docker stop` sends SIGTERM; without
 // this, in-flight requests are cut and postgres keeps the abandoned
 // connections until its own timeout. Mirrors log_ingester.ts.
 const shutdown = async () => {
-  console.log("[mcp] shutdown signal received; draining server + pool");
-  try {
-    await httpServer.shutdown();
-    await pool.end();
-  } catch (e) {
-    console.warn(`[mcp] shutdown cleanup failed: ${(e as Error).message}`);
+  console.log(
+    "[mcp] shutdown signal received; draining server + worker + pool",
+  );
+  const cleanupSteps: Array<[string, () => Promise<void>]> = [
+    ["http server", () => httpServer.shutdown()],
+    ["metadata notification worker", async () => {
+      await metadataNotificationWorker?.stop();
+    }],
+    ["database pool", () => pool.end()],
+  ];
+  for (const [label, cleanup] of cleanupSteps) {
+    try {
+      await cleanup();
+    } catch (e) {
+      console.warn(
+        `[mcp] ${label} shutdown failed: ${(e as Error).message}`,
+      );
+    }
   }
   Deno.exit(0);
 };

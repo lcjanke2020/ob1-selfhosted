@@ -206,8 +206,15 @@ docker compose exec -T postgres \
   < ../../db/06-spaces.sql
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/07-metadata-degradation.sql
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/03-grants-assertion.sql
 ```
+
+Migration 07 is the next required server schema and is included here so the
+completed-catalog grant assertion remains last. It does not extend or weaken
+the space boundary; see [Metadata degradation monitoring](metadata-degradation-monitoring.md).
 
 The migration backfills existing thoughts and sessions into the `default`
 workspace at workspace visibility. It takes table locks while adding and

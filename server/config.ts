@@ -11,12 +11,23 @@ function required(name: string): string {
   return v;
 }
 
-function requiredInt(name: string, fallback: number): number {
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+function requiredInt(
+  name: string,
+  fallback: number,
+  max = Number.MAX_SAFE_INTEGER,
+): number {
   const raw = Deno.env.get(name)?.trim();
   if (!raw) return fallback;
-  const value = Number.parseInt(raw, 10);
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`Invalid integer env var ${name}: "${raw}"`);
+  if (!/^[0-9]+$/.test(raw)) {
+    throw new Error(`${name} must be a complete positive decimal integer`);
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0 || value > max) {
+    throw new Error(
+      `${name} must be a positive integer no greater than ${max}`,
+    );
   }
   return value;
 }
@@ -64,13 +75,26 @@ export const CHAT_API_KEY = optionalTrimmed("CHAT_API_KEY");
 export const CHAT_MODEL = optionalTrimmed("CHAT_MODEL");
 
 // Safety gate for the PRIMARY (CHAT_*) extractor call. Default OFF: the primary
-// is attempted ONLY when ENABLE_PRIMARY_EXTRACTION is set EXACTLY to "true" AND
-// the primary endpoint is configured. The opt-in exists so a primary that is
+// is attempted ONLY when ENABLE_PRIMARY_EXTRACTION is set to "true" AND the
+// primary endpoint is configured. The opt-in exists so a primary that is
 // misconfigured or fronted by a dangerous transport can't fire on the hot
 // capture path — e.g. a qrexec forwarder whose call would auto-start a downed
 // GPU qube. Set to "true" only once the primary endpoint is known-good.
-const PRIMARY_EXTRACTION_OPT_IN =
-  optionalTrimmed("ENABLE_PRIMARY_EXTRACTION").toLowerCase() === "true";
+const PRIMARY_EXTRACTION_SETTING = optionalTrimmed(
+  "ENABLE_PRIMARY_EXTRACTION",
+).toLowerCase();
+if (
+  PRIMARY_EXTRACTION_SETTING &&
+  !["true", "false"].includes(PRIMARY_EXTRACTION_SETTING)
+) {
+  throw new Error("ENABLE_PRIMARY_EXTRACTION must be true or false");
+}
+const PRIMARY_EXTRACTION_OPT_IN = PRIMARY_EXTRACTION_SETTING === "true";
+if (PRIMARY_EXTRACTION_OPT_IN && (!CHAT_API_BASE || !CHAT_MODEL)) {
+  throw new Error(
+    "ENABLE_PRIMARY_EXTRACTION=true requires CHAT_API_BASE and CHAT_MODEL",
+  );
+}
 export const ENABLE_PRIMARY_EXTRACTION = Boolean(
   PRIMARY_EXTRACTION_OPT_IN && CHAT_API_BASE && CHAT_MODEL,
 );
@@ -95,6 +119,132 @@ export const ENABLE_FALLBACK_EXTRACTION = Boolean(
 // stub.
 export const ENABLE_METADATA_EXTRACTION = ENABLE_PRIMARY_EXTRACTION ||
   ENABLE_FALLBACK_EXTRACTION;
+
+// Optional durable metadata-degradation notifications. Empty means real
+// degradation rows and their pending outbox entries are retained, but no
+// delivery worker runs. A comma-separated list enables one or both pluggable
+// adapters. Multiple adapters are best-effort fan-out, not independent per-
+// channel queues: the batch succeeds when at least one adapter accepts it,
+// while failed channel names are retained in the delivery ledger for diagnosis.
+export type MetadataNotificationChannel = "pushover" | "ntfy";
+
+function metadataNotificationChannels(): MetadataNotificationChannel[] {
+  const raw = optionalTrimmed("METADATA_NOTIFY_CHANNELS");
+  if (!raw) return [];
+  const channels = raw.split(",").map((value) => value.trim()).filter(Boolean);
+  const unique = new Set<string>();
+  for (const channel of channels) {
+    if (channel !== "pushover" && channel !== "ntfy") {
+      throw new Error(
+        "Invalid METADATA_NOTIFY_CHANNELS entry " +
+          "(expected pushover and/or ntfy)",
+      );
+    }
+    if (unique.has(channel)) {
+      throw new Error(`Duplicate METADATA_NOTIFY_CHANNELS entry: ${channel}`);
+    }
+    unique.add(channel);
+  }
+  return [...unique] as MetadataNotificationChannel[];
+}
+
+function noControlCharacters(name: string, value: string, max: number): string {
+  const hasControlCharacter = [...value].some((character) => {
+    const codePoint = character.codePointAt(0)!;
+    return codePoint <= 0x1f || codePoint === 0x7f;
+  });
+  if (value.length > max || hasControlCharacter) {
+    throw new Error(
+      `${name} must be at most ${max} characters and contain no control characters`,
+    );
+  }
+  return value;
+}
+
+export const METADATA_NOTIFY_CHANNELS = metadataNotificationChannels();
+export const ENABLE_METADATA_NOTIFICATIONS =
+  METADATA_NOTIFY_CHANNELS.length > 0;
+export const METADATA_NOTIFY_LABEL = noControlCharacters(
+  "METADATA_NOTIFY_LABEL",
+  optionalTrimmed("METADATA_NOTIFY_LABEL") || "OpenBrain",
+  64,
+);
+export const METADATA_NOTIFY_POLL_INTERVAL_MS = requiredInt(
+  "METADATA_NOTIFY_POLL_INTERVAL_MS",
+  300_000,
+  MAX_TIMER_DELAY_MS,
+);
+export const METADATA_NOTIFY_ROLLUP_MS = requiredInt(
+  "METADATA_NOTIFY_ROLLUP_MS",
+  1_800_000,
+  MAX_TIMER_DELAY_MS,
+);
+export const METADATA_NOTIFY_TIMEOUT_MS = requiredInt(
+  "METADATA_NOTIFY_TIMEOUT_MS",
+  10_000,
+  MAX_TIMER_DELAY_MS,
+);
+
+export const METADATA_PUSHOVER_APP_TOKEN = noControlCharacters(
+  "METADATA_PUSHOVER_APP_TOKEN",
+  optionalTrimmed("METADATA_PUSHOVER_APP_TOKEN"),
+  1024,
+);
+export const METADATA_PUSHOVER_USER_KEY = noControlCharacters(
+  "METADATA_PUSHOVER_USER_KEY",
+  optionalTrimmed("METADATA_PUSHOVER_USER_KEY"),
+  1024,
+);
+export const METADATA_NTFY_TOPIC = noControlCharacters(
+  "METADATA_NTFY_TOPIC",
+  optionalTrimmed("METADATA_NTFY_TOPIC"),
+  256,
+);
+export const METADATA_NTFY_TOKEN = noControlCharacters(
+  "METADATA_NTFY_TOKEN",
+  optionalTrimmed("METADATA_NTFY_TOKEN"),
+  2048,
+);
+export const METADATA_NTFY_SERVER_URL = optionalTrimmed(
+  "METADATA_NTFY_SERVER_URL",
+) || "https://ntfy.sh";
+
+if (METADATA_NOTIFY_CHANNELS.includes("pushover")) {
+  if (!METADATA_PUSHOVER_APP_TOKEN || !METADATA_PUSHOVER_USER_KEY) {
+    throw new Error(
+      "METADATA_NOTIFY_CHANNELS includes pushover, so " +
+        "METADATA_PUSHOVER_APP_TOKEN and METADATA_PUSHOVER_USER_KEY are required",
+    );
+  }
+}
+
+if (METADATA_NOTIFY_CHANNELS.includes("ntfy")) {
+  if (!METADATA_NTFY_TOPIC) {
+    throw new Error(
+      "METADATA_NOTIFY_CHANNELS includes ntfy, so METADATA_NTFY_TOPIC is required",
+    );
+  }
+  let ntfyUrl: URL;
+  try {
+    ntfyUrl = new URL(METADATA_NTFY_SERVER_URL);
+  } catch {
+    throw new Error("METADATA_NTFY_SERVER_URL must be an absolute URL");
+  }
+  if (
+    !["http:", "https:"].includes(ntfyUrl.protocol) || ntfyUrl.username ||
+    ntfyUrl.password || ntfyUrl.search || ntfyUrl.hash
+  ) {
+    throw new Error(
+      "METADATA_NTFY_SERVER_URL must use http/https and contain no credentials, query, or fragment",
+    );
+  }
+  if (
+    METADATA_NTFY_TOKEN &&
+    !/^[A-Za-z0-9\-._~+/]+=*$/.test(METADATA_NTFY_TOKEN)
+  ) {
+    throw new Error("METADATA_NTFY_TOKEN is not a valid bearer token");
+  }
+}
 
 // Opt-in REST gateway (/api/v1). Default OFF; when off the router is never
 // mounted, so the surface does not exist (every /api/v1 path 404s before any
@@ -243,13 +393,21 @@ export const CITATION_BASE_URL = optionalTrimmed("CITATION_BASE_URL") ||
 // for a slow first-load embed model warm-up and short enough that a hung
 // backend can't tie up an MCP request indefinitely. (The chat-LLM metadata
 // call has its own knob — CHAT_TIMEOUT_MS below.)
-export const FETCH_TIMEOUT_MS = requiredInt("FETCH_TIMEOUT_MS", 15_000);
+export const FETCH_TIMEOUT_MS = requiredInt(
+  "FETCH_TIMEOUT_MS",
+  15_000,
+  MAX_TIMER_DELAY_MS,
+);
 
 // Separate, longer cap for the optional chat-LLM metadata extraction call.
 // A chat completion over a large captured thought can legitimately take far
 // longer than an embedding — gating both on FETCH_TIMEOUT_MS silently
 // truncated extraction on slow local models.
-export const CHAT_TIMEOUT_MS = requiredInt("CHAT_TIMEOUT_MS", 60_000);
+export const CHAT_TIMEOUT_MS = requiredInt(
+  "CHAT_TIMEOUT_MS",
+  60_000,
+  MAX_TIMER_DELAY_MS,
+);
 
 // Wall-clock cap on JWKS fetches. Two surfaces:
 //   1. Passed to jose's `createRemoteJWKSet` as `timeoutDuration`, bounding
@@ -264,6 +422,7 @@ export const CHAT_TIMEOUT_MS = requiredInt("CHAT_TIMEOUT_MS", 60_000);
 export const JWKS_FETCH_TIMEOUT_MS = requiredInt(
   "JWKS_FETCH_TIMEOUT_MS",
   10_000,
+  MAX_TIMER_DELAY_MS,
 );
 
 // Overall deadline for the boot-time Postgres reachability probe (wired in
@@ -279,4 +438,5 @@ export const JWKS_FETCH_TIMEOUT_MS = requiredInt(
 export const DB_BOOT_PROBE_TIMEOUT_MS = requiredInt(
   "DB_BOOT_PROBE_TIMEOUT_MS",
   30_000,
+  MAX_TIMER_DELAY_MS,
 );

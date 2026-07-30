@@ -84,7 +84,15 @@ export function makeDeps(overrides: Partial<ServiceDeps> = {}): RecordingDeps {
     }),
     extractMetadata: overrides.extractMetadata ?? ((text) => {
       extractCalls.push(text);
-      return Promise.resolve({ type: "observation", topics: ["testing"] });
+      return Promise.resolve({
+        metadata: { type: "observation", topics: ["testing"] },
+        classifier: {
+          schema_version: 1 as const,
+          endpoint: "primary" as const,
+          model: "test-local-model",
+        },
+        degradation_events: [],
+      });
     }),
   };
 }

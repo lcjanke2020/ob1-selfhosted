@@ -5,6 +5,7 @@ import { Pool } from "postgres";
 import { getClient } from "./db_pool.ts";
 import type { ThoughtMatch, ThoughtRecord } from "./db.ts";
 import { toVectorLiteral } from "./embeddings.ts";
+import type { MetadataDegradationEvent } from "./metadata.ts";
 import { withScopeClient } from "./scoped_db.ts";
 import {
   THOUGHT_PROVENANCE_FIELDS,
@@ -275,6 +276,7 @@ export type CaptureInput = {
   content: string;
   embedding: number[];
   metadata: Record<string, unknown>;
+  degradationEvents: MetadataDegradationEvent[];
   scope: ResolvedWriteScope;
 };
 
@@ -333,7 +335,52 @@ export async function captureThought(
         input.scope.ownerSubject,
       ],
     );
-    return result.rows[0];
+    const persisted = result.rows[0];
+    if (!persisted) {
+      throw new Error("thought upsert returned no row");
+    }
+
+    if (input.degradationEvents.length > 0) {
+      // One UUID groups every event emitted by this capture attempt. The
+      // thought upsert, immutable history, and pending-delivery outbox enqueue
+      // share withScopeClient's transaction. The outbox makes notification
+      // claiming commit-safe when BIGSERIAL ids commit out of order.
+      await client.queryArray(
+        `WITH inserted_events AS (
+           INSERT INTO metadata_degradation_events (
+             thought_id, capture_id, event_type, endpoint_role,
+             failure_reason, http_status, endpoint_model, endpoint_base_url
+           )
+           SELECT
+             $1::uuid,
+             $2::uuid,
+             event_type,
+             endpoint_role,
+             failure_reason,
+             http_status,
+             endpoint_model,
+             endpoint_base_url
+           FROM jsonb_to_recordset($3::jsonb) AS event(
+             event_type text,
+             endpoint_role text,
+             failure_reason text,
+             http_status integer,
+             endpoint_model text,
+             endpoint_base_url text
+           )
+           RETURNING id
+         )
+         INSERT INTO metadata_degradation_outbox (event_id)
+         SELECT id FROM inserted_events`,
+        [
+          persisted.id,
+          crypto.randomUUID(),
+          JSON.stringify(input.degradationEvents),
+        ],
+      );
+    }
+
+    return persisted;
   });
 }
 

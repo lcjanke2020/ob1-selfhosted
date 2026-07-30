@@ -86,6 +86,7 @@ export async function probeDbAtBoot(
         boolean,
         boolean,
         boolean,
+        boolean,
       ]>(
         `SELECT
            to_regclass('public.idx_thoughts_content_tsv') IS NOT NULL,
@@ -162,7 +163,89 @@ export async function probeDbAtBoot(
                  WHERE polrelid = artifact_rel.oid
                    AND polname = 'artifact_app_audience'
                )
-           )`,
+           ),
+           to_regclass('public.metadata_degradation_events') IS NOT NULL
+             AND to_regclass(
+               'public.metadata_degradation_outbox'
+             ) IS NOT NULL
+             AND to_regclass(
+               'public.metadata_degradation_notification_state'
+             ) IS NOT NULL
+             AND to_regclass(
+               'public.metadata_degradation_events_id_seq'
+             ) IS NOT NULL
+             AND NOT EXISTS (
+               SELECT 1
+               FROM (VALUES
+                 ('singleton'),
+                 ('pending_counts'),
+                 ('notified_event_types'),
+                 ('last_notified_at'),
+                 ('last_delivery_attempt_at'),
+                 ('last_failed_channels'),
+                 ('updated_at')
+               ) AS required(attname)
+               WHERE NOT EXISTS (
+                 SELECT 1
+                 FROM pg_attribute
+                 WHERE attrelid = to_regclass(
+                         'public.metadata_degradation_notification_state'
+                       )
+                   AND pg_attribute.attname::text = required.attname
+                   AND attnum > 0
+                   AND NOT attisdropped
+               )
+             )
+             AND NOT EXISTS (
+               SELECT 1
+               FROM pg_attribute
+               WHERE attrelid = to_regclass(
+                       'public.metadata_degradation_notification_state'
+                     )
+                 AND attname = 'last_event_id'
+                 AND attnum > 0
+                 AND NOT attisdropped
+             )
+             AND EXISTS (
+               SELECT 1
+               FROM pg_attribute
+               WHERE attrelid = to_regclass(
+                       'public.metadata_degradation_outbox'
+                     )
+                 AND attname = 'created_at'
+                 AND attnum > 0
+                 AND NOT attisdropped
+             )
+             AND EXISTS (
+               SELECT 1
+               FROM pg_attribute
+               WHERE attrelid = to_regclass(
+                       'public.metadata_degradation_events'
+                     )
+                 AND attname = 'thought_id'
+                 AND attnum > 0
+                 AND NOT attisdropped
+                 AND NOT attnotnull
+             )
+             AND EXISTS (
+               SELECT 1
+               FROM pg_constraint
+               WHERE conrelid = to_regclass(
+                       'public.metadata_degradation_events'
+                     )
+                 AND conname =
+                       'metadata_degradation_events_thought_id_fkey'
+                 AND confdeltype = 'n'
+             )
+             AND EXISTS (
+               SELECT 1
+               FROM pg_constraint
+               WHERE conrelid = to_regclass(
+                       'public.metadata_degradation_notification_state'
+                     )
+                 AND conname =
+                       'metadata_degradation_failed_channels_shape'
+             )`,
       );
       const [
         hasFtsIndex,
@@ -173,7 +256,9 @@ export async function probeDbAtBoot(
         hasAudienceIndexes,
         hasScopedSearch,
         hasRlsEnforcement,
+        hasMetadataDegradationSchema,
       ] = schema.rows[0] ?? [
+        false,
         false,
         false,
         false,
@@ -214,6 +299,32 @@ export async function probeDbAtBoot(
           `[db] Postgres at ${target} is missing fail-closed spaces schema ` +
             `(${missing}). Apply db/06-spaces.sql as a PostgreSQL superuser ` +
             `(for example, postgres) before starting this server version.`,
+        );
+      }
+      if (!hasMetadataDegradationSchema) {
+        throw new RequiredSchemaError(
+          `[db] Postgres at ${target} has missing or incompatible ` +
+            `metadata-degradation audit schema or notification ledger. Apply ` +
+            `db/07-metadata-degradation.sql as the database owner before ` +
+            `starting this server version.`,
+        );
+      }
+      // Only reference the ledger after to_regclass proved it exists. Putting
+      // this EXISTS in the catalog query above would fail at SQL parse time on
+      // an old database, bypassing the actionable migration guidance.
+      const hasMetadataNotificationState = await client.queryArray<[boolean]>(
+        `SELECT EXISTS (
+           SELECT 1
+           FROM public.metadata_degradation_notification_state
+           WHERE singleton
+         )`,
+      );
+      if (hasMetadataNotificationState.rows[0]?.[0] !== true) {
+        throw new RequiredSchemaError(
+          `[db] Postgres at ${target} is missing metadata-degradation audit ` +
+            `schema or its notification ledger row. Apply ` +
+            `db/07-metadata-degradation.sql as the database owner before ` +
+            `starting this server version.`,
         );
       }
       const configuredWorkspace = await client.queryArray<[boolean]>(

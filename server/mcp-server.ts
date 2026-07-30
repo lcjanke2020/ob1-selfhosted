@@ -255,7 +255,10 @@ export function createMcpServer(
     // scalar/list fields and requires a strictly typed [[artifacts]] array.
     // 1.15.0: session time fields and list bounds reject malformed values
     // before database work; session search adds a bounded similarity floor.
-    version: "1.15.0",
+    // 1.16.0: metadata extraction stamps classifier role/model and writes
+    // durable degradation events; an optional outbox/ledger-backed
+    // Pushover/ntfy worker sends content-free first/rollup alerts.
+    version: "1.16.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names

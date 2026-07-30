@@ -101,7 +101,7 @@ interface ChatEndpoint {
   model: string;
 }
 
-type ClassificationFailure =
+export type ClassificationFailure =
   | { reason: "transport_or_timeout" }
   | { reason: "non_2xx"; status: number }
   | { reason: "invalid_response" }
@@ -205,7 +205,93 @@ async function classifyOnce(
   }
 }
 
-type EndpointRole = "primary" | "fallback";
+export type EndpointRole = "primary" | "fallback";
+
+export type MetadataExtractionStamp =
+  | {
+    schema_version: 1;
+    endpoint: EndpointRole;
+    model: string;
+  }
+  | {
+    schema_version: 1;
+    endpoint: "stub";
+  };
+
+export type MetadataDegradationEvent =
+  | {
+    event_type: "primary_failure";
+    endpoint_role: "primary";
+    failure_reason: ClassificationFailure["reason"];
+    http_status: number | null;
+    endpoint_model: string;
+    endpoint_base_url: string;
+  }
+  | {
+    event_type: "fallback_failure";
+    endpoint_role: "fallback";
+    failure_reason: ClassificationFailure["reason"];
+    http_status: number | null;
+    endpoint_model: string;
+    endpoint_base_url: string;
+  }
+  | {
+    event_type: "fallback_used";
+    endpoint_role: "fallback";
+    failure_reason: null;
+    http_status: null;
+    endpoint_model: string;
+    endpoint_base_url: string;
+  }
+  | {
+    event_type: "stub_used";
+    endpoint_role: null;
+    failure_reason: null;
+    http_status: null;
+    endpoint_model: null;
+    endpoint_base_url: null;
+  };
+
+export type MetadataExtractionResult = {
+  metadata: Record<string, unknown>;
+  classifier: MetadataExtractionStamp;
+  degradation_events: MetadataDegradationEvent[];
+};
+
+// Persist enough endpoint identity to answer which configured destination
+// classified a thought even after config changes, without ever copying URL
+// userinfo, query parameters, or fragments that may contain credentials.
+export function sanitizeMetadataEndpointBase(base: string): string {
+  try {
+    const url = new URL(base);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    // extractMetadata's never-throw contract includes malformed operator
+    // config. Record a finite sentinel, never the raw value (which could hold
+    // a credential), and let the existing transport-failure path degrade.
+    return "invalid-configured-url";
+  }
+}
+
+function failureEvent(
+  endpoint: EndpointRole,
+  failure: ClassificationFailure,
+  config: ChatEndpoint,
+): MetadataDegradationEvent {
+  const fields = {
+    failure_reason: failure.reason,
+    http_status: failure.reason === "non_2xx" ? failure.status : null,
+    endpoint_model: config.model,
+    endpoint_base_url: sanitizeMetadataEndpointBase(config.base),
+  };
+  return endpoint === "primary"
+    ? { ...fields, event_type: "primary_failure", endpoint_role: "primary" }
+    : { ...fields, event_type: "fallback_failure", endpoint_role: "fallback" };
+}
 
 function logClassificationFailure(
   endpoint: EndpointRole,
@@ -249,52 +335,113 @@ function logClassificationFailure(
 // never breaks. Either endpoint may be omitted: with both off it stamps the
 // stub; with only the fallback configured it is a fallback-only deployment.
 //
-// Each step logs its outcome (no thought content) — including a line whenever
-// an endpoint fails, so a single capture may log more than one line — making
-// the two otherwise-silent degradations visible: every capture quietly stamping
-// the stub (no working endpoint), and every capture quietly classifying via the
-// fallback (which, depending on FALLBACK_CHAT_API_BASE, may send content
-// off-box).
+// Each configured step logs its outcome (no thought content) — including a line
+// whenever an endpoint fails, so a single capture may log more than one line.
+// This makes configured failures and fallback use visible. An intentionally
+// endpoint-free deployment logs its stable stub outcome but creates no
+// degradation event.
 export async function extractMetadata(
   text: string,
-): Promise<Record<string, unknown>> {
+): Promise<MetadataExtractionResult> {
+  const degradationEvents: MetadataDegradationEvent[] = [];
+
+  // An intentionally extraction-free deployment is a stable configuration,
+  // not a classifier failure. Keep the explicit per-thought stub provenance,
+  // but do not grow the degradation audit or page the operator forever.
+  if (!ENABLE_PRIMARY_EXTRACTION && !ENABLE_FALLBACK_EXTRACTION) {
+    console.log(
+      "[metadata] extraction disabled; using uncategorized metadata",
+    );
+    return {
+      metadata: { ...METADATA_STUB },
+      classifier: { schema_version: 1, endpoint: "stub" },
+      degradation_events: degradationEvents,
+    };
+  }
+
   // Primary is opt-in (ENABLE_PRIMARY_EXTRACTION, which also requires the
   // CHAT_* endpoint to be configured). Off by default so a misconfigured or
   // dangerous primary transport can't fire on the capture path; when off we
   // skip straight to the fallback.
   if (ENABLE_PRIMARY_EXTRACTION) {
-    const primaryAttempt = await classifyOnce(text, {
+    const primaryEndpoint = {
       base: CHAT_API_BASE,
       key: CHAT_API_KEY,
       model: CHAT_MODEL,
-    });
+    };
+    const primaryAttempt = await classifyOnce(text, primaryEndpoint);
     if (primaryAttempt.ok) {
       console.log("[metadata] classified via primary endpoint");
-      return primaryAttempt.metadata;
+      return {
+        metadata: primaryAttempt.metadata,
+        classifier: {
+          schema_version: 1,
+          endpoint: "primary",
+          model: CHAT_MODEL,
+        },
+        degradation_events: degradationEvents,
+      };
     }
     logClassificationFailure("primary", primaryAttempt);
+    degradationEvents.push(
+      failureEvent("primary", primaryAttempt, primaryEndpoint),
+    );
   }
 
   // Fallback runs whenever it is configured — after a primary failure OR as the
   // sole extractor in a fallback-only deployment. NB this path can send thought
   // content off-box (the privacy trade-off documented in .env.example).
   if (ENABLE_FALLBACK_EXTRACTION) {
-    const fallbackAttempt = await classifyOnce(text, {
+    const fallbackEndpoint = {
       base: FALLBACK_CHAT_API_BASE,
       key: FALLBACK_CHAT_API_KEY,
       model: FALLBACK_CHAT_MODEL,
-    });
+    };
+    const fallbackAttempt = await classifyOnce(text, fallbackEndpoint);
     if (fallbackAttempt.ok) {
       console.warn(
         "[metadata] classified via FALLBACK endpoint — thought content may have left your local network (depends on the configured fallback base URL)",
       );
-      return fallbackAttempt.metadata;
+      degradationEvents.push({
+        event_type: "fallback_used",
+        endpoint_role: "fallback",
+        failure_reason: null,
+        http_status: null,
+        endpoint_model: FALLBACK_CHAT_MODEL,
+        endpoint_base_url: sanitizeMetadataEndpointBase(
+          FALLBACK_CHAT_API_BASE,
+        ),
+      });
+      return {
+        metadata: fallbackAttempt.metadata,
+        classifier: {
+          schema_version: 1,
+          endpoint: "fallback",
+          model: FALLBACK_CHAT_MODEL,
+        },
+        degradation_events: degradationEvents,
+      };
     }
     logClassificationFailure("fallback", fallbackAttempt);
+    degradationEvents.push(
+      failureEvent("fallback", fallbackAttempt, fallbackEndpoint),
+    );
   }
 
   console.warn(
     "[metadata] no endpoint produced metadata; stamping uncategorized stub",
   );
-  return { ...METADATA_STUB };
+  degradationEvents.push({
+    event_type: "stub_used",
+    endpoint_role: null,
+    failure_reason: null,
+    http_status: null,
+    endpoint_model: null,
+    endpoint_base_url: null,
+  });
+  return {
+    metadata: { ...METADATA_STUB },
+    classifier: { schema_version: 1, endpoint: "stub" },
+    degradation_events: degradationEvents,
+  };
 }
