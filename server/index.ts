@@ -28,6 +28,8 @@ import {
   ENABLE_OAUTH,
   ENABLE_PRIMARY_EXTRACTION,
   ENABLE_REST_API,
+  FALLBACK_CHAT_API_BASE,
+  FALLBACK_CHAT_MODEL,
   METADATA_FALLBACK_POLICY,
   METADATA_NOTIFY_CHANNELS,
   METADATA_NOTIFY_LABEL,
@@ -186,9 +188,18 @@ if (ENABLE_REST_API) {
 // vs on-LAN depends on the operator's FALLBACK_CHAT_API_BASE.
 console.log(`[metadata] fallback policy: ${METADATA_FALLBACK_POLICY}`);
 if (!ENABLE_METADATA_EXTRACTION) {
-  console.warn(
-    "[metadata] extraction disabled (no primary or fallback configured) — captures stamp the uncategorized stub",
+  const fallbackEndpointConfigured = Boolean(
+    FALLBACK_CHAT_API_BASE && FALLBACK_CHAT_MODEL,
   );
+  if (METADATA_FALLBACK_POLICY === "off" && fallbackEndpointConfigured) {
+    console.warn(
+      "[metadata] extraction disabled: METADATA_FALLBACK_POLICY=off blocks the configured fallback and no primary is enabled — captures stamp the uncategorized stub",
+    );
+  } else {
+    console.warn(
+      "[metadata] extraction disabled (no primary or policy-permitted fallback configured) — captures stamp the uncategorized stub",
+    );
+  }
 } else if (ENABLE_PRIMARY_EXTRACTION && ENABLE_FALLBACK_EXTRACTION) {
   console.log(
     "[metadata] extraction on: primary endpoint, fallback on failure (fallback may be off-box)",

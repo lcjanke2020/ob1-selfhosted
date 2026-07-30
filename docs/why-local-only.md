@@ -98,7 +98,9 @@ privacy decision merely from populated endpoint variables:
 - `alert` permits the configured fallback but refuses to boot without at least
   one valid Pushover/ntfy channel. Fallback use enters the durable, content-free
   audit and notification queue, so the off-box-capable path is never enabled
-  without delivery plumbing.
+  without delivery plumbing. Boot validates adapter configuration rather than
+  provider reachability; delivery remains best-effort and must be live-fired
+  before it is trusted.
 - `allow` permits fallback without requiring a notification channel. It supports
   graceful degradation and fallback-only deployments, but it is the
   privacy-weakest choice.

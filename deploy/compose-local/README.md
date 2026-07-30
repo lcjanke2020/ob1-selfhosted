@@ -185,8 +185,11 @@ are in [metadata degradation monitoring](../../docs/metadata-degradation-monitor
   `{topics: [uncategorized], type: observation}` without contacting the
   fallback; `alert` or `allow` may classify through `FALLBACK_CHAT_*` when it is
   configured. A configured path that fails is recorded in the durable audit;
-  `alert` additionally requires content-free Pushover/ntfy delivery at boot.
-  See [metadata degradation monitoring](../../docs/metadata-degradation-monitoring.md).
+  `alert` additionally requires a fully configured Pushover/ntfy adapter at
+  boot. Provider reachability and delivery remain best-effort: live-fire the
+  configured path and watch `[metadata_notify] ... delivery failed` plus
+  `last_failed_channels` before relying on it. See
+  [metadata degradation monitoring](../../docs/metadata-degradation-monitoring.md).
 
 ## Backups
 

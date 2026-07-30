@@ -121,8 +121,14 @@ Deno.test("metadata fallback policy: required, bounded, and notification-aware",
     assertEquals(result.code, 1);
     assertStringIncludes(
       result.stderr,
-      "METADATA_FALLBACK_POLICY must be off, alert, or allow",
+      "METADATA_FALLBACK_POLICY must be exactly off, alert, or allow",
     );
+  });
+
+  await t.step("policy values are exact lowercase", async () => {
+    const result = await runConfig({ METADATA_FALLBACK_POLICY: "Off" });
+    assertEquals(result.code, 1);
+    assertStringIncludes(result.stderr, "(lowercase)");
   });
 
   await t.step("off keeps a configured fallback inert", async () => {

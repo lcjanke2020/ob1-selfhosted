@@ -346,8 +346,10 @@ export async function extractMetadata(
   const degradationEvents: MetadataDegradationEvent[] = [];
 
   // An intentionally extraction-free deployment is a stable configuration,
-  // not a classifier failure. Keep the explicit per-thought stub provenance,
-  // but do not grow the degradation audit or page the operator forever.
+  // not a classifier failure. This includes a fallback-only endpoint that the
+  // operator deliberately suppresses with policy `off`. Keep the explicit
+  // per-thought stub provenance, but do not grow the degradation audit or page
+  // the operator forever.
   if (!ENABLE_PRIMARY_EXTRACTION && !ENABLE_FALLBACK_EXTRACTION) {
     console.log(
       "[metadata] extraction disabled; using uncategorized metadata",

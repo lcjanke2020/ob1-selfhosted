@@ -114,7 +114,8 @@ function metadataFallbackPolicy(): MetadataFallbackPolicy {
   }
   if (value !== "off" && value !== "alert" && value !== "allow") {
     throw new Error(
-      "METADATA_FALLBACK_POLICY must be off, alert, or allow",
+      "METADATA_FALLBACK_POLICY must be exactly off, alert, or allow " +
+        "(lowercase)",
     );
   }
   return value;
@@ -266,9 +267,10 @@ if (METADATA_NOTIFY_CHANNELS.includes("ntfy")) {
   }
 }
 
-// `alert` promises that fallback classification is never silent. A selected
-// but incomplete adapter already fails above; an empty channel list must fail
-// too rather than quietly behaving like `allow`.
+// `alert` promises that notification plumbing is configured before fallback
+// classification is permitted. Runtime delivery remains best-effort. A
+// selected but incomplete adapter already fails above; an empty channel list
+// must fail too rather than quietly behaving like `allow`.
 if (
   METADATA_FALLBACK_POLICY === "alert" &&
   !ENABLE_METADATA_NOTIFICATIONS
