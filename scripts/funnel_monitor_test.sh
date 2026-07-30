@@ -32,7 +32,19 @@ while (( $# > 0 )); do
 done
 printf '%s\n--END--\n' "$sql" >> "$TEST_PSQL_LOG"
 if [[ "$sql" == *"WITH bounds AS MATERIALIZED"* ]]; then
-  printf '%s|%s|%s\n' "$TEST_MAX_ID" "$TEST_CUTOFF_EPOCH" "$TEST_AUTH_FAILURES"
+  if [[ -n "${TEST_AUTH_STARTED_FILE:-}" ]]; then
+    : > "$TEST_AUTH_STARTED_FILE"
+  fi
+  if [[ -n "${TEST_AUTH_BLOCK_FILE:-}" ]]; then
+    while [[ -e "$TEST_AUTH_BLOCK_FILE" ]]; do
+      sleep 0.02
+    done
+  fi
+  if [[ -n "${TEST_AUTH_RESULT+x}" ]]; then
+    printf '%s\n' "$TEST_AUTH_RESULT"
+  else
+    printf '%s|%s|%s\n' "$TEST_MAX_ID" "$TEST_CUTOFF_EPOCH" "$TEST_AUTH_FAILURES"
+  fi
 elif [[ "$sql" == *"SELECT COUNT(*) FROM funnel_access_log"* ]]; then
   printf '%s\n' "$TEST_VOLUME"
 else
@@ -125,7 +137,11 @@ export TEST_MAX_ID=10 TEST_CUTOFF_EPOCH=1000 TEST_AUTH_FAILURES=4
 run_monitor 0 "$MAIN_HOME"
 assert_eq "10 0 0" "$(<"$MAIN_HOME/.local/state/funnel-monitor/state")" \
   "sub-threshold state"
+assert_eq "600" "$(stat -c '%a' "$MAIN_HOME/.local/state/funnel-monitor/lock")" \
+  "state lock permissions"
 assert_eq 0 "$(curl_calls)" "sub-threshold delivery count"
+assert_contains "$MAIN_HOME/funnel_monitor.log" "funnel_401_rows=4" \
+  "self-describing 401 log field"
 
 # The first qualifying burst sends immediately and clears the pending count.
 export TEST_MAX_ID=20 TEST_CUTOFF_EPOCH=1100 TEST_AUTH_FAILURES=6
@@ -135,6 +151,8 @@ assert_eq "20 1100 0" "$(<"$MAIN_HOME/.local/state/funnel-monitor/state")" \
 assert_eq 1 "$(curl_calls)" "first-burst delivery count"
 assert_contains "$TEST_CURL_LOG" "message=edge: auth-failure burst — funnel-401-rows=6" \
   "first-burst privacy-safe body"
+assert_contains "$TEST_CURL_LOG" "across qualifying burst windows. No request details included." \
+  "first-burst count semantics"
 
 # Further burst intervals accumulate until the configured rollup cadence.
 export TEST_MAX_ID=30 TEST_CUTOFF_EPOCH=1200 TEST_AUTH_FAILURES=7
@@ -218,6 +236,114 @@ run_monitor 0 "$FALLBACK_HOME"
 assert_eq 6 "$(curl_calls)" "invalid-threshold fallback delivery count"
 assert_contains "$FALLBACK_HOME/funnel_monitor.log" \
   "invalid AUTH_FAILURE_BURST_THRESHOLD" "invalid-threshold local alert"
+
+# A typo in the optional delivery toggle fails safe to delivery-off while the
+# pre-existing volume alarm and local 401-burst alarm continue to run.
+TOGGLE_HOME="$TEST_ROOT/toggle-home"
+make_home "$TOGGLE_HOME" true
+export TEST_VOLUME=999 TEST_MAX_ID=110 TEST_CUTOFF_EPOCH=7200 TEST_AUTH_FAILURES=5
+toggle_curl_before=$(curl_calls)
+run_monitor 0 "$TOGGLE_HOME"
+assert_eq "$toggle_curl_before" "$(curl_calls)" "invalid-toggle curl suppression"
+assert_eq "110 0 0" "$(<"$TOGGLE_HOME/.local/state/funnel-monitor/state")" \
+  "invalid-toggle disabled state"
+assert_contains "$TOGGLE_HOME/funnel_monitor.log" "invalid PUSHOVER_ENABLED" \
+  "invalid-toggle local alert"
+assert_contains "$TOGGLE_HOME/funnel_monitor.log" "funnel volume>200" \
+  "invalid-toggle preserved volume alarm"
+assert_contains "$TOGGLE_HOME/funnel_monitor.log" "auth_failure_burst=5" \
+  "invalid-toggle preserved 401 alarm"
+export TEST_VOLUME=4
+
+# Malformed non-empty probe output must fail before cursor/pending mutation or
+# provider delivery, and a later healthy result must recover without reset.
+MALFORMED_HOME="$TEST_ROOT/malformed-probe-home"
+make_home "$MALFORMED_HOME"
+export TEST_MAX_ID=10 TEST_CUTOFF_EPOCH=1000 TEST_AUTH_FAILURES=0
+run_monitor 0 "$MALFORMED_HOME"
+malformed_curl_before=$(curl_calls)
+
+export TEST_AUTH_RESULT='abc|1200|0'
+run_monitor 1 "$MALFORMED_HOME"
+assert_eq "10 0 0" "$(<"$MALFORMED_HOME/.local/state/funnel-monitor/state")" \
+  "invalid-field state preservation"
+assert_eq "$malformed_curl_before" "$(curl_calls)" "invalid-field delivery suppression"
+
+export TEST_AUTH_RESULT='20|1200|4201100|5|0'
+run_monitor 1 "$MALFORMED_HOME"
+assert_eq "10 0 0" "$(<"$MALFORMED_HOME/.local/state/funnel-monitor/state")" \
+  "extra-field state preservation"
+assert_eq "$malformed_curl_before" "$(curl_calls)" "extra-field delivery suppression"
+assert_contains "$MALFORMED_HOME/funnel_monitor.log" "monitor probe FAILED" \
+  "malformed-probe local alert"
+
+unset TEST_AUTH_RESULT
+export TEST_MAX_ID=20 TEST_CUTOFF_EPOCH=1300 TEST_AUTH_FAILURES=0
+run_monitor 0 "$MALFORMED_HOME"
+assert_eq "20 0 0" "$(<"$MALFORMED_HOME/.local/state/funnel-monitor/state")" \
+  "malformed-probe recovery state"
+
+# A newline introduced by echo/editor save is rejected before curl. The
+# aggregate remains pending and is delivered after the token file is fixed.
+NEWLINE_HOME="$TEST_ROOT/newline-token-home"
+make_home "$NEWLINE_HOME"
+export TEST_MAX_ID=10 TEST_CUTOFF_EPOCH=1000 TEST_AUTH_FAILURES=0
+run_monitor 0 "$NEWLINE_HOME"
+printf '\n' >> "$NEWLINE_HOME/.config/funnel-monitor/pushover-token"
+newline_curl_before=$(curl_calls)
+export TEST_MAX_ID=20 TEST_CUTOFF_EPOCH=1100 TEST_AUTH_FAILURES=5
+run_monitor 1 "$NEWLINE_HOME"
+assert_eq "20 0 5" "$(<"$NEWLINE_HOME/.local/state/funnel-monitor/state")" \
+  "newline-token retained state"
+assert_eq "$newline_curl_before" "$(curl_calls)" "newline-token curl suppression"
+assert_contains "$NEWLINE_HOME/funnel_monitor.log" "must not contain a newline" \
+  "newline-token local alert"
+
+printf %s application-test-secret > "$NEWLINE_HOME/.config/funnel-monitor/pushover-token"
+export TEST_MAX_ID=30 TEST_CUTOFF_EPOCH=1200 TEST_AUTH_FAILURES=0
+run_monitor 0 "$NEWLINE_HOME"
+assert_eq "30 1200 0" "$(<"$NEWLINE_HOME/.local/state/funnel-monitor/state")" \
+  "newline-token retry state"
+assert_eq "$((newline_curl_before + 1))" "$(curl_calls)" \
+  "newline-token retry delivery count"
+
+# Overlapping manual/timer invocations serialize the complete cursor update.
+# Without the lock, the delayed older run would overwrite cursor 30 with 20.
+LOCK_HOME="$TEST_ROOT/lock-home"
+make_home "$LOCK_HOME" 0
+export TEST_MAX_ID=10 TEST_CUTOFF_EPOCH=1000 TEST_AUTH_FAILURES=0
+run_monitor 0 "$LOCK_HOME"
+block_file="$TEST_ROOT/block-auth-query"
+started_file="$TEST_ROOT/auth-query-started"
+: > "$block_file"
+HOME="$LOCK_HOME" TEST_MAX_ID=20 TEST_CUTOFF_EPOCH=1100 TEST_AUTH_FAILURES=5 \
+  TEST_AUTH_BLOCK_FILE="$block_file" TEST_AUTH_STARTED_FILE="$started_file" \
+  "$MONITOR" > "$TEST_ROOT/lock-first.stdout" 2> "$TEST_ROOT/lock-first.stderr" &
+first_pid=$!
+for _ in {1..200}; do
+  [[ -e "$started_file" ]] && break
+  sleep 0.01
+done
+[[ -e "$started_file" ]] || fail "first overlapping invocation did not reach auth query"
+
+HOME="$LOCK_HOME" TEST_MAX_ID=30 TEST_CUTOFF_EPOCH=1200 TEST_AUTH_FAILURES=4 \
+  "$MONITOR" > "$TEST_ROOT/lock-second.stdout" 2> "$TEST_ROOT/lock-second.stderr" &
+second_pid=$!
+sleep 0.2
+kill -0 "$second_pid" 2>/dev/null || fail "second overlapping invocation did not wait for lock"
+rm -f -- "$block_file"
+set +e
+wait "$first_pid"
+first_rc=$?
+wait "$second_pid"
+second_rc=$?
+set -e
+assert_eq 0 "$first_rc" "first overlapping invocation exit code"
+assert_eq 0 "$second_rc" "second overlapping invocation exit code"
+assert_eq "30 0 0" "$(<"$LOCK_HOME/.local/state/funnel-monitor/state")" \
+  "serialized final state"
+assert_contains "$TEST_PSQL_LOG" "event.id > 20" \
+  "second overlapping invocation loaded the first cursor"
 
 # Corrupt state fails closed before any query can interpolate its cursor.
 printf '%s\n' '1;DROP 0 0' > "$DISABLED_HOME/.local/state/funnel-monitor/state"

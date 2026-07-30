@@ -22,6 +22,7 @@ ERRLOG="$HOME/funnel_monitor.err"
 ENV_FILE="${FUNNEL_MONITOR_ENV_FILE:-$HOME/.config/funnel-monitor.env}"
 STATE_DIR="$HOME/.local/state/funnel-monitor"
 STATE_FILE="$STATE_DIR/state" # "<last-funnel-row-id> <last-push-epoch> <pending-auth-failures>"
+STATE_LOCK_FILE="$STATE_DIR/lock"
 PUSHOVER_CONF_DIR="$HOME/.config/funnel-monitor"
 PUSHOVER_TOKEN_FILE="$PUSHOVER_CONF_DIR/pushover-token"
 PUSHOVER_USER_FILE="$PUSHOVER_CONF_DIR/pushover-user"
@@ -36,7 +37,7 @@ local_alert() {
 private_file_ok() {
   # $1=file, $2=human label. Exact 0600 is deliberate for provider tokens;
   # the env/state callers perform their slightly broader checks separately.
-  local file="$1" label="$2" mode
+  local file="$1" label="$2" mode contents=""
   if [[ ! -f "$file" || -L "$file" || ! -O "$file" || ! -r "$file" || ! -s "$file" ]]; then
     local_alert "$label must be a non-empty, readable, current-user-owned regular file (not a symlink): $file"
     return 1
@@ -47,6 +48,14 @@ private_file_ok() {
   }
   if [[ "$mode" != "600" ]]; then
     local_alert "$label must be mode 0600: $file (mode $mode)"
+    return 1
+  fi
+  # Pushover keys are single-line values. Reject CR/LF explicitly so a file
+  # written with echo or an editor cannot fail every delivery indefinitely.
+  # The value remains shell-local and is never copied into argv or a log.
+  IFS= read -r -d '' contents < "$file" || true
+  if [[ "$contents" == *$'\n'* || "$contents" == *$'\r'* ]]; then
+    local_alert "$label must not contain a newline: $file"
     return 1
   fi
 }
@@ -90,7 +99,7 @@ OB1_MONITOR_LABEL="${OB1_MONITOR_LABEL:-ob1}"
 # comparisons can reject syntactically numeric values outside their range.
 # Alert locally and use the documented default instead.
 if ! [[ "$VOLUME_THRESHOLD" =~ ^(0|[1-9][0-9]{0,8})$ ]]; then
-  local_alert "invalid VOLUME_THRESHOLD='$VOLUME_THRESHOLD' (need a 1-9 digit integer) in $ENV_FILE — using 200"
+  local_alert "invalid VOLUME_THRESHOLD='$VOLUME_THRESHOLD' (need an integer from 0 to 999999999) in $ENV_FILE — using 200"
   VOLUME_THRESHOLD=200
 fi
 if ! [[ "$AUTH_FAILURE_BURST_THRESHOLD" =~ ^[1-9][0-9]{0,8}$ ]]; then
@@ -103,8 +112,10 @@ if ! [[ "$PUSHOVER_ROLLUP_SECONDS" =~ ^[1-9][0-9]{1,5}$ ]] ||
   PUSHOVER_ROLLUP_SECONDS=1800
 fi
 if [[ "$PUSHOVER_ENABLED" != "0" && "$PUSHOVER_ENABLED" != "1" ]]; then
-  local_alert "invalid PUSHOVER_ENABLED='$PUSHOVER_ENABLED' (expected 0 or 1) in $ENV_FILE"
-  exit 1
+  # Delivery is optional. A typo here must not suppress the existing local
+  # volume alarm or the new local 401-burst alarm; fail safe to delivery off.
+  local_alert "invalid PUSHOVER_ENABLED='$PUSHOVER_ENABLED' (expected 0 or 1) in $ENV_FILE — disabling delivery"
+  PUSHOVER_ENABLED=0
 fi
 # Restrict the provider-visible label to a short, non-identifying token and
 # exclude whitespace/control characters that could forge a multiline body.
@@ -130,6 +141,42 @@ state_dir_mode=$(stat -c '%a' -- "$STATE_DIR") || {
 }
 if [[ ! "$state_dir_mode" =~ ^[0-7]{3,4}$ ]] || (( (8#$state_dir_mode & 077) != 0 )); then
   local_alert "monitor state directory must have no group/other permissions: $STATE_DIR (mode $state_dir_mode)"
+  exit 1
+fi
+
+# Atomic rename prevents torn state files but cannot serialize two timer/manual
+# invocations. Hold one advisory lock across state load, both probes, provider
+# delivery, and the final state write so an older run cannot overwrite a newer
+# cursor or pending aggregate.
+if ! command -v flock >/dev/null 2>&1; then
+  local_alert "flock (util-linux) is required to serialize monitor state"
+  exit 1
+fi
+if [[ -e "$STATE_LOCK_FILE" || -L "$STATE_LOCK_FILE" ]]; then
+  if [[ ! -f "$STATE_LOCK_FILE" || -L "$STATE_LOCK_FILE" || ! -O "$STATE_LOCK_FILE" ]]; then
+    local_alert "monitor lock must be a current-user-owned regular file (not a symlink): $STATE_LOCK_FILE"
+    exit 1
+  fi
+else
+  (umask 077; : > "$STATE_LOCK_FILE") || {
+    local_alert "could not create monitor lock: $STATE_LOCK_FILE"
+    exit 1
+  }
+fi
+lock_mode=$(stat -c '%a' -- "$STATE_LOCK_FILE") || {
+  local_alert "could not inspect monitor lock permissions: $STATE_LOCK_FILE"
+  exit 1
+}
+if [[ "$lock_mode" != "600" ]]; then
+  local_alert "monitor lock must be mode 0600: $STATE_LOCK_FILE (mode $lock_mode)"
+  exit 1
+fi
+exec {state_lock_fd}<>"$STATE_LOCK_FILE" || {
+  local_alert "could not open monitor lock: $STATE_LOCK_FILE"
+  exit 1
+}
+if ! flock -w 60 "$state_lock_fd"; then
+  local_alert "timed out waiting 60 seconds for another monitor invocation"
   exit 1
 fi
 
@@ -196,7 +243,7 @@ send_pushover() { # $1=aggregate auth-failure count
     --form "token=<$PUSHOVER_TOKEN_FILE" \
     --form "user=<$PUSHOVER_USER_FILE" \
     --form-string "title=OB1 funnel anomaly" \
-    --form-string "message=$OB1_MONITOR_LABEL: auth-failure burst — funnel-401-rows=$1 since the previous notification. No request data included." \
+    --form-string "message=$OB1_MONITOR_LABEL: auth-failure burst — funnel-401-rows=$1 across qualifying burst windows. No request details included." \
     --form-string "priority=1" >/dev/null
 }
 
@@ -244,11 +291,12 @@ auth_failures=""
 extra=""
 IFS='|' read -r new_funnel_id cutoff_epoch auth_failures extra <<< "$auth_result"
 
-echo "[$ts] vol=${volume:-?} auth_failures=${auth_failures:-?}" >> "$LOG"
+echo "[$ts] vol=${volume:-?} funnel_401_rows=${auth_failures:-?}" >> "$LOG"
 
 re='^(0|[1-9][0-9]{0,17})$'
 alert=0
 reason=""
+auth_probe_ok=1
 if ! [[ "$volume" =~ $re ]]; then
   alert=1
   reason="monitor probe FAILED (volume='${volume:-empty}') — db qube unreachable or role/creds broken; see $ERRLOG"
@@ -260,16 +308,17 @@ if [[ -n "$extra" ]] ||
    ! [[ "$new_funnel_id" =~ ^(0|[1-9][0-9]{0,17})$ ]] ||
    ! [[ "$cutoff_epoch" =~ ^(0|[1-9][0-9]{0,17})$ ]] ||
    ! [[ "$auth_failures" =~ ^(0|[1-9][0-9]{0,17})$ ]]; then
+  auth_probe_ok=0
   alert=1
-  reason="${reason:+$reason; }monitor probe FAILED (auth_failures='${auth_result:-empty}')"
+  reason="${reason:+$reason; }monitor probe FAILED (funnel_401_rows='${auth_result:-empty}')"
 elif [[ -n "$last_funnel_id" && "$new_funnel_id" != "0" ]] &&
      (( new_funnel_id < last_funnel_id )); then
   # An empty retained table legitimately reports max(id)=0, so keep the old
   # cursor. A lower non-zero max indicates a restore/reset; advancing would
   # permanently skip rows until the sequence caught up.
+  auth_probe_ok=0
   alert=1
   reason="${reason:+$reason; }monitor probe FAILED (funnel row id moved backwards; inspect/reset $STATE_FILE)"
-  auth_failures=""
 elif (( auth_failures >= AUTH_FAILURE_BURST_THRESHOLD )); then
   alert=1
   reason="${reason:+$reason; }auth_failure_burst=$auth_failures since prior successful probe (threshold=$AUTH_FAILURE_BURST_THRESHOLD)"
@@ -282,7 +331,7 @@ fi
 
 # A malformed/failed auth probe never advances the cursor or notification
 # state. The volume probe remains independently visible in the local log.
-if [[ -z "$auth_failures" ]]; then
+if (( auth_probe_ok == 0 )); then
   exit 1
 fi
 

@@ -447,6 +447,14 @@ jobs:
                        AND event.status = 401
                        AND event.ts > now() - interval '5 minutes')
              FROM bounds;" >/dev/null
+          # The v4 monitor is intentionally one-table. A replay of
+          # 02-observability.sql must remove the obsolete v3 auth-event grant.
+          if docker exec -e PGPASSWORD="$OPENBRAIN_MONITOR_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_monitor -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT 1 FROM mcp_auth_events LIMIT 1" >/dev/null 2>&1; then
+            echo "::error::openbrain_monitor can read mcp_auth_events — SELECT should be denied"
+            exit 1
+          fi
           # Negative check: the edge-resident credential must NOT reach
           # thought content (03-grants-assertion.sql asserts this in the
           # catalog; this exercises it end-to-end).

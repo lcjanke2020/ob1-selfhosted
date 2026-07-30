@@ -58,7 +58,7 @@ for those logs, which would sever this qube's last DB path (GH #12).
 
 An alert-only host script ([`scripts/funnel_monitor.sh`](../../../scripts/funnel_monitor.sh))
 probes the db qube every 5 minutes as a dedicated SELECT-only role (`openbrain_monitor`,
-readable tables: `funnel_access_log` + `mcp_auth_events` — request metadata, never thoughts)
+readable table: `funnel_access_log` only — never reason-coded auth events or thoughts)
 and appends to `~/funnel_monitor.log`: funnel request volume over the window (alert above
 `VOLUME_THRESHOLD`, default 200) and newly ingested HTTP 401 responses at the public Funnel
 door (local alert at `AUTH_FAILURE_BURST_THRESHOLD`, default 5). It **fails loud**: an
@@ -69,13 +69,22 @@ Pushover delivery is opt-in (`PUSHOVER_ENABLED=1`). A successful interval with a
 `AUTH_FAILURE_BURST_THRESHOLD` new Funnel 401 rows (default 5) sends one aggregate push;
 later qualifying intervals accumulate and roll up no more often than
 `PUSHOVER_ROLLUP_SECONDS` (default 1800, 30 minutes). The row-id cursor and pending count
-are atomically committed together under `~/.local/state/funnel-monitor/` before delivery,
-so delayed log-ingester rows are not missed, a failed provider call retains its count for
-retry, and a crash can at worst repeat an aggregate alert. Turning delivery on does not
-replay activity observed while it was off.
+are atomically committed together under `~/.local/state/funnel-monitor/` before delivery.
+A `flock` lock (from util-linux, installed by default on the supported Qubes templates)
+serializes timer and manual invocations across state load, queries, delivery, and final
+commit. Delayed log-ingester rows are therefore not missed, a failed provider call retains
+its count for retry, and a crash can at worst repeat an aggregate alert. Turning delivery
+on does not replay activity observed while it was off.
+
+This first-cut signal is deliberately narrow: the edge credential cannot read
+`mcp_auth_events`, so reason-coded and tailnet-door credential rejections remain in the
+central audit/rollup path rather than this alert. Successful intervals below the burst
+threshold advance the cursor and do not enter a later rollup; set the threshold to 1 if
+every newly ingested public-door 401 should qualify.
 
 The provider-visible alert body is deliberately fixed and small: a generic operator label,
-the aggregate Funnel 401-row count, and a statement that no request data is included. It
+the aggregate Funnel 401-row count across qualifying burst windows, and a statement that
+no request details are included. It
 never includes a hostname, qube/container name, client IP, path, identity, request content,
 or application/database/client credential. (Pushover necessarily receives its own delivery
 token and user key as authentication form fields.) Pushover is alert-only; the script never
@@ -86,7 +95,10 @@ closes Funnel or changes firewall state.
 [`scripts/upgrade-add-monitor-role.sh`](../../../scripts/upgrade-add-monitor-role.sh)
 (compose) or the equivalent `CREATE ROLE` by hand on the db qube
 (see [`../db-qube/README.md`](../db-qube/README.md)), then re-run `db/02-observability.sql`
-for the grants. The db qube's `pg_hba` must permit `openbrain_monitor` from **this** qube's
+for the grants. Existing v3 deployments must also replay that file before installing v4:
+it grants `funnel_access_log`, revokes the obsolete `mcp_auth_events` access, and converges
+the edge credential to the one-table contract. Run `db/03-grants-assertion.sql` afterward
+to verify it. The db qube's `pg_hba` must permit `openbrain_monitor` from **this** qube's
 tailnet IP ([`../db-qube/pg_hba.snippet.conf`](../db-qube/pg_hba.snippet.conf)).
 
 **Install on this qube** (as the regular user, from the repo checkout):
@@ -104,7 +116,12 @@ systemctl --user enable --now funnel-monitor.timer
 
 The script enforces that `~/.config/funnel-monitor.env` is a current-user-owned,
 non-symlink regular file with no group/other permissions. Leave `PUSHOVER_ENABLED=0`
-until the provider path below is ready.
+until the provider path below is ready. V4 sources this file without exporting arbitrary
+entries so the database password cannot leak to child tools. If an older deployment relied
+on a non-secret libpq variable such as `PGSSLMODE`, export it from the service environment
+(for example, a systemd user-unit drop-in) instead of adding it to this file. A malformed
+`PUSHOVER_ENABLED` value emits a local alert and behaves as `0`; it never suppresses the
+volume or local 401-burst probes.
 
 ### Optional Pushover delivery
 
@@ -120,7 +137,8 @@ chmod 0600 ~/.config/funnel-monitor/pushover-token
 chmod 0600 ~/.config/funnel-monitor/pushover-user
 ```
 
-The script rejects symlinks, wrong ownership, empty files, and any mode other than `0600`.
+The script rejects symlinks, wrong ownership, empty files, CR/LF characters, and any mode
+other than `0600`.
 At send time curl reads each secret directly from its file, so neither value appears in
 process argv or logs.
 
@@ -142,15 +160,15 @@ held for the rollup rather than pushed request-by-request.
 
 These are **user** units — linger must be on or the timer stops firing without an open
 shell session; see the [Qubes README](../README.md) § user timers. Watch it work with
-`tail -f ~/funnel_monitor.log` (a `vol=N auth_failures=N` line every 5 minutes; probe
+`tail -f ~/funnel_monitor.log` (a `vol=N funnel_401_rows=N` line every 5 minutes; probe
 errors accumulate in `~/funnel_monitor.err`; successful provider calls append only their
 aggregate count). Both files append indefinitely — at 5-minute cadence that's slow, but on
 a long-lived qube add a logrotate rule (or an occasional truncate) for the pair.
 
 Future note: if the funnel logs ever move into this qube's parked local postgres
 ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)), the volume query's target
-moves with them while auth events stay on the central DB — the monitor env would then need
-per-metric DB targets.
+moves with them too; both monitor queries would then be local and the edge's central-DB
+SELECT path could be removed.
 
 ## Verify
 
