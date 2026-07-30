@@ -2,8 +2,8 @@
 --
 -- Exercises the real application role inside the same audience context used by
 -- captureThought. The fixture is rolled back: this proves append/read access,
--- event-shape constraints, immutable history, and ledger update without leaving
--- a synthetic thought or moving the durable notification cursor.
+-- event-shape constraints, immutable history, outbox consumption, and ledger
+-- update without leaving a synthetic thought or pending queue row.
 
 \set ON_ERROR_STOP on
 
@@ -26,32 +26,47 @@ INSERT INTO public.thoughts (
   'default', NULL, 'workspace', NULL
 );
 
-INSERT INTO public.metadata_degradation_events (
-  thought_id, capture_id, event_type, endpoint_role, failure_reason,
-  http_status, endpoint_model, endpoint_base_url
-) VALUES
-  (
-    '00000000-0000-0000-0000-000000000701',
-    '00000000-0000-0000-0000-000000000702',
-    'primary_failure', 'primary', 'non_2xx', 503,
-    'smoke-primary', 'https://classifier.example/v1'
-  ),
-  (
-    '00000000-0000-0000-0000-000000000701',
-    '00000000-0000-0000-0000-000000000702',
-    'fallback_used', 'fallback', NULL, NULL,
-    'smoke-fallback', 'https://fallback.example/v1'
-  );
+WITH inserted_events AS (
+  INSERT INTO public.metadata_degradation_events (
+    thought_id, capture_id, event_type, endpoint_role, failure_reason,
+    http_status, endpoint_model, endpoint_base_url
+  ) VALUES
+    (
+      '00000000-0000-0000-0000-000000000701',
+      '00000000-0000-0000-0000-000000000702',
+      'primary_failure', 'primary', 'non_2xx', 503,
+      'smoke-primary', 'https://classifier.example/v1'
+    ),
+    (
+      '00000000-0000-0000-0000-000000000701',
+      '00000000-0000-0000-0000-000000000702',
+      'fallback_used', 'fallback', NULL, NULL,
+      'smoke-fallback', 'https://fallback.example/v1'
+    )
+  RETURNING id
+)
+INSERT INTO public.metadata_degradation_outbox (event_id)
+SELECT id FROM inserted_events;
 
 DO $$
 DECLARE
   event_count integer;
+  queue_count integer;
 BEGIN
   SELECT count(*) INTO event_count
   FROM public.metadata_degradation_events
   WHERE capture_id = '00000000-0000-0000-0000-000000000702';
   IF event_count <> 2 THEN
     RAISE EXCEPTION 'app role expected 2 degradation events, found %', event_count;
+  END IF;
+
+  SELECT count(*) INTO queue_count
+  FROM public.metadata_degradation_outbox AS outbox
+  JOIN public.metadata_degradation_events AS event
+    ON event.id = outbox.event_id
+  WHERE event.capture_id = '00000000-0000-0000-0000-000000000702';
+  IF queue_count <> 2 THEN
+    RAISE EXCEPTION 'app role expected 2 queued events, found %', queue_count;
   END IF;
 
   BEGIN
@@ -64,6 +79,25 @@ BEGIN
   EXCEPTION WHEN insufficient_privilege THEN
     NULL;
   END;
+
+  BEGIN
+    EXECUTE $sql$
+      UPDATE public.metadata_degradation_outbox
+      SET event_id = event_id
+    $sql$;
+    RAISE EXCEPTION 'app role unexpectedly updated the degradation outbox';
+  EXCEPTION WHEN insufficient_privilege THEN
+    NULL;
+  END;
+
+  DELETE FROM public.metadata_degradation_outbox AS outbox
+  USING public.metadata_degradation_events AS event
+  WHERE outbox.event_id = event.id
+    AND event.capture_id = '00000000-0000-0000-0000-000000000702';
+  GET DIAGNOSTICS queue_count = ROW_COUNT;
+  IF queue_count <> 2 THEN
+    RAISE EXCEPTION 'app role expected to consume 2 queued events, deleted %', queue_count;
+  END IF;
 
   BEGIN
     EXECUTE $sql$

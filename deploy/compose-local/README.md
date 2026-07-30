@@ -155,9 +155,10 @@ indexes.
 then backfills legacy thoughts and sessions into the `default` workspace, adds
 audience-aware indexes, and forces RLS; it also takes table locks, so keep the
 same maintenance window through both migrations. Migration 07 then adds the
-append-only metadata-degradation audit and its notification ledger; it does not
-rewrite `thoughts` or build an index over that table. The updated server refuses
-to boot until all three schema contracts exist. Re-running the files is safe,
+append-only metadata-degradation audit, transactional outbox, and notification
+ledger; it does not rewrite `thoughts` or build an index over that table. The
+updated server refuses to boot until all three schema contracts exist.
+Re-running the files is safe,
 but re-running `06-spaces.sql` still rebuilds its fingerprint index and needs the
 full lock window and index headroom. Details are in
 [`docs/hybrid-search.md`](../../docs/hybrid-search.md) and
@@ -170,7 +171,12 @@ are in [metadata degradation monitoring](../../docs/metadata-degradation-monitor
 - **Schema didn't run.** Postgres only runs `/docker-entrypoint-initdb.d/*` when the data dir is empty. After a schema change, either apply it manually with `psql` or `docker compose down -v` to wipe the volume (destroys all thoughts).
 - **Host port already in use.** If the box already runs postgres (or anything else) on `5432`, the stack fails to start with `failed to bind host port 127.0.0.1:5432`. Change the host side of the mapping in `docker-compose.yml` (e.g. `"127.0.0.1:15432:5432"`) — the containers talk over the docker network, so only your direct-psql habits change. Same applies to `8787`/`11434`.
 - **No GPU detected for Ollama.** Install the NVIDIA Container Toolkit, or remove the `deploy: resources:` block from the `ollama` service.
-- **Metadata extraction degrading.** With `CHAT_API_BASE`/`CHAT_MODEL` unset (or unreachable), capture still works but thoughts may receive `{topics: [uncategorized], type: observation}`. Inspect the durable audit or enable content-free Pushover/ntfy alerts as described in [metadata degradation monitoring](../../docs/metadata-degradation-monitoring.md).
+- **Metadata extraction degrading.** With `CHAT_API_BASE`/`CHAT_MODEL` unset or
+  unreachable, capture still works but thoughts may receive
+  `{topics: [uncategorized], type: observation}`. Intentionally leaving every
+  extractor unset creates no degradation event; a configured path that fails is
+  recorded in the durable audit and can enable content-free Pushover/ntfy alerts.
+  See [metadata degradation monitoring](../../docs/metadata-degradation-monitoring.md).
 
 ## Backups
 

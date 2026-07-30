@@ -183,11 +183,11 @@ scoped app server starts; the server boot probe refuses a partial catalog. See
 Finally, apply
 [`db/07-metadata-degradation.sql`](../../../db/07-metadata-degradation.sql) as
 the database owner, then run `db/03-grants-assertion.sql` last. It adds the
-append-only, content-free metadata-classification audit and its singleton
-notification ledger without rewriting `thoughts`. Server 1.16.0 refuses to
-start until both relations and the seeded ledger row exist. Audit queries and
-the optional Pushover/ntfy worker are documented in [Metadata degradation
-monitoring](../../../docs/metadata-degradation-monitoring.md).
+append-only, content-free metadata-classification audit, transactional outbox,
+and singleton notification ledger without rewriting `thoughts`. Server 1.16.0
+refuses to start until all three relations and the seeded ledger row exist.
+Audit queries and the optional Pushover/ntfy worker are documented in [Metadata
+degradation monitoring](../../../docs/metadata-degradation-monitoring.md).
 
 ## Template note
 

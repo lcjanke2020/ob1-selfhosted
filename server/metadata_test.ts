@@ -190,7 +190,6 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
           schema_version: 1,
           endpoint: "primary",
           model: "local-model",
-          base_url: PRIMARY_BASE,
         });
         assertEquals(r.degradation_events, []);
         assertEquals(
@@ -246,7 +245,6 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
           schema_version: 1,
           endpoint: "fallback",
           model: "hosted-model",
-          base_url: FALLBACK_BASE,
         });
         assertEquals(r.degradation_events, [
           {

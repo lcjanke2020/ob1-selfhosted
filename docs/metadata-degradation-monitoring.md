@@ -15,11 +15,13 @@ monitors, but container logs are no longer the source of truth.
 
 ## Durable audit trail
 
-[`db/07-metadata-degradation.sql`](../db/07-metadata-degradation.sql) adds two
+[`db/07-metadata-degradation.sql`](../db/07-metadata-degradation.sql) adds three
 relations:
 
 - `metadata_degradation_events` is append-only to the application role. One or
-  more rows share a `capture_id` and point at the persisted `thought_id`.
+  more rows share a `capture_id` and point at the persisted `thought_id`. If a
+  database owner later deletes that thought, the link becomes null while the
+  content-free audit survives.
   Failure rows carry the finite reason from `server/metadata.ts` and the HTTP
   status for `non_2xx`; fallback/stub outcome rows make the three alert classes
   directly queryable. Endpoint model and base URL are retained for historical
@@ -27,10 +29,14 @@ relations:
   insertion so those common credential-bearing components cannot enter the
   table. Do not put a secret in an endpoint path or model name; those fields are
   audit data and remain verbatim.
-- `metadata_degradation_notification_state` is a singleton cursor, pending-
-  count, cooldown, and first-occurrence ledger. Workers lock it with `FOR
-  UPDATE SKIP LOCKED`, so multiple server processes cannot send the same batch
-  concurrently.
+- `metadata_degradation_outbox` is a transient, content-free queue populated in
+  the same transaction as history. The worker deletes only committed rows, so
+  concurrent captures that commit out of sequence-number order cannot be
+  skipped. A rollback restores a claimed row.
+- `metadata_degradation_notification_state` is a singleton pending-count,
+  cooldown, first-occurrence, and latest delivery-attempt ledger. Workers lock
+  it with `FOR UPDATE SKIP LOCKED`, so multiple server processes cannot send the
+  same batch concurrently.
 
 The thought itself receives versioned `metadata.metadata_extraction` data:
 
@@ -38,14 +44,15 @@ The thought itself receives versioned `metadata.metadata_extraction` data:
 {
   "schema_version": 1,
   "endpoint": "primary | fallback | stub",
-  "model": "present for primary/fallback",
-  "base_url": "credential-scrubbed; present for primary/fallback"
+  "model": "present for primary/fallback"
 }
 ```
 
-That JSON describes the latest capture of a deduplicated thought. The event
-table is the application-append-only, capture-by-capture history, so use it for
-questions about what happened before a later recapture:
+That client-visible JSON describes the latest capture of a deduplicated thought
+without disclosing an internal classifier URL. Exact credential-scrubbed
+destinations remain in the owner-visible event table. That table is the
+application-append-only, capture-by-capture history, so use it for questions
+about what happened before a later recapture:
 
 ```sql
 -- Every thought capture classified by the configured fallback, including the
@@ -64,19 +71,39 @@ GROUP BY failure_reason
 ORDER BY count(*) DESC;
 ```
 
-The table deliberately contains no thought content. It has no automatic
-retention window: the point is to preserve the privacy audit across container
-replacement and configuration changes. It is included in normal database
-backups.
+The table deliberately contains no thought content. Intentionally disabled
+extraction still stamps `endpoint: "stub"` on the thought but does not create a
+degradation event or alert; only a configured path that actually fails produces
+`stub_used`. There is no automatic retention window: the point is to preserve
+the privacy audit across container replacement and configuration changes. It is
+included in normal database backups.
+
+If an operator deliberately does not need old stub-only history, the database
+owner may prune already-consumed rows without weakening the off-box audit:
+
+```sql
+DELETE FROM metadata_degradation_events AS event
+WHERE event.event_type = 'stub_used'
+  AND event.created_at < now() - interval '90 days'
+  AND NOT EXISTS (
+    SELECT 1 FROM metadata_degradation_outbox AS outbox
+    WHERE outbox.event_id = event.id
+  );
+```
+
+Never prune `fallback_used` if historical enumeration of off-box candidates is
+required. Deleting an unconsumed event would cascade its outbox row and suppress
+the corresponding alert, which is why the guard above is load-bearing.
 
 Existing databases must apply migration 07 as the database owner and run
 `db/03-grants-assertion.sql` last before starting server 1.16.0. The boot probe
-fails closed when an audit relation, its sequence, or the singleton ledger row
-is missing.
+fails closed when an audit/outbox relation, its sequence, or the singleton
+ledger row is missing.
 
 ## Durable notification worker
 
-Delivery is opt-in; audit recording is not. Set `METADATA_NOTIFY_CHANNELS` to
+Delivery is opt-in; real degradation auditing is not. Set
+`METADATA_NOTIFY_CHANNELS` to
 `pushover`, `ntfy`, or `pushover,ntfy`, then provide the selected adapters'
 credentials from the deployment's `0600` `.env` file. The complete variable
 set and defaults live in the two deployment `.env.example` files.
@@ -95,12 +122,25 @@ protected/self-hosted topics.
 
 The worker polls every five minutes by default. A trigger class that has never
 been delivered bypasses the cooldown; later occurrences accumulate for a
-30-minute rollup. A delivery batch fans out to all selected adapters and is
-committed as delivered when at least one succeeds. If all fail, the durable
-cursor and pending counts advance together and the same counts are retried on
-the next poll without rereading or multiplying events. A crash after external
-delivery but before the ledger commit can repeat an alert—the deliberate
-at-least-once failure direction—but cannot silently lose one.
+30-minute rollup. A delivery batch uses best-effort fan-out to all selected
+adapters and is committed as delivered when at least one succeeds. This is not
+independent per-channel guaranteed delivery: a failed channel is recorded in
+`last_failed_channels` and logged, but that batch is not retried to it after
+another channel accepts it. Configure one channel when delivery through that
+specific provider must be durable. If all adapters fail, pending counts are
+retained and retried on the next poll without rereading or multiplying events.
+The outbox claim and ledger update commit together. A crash after external
+delivery but before that commit can repeat an alert—the deliberate at-least-once
+failure direction—but cannot silently lose one.
+
+The latest partial/all-channel failure remains queryable without exposing any
+credential or provider response:
+
+```sql
+SELECT last_delivery_attempt_at, last_failed_channels
+FROM metadata_degradation_notification_state
+WHERE singleton;
+```
 
 Notification construction sees only finite event codes and counts. It never
 selects thought content, thought IDs, endpoint bases/models, request data, or
@@ -113,20 +153,32 @@ Keep any existing log monitor running until the durable path has completed one
 real end-to-end delivery:
 
 1. Apply migration 07 and the grant assertion before starting server 1.16.0.
-2. Put one adapter's credentials and a generic label in the deployment's real
+2. Confirm egress **from inside the MCP container** before depending on the
+   worker. For Pushover, for example, run
+
+   ```bash
+   docker compose exec mcp deno eval --allow-net=api.pushover.net \
+     'const r = await fetch("https://api.pushover.net"); console.log(r.status)'
+   ```
+
+   Any HTTP status proves DNS/TLS reachability; a timeout or DNS error does not.
+   Use the configured origin for ntfy. `DOCKER-USER` rules and the app qube's
+   Qubes firewall govern this container path, even when a host-side probe works.
+3. Put one adapter's credentials and a generic label in the deployment's real
    `0600` `.env`, enable its channel, and recreate the MCP container. Existing
    unread audit rows may cause the first alert immediately.
-3. If no historical alert arrives, make one capture containing only an explicit
-   harmless fixture such as `metadata alert live-fire fixture` while both
-   classifier endpoints are temporarily disabled. That deterministically
-   produces a real stub event without sending private text to a fallback. For a
-   quicker test, temporarily lower the poll and rollup intervals, then recreate
-   the container so it reads the new values.
-4. Confirm the provider received a content-free alert, the MCP log contains
+4. If no historical alert arrives, make one capture containing only an explicit
+   harmless fixture such as `metadata alert live-fire fixture` while the primary
+   is enabled but pointed at a known-dead local port and the fallback is blank.
+   That deterministically records a primary failure plus a real stub without
+   sending text to a fallback. Disabling extraction entirely does not emit a
+   degradation event. For a quicker test, temporarily lower the poll and rollup
+   intervals, then recreate the container so it reads the new values.
+5. Confirm the provider received a content-free alert, the MCP log contains
    `delivered durable alert batch`, and the stub row is queryable in
    `metadata_degradation_events`. Restore the endpoint and interval settings and
    recreate the container again.
-5. Only after that success should the legacy log-scraping timer be disabled.
+6. Only after that success should the legacy log-scraping timer be disabled.
 
 The fixture remains a real thought and audit event by design; never use real or
 private content for this test.

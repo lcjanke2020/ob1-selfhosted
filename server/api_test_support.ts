@@ -90,7 +90,6 @@ export function makeDeps(overrides: Partial<ServiceDeps> = {}): RecordingDeps {
           schema_version: 1 as const,
           endpoint: "primary" as const,
           model: "test-local-model",
-          base_url: "http://test-primary.invalid/v1",
         },
         degradation_events: [],
       });

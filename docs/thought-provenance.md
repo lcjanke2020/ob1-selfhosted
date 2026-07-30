@@ -52,8 +52,7 @@ the existing classification keys:
   "metadata_extraction": {
     "schema_version": 1,
     "endpoint": "primary",
-    "model": "local-chat-model",
-    "base_url": "http://classifier.example/v1"
+    "model": "local-chat-model"
   },
   "source": "rest",
   "door": "funnel",
@@ -77,15 +76,17 @@ The trust boundary is:
 | `metadata.source`                       | Server               | Validated transport: `mcp` or `rest`                    |
 | `metadata.door`                         | Server               | Auth path: `tailnet` or `funnel`                        |
 | `metadata.sub`                          | Server               | Verified OAuth `sub`, or `null` for the shared-key door |
-| `metadata.metadata_extraction`          | Server               | Classifier path, model, and credential-scrubbed base URL |
+| `metadata.metadata_extraction`          | Server               | Classifier path and model                               |
 | `metadata.provenance.schema_version`    | Server               | Version of the nested caller-claims contract            |
 | `metadata.provenance.caller_asserted.*` | Authenticated caller | Validated but unverified author/work-context claims     |
 
 The top-level `source`, `door`, and `sub` keys remain canonical compatibility
 keys; they are not copied from caller input. `metadata_extraction` is versioned
-and uses `endpoint: "stub"` without model/base fields when no endpoint
-classified the thought. The metadata extractor is prevented from populating
-any of these reserved keys, `metadata_extraction`, or `provenance`.
+and uses `endpoint: "stub"` without a model field when no endpoint classified
+the thought. Classifier base URLs remain in the owner-visible degradation audit
+rather than this client-visible metadata. The metadata extractor is prevented
+from populating any of these reserved keys, `metadata_extraction`, or
+`provenance`.
 
 Callers do not submit `schema_version`. Open Brain writes it. A future
 incompatible change to the nested key layout must increment the integer;

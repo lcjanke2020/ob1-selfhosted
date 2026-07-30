@@ -15,7 +15,9 @@ BEGIN;
 
 CREATE TABLE IF NOT EXISTS metadata_degradation_events (
   id              BIGSERIAL PRIMARY KEY,
-  thought_id      UUID NOT NULL REFERENCES thoughts(id) ON DELETE RESTRICT,
+  -- Preserve the content-free audit if an owner later deletes a thought,
+  -- without making a future forget/retention feature fight this foreign key.
+  thought_id      UUID REFERENCES thoughts(id) ON DELETE SET NULL,
   capture_id      UUID NOT NULL,
   event_type      TEXT NOT NULL CHECK (event_type IN (
                     'primary_failure',
@@ -82,13 +84,22 @@ CREATE INDEX IF NOT EXISTS idx_metadata_degradation_thought_ts
 CREATE INDEX IF NOT EXISTS idx_metadata_degradation_type_ts
   ON metadata_degradation_events (event_type, created_at DESC);
 
--- One durable cursor/cooldown row coordinates every server process. A worker
--- takes FOR UPDATE SKIP LOCKED before reading/updating it, so replicas cannot
--- deliver the same batch concurrently. `pending_counts` contains only finite
--- event/reason keys and integer counts; no request or thought data enters it.
+-- A transactional outbox separates commit visibility from BIGSERIAL order.
+-- Capture inserts this row in the same transaction as its immutable history
+-- row. The worker deletes only committed queue rows; rollback restores a claim,
+-- so an older transaction that commits after a newer event can never be skipped.
+CREATE TABLE IF NOT EXISTS metadata_degradation_outbox (
+  event_id BIGINT PRIMARY KEY
+             REFERENCES metadata_degradation_events(id) ON DELETE CASCADE
+);
+
+-- One durable cooldown/count row coordinates every server process. A worker
+-- takes FOR UPDATE SKIP LOCKED on this singleton before claiming outbox rows,
+-- so replicas cannot deliver the same batch concurrently. `pending_counts`
+-- contains only finite event/reason keys and integer counts; no request or
+-- thought data enters it.
 CREATE TABLE IF NOT EXISTS metadata_degradation_notification_state (
   singleton             BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
-  last_event_id         BIGINT NOT NULL DEFAULT 0 CHECK (last_event_id >= 0),
   pending_counts        JSONB NOT NULL DEFAULT '{}'::jsonb
                           CHECK (jsonb_typeof(pending_counts) = 'object'),
   notified_event_types  TEXT[] NOT NULL DEFAULT '{}'::text[]
@@ -100,6 +111,14 @@ CREATE TABLE IF NOT EXISTS metadata_degradation_notification_state (
                             ]::text[]
                           ),
   last_notified_at      TIMESTAMPTZ,
+  last_delivery_attempt_at TIMESTAMPTZ,
+  last_failed_channels  TEXT[] NOT NULL DEFAULT '{}'::text[]
+                          CHECK (
+                            last_failed_channels <@ ARRAY[
+                              'pushover',
+                              'ntfy'
+                            ]::text[]
+                          ),
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -108,9 +127,11 @@ VALUES (TRUE)
 ON CONFLICT (singleton) DO NOTHING;
 
 -- Re-applying the ordered migrations after 01-schema.sql must restore exactly
--- these narrow privileges: append/read audit history, mutate only the delivery
--- ledger, and never delete either relation.
+-- these narrow privileges: append/read immutable history, enqueue/consume the
+-- transient outbox, and mutate only the delivery ledger.
 REVOKE ALL ON metadata_degradation_events
+  FROM openbrain_app;
+REVOKE ALL ON metadata_degradation_outbox
   FROM openbrain_app;
 REVOKE ALL ON metadata_degradation_notification_state
   FROM openbrain_app;
@@ -118,6 +139,8 @@ REVOKE ALL ON SEQUENCE metadata_degradation_events_id_seq
   FROM openbrain_app;
 
 GRANT SELECT, INSERT ON metadata_degradation_events
+  TO openbrain_app;
+GRANT SELECT, INSERT, DELETE ON metadata_degradation_outbox
   TO openbrain_app;
 GRANT SELECT, UPDATE ON metadata_degradation_notification_state
   TO openbrain_app;
@@ -127,6 +150,8 @@ GRANT USAGE ON SEQUENCE metadata_degradation_events_id_seq
 -- The trusted backup/inspection role intentionally sees the content-free audit
 -- rows and must be able to dump the BIGSERIAL sequence state.
 GRANT SELECT ON metadata_degradation_events
+  TO openbrain_readonly;
+GRANT SELECT ON metadata_degradation_outbox
   TO openbrain_readonly;
 GRANT SELECT ON metadata_degradation_notification_state
   TO openbrain_readonly;

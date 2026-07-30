@@ -342,31 +342,36 @@ export async function captureThought(
 
     if (input.degradationEvents.length > 0) {
       // One UUID groups every event emitted by this capture attempt. The
-      // thought upsert and this append share withScopeClient's transaction, so
-      // a persisted thought can never claim a degraded classifier path without
-      // its audit rows (or vice versa).
+      // thought upsert, immutable history, and transient outbox enqueue share
+      // withScopeClient's transaction. The outbox makes notification claiming
+      // commit-safe even when concurrent BIGSERIAL ids commit out of order.
       await client.queryArray(
-        `INSERT INTO metadata_degradation_events (
-           thought_id, capture_id, event_type, endpoint_role,
-           failure_reason, http_status, endpoint_model, endpoint_base_url
+        `WITH inserted_events AS (
+           INSERT INTO metadata_degradation_events (
+             thought_id, capture_id, event_type, endpoint_role,
+             failure_reason, http_status, endpoint_model, endpoint_base_url
+           )
+           SELECT
+             $1::uuid,
+             $2::uuid,
+             event_type,
+             endpoint_role,
+             failure_reason,
+             http_status,
+             endpoint_model,
+             endpoint_base_url
+           FROM jsonb_to_recordset($3::jsonb) AS event(
+             event_type text,
+             endpoint_role text,
+             failure_reason text,
+             http_status integer,
+             endpoint_model text,
+             endpoint_base_url text
+           )
+           RETURNING id
          )
-         SELECT
-           $1::uuid,
-           $2::uuid,
-           event_type,
-           endpoint_role,
-           failure_reason,
-           http_status,
-           endpoint_model,
-           endpoint_base_url
-         FROM jsonb_to_recordset($3::jsonb) AS event(
-           event_type text,
-           endpoint_role text,
-           failure_reason text,
-           http_status integer,
-           endpoint_model text,
-           endpoint_base_url text
-         )`,
+         INSERT INTO metadata_degradation_outbox (event_id)
+         SELECT id FROM inserted_events`,
         [
           persisted.id,
           crypto.randomUUID(),

@@ -42,7 +42,7 @@ Five roles, least privilege, with drift detection:
 | Role | Privileges | Used by |
 |---|---|---|
 | `postgres` | superuser | init + DB admin (role provisioning / migrations) — never the app runtime. In the three-qube split it's reachable from the app qube's IP only for remote admin — a deliberate trade-off (a compromised app qube then has full DB admin, including an app→db OS pivot via `COPY … TO/FROM PROGRAM`); see [db-qube/README.md](../deploy/qubes/db-qube/README.md) and [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15) |
-| `openbrain_app` | SELECT/INSERT/UPDATE on `thoughts` (+ scoped observability/sessions grants); SELECT/INSERT-only on metadata-degradation history and SELECT/UPDATE-only on its singleton delivery ledger; **no DELETE**, no schema-wide DML, and no role memberships | MCP server, daily summary, metadata notification worker |
+| `openbrain_app` | SELECT/INSERT/UPDATE on `thoughts` (+ scoped observability/sessions grants); SELECT/INSERT-only on metadata-degradation history, SELECT/INSERT/DELETE on its transient outbox, and SELECT/UPDATE on its singleton delivery ledger; **no thought/history DELETE**, no schema-wide DML, and no role memberships | MCP server, daily summary, metadata notification worker |
 | `openbrain_ingester` | INSERT-only on `funnel_access_log` | log-ingester sidecar — it parses attacker-influenced log lines, so its blast radius is one table |
 | `openbrain_monitor` | SELECT on `funnel_access_log` + `mcp_auth_events` only | host-side funnel monitor ([`scripts/funnel_monitor.sh`](../scripts/funnel_monitor.sh)) — its credential sits on the internet-adjacent edge, so it reads request metadata but can never reach a thought. Optional, like the ingester |
 | `openbrain_readonly` | SELECT on everything + `BYPASSRLS` so full `pg_dump` works; no DML | trusted backup job, humans with psql/DBeaver |
@@ -52,10 +52,13 @@ Five roles, least privilege, with drift detection:
 `db/07-metadata-degradation.sql` records only thought/capture identifiers,
 finite outcome/reason codes, status, timestamp, and credential-scrubbed endpoint
 identity—never thought content. The thought upsert and its event rows share one
-transaction. The application role cannot update or delete that history; the
-single mutable row contains only the notification cursor, finite counts, and
-cooldown state. The grant assertion covers both relations and the event
-sequence, including effective `PUBLIC` access.
+transaction with a transient outbox enqueue. The application role cannot update
+or delete history; it can consume committed outbox rows. The single mutable
+state row contains only finite counts, cooldown state, and the latest failed
+delivery-channel set. Owner-directed thought deletion nulls the history link
+instead of erasing the audit or blocking deletion. The grant assertion covers
+all three relations and the event sequence, including effective `PUBLIC`
+access.
 
 `db/01-schema.sql` actively REVOKEs historical broad grants (idempotent, safe on live DBs), and `db/03-grants-assertion.sql` is a read-only invariant check you can run any time — because init scripts only run on a fresh data directory, a tightened grant **does not** reach an existing deployment by itself. Its monitor check scans every non-system application relation across schemas, rejects default ACLs that would grant future relations to the monitor or `PUBLIC`, and permits only the two observability tables, so future relation grants fail closed without extending a denylist. The assertion is how you notice. This invariant is relation-scoped: PostgreSQL grants function execution to `PUBLIC` by default, so any future `SECURITY DEFINER` routine must revoke that default and receive a separate security review.
 
@@ -69,7 +72,7 @@ sequence, including effective `PUBLIC` access.
 
 - Caddy redacts `Authorization`, `X-Brain-Key`, `Cookie`, `Set-Cookie`, `Proxy-Authorization` at format level from **both the per-handle access logs and the process-level error log** — the latter matters because `reverse_proxy` warnings otherwise serialize the full request header map (incl. a Bearer) to `docker logs`; the ingester additionally keeps only UA + Host from headers and strips query strings.
 - Every 401 inserts a reason-coded row into `mcp_auth_events` (fire-and-forget, with an in-flight cap so a 401 flood can't queue unbounded memory).
-- Every degraded classification appends a database event in the thought transaction. The optional Pushover/ntfy worker selects only finite codes and counts—never thought IDs/content or endpoint identity—and coordinates replicas through a locked durable cursor. Provider errors are redacted; delivery is at-least-once, so a crash after provider acceptance but before commit may duplicate an alert rather than lose one.
+- Every degraded classification appends history plus a transactional outbox row in the thought transaction. The optional Pushover/ntfy worker consumes only committed queue rows and selects finite codes and counts—never thought IDs/content or endpoint identity. A locked durable ledger coordinates replicas. Provider errors are redacted and failed channels from the latest attempt are recorded; delivery is at-least-once, so a crash after provider acceptance but before commit may duplicate an alert rather than lose one.
 - A daily rollup retains a year of trend data after raw rows age out at 30 days.
 
 ### Supply chain / process

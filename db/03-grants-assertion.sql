@@ -38,8 +38,9 @@
 --   (d) the app may read but not mutate the memory-space registry, and only
 --       it may execute the two reviewed memory_scope helpers (never PUBLIC or
 --       the edge-resident monitor).
---   (e) metadata degradation history is append-only to the app, while only
---       the singleton notification ledger is mutable.
+--   (e) metadata degradation history is append-only to the app; its transient
+--       outbox is enqueue/consume-only, and only the singleton notification
+--       ledger is otherwise mutable.
 --
 -- The openbrain_app check is deliberately scoped to thoughts:
 -- 02-observability.sql and 04-sessions.sql legitimately grant it access to
@@ -90,10 +91,29 @@ BEGIN
   END IF;
 
   IF to_regclass('public.metadata_degradation_events') IS NULL
+     OR to_regclass('public.metadata_degradation_outbox') IS NULL
      OR to_regclass('public.metadata_degradation_notification_state') IS NULL
      OR to_regclass('public.metadata_degradation_events_id_seq') IS NULL THEN
     RAISE EXCEPTION
       'grants assertion failed: metadata degradation schema is missing; apply db/07-metadata-degradation.sql first.';
+  END IF;
+
+  IF NOT (
+       has_table_privilege(
+         'openbrain_app', 'public.metadata_degradation_outbox', 'SELECT'
+       )
+       AND has_table_privilege(
+         'openbrain_app', 'public.metadata_degradation_outbox', 'INSERT'
+       )
+       AND has_table_privilege(
+         'openbrain_app', 'public.metadata_degradation_outbox', 'DELETE'
+       )
+     ) OR has_table_privilege(
+       'openbrain_app', 'public.metadata_degradation_outbox',
+       'UPDATE, TRUNCATE, REFERENCES, TRIGGER'
+     ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_app metadata degradation outbox must be SELECT/INSERT/DELETE-only.';
   END IF;
 
   IF NOT (
@@ -151,6 +171,7 @@ BEGIN
     ) acl
     WHERE relation.oid = ANY (ARRAY[
       'public.metadata_degradation_events'::regclass::oid,
+      'public.metadata_degradation_outbox'::regclass::oid,
       'public.metadata_degradation_notification_state'::regclass::oid,
       'public.metadata_degradation_events_id_seq'::regclass::oid
     ])

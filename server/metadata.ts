@@ -212,7 +212,6 @@ export type MetadataExtractionStamp =
     schema_version: 1;
     endpoint: EndpointRole;
     model: string;
-    base_url: string;
   }
   | {
     schema_version: 1;
@@ -336,16 +335,29 @@ function logClassificationFailure(
 // never breaks. Either endpoint may be omitted: with both off it stamps the
 // stub; with only the fallback configured it is a fallback-only deployment.
 //
-// Each step logs its outcome (no thought content) — including a line whenever
-// an endpoint fails, so a single capture may log more than one line — making
-// the two otherwise-silent degradations visible: every capture quietly stamping
-// the stub (no working endpoint), and every capture quietly classifying via the
-// fallback (which, depending on FALLBACK_CHAT_API_BASE, may send content
-// off-box).
+// Each configured step logs its outcome (no thought content) — including a line
+// whenever an endpoint fails, so a single capture may log more than one line.
+// This makes configured failures and fallback use visible. An intentionally
+// endpoint-free deployment logs its stable stub outcome but creates no
+// degradation event.
 export async function extractMetadata(
   text: string,
 ): Promise<MetadataExtractionResult> {
   const degradationEvents: MetadataDegradationEvent[] = [];
+
+  // An intentionally extraction-free deployment is a stable configuration,
+  // not a classifier failure. Keep the explicit per-thought stub provenance,
+  // but do not grow the degradation audit or page the operator forever.
+  if (!ENABLE_PRIMARY_EXTRACTION && !ENABLE_FALLBACK_EXTRACTION) {
+    console.log(
+      "[metadata] extraction disabled; using uncategorized metadata",
+    );
+    return {
+      metadata: { ...METADATA_STUB },
+      classifier: { schema_version: 1, endpoint: "stub" },
+      degradation_events: degradationEvents,
+    };
+  }
 
   // Primary is opt-in (ENABLE_PRIMARY_EXTRACTION, which also requires the
   // CHAT_* endpoint to be configured). Off by default so a misconfigured or
@@ -366,7 +378,6 @@ export async function extractMetadata(
           schema_version: 1,
           endpoint: "primary",
           model: CHAT_MODEL,
-          base_url: sanitizeMetadataEndpointBase(CHAT_API_BASE),
         },
         degradation_events: degradationEvents,
       };
@@ -407,7 +418,6 @@ export async function extractMetadata(
           schema_version: 1,
           endpoint: "fallback",
           model: FALLBACK_CHAT_MODEL,
-          base_url: sanitizeMetadataEndpointBase(FALLBACK_CHAT_API_BASE),
         },
         degradation_events: degradationEvents,
       };

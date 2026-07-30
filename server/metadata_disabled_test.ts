@@ -1,5 +1,6 @@
 // Extraction-disabled deployments still persist an explicit stub classifier
-// stamp and durable stub_used event for every capture.
+// stamp, but do not turn a stable configuration into degradation history or a
+// periodic alert forever.
 
 import { assertEquals } from "@std/assert";
 
@@ -51,14 +52,7 @@ Deno.test("extractMetadata: disabled extraction returns a durable stub outcome",
       type: "observation",
     });
     assertEquals(result.classifier, { schema_version: 1, endpoint: "stub" });
-    assertEquals(result.degradation_events, [{
-      event_type: "stub_used",
-      endpoint_role: null,
-      failure_reason: null,
-      http_status: null,
-      endpoint_model: null,
-      endpoint_base_url: null,
-    }]);
+    assertEquals(result.degradation_events, []);
   } finally {
     for (const [key, value] of original) {
       if (value === undefined) Deno.env.delete(key);

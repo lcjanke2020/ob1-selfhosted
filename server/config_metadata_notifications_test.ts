@@ -10,6 +10,9 @@ const SCRIPT = `
     label: c.METADATA_NOTIFY_LABEL,
     enabled: c.ENABLE_METADATA_NOTIFICATIONS,
     ntfyUrl: c.METADATA_NTFY_SERVER_URL,
+    pollMs: c.METADATA_NOTIFY_POLL_INTERVAL_MS,
+    rollupMs: c.METADATA_NOTIFY_ROLLUP_MS,
+    timeoutMs: c.METADATA_NOTIFY_TIMEOUT_MS,
   }));
 `;
 
@@ -58,6 +61,9 @@ Deno.test("metadata notification config: disabled default and valid dual-channel
       label: "OpenBrain",
       enabled: false,
       ntfyUrl: "https://ntfy.sh",
+      pollMs: 300_000,
+      rollupMs: 1_800_000,
+      timeoutMs: 10_000,
     });
   });
 
@@ -72,6 +78,7 @@ Deno.test("metadata notification config: disabled default and valid dual-channel
         METADATA_NTFY_SERVER_URL: "https://notify.example/base",
         METADATA_NTFY_TOPIC: "unguessable-topic",
         METADATA_NTFY_TOKEN: "ntfy-token",
+        METADATA_NOTIFY_POLL_INTERVAL_MS: "2147483647",
       });
       assertEquals(result.code, 0, result.stderr);
       assertEquals(JSON.parse(result.stdout), {
@@ -79,6 +86,9 @@ Deno.test("metadata notification config: disabled default and valid dual-channel
         label: "Private memory",
         enabled: true,
         ntfyUrl: "https://notify.example/base",
+        pollMs: 2_147_483_647,
+        rollupMs: 1_800_000,
+        timeoutMs: 10_000,
       });
     },
   );
@@ -129,5 +139,23 @@ Deno.test("metadata notification config: incomplete or unsafe channel config fai
     assertEquals(result.code, 1);
     assertStringIncludes(result.stderr, "not a valid bearer token");
     assertEquals(result.stderr.includes("not-header-safe"), false);
+  });
+
+  await t.step("timer values reject partial numeric strings", async () => {
+    const result = await runConfig({
+      METADATA_NOTIFY_POLL_INTERVAL_MS: "1e3",
+    });
+    assertEquals(result.code, 1);
+    assertStringIncludes(result.stderr, "METADATA_NOTIFY_POLL_INTERVAL_MS");
+    assertStringIncludes(result.stderr, "complete positive decimal integer");
+  });
+
+  await t.step("timer values reject setTimeout overflow", async () => {
+    const result = await runConfig({
+      METADATA_NOTIFY_TIMEOUT_MS: "2147483648",
+    });
+    assertEquals(result.code, 1);
+    assertStringIncludes(result.stderr, "METADATA_NOTIFY_TIMEOUT_MS");
+    assertStringIncludes(result.stderr, "2147483647");
   });
 });

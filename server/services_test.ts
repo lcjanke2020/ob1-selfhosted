@@ -120,7 +120,6 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           schema_version: 1,
           endpoint: "primary",
           model: "test-local-model",
-          base_url: "http://test-primary.invalid/v1",
         });
         assertEquals(out.metadata.provenance, {
           schema_version: 1,
@@ -171,7 +170,6 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           schema_version: 1,
           endpoint: "primary",
           model: "test-local-model",
-          base_url: "http://test-primary.invalid/v1",
         });
       },
     );
@@ -209,7 +207,6 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
                 schema_version: 1,
                 endpoint: "fallback",
                 model: "server-owned-model",
-                base_url: "https://fallback.example/v1",
               },
               degradation_events: [{
                 event_type: "fallback_used",
@@ -242,7 +239,6 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           schema_version: 1,
           endpoint: "fallback",
           model: "server-owned-model",
-          base_url: "https://fallback.example/v1",
         });
         assertEquals(eventInsert[0], "uuid-3");
         assertEquals(

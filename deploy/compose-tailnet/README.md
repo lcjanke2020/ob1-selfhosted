@@ -191,10 +191,11 @@ application policies, forced-RLS flags, and scoped search function. See [Memory
 spaces](../../docs/spaces.md).
 
 `07-metadata-degradation.sql` adds an append-only, content-free classification
-audit and the singleton notification ledger. It does not rewrite `thoughts` or
-build an index over that table. Apply it before server 1.16.0; the boot probe
-refuses a partial catalog. See [Metadata degradation monitoring](../../docs/metadata-degradation-monitoring.md)
-for audit queries and optional Pushover/ntfy configuration.
+audit, a transactional notification outbox, and the singleton delivery ledger.
+It does not rewrite `thoughts` or build an index over that table. Apply it before
+server 1.16.0; the boot probe refuses a partial catalog. See [Metadata
+degradation monitoring](../../docs/metadata-degradation-monitoring.md) for audit
+queries and optional Pushover/ntfy configuration.
 
 Optional: the SELECT-only role for the host-side funnel monitor follows the same shape —
 set `OPENBRAIN_MONITOR_PASSWORD` in `.env`, run `bash ../../scripts/upgrade-add-monitor-role.sh`,

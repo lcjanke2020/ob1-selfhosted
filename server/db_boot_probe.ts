@@ -166,6 +166,9 @@ export async function probeDbAtBoot(
            ),
            to_regclass('public.metadata_degradation_events') IS NOT NULL
              AND to_regclass(
+               'public.metadata_degradation_outbox'
+             ) IS NOT NULL
+             AND to_regclass(
                'public.metadata_degradation_notification_state'
              ) IS NOT NULL
              AND to_regclass(

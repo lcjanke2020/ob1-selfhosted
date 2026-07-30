@@ -11,12 +11,23 @@ function required(name: string): string {
   return v;
 }
 
-function requiredInt(name: string, fallback: number): number {
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+function requiredInt(
+  name: string,
+  fallback: number,
+  max = Number.MAX_SAFE_INTEGER,
+): number {
   const raw = Deno.env.get(name)?.trim();
   if (!raw) return fallback;
-  const value = Number.parseInt(raw, 10);
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`Invalid integer env var ${name}: "${raw}"`);
+  if (!/^[0-9]+$/.test(raw)) {
+    throw new Error(`${name} must be a complete positive decimal integer`);
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0 || value > max) {
+    throw new Error(
+      `${name} must be a positive integer no greater than ${max}`,
+    );
   }
   return value;
 }
@@ -96,10 +107,12 @@ export const ENABLE_FALLBACK_EXTRACTION = Boolean(
 export const ENABLE_METADATA_EXTRACTION = ENABLE_PRIMARY_EXTRACTION ||
   ENABLE_FALLBACK_EXTRACTION;
 
-// Optional durable metadata-degradation notifications. Empty means
-// the audit rows are still recorded but no delivery worker runs. A comma-
-// separated list enables one or both pluggable adapters; fan-out succeeds when
-// at least one configured adapter accepts the alert.
+// Optional durable metadata-degradation notifications. Empty means real
+// degradation rows are still recorded but no delivery worker runs. A comma-
+// separated list enables one or both pluggable adapters. Multiple adapters are
+// best-effort fan-out, not independent per-channel queues: the batch succeeds
+// when at least one adapter accepts it, while failed channel names are retained
+// in the delivery ledger for diagnosis.
 export type MetadataNotificationChannel = "pushover" | "ntfy";
 
 function metadataNotificationChannels(): MetadataNotificationChannel[] {
@@ -146,14 +159,17 @@ export const METADATA_NOTIFY_LABEL = noControlCharacters(
 export const METADATA_NOTIFY_POLL_INTERVAL_MS = requiredInt(
   "METADATA_NOTIFY_POLL_INTERVAL_MS",
   300_000,
+  MAX_TIMER_DELAY_MS,
 );
 export const METADATA_NOTIFY_ROLLUP_MS = requiredInt(
   "METADATA_NOTIFY_ROLLUP_MS",
   1_800_000,
+  MAX_TIMER_DELAY_MS,
 );
 export const METADATA_NOTIFY_TIMEOUT_MS = requiredInt(
   "METADATA_NOTIFY_TIMEOUT_MS",
   10_000,
+  MAX_TIMER_DELAY_MS,
 );
 
 export const METADATA_PUSHOVER_APP_TOKEN = noControlCharacters(
@@ -364,13 +380,21 @@ export const CITATION_BASE_URL = optionalTrimmed("CITATION_BASE_URL") ||
 // for a slow first-load embed model warm-up and short enough that a hung
 // backend can't tie up an MCP request indefinitely. (The chat-LLM metadata
 // call has its own knob — CHAT_TIMEOUT_MS below.)
-export const FETCH_TIMEOUT_MS = requiredInt("FETCH_TIMEOUT_MS", 15_000);
+export const FETCH_TIMEOUT_MS = requiredInt(
+  "FETCH_TIMEOUT_MS",
+  15_000,
+  MAX_TIMER_DELAY_MS,
+);
 
 // Separate, longer cap for the optional chat-LLM metadata extraction call.
 // A chat completion over a large captured thought can legitimately take far
 // longer than an embedding — gating both on FETCH_TIMEOUT_MS silently
 // truncated extraction on slow local models.
-export const CHAT_TIMEOUT_MS = requiredInt("CHAT_TIMEOUT_MS", 60_000);
+export const CHAT_TIMEOUT_MS = requiredInt(
+  "CHAT_TIMEOUT_MS",
+  60_000,
+  MAX_TIMER_DELAY_MS,
+);
 
 // Wall-clock cap on JWKS fetches. Two surfaces:
 //   1. Passed to jose's `createRemoteJWKSet` as `timeoutDuration`, bounding
@@ -385,6 +409,7 @@ export const CHAT_TIMEOUT_MS = requiredInt("CHAT_TIMEOUT_MS", 60_000);
 export const JWKS_FETCH_TIMEOUT_MS = requiredInt(
   "JWKS_FETCH_TIMEOUT_MS",
   10_000,
+  MAX_TIMER_DELAY_MS,
 );
 
 // Overall deadline for the boot-time Postgres reachability probe (wired in
@@ -400,4 +425,5 @@ export const JWKS_FETCH_TIMEOUT_MS = requiredInt(
 export const DB_BOOT_PROBE_TIMEOUT_MS = requiredInt(
   "DB_BOOT_PROBE_TIMEOUT_MS",
   30_000,
+  MAX_TIMER_DELAY_MS,
 );

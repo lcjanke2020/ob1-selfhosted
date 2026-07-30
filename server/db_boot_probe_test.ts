@@ -115,6 +115,7 @@ Deno.test("probeDbAtBoot: success path validates connectivity and hybrid schema"
   assert(client.queryCalls[1].includes("idx_thoughts_content_tsv"));
   assert(client.queryCalls[1].includes("idx_thoughts_content_trgm"));
   assert(client.queryCalls[1].includes("metadata_degradation_events_id_seq"));
+  assert(client.queryCalls[1].includes("metadata_degradation_outbox"));
   assert(
     client.queryCalls[2].includes("metadata_degradation_notification_state"),
   );

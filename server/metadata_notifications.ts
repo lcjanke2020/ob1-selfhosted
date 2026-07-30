@@ -1,10 +1,11 @@
 // Durable, content-free metadata-degradation notifications.
 //
-// Capture writes finite event codes to metadata_degradation_events. This
-// worker polls those rows, coordinates replicas through one locked ledger row,
-// and delivers first-occurrence alerts plus periodic rollups. It never selects
-// thoughts.content (or any request data), so a future payload edit cannot
-// accidentally quote the thought that triggered the alert.
+// Capture writes finite event codes to immutable history and enqueues their ids
+// in the same transaction. This worker consumes the commit-safe outbox,
+// coordinates replicas through one locked ledger row, and delivers first-
+// occurrence alerts plus periodic rollups. It never selects thoughts.content
+// (or any request data), so a future payload edit cannot accidentally quote the
+// thought that triggered the alert.
 
 import type { Pool, PoolClient } from "postgres";
 import { getClient } from "./db_pool.ts";
@@ -111,7 +112,10 @@ export class NtfyMetadataNotificationAdapter
     const headers: Record<string, string> = {
       "content-type": "text/plain; charset=utf-8",
       title: notification.title,
-      priority: notification.severity === "high" ? "urgent" : "high",
+      // Align semantic severity across adapters: Pushover 0/1 corresponds to
+      // ntfy default/high. Urgent has stronger repeat semantics than this
+      // worker's finite "high" level promises.
+      priority: notification.severity === "high" ? "high" : "default",
     };
     if (this.token) headers.authorization = `Bearer ${this.token}`;
 
@@ -230,7 +234,7 @@ export function buildMetadataNotification(
   const primary = totalFor(counts, "primary_failure");
   const lines = [
     `Metadata classification degraded for ${label}.`,
-    `Window ending: ${now.toISOString()}`,
+    `Counts through: ${now.toISOString()}`,
     `Fallback classifications: ${fallback}`,
     `Stub classifications: ${stub}`,
     `Primary failures: ${primary}`,
@@ -250,14 +254,12 @@ export function buildMetadataNotification(
 }
 
 type LedgerRow = {
-  last_event_id: string;
   pending_counts: unknown;
   notified_event_types: string[];
   last_notified_at_ms: string | null;
 };
 
 type EventRow = {
-  id: string;
   event_type: string;
   failure_reason: string | null;
 };
@@ -273,22 +275,32 @@ export type MetadataNotificationCycleResult =
   | { outcome: "locked" | "idle"; processed: number }
   | { outcome: "queued" | "delivered" | "delivery_failed"; processed: number };
 
+type DeliveryResult = {
+  accepted: boolean;
+  failedChannels: MetadataNotificationAdapter["name"][];
+};
+
 async function deliver(
   adapters: MetadataNotificationAdapter[],
   notification: MetadataNotification,
-): Promise<boolean> {
+): Promise<DeliveryResult> {
   const outcomes = await Promise.all(adapters.map(async (adapter) => {
     try {
       await adapter.send(notification);
-      return true;
+      return { adapter: adapter.name, accepted: true };
     } catch {
       // Adapter implementations intentionally redact underlying request errors.
       // Keep this log equally sparse so topic/token/user values cannot escape.
       console.warn(`[metadata_notify] ${adapter.name} delivery failed`);
-      return false;
+      return { adapter: adapter.name, accepted: false };
     }
   }));
-  return outcomes.some(Boolean);
+  return {
+    accepted: outcomes.some((outcome) => outcome.accepted),
+    failedChannels: outcomes
+      .filter((outcome) => !outcome.accepted)
+      .map((outcome) => outcome.adapter),
+  };
 }
 
 async function rollbackQuietly(client: PoolClient): Promise<void> {
@@ -305,6 +317,11 @@ export async function runMetadataNotificationCycle(
   if (adapters.length === 0) return { outcome: "idle", processed: 0 };
   const now = options.now?.() ?? new Date();
   const batchSize = options.batchSize ?? 10_000;
+  if (
+    !Number.isSafeInteger(batchSize) || batchSize <= 0 || batchSize > 10_000
+  ) {
+    throw new Error("metadata notification batch size must be 1..10000");
+  }
   const client = await getClient(pool);
   let transactionOpen = false;
   try {
@@ -312,7 +329,6 @@ export async function runMetadataNotificationCycle(
     transactionOpen = true;
     const ledgerResult = await client.queryObject<LedgerRow>(
       `SELECT
-         last_event_id::text AS last_event_id,
          pending_counts,
          notified_event_types,
          CASE WHEN last_notified_at IS NULL THEN NULL
@@ -353,17 +369,32 @@ export async function runMetadataNotificationCycle(
       notifiedTypes.add(eventType as TriggerEventType);
     }
 
+    // Consume only committed outbox rows. A BIGSERIAL high-water cursor is not
+    // safe here: ids are allocated before commit, so a newer id can become
+    // visible first and permanently skip an older in-flight capture. Deleting
+    // inside this transaction makes the claim atomic with the ledger update;
+    // any rollback restores the queue rows.
     const eventResult = await client.queryObject<EventRow>(
-      `SELECT id::text AS id, event_type, failure_reason
-       FROM metadata_degradation_events
-       WHERE id > $1::bigint
-       ORDER BY id
-       LIMIT $2`,
-      [ledger.last_event_id, batchSize],
+      `WITH claimed AS MATERIALIZED (
+         SELECT event_id
+         FROM metadata_degradation_outbox
+         ORDER BY event_id
+         LIMIT $1
+       ), consumed AS (
+         DELETE FROM metadata_degradation_outbox AS outbox
+         USING claimed
+         WHERE outbox.event_id = claimed.event_id
+         RETURNING outbox.event_id
+       )
+       SELECT history.event_type,
+              history.failure_reason
+       FROM consumed
+       JOIN metadata_degradation_events AS history
+         ON history.id = consumed.event_id
+       ORDER BY history.id`,
+      [batchSize],
     );
-    let lastEventId = ledger.last_event_id;
     for (const event of eventResult.rows) {
-      lastEventId = event.id;
       if (event.event_type === "primary_failure") {
         if (
           !PRIMARY_REASONS.includes(
@@ -402,31 +433,43 @@ export async function runMetadataNotificationCycle(
     const shouldDeliver = pendingTypes.length > 0 &&
       (firstOccurrence || cooldownElapsed);
 
-    let delivered = false;
+    let deliveryResult: DeliveryResult | null = null;
     if (shouldDeliver) {
-      delivered = await deliver(
+      // Deliberately keep the ledger lock and outbox deletion transaction open
+      // across bounded provider I/O. Committing before the send could lose an
+      // alert on a crash; rollback here restores both queue rows and counts.
+      deliveryResult = await deliver(
         adapters,
         buildMetadataNotification(counts, options.label, now),
       );
     }
 
+    const delivered = deliveryResult?.accepted ?? false;
     const persistedCounts = delivered ? {} : counts;
     if (delivered) {
       for (const type of pendingTypes) notifiedTypes.add(type);
     }
     await client.queryArray(
       `UPDATE metadata_degradation_notification_state
-       SET last_event_id = $1::bigint,
-           pending_counts = $2::jsonb,
-           notified_event_types = $3::text[],
-           last_notified_at = COALESCE($4::timestamptz, last_notified_at),
+       SET pending_counts = $1::jsonb,
+           notified_event_types = $2::text[],
+           last_notified_at = COALESCE($3::timestamptz, last_notified_at),
+           last_delivery_attempt_at = COALESCE(
+             $4::timestamptz,
+             last_delivery_attempt_at
+           ),
+           last_failed_channels = CASE
+             WHEN $4::timestamptz IS NULL THEN last_failed_channels
+             ELSE $5::text[]
+           END,
            updated_at = now()
        WHERE singleton`,
       [
-        lastEventId,
         JSON.stringify(persistedCounts),
         [...notifiedTypes].sort(),
         delivered ? now.toISOString() : null,
+        deliveryResult ? now.toISOString() : null,
+        deliveryResult ? [...deliveryResult.failedChannels].sort() : [],
       ],
     );
     await client.queryArray("COMMIT");

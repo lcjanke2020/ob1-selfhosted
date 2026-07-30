@@ -170,6 +170,9 @@ jobs:
             "SELECT 1 FROM memory_scope.workspace WHERE id='sensitive' AND personal_only" | grep -q 1
           docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT to_regclass('public.metadata_degradation_outbox') IS NOT NULL" | grep -q t
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
             "SELECT 1 FROM metadata_degradation_notification_state WHERE singleton" | grep -q 1
 
       - name: Smoke test — protected roles reject grant drift
@@ -278,7 +281,8 @@ jobs:
         run: |
           # Reapply the upgrade migration to exercise its live-database path,
           # then use the real app role and audience settings. The fixture rolls
-          # back, including the notification ledger update.
+          # back, including outbox consumption and the notification-ledger
+          # update.
           docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
             -v ON_ERROR_STOP=1 < db/07-metadata-degradation.sql >/dev/null
@@ -289,7 +293,7 @@ jobs:
             --allow-env \
             --allow-net=127.0.0.1:55439 \
             server/metadata_notifications_db_smoke.ts
-          echo "metadata audit append/read, immutable-history, shape, and ledger checks passed"
+          echo "metadata audit/outbox, immutable-history, shape, and ledger checks passed"
 
       - name: Smoke test — spaces isolate every audience and pooled reuse
         run: |

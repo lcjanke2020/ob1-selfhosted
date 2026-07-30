@@ -178,9 +178,9 @@ if (ENABLE_REST_API) {
   );
 }
 
-// Announce the metadata-extraction mode at boot so the two silent degradations
-// (every capture stamping the stub; every capture going to the fallback, which
-// may be off-box) are obvious from the startup log, not just per-capture lines.
+// Announce the metadata-extraction mode at boot so an intentionally disabled
+// extractor and a fallback-only deployment (which may be off-box) are obvious
+// from the startup log, not just per-capture lines.
 // No secrets. "May be off-box" because whether the fallback endpoint is remote
 // vs on-LAN depends on the operator's FALLBACK_CHAT_API_BASE.
 if (!ENABLE_METADATA_EXTRACTION) {

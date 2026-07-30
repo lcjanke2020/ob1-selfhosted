@@ -18,10 +18,11 @@ import {
 import { asPool, FakePool, type QueryHandler } from "./api_test_support.ts";
 
 type Ledger = {
-  last_event_id: string;
   pending_counts: Record<string, number>;
   notified_event_types: string[];
   last_notified_at_ms: string | null;
+  last_delivery_attempt_at_ms: string | null;
+  last_failed_channels: string[];
 };
 
 type Event = {
@@ -32,10 +33,11 @@ type Event = {
 
 class NotificationDb {
   ledger: Ledger = {
-    last_event_id: "0",
     pending_counts: {},
     notified_event_types: [],
     last_notified_at_ms: null,
+    last_delivery_attempt_at_ms: null,
+    last_failed_channels: [],
   };
   events: Event[] = [];
   locked = false;
@@ -44,35 +46,37 @@ class NotificationDb {
   updates = 0;
 
   readonly handler: QueryHandler = (sql, params) => {
-    if (sql.includes("FOR UPDATE SKIP LOCKED")) {
+    if (
+      sql.includes("metadata_degradation_notification_state") &&
+      sql.includes("FOR UPDATE SKIP LOCKED")
+    ) {
       return { rows: this.locked || this.missing ? [] : [{ ...this.ledger }] };
     }
     if (sql.includes("SELECT EXISTS") && sql.includes("notification_state")) {
       return { rows: [[!this.missing]] };
     }
     if (
-      sql.includes("FROM metadata_degradation_events") &&
-      sql.includes("ORDER BY id")
+      sql.includes("DELETE FROM metadata_degradation_outbox") &&
+      sql.includes("JOIN metadata_degradation_events")
     ) {
       this.eventSelectSql = sql;
-      const after = BigInt(params[0] as string);
-      const limit = Number(params[1]);
-      return {
-        rows: this.events.filter((event) => BigInt(event.id) > after).slice(
-          0,
-          limit,
-        ),
-      };
+      const limit = Number(params[0]);
+      return { rows: this.events.splice(0, limit) };
     }
     if (sql.includes("UPDATE metadata_degradation_notification_state")) {
       this.updates++;
-      this.ledger.last_event_id = String(params[0]);
-      this.ledger.pending_counts = JSON.parse(params[1] as string);
-      this.ledger.notified_event_types = [...params[2] as string[]];
-      if (params[3] !== null) {
+      this.ledger.pending_counts = JSON.parse(params[0] as string);
+      this.ledger.notified_event_types = [...params[1] as string[]];
+      if (params[2] !== null) {
         this.ledger.last_notified_at_ms = String(
+          new Date(params[2] as string).getTime(),
+        );
+      }
+      if (params[3] !== null) {
+        this.ledger.last_delivery_attempt_at_ms = String(
           new Date(params[3] as string).getTime(),
         );
+        this.ledger.last_failed_channels = [...params[4] as string[]];
       }
       return { rows: [] };
     }
@@ -85,9 +89,12 @@ class NotificationDb {
 }
 
 class RecordingAdapter implements MetadataNotificationAdapter {
-  readonly name = "pushover" as const;
   notifications: MetadataNotification[] = [];
   fail = false;
+
+  constructor(
+    readonly name: MetadataNotificationAdapter["name"] = "pushover",
+  ) {}
 
   send(notification: MetadataNotification): Promise<void> {
     this.notifications.push(notification);
@@ -125,7 +132,7 @@ Deno.test("metadata notification ledger: first occurrence, cooldown, retry, and 
         options(T0),
       );
       assertEquals(result, { outcome: "delivered", processed: 2 });
-      assertEquals(db.ledger.last_event_id, "2");
+      assertEquals(db.events, []);
       assertEquals(db.ledger.pending_counts, {});
       assertEquals(db.ledger.notified_event_types, [
         "fallback_used",
@@ -212,8 +219,9 @@ Deno.test("metadata notification ledger: first occurrence, cooldown, retry, and 
       options(new Date(T0.getTime() + 45 * 60 * 1000)),
     );
     assertEquals(failed, { outcome: "delivery_failed", processed: 1 });
-    assertEquals(db.ledger.last_event_id, "5");
+    assertEquals(db.events, []);
     assertEquals(db.ledger.pending_counts, { fallback_used: 1 });
+    assertEquals(db.ledger.last_failed_channels, ["pushover"]);
 
     adapter.fail = false;
     const retried = await runMetadataNotificationCycle(
@@ -223,6 +231,7 @@ Deno.test("metadata notification ledger: first occurrence, cooldown, retry, and 
     );
     assertEquals(retried, { outcome: "delivered", processed: 0 });
     assertEquals(db.ledger.pending_counts, {});
+    assertEquals(db.ledger.last_failed_channels, []);
     assertStringIncludes(
       adapter.notifications.at(-1)!.message,
       "Fallback classifications: 1",
@@ -244,8 +253,30 @@ Deno.test("metadata notification ledger: first occurrence, cooldown, retry, and 
         options(new Date(T0.getTime() + 55 * 60 * 1000)),
       );
       assertEquals(result, { outcome: "idle", processed: 1 });
-      assertEquals(db.ledger.last_event_id, "6");
+      assertEquals(db.events, []);
       assertEquals(adapter.notifications.length, before);
+    },
+  );
+
+  await t.step(
+    "partial fan-out success clears counts but records the failed channel",
+    async () => {
+      db.events.push({
+        id: "7",
+        event_type: "stub_used",
+        failure_reason: null,
+      });
+      const brokenNtfy = new RecordingAdapter("ntfy");
+      brokenNtfy.fail = true;
+      const result = await runMetadataNotificationCycle(
+        db.pool(),
+        [adapter, brokenNtfy],
+        options(new Date(T0.getTime() + 90 * 60 * 1000)),
+      );
+      assertEquals(result, { outcome: "delivered", processed: 1 });
+      assertEquals(db.ledger.pending_counts, {});
+      assertEquals(db.ledger.last_failed_channels, ["ntfy"]);
+      assertEquals(brokenNtfy.notifications.length, 1);
     },
   );
 
@@ -367,7 +398,7 @@ Deno.test("ntfy adapter encodes its topic, applies auth, and redacts errors", as
   assertEquals(requestUrl, "https://notify.example/secret%2Ftopic");
   const headers = requestInit.headers as Record<string, string>;
   assertEquals(headers.authorization, "Bearer bearer-secret");
-  assertEquals(headers.priority, "high");
+  assertEquals(headers.priority, "default");
   assertStringIncludes(String(requestInit.body), "Private memory 🧠");
 
   const leakingFetch =

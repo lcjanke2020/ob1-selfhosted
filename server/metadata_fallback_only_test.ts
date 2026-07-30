@@ -78,7 +78,6 @@ Deno.test("extractMetadata: fallback-only (primary blank) classifies via the fal
       schema_version: 1,
       endpoint: "fallback",
       model: "hosted-model",
-      base_url: FALLBACK_BASE,
     });
     assertEquals(r.degradation_events, [{
       event_type: "fallback_used",
