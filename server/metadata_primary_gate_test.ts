@@ -12,6 +12,7 @@ const ENV_KEYS = [
   "DB_PASSWORD",
   "MCP_ACCESS_KEY",
   "MCP_ACCESS_KEY_PRINCIPAL",
+  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
   "OBS_AUTH_EVENTS_ENABLED",
   "CHAT_API_BASE",
   "CHAT_API_KEY",
@@ -32,6 +33,7 @@ Deno.test("extractMetadata: primary is skipped when ENABLE_PRIMARY_EXTRACTION is
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
   Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
+  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
   // Both endpoints configured, but the primary gate is OFF (deleted, not "true").
   Deno.env.set("CHAT_API_BASE", PRIMARY_BASE);

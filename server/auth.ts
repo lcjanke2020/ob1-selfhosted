@@ -1,5 +1,10 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { createRemoteJWKSet, type JWTPayload, jwtVerify } from "jose";
+import {
+  type AuthContext,
+  type AuthDoor,
+  isOAuthSubject,
+} from "./auth_context.ts";
 
 // Hono request-context variables set by `requireAuth` after a
 // successful authentication. Downstream handlers read these to attribute
@@ -9,11 +14,12 @@ import { createRemoteJWKSet, type JWTPayload, jwtVerify } from "jose";
 // because the @modelcontextprotocol/sdk tool callbacks are not
 // Hono-context-aware.
 //   - door:  "tailnet" when authenticated via x-brain-key;
-//            "funnel"  when authenticated via Auth0 Bearer (JWT).
+//            "funnel"  for an OAuth user Bearer;
+//            "service" for an OAuth client-credentials Bearer.
 //   - sub:   null on x-brain-key (shared tailnet credential, no per-user id);
-//            the verified JWT `sub` claim on Bearer (guaranteed present —
+//            the verified JWT `sub` claim on either Bearer label (guaranteed —
 //            see `verifyBearer` below, which puts "sub" in jose's requiredClaims).
-export type AppVariables = { door: "funnel" | "tailnet"; sub: string | null };
+export type AppVariables = AuthContext;
 
 import {
   AUTH0_AUDIENCE,
@@ -23,6 +29,7 @@ import {
   ENABLE_OAUTH,
   JWKS_FETCH_TIMEOUT_MS,
   MCP_ACCESS_KEY,
+  OAUTH_SERVICE_ACCOUNT_SUBJECTS,
 } from "./config.ts";
 import { type AuthFailureReason, logAuthFailure } from "./auth_audit.ts";
 import { parseInetCandidate } from "./inet.ts";
@@ -194,7 +201,9 @@ function checkBrainKey(provided: string | undefined): boolean {
   return safeEqual(provided, MCP_ACCESS_KEY);
 }
 
-async function verifyBearer(token: string): Promise<JWTPayload> {
+type VerifiedBearerPayload = JWTPayload & { sub: string };
+
+async function verifyBearer(token: string): Promise<VerifiedBearerPayload> {
   if (!jwks) throw new Error("OAuth not enabled");
   // `requiredClaims: ["exp"]` forces the token to carry an
   // expiration claim. jose's default behavior validates `exp` only when
@@ -217,7 +226,31 @@ async function verifyBearer(token: string): Promise<JWTPayload> {
     algorithms: ["RS256"],
     requiredClaims: ["exp", "sub"],
   });
-  return payload;
+  // `requiredClaims` checks presence, not the claim's runtime type or value.
+  // Validate before classification so an empty/non-string/unsafe identity can
+  // never cross into RLS ownership or durable provenance.
+  if (!isOAuthSubject(payload.sub)) {
+    throw new Error("OAuth token subject is invalid");
+  }
+  return payload as VerifiedBearerPayload;
+}
+
+// Classify only a successfully-verified payload. Auth0's default token profile
+// supplies the signed `gty` automatic path; its RFC 9068 profile and generic
+// providers may instead require the exact-subject mapping. Neither path changes
+// the verified subject or grants access — it only makes machine identity
+// explicit in provenance.
+export function oauthDoorFor(payload: VerifiedBearerPayload): Extract<
+  AuthDoor,
+  "funnel" | "service"
+> {
+  if (
+    payload.gty === "client-credentials" ||
+    OAUTH_SERVICE_ACCOUNT_SUBJECTS.has(payload.sub)
+  ) {
+    return "service";
+  }
+  return "funnel";
 }
 
 // JSON-RPC error code for unauthorized requests. Per JSON-RPC
@@ -439,7 +472,7 @@ async function unauthorized(
 }
 
 // Accepts the x-brain-key door (when enabled, MCP_ACCESS_KEY set) OR
-// Authorization: Bearer with a valid Auth0 RS256 JWT (OAuth door, when enabled).
+// Authorization: Bearer with a valid RS256 JWT (OAuth door, when enabled).
 // Which doors are live is per-deployment: compose-local enables x-brain-key only;
 // the funnel + Qubes deployments enable OAuth only. Caddy in front of a
 // publicly-reachable deployment does not strip credentials per branch — the
@@ -460,11 +493,10 @@ export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> =
     // through to the Bearer attempt below.
     const brainKey = c.req.header("x-brain-key");
     if (ENABLE_BRAIN_KEY && brainKey && checkBrainKey(brainKey)) {
-      // tag the tailnet door. The shared x-brain-key is not a
-      // per-user identity (every tailnet agent uses the same secret), so
-      // sub is null here. Downstream capture path stamps these into
-      // thoughts.metadata for the source-attribution "mobile-originated
-      // writes" dashboard tile (which discriminates funnel vs tailnet).
+      // Tag the shared-key credential as `tailnet`. The shared x-brain-key is
+      // not a per-user identity (every key holder uses the same secret), so sub
+      // is null here. Downstream capture paths stamp this server-owned context
+      // into durable provenance.
       c.set("door", "tailnet");
       c.set("sub", null);
       await next();
@@ -478,16 +510,16 @@ export const requireAuth: MiddlewareHandler<{ Variables: AppVariables }> =
       if (m) {
         bearerTried = true;
         try {
-          // capture the verified payload's `sub` claim and tag
-          // the funnel door. `verifyBearer` now requires `sub` via jose's
-          // requiredClaims (see above), so payload.sub is guaranteed
-          // non-undefined here; the non-null assertion is a type narrow,
-          // not a runtime gamble. the single-vs-dual-door decision (deliberately open)
+          // Capture the verified payload's `sub` claim, then classify the
+          // OAuth credential as a user (`funnel`) or machine (`service`).
+          // `verifyBearer` requires and runtime-validates `sub` (see above),
+          // so only a bounded non-empty string reaches either context field.
+          // The single-vs-dual-door decision (deliberately open)
           // remains separate scope — the source-marker work doesn't
           // depend on either outcome of that deliberation.
           const payload = await verifyBearer(m[1].trim());
-          c.set("door", "funnel");
-          c.set("sub", payload.sub!);
+          c.set("door", oauthDoorFor(payload));
+          c.set("sub", payload.sub);
           await next();
           return;
         } catch (_err) {

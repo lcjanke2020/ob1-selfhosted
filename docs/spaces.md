@@ -118,8 +118,11 @@ its three scope fields stay inside `toml_text`.
 
 ## What counts as a personal principal
 
-OAuth requests use the verified JWT `sub`. The shared `x-brain-key` is one
-credential used by every holder, so it is not an identity by itself. A local
+OAuth requests use the verified JWT `sub`; this applies equally to user tokens
+and [client-credentials service accounts](service-account-oauth-client.md). A
+dedicated M2M application therefore owns its personal rows under its stable
+client subject. The shared `x-brain-key` is one credential used by every holder,
+so it is not an identity by itself. A local
 shared-key deployment can opt into personal/sensitive memory by binding that
 door to one stable, server-controlled subject:
 

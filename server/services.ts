@@ -9,6 +9,7 @@
 // rest of the suite.
 
 import type { Pool } from "postgres";
+import type { AuthContext } from "./auth_context.ts";
 import type { ThoughtMatch, ThoughtRecord } from "./db.ts";
 import { embed as defaultEmbed } from "./embeddings.ts";
 export { NotFoundError, UpstreamError, ValidationError } from "./errors.ts";
@@ -59,9 +60,7 @@ import {
   parseSessionToml,
 } from "./session_toml.ts";
 
-// Same shape as auth.ts AppVariables / mcp-server.ts RequestAuth; declared
-// standalone so this module depends on neither transport layer.
-export type AuthContext = { door: "funnel" | "tailnet"; sub: string | null };
+export type { AuthContext } from "./auth_context.ts";
 
 function validateThoughtProvenance(
   provenance: ThoughtProvenanceClaims | undefined,
@@ -397,12 +396,11 @@ export async function captureSessionFromToml(
     contentHash,
     embedding,
     provenance: {
-      // Store the transport door faithfully ('funnel' | 'tailnet'),
-      // mirroring how capture_thought stamps thoughts.metadata.door. The
-      // funnel door carries every Anthropic surface (web/desktop/mobile),
-      // indistinguishable server-side (requests arrive from Anthropic
-      // egress, not the device), so 'funnel' is the honest label — not
-      // 'mobile'.
+      // Store the server-verified credential label faithfully, mirroring how
+      // capture_thought stamps thoughts.metadata.door. OAuth user surfaces
+      // remain indistinguishable from each other and use `funnel`; OAuth
+      // client-credentials identities use `service`; the shared key uses
+      // `tailnet`. These are auth/provenance labels, not Caddy route evidence.
       source: input.auth.door,
       sourceNode: input.auth.sub,
     },

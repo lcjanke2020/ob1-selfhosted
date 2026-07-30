@@ -14,6 +14,7 @@ const ENV_KEYS = [
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
+  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
   "OBS_AUTH_EVENTS_ENABLED",
   "CHAT_API_BASE",
   "CHAT_API_KEY",
@@ -38,6 +39,7 @@ Deno.test("extractMetadata: off policy never requests the configured fallback", 
   Deno.env.delete("AUTH0_ISSUER");
   Deno.env.delete("AUTH0_JWKS_URI");
   Deno.env.delete("AUTH0_AUDIENCE");
+  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
   Deno.env.set("CHAT_API_BASE", PRIMARY_BASE);
   Deno.env.set("CHAT_MODEL", "local-model");

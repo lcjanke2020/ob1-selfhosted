@@ -19,6 +19,7 @@
 
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { type Context, Hono } from "hono";
+import { type AuthContext, authContextFromValues } from "./auth_context.ts";
 
 import {
   ENABLE_BRAIN_KEY,
@@ -108,8 +109,9 @@ if (ENABLE_REST_API) {
   app.route("/api/v1", createApiRouter(pool));
 }
 
-// MCP transport. requireAuth accepts either x-brain-key (tailnet) or
-// Authorization: Bearer with an Auth0 RS256 JWT (OAuth/Funnel). A new
+// MCP transport. requireAuth accepts either x-brain-key (shared-key `tailnet`)
+// or Authorization: Bearer with a valid RS256 JWT (OAuth user `funnel` or
+// OAuth machine `service`). A new
 // McpServer is constructed per request — the SDK's connect() mutates an
 // instance-scoped transport reference and is not safe to share under
 // concurrent load.
@@ -121,14 +123,13 @@ if (ENABLE_REST_API) {
 // `c.set` calls in `requireAuth` would otherwise stuff `door: undefined`
 // into the JSONB and silently break the Phase 7 telemetry tile.
 function authContextOr500(c: Context<{ Variables: AppVariables }>):
-  | { door: "funnel" | "tailnet"; sub: string | null }
+  | AuthContext
   | Response {
-  const door = c.get("door");
-  const sub = c.get("sub") ?? null;
-  if (door !== "funnel" && door !== "tailnet") {
+  const auth = authContextFromValues(c.get("door"), c.get("sub"));
+  if (!auth) {
     return c.json({ error: "auth_context_missing" }, 500);
   }
-  return { door, sub };
+  return auth;
 }
 
 app.all("/mcp", requireAuth, async (c) => {

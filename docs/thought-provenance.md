@@ -74,7 +74,7 @@ The trust boundary is:
 | Persisted key                           | Set by               | Meaning                                                 |
 | --------------------------------------- | -------------------- | ------------------------------------------------------- |
 | `metadata.source`                       | Server               | Validated transport: `mcp` or `rest`                    |
-| `metadata.door`                         | Server               | Auth path: `tailnet` or `funnel`                        |
+| `metadata.door`                         | Server               | Credential label: `tailnet`, `funnel`, or `service`     |
 | `metadata.sub`                          | Server               | Verified OAuth `sub`, or `null` for the shared-key door |
 | `metadata.metadata_extraction`          | Server               | Classifier path and model                               |
 | `metadata.provenance.schema_version`    | Server               | Version of the nested caller-claims contract            |
@@ -87,6 +87,15 @@ the thought. Classifier base URLs remain in the owner-visible degradation audit
 rather than this client-visible metadata. The metadata extractor is prevented
 from populating any of these reserved keys, `metadata_extraction`, or
 `provenance`.
+
+`funnel` identifies a verified OAuth user token, `service` a verified OAuth
+client-credentials identity, and `tailnet` the shared-key credential. These
+historical names are provenance labels rather than proof of the Caddy socket;
+an OAuth service can arrive through the private tailnet route. A verified
+`gty=client-credentials` claim (emitted by Auth0's default token profile)
+selects `service` automatically; Auth0's RFC 9068 profile and other profiles
+without that signed claim use the exact operator mapping documented in
+[OAuth service accounts](service-account-oauth-client.md).
 
 Callers do not submit `schema_version`. Open Brain writes it. A future
 incompatible change to the nested key layout must increment the integer;

@@ -6,6 +6,10 @@ This directory is the **public Funnel + OAuth edge**. Auth here is **OAuth (RS25
 
 Prerequisite: Tailscale installed on the host, plus the [local install](../compose-local/README.md) working (start there — all five setup steps apply unchanged). Leave `MCP_ACCESS_KEY` **unset** here and set the `AUTH0_*` trio instead.
 
+Interactive clients and [headless service accounts](../../docs/service-account-oauth-client.md)
+use this same OAuth verifier. Scheduled agents normally connect over the private
+tailnet branch; the public Funnel branch remains restricted to Anthropic egress.
+
 > **Just want tailnet reach, no public internet?** You don't need this directory. Front the [local install](../compose-local/README.md) (x-brain-key auth) with `sudo tailscale serve --bg --https=443 http://127.0.0.1:8787` and connect tailnet devices at `https://homebox.tailnet-name.ts.net/mcp` with the `x-brain-key` header — only WireGuard-authenticated tailnet peers (gated by your ACLs) can reach it. The rest of this guide is the public Funnel + OAuth door.
 
 ## Funnel + OAuth setup
@@ -25,6 +29,11 @@ The `caddy` service itself lives in the base compose file, gated behind the `pat
 All three of `AUTH0_ISSUER`, `AUTH0_JWKS_URI`, `AUTH0_AUDIENCE` must be set — partial config throws at boot. The dashboard steps live in `../compose-local/.env.example` next to the variables. The one irreversible decision:
 
 > `AUTH0_AUDIENCE` MUST equal your API Identifier byte-for-byte AND your public Funnel URL — `https://homebox.tailnet-name.ts.net/mcp`, no port. The Identifier is immutable once the API is created; getting it wrong means deleting and recreating the API.
+
+The variable names are retained for compatibility, but any issuer that produces
+the documented RS256 JWT profile can be used. Auth0 M2M, Okta API Services, the
+generic subject mapping, and a browserless verification command are covered in
+[OAuth service accounts](../../docs/service-account-oauth-client.md).
 
 ### Start the stack
 
@@ -82,6 +91,15 @@ If the connector fails after a successful consent screen, the most common cause 
 > **Connecting a local Codex CLI instead?** That's a different client shape — a public PKCE client with no secret, authorized per Codex account, per machine. See [`docs/codex-oauth-client.md`](../../docs/codex-oauth-client.md).
 >
 > **Connecting a local Kimi Code CLI?** Same public-PKCE shape, but registered exclusively through a time-boxed Dynamic Client Registration window (Kimi Code has no pre-registered-client option). See [`docs/kimi-code-oauth-client.md`](../../docs/kimi-code-oauth-client.md).
+
+### Connect an unattended agent
+
+Create a dedicated provider application using the OAuth `client_credentials`
+grant, keep its secret in the agent's secret store, and connect over the
+tailnet. Follow the complete [service-account runbook](../../docs/service-account-oauth-client.md),
+including the tracked headless smoke test. Successful machine writes land with
+`metadata.door = 'service'` and `metadata.sub = <verified client subject>`;
+interactive user writes remain `door = 'funnel'`.
 
 ## Observability (Pattern B)
 
@@ -226,4 +244,9 @@ as the database owner during the next maintenance window.
 
 ## Key rotation
 
-This OAuth-only deployment has no `MCP_ACCESS_KEY` to rotate. Rotate the OAuth client secret in your provider's dashboard and re-paste it into claude.ai; nothing in this stack stores it.
+This OAuth-only deployment has no `MCP_ACCESS_KEY` to rotate. Rotate interactive
+client secrets in the provider and re-paste them into the hosted connector.
+Rotate each M2M secret in the provider and the corresponding agent secret store,
+verify the new credential, then revoke the old one; nothing in this stack stores
+either secret. Already-issued JWTs remain valid until expiration because the
+server performs local verification rather than introspection.

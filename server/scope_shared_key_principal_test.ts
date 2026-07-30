@@ -11,6 +11,7 @@ Deno.env.set("MCP_ACCESS_KEY_PRINCIPAL", "local-owner");
 Deno.env.delete("AUTH0_ISSUER");
 Deno.env.delete("AUTH0_JWKS_URI");
 Deno.env.delete("AUTH0_AUDIENCE");
+Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
 Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 
 Deno.test("configured shared-key principal owns sensitive personal scope", async () => {

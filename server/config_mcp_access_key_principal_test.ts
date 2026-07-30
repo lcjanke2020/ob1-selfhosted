@@ -11,6 +11,7 @@ const ENV_KEYS = [
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
+  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
   "METADATA_FALLBACK_POLICY",
 ];
 
@@ -28,6 +29,7 @@ Deno.test("config.ts: shared-key principal requires the shared-key door", async 
     "https://example.auth0.com/.well-known/jwks.json",
   );
   Deno.env.set("AUTH0_AUDIENCE", "https://brain.example.test/mcp");
+  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
 
   try {
     let message = "";

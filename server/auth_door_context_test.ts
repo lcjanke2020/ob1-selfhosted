@@ -7,10 +7,12 @@
 //
 // Coverage:
 //   1. Successful x-brain-key  → door = "tailnet", sub = null.
-//   2. Successful Bearer JWT   → door = "funnel",  sub = <verified jwt.sub>.
-//   3. Bearer without `sub`    → HTTP 401 (envelope body), context vars never set
-//      (the `requiredClaims: ["sub"]` change on `verifyBearer` is what
-//      makes Auth0 misconfig / forged-sub-less tokens fail closed).
+//   2. Successful user Bearer  → door = "funnel",  sub = <verified jwt.sub>.
+//   3. Auth0 M2M Bearer        → door = "service", sub = <verified client sub>.
+//   4. Allowlisted M2M subject → door = "service" without provider grant claim.
+//   5. Forged M2M-shaped JWT   → HTTP 401 before machine classification.
+//   6. No/other `gty` signal    → door = "funnel" unless the subject is mapped.
+//   7. Missing or malformed sub → HTTP 401 before context vars are set.
 //
 // Strategy mirrors auth_oauth_test.ts: mock globalThis.fetch to serve a
 // local JWKS, dynamic-import auth.ts after env is set, mint real RS256
@@ -23,9 +25,10 @@
 // the metadata-literal extension by inspection, is the scoped-right
 // alternative to inventing a module-mocking harness).
 
-import { assertEquals } from "jsr:@std/assert@1";
+import { assertEquals } from "@std/assert";
 import { Hono, type MiddlewareHandler } from "hono";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import type { AuthContext } from "./auth_context.ts";
 
 const BRAIN_KEY = "b".repeat(64);
 const ISSUER = "https://test.invalid/";
@@ -39,6 +42,7 @@ const ENV_KEYS = [
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
+  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
   "OBS_AUTH_EVENTS_ENABLED",
   "METADATA_FALLBACK_POLICY",
   "JWKS_FETCH_TIMEOUT_MS",
@@ -49,13 +53,9 @@ const ENV_KEYS = [
 // assert on what was written. The `sub` shape matters: null is distinct
 // from undefined and from "" — keep all three observable.
 function makeApp(
-  mw: MiddlewareHandler<
-    { Variables: { door: "funnel" | "tailnet"; sub: string | null } }
-  >,
+  mw: MiddlewareHandler<{ Variables: AuthContext }>,
 ) {
-  const app = new Hono<
-    { Variables: { door: "funnel" | "tailnet"; sub: string | null } }
-  >();
+  const app = new Hono<{ Variables: AuthContext }>();
   app.use("*", mw);
   app.get("/", (c) =>
     c.json({
@@ -105,6 +105,7 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
   Deno.env.set("AUTH0_ISSUER", ISSUER);
   Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
   Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
+  Deno.env.set("OAUTH_SERVICE_ACCOUNT_SUBJECTS", "generic-service-subject");
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
   Deno.env.set("METADATA_FALLBACK_POLICY", "off");
   Deno.env.set("JWKS_FETCH_TIMEOUT_MS", "2000");
@@ -154,6 +155,142 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
     );
 
     await t.step(
+      "Auth0 client-credentials Bearer → door = 'service' with verified client sub",
+      async () => {
+        const expectedSub = "auth0-m2m-client@clients";
+        const token = await new SignJWT({
+          sub: expectedSub,
+          gty: "client-credentials",
+        })
+          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
+          .setIssuer(ISSUER)
+          .setAudience(AUDIENCE)
+          .setIssuedAt()
+          .setExpirationTime("1h")
+          .sign(privateKey as CryptoKey);
+        const res = await app.request("/", {
+          headers: { "authorization": `Bearer ${token}` },
+        });
+        assertEquals(res.status, 200);
+        const body = await res.json();
+        assertEquals(body.door, "service");
+        assertEquals(body.sub, expectedSub);
+      },
+    );
+
+    await t.step(
+      "configured generic service subject → door = 'service' without gty claim",
+      async () => {
+        const expectedSub = "generic-service-subject";
+        const token = await new SignJWT({ sub: expectedSub })
+          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
+          .setIssuer(ISSUER)
+          .setAudience(AUDIENCE)
+          .setIssuedAt()
+          .setExpirationTime("1h")
+          .sign(privateKey as CryptoKey);
+        const res = await app.request("/", {
+          headers: { "authorization": `Bearer ${token}` },
+        });
+        assertEquals(res.status, 200);
+        const body = await res.json();
+        assertEquals(body.door, "service");
+        assertEquals(body.sub, expectedSub);
+      },
+    );
+
+    await t.step(
+      "generic service-subject mapping is exact and case-sensitive",
+      async () => {
+        const token = await new SignJWT({ sub: "Generic-Service-Subject" })
+          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
+          .setIssuer(ISSUER)
+          .setAudience(AUDIENCE)
+          .setIssuedAt()
+          .setExpirationTime("1h")
+          .sign(privateKey as CryptoKey);
+        const res = await app.request("/", {
+          headers: { "authorization": `Bearer ${token}` },
+        });
+        assertEquals(res.status, 200);
+        assertEquals((await res.json()).door, "funnel");
+      },
+    );
+
+    await t.step(
+      "Auth0 RFC 9068 M2M shape without gty stays funnel until mapped",
+      async () => {
+        const expectedSub = "rfc9068-machine@clients";
+        const token = await new SignJWT({
+          sub: expectedSub,
+          client_id: "rfc9068-machine",
+          jti: "rfc9068-token-id",
+        })
+          .setProtectedHeader({
+            alg: "RS256",
+            kid: "test-key-1",
+            typ: "at+jwt",
+          })
+          .setIssuer(ISSUER)
+          .setAudience(AUDIENCE)
+          .setIssuedAt()
+          .setExpirationTime("1h")
+          .sign(privateKey as CryptoKey);
+        const res = await app.request("/", {
+          headers: { "authorization": `Bearer ${token}` },
+        });
+        assertEquals(res.status, 200);
+        const body = await res.json();
+        assertEquals(body.door, "funnel");
+        assertEquals(body.sub, expectedSub);
+      },
+    );
+
+    await t.step(
+      "non-client-credentials gty does not select the service door",
+      async () => {
+        const token = await new SignJWT({
+          sub: "password-flow-user",
+          gty: "password",
+        })
+          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
+          .setIssuer(ISSUER)
+          .setAudience(AUDIENCE)
+          .setIssuedAt()
+          .setExpirationTime("1h")
+          .sign(privateKey as CryptoKey);
+        const res = await app.request("/", {
+          headers: { "authorization": `Bearer ${token}` },
+        });
+        assertEquals(res.status, 200);
+        assertEquals((await res.json()).door, "funnel");
+      },
+    );
+
+    await t.step(
+      "unverified gty claim cannot select the service door",
+      async () => {
+        const { privateKey: attackerKey } = await generateKeyPair("RS256");
+        const token = await new SignJWT({
+          sub: "forged-machine",
+          gty: "client-credentials",
+        })
+          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
+          .setIssuer(ISSUER)
+          .setAudience(AUDIENCE)
+          .setIssuedAt()
+          .setExpirationTime("1h")
+          .sign(attackerKey as CryptoKey);
+        const res = await app.request("/", {
+          headers: { "authorization": `Bearer ${token}` },
+        });
+        assertEquals(res.status, 401);
+        const body = await res.json();
+        assertEquals(body.error?.code, -32001);
+      },
+    );
+
+    await t.step(
       "Bearer without `sub` claim → unauthorized (jose requiredClaims gate)",
       async () => {
         // Auth0 always issues `sub`. A token missing it indicates either an
@@ -180,6 +317,39 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
         assertEquals(body.error?.code, -32001);
       },
     );
+
+    for (
+      const [name, invalidSub] of [
+        ["empty", ""],
+        ["non-string", 123],
+        ["control-character", "machine\nsubject"],
+        ["oversized", "s".repeat(1_025)],
+      ] as const
+    ) {
+      await t.step(
+        `Bearer with ${name} sub → unauthorized before classification`,
+        async () => {
+          const claims: Record<string, unknown> = {
+            sub: invalidSub,
+            gty: "client-credentials",
+          };
+          const token = await new SignJWT(claims)
+            .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
+            .setIssuer(ISSUER)
+            .setAudience(AUDIENCE)
+            .setIssuedAt()
+            .setExpirationTime("1h")
+            .sign(privateKey as CryptoKey);
+          const res = await app.request("/", {
+            headers: { "authorization": `Bearer ${token}` },
+          });
+          assertEquals(res.status, 401);
+          const body = await res.json();
+          assertEquals(body.jsonrpc, "2.0");
+          assertEquals(body.error?.code, -32001);
+        },
+      );
+    }
 
     await t.step(
       "tailnet + invalid Bearer dual-header → door = 'tailnet' (fast path wins)",

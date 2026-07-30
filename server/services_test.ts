@@ -23,6 +23,7 @@ const ENV_KEYS = [
   "AUTH0_ISSUER",
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
+  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
   "METADATA_FALLBACK_POLICY",
 ];
 
@@ -61,6 +62,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
   Deno.env.delete("AUTH0_ISSUER");
   Deno.env.delete("AUTH0_JWKS_URI");
   Deno.env.delete("AUTH0_AUDIENCE");
+  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
   Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
@@ -172,6 +174,42 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
           schema_version: 1,
           endpoint: "primary",
           model: "test-local-model",
+        });
+      },
+    );
+
+    await t.step(
+      "thought capture: service auth persists machine label and verified subject",
+      async () => {
+        const pool = new FakePool((sql, params) =>
+          sql.includes("INSERT INTO thoughts")
+            ? {
+              rows: [{
+                id: "uuid-service",
+                metadata: JSON.parse(params[2] as string),
+              }],
+            }
+            : undefined
+        );
+        const out = await captureThoughtWithMetadata(
+          asPool(pool),
+          {
+            content: "automated capture",
+            provenance: { agent: "nightly-indexer" },
+            auth: {
+              door: "service",
+              sub: "nightly-indexer-client@clients",
+            },
+            via: "mcp",
+          },
+          makeDeps(),
+        );
+        assertEquals(out.metadata.source, "mcp");
+        assertEquals(out.metadata.door, "service");
+        assertEquals(out.metadata.sub, "nightly-indexer-client@clients");
+        assertEquals(out.metadata.provenance, {
+          schema_version: 1,
+          caller_asserted: { agent: "nightly-indexer" },
         });
       },
     );
@@ -851,6 +889,33 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         assertEquals(insertParams[25], null);
         // Fresh capture always embeds ($29 is the vector literal).
         assertEquals(insertParams[28], `[${FAKE_VECTOR.join(",")}]`);
+      },
+    );
+
+    await t.step(
+      "session capture: service auth stamps source and verified client subject",
+      async () => {
+        let insertParams: unknown[] = [];
+        const pool = new FakePool((sql, params) => {
+          if (sql.includes("INSERT INTO sessions.session")) {
+            insertParams = params;
+            return { rows: [persistedSession("active")] };
+          }
+          return undefined;
+        });
+        await captureSessionFromToml(
+          asPool(pool),
+          {
+            tomlText: 'title = "scheduled session"\nstatus = "active"',
+            auth: {
+              door: "service",
+              sub: "scheduler-client@clients",
+            },
+          },
+          makeDeps(),
+        );
+        assertEquals(insertParams[24], "service");
+        assertEquals(insertParams[25], "scheduler-client@clients");
       },
     );
 

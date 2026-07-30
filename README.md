@@ -24,6 +24,33 @@ This repo is one codebase with **three install paths**, from "docker on a laptop
 >
 > The Funnel overlay also needs **Docker Compose v2.20+** (the `!reset` YAML tag); the Qubes path additionally assumes a working **Qubes OS** machine with Docker-capable templates.
 
+## Supported authentication methods
+
+There are two separate authentication boundaries:
+
+- **Requests to Open Brain:** the local install supports the shared
+  `x-brain-key`; OAuth deployments accept an `Authorization: Bearer` access
+  token. OAuth access tokens must be RS256 JWTs with the configured issuer and
+  audience plus a valid expiration and subject. Open Brain does not receive an
+  OAuth application's client secret.
+- **A service application requesting that token from the issuer:** Auth0 or the
+  configured issuer authenticates the application at its token endpoint. The
+  tracked browserless helper supports the following methods:
+
+| Token-endpoint application auth | Shipped helper support | Guidance |
+|---|---|---|
+| Client Secret (Post), `client_secret_post` | **Yes — default** | Choose **Client Secret (Post)** for the documented Auth0 M2M path. |
+| Client Secret (Basic), `client_secret_basic` | **Yes** | Set `OAUTH_CLIENT_AUTH_METHOD=client_secret_basic`; this is the documented Okta-style path. |
+| Private Key JWT, `private_key_jwt` | **No** | Auth0 can provide it, but this repository does not generate client assertions. A custom client is outside the verified runbook. |
+| Mutual TLS (mTLS) | **No** | The helper does not present a client certificate and Open Brain does not enforce sender-constrained tokens. |
+| No client authentication, `none` | **No** | Not supported for unattended service accounts. |
+
+Both supported secret methods produce the same bearer-token validation at Open
+Brain; the difference exists only between the service application and its
+issuer. See [OAuth service accounts](docs/service-account-oauth-client.md) for
+the provider setup, Auth0 token-profile distinction, secret-safe smoke test,
+and failure modes.
+
 ## Architecture at a glance
 
 The hardened shape (the **Qubes OS** install path). Each tinted box is a separate Qubes VM, connected over a firewall-scoped tailnet — a compromised public edge holds no memory store and no app credential. On the **Tailnet / Funnel** path the same components co-locate on one host over the local docker network — same OAuth door, minus the VM boundaries. **Local compose** is simpler still: just Postgres + the MCP server + Ollama behind the `x-brain-key` door, with no public edge at all.
@@ -72,7 +99,7 @@ In text: clients reach tailscaled's single Funnel listener on the ingress qube; 
 - **Bounded MCP recall** — lookup, list, and search results are capped at 120,000 serialized UTF-8 bytes, leaving framing headroom below hosted-connector limits. Results that fit retain their existing shape; an oversized result keeps complete records where possible and reports omitted IDs or fields plus a deterministic `fetch`, `session_lookup`, narrower-query, or tailnet REST recovery path. Truncated `session_search` and `session_list` responses use `{results, truncation}` instead of their fitting bare-array shape. MCP follow-ups must reuse the originating scope, and any REST recovery path includes its resolved workspace/project/visibility query. REST payloads are not subject to this MCP-only budget.
 - **REST gateway (`/api/v1`)** — the same thoughts + sessions operations as structured-JSON HTTP endpoints, behind the same auth doors, for CLI/cron/dashboard consumers that don't speak MCP. Opt-in per deployment (`ENABLE_REST_API`): on by default in the docker-compose installs, deliberately absent from the Qubes install, and never served over the public Funnel. See [REST API](#rest-api-apiv1) below.
 - **Local embeddings** — Ollama (`nomic-embed-text`, 768-dim by default), in-stack or on another box.
-- **Two auth modes, one per deployment** — a static `x-brain-key` header for the simple single-box local install (also usable over your tailnet if you front it with `tailscale serve`), or OAuth 2.1 resource-server validation (RS256 JWT via JWKS) as the single door on the publicly-reachable Funnel and Qubes deployments. The two doors are independently toggleable and the server refuses to boot with neither, so a public deployment carries no static key. Every write is stamped server-side with the door it came through.
+- **Two auth modes, one per deployment** — a static `x-brain-key` header for the simple single-box local install (also usable over your tailnet if you front it with `tailscale serve`), or OAuth resource-server validation (RS256 JWT via JWKS) as the single door on the publicly-reachable Funnel and Qubes deployments. OAuth supports interactive users and [headless `client_credentials` service accounts](docs/service-account-oauth-client.md); verified writes distinguish `funnel` user identities from `service` machine identities while retaining the JWT `sub`. The two modes are independently toggleable and the server refuses to boot with neither, so a public deployment carries no static key.
 - **Observability** — Caddy JSON access logs, an auth-failure audit table, a log-ingester sidecar, and a daily rollup with retention, so a public endpoint is *measured*, not guessed at.
 - **Defense in depth** — loopback-only binds, dropped capabilities, read-only rootfs, least-privilege DB roles with a drift assertion, an Anthropic-egress IP allowlist at the proxy edge (the primary public perimeter, CI-guarded so it can't be silently dropped), credential redaction in access logs, fail-fast misconfiguration guards. The full inventory is in [`docs/security-model.md`](docs/security-model.md).
 
@@ -158,7 +185,7 @@ sequenceDiagram
 │                              Stable CI boundaries for ANN search behavior
 ├── docs/                      Memory spaces, threat/security models, Funnel-as-MCP-
 │                              perimeter guide, "why not Cloudflare?" rationale,
-│                              Codex-over-OAuth client setup
+│                              OAuth user + service-account client setup
 └── .github/workflows/         CI (deno tests, --allow-env drift guard) + leak gate
 ```
 
@@ -288,7 +315,7 @@ And what the observability stack is for — one week of real data from a live de
 
 ## Trust model, in one paragraph
 
-On the **local single-box install**, anyone who can present your `x-brain-key` (loopback, your LAN, or your tailnet if you front it with `tailscale serve`) enters the same shared-key trust boundary — treat the key like a database password. Personal spaces are disabled on that door unless the operator deliberately binds it to one deployment-wide `MCP_ACCESS_KEY_PRINCIPAL`. On any **Funnel or Qubes** deployment there is no static key at all: a valid RS256 JWT supplies a verified `sub`, and PostgreSQL RLS partitions personal rows by that subject while workspace/project rows follow the requested registered scope. The Anthropic-egress IP allowlist still restricts the public door before auth. Thought `author` / `agent` / `repo` / `branch` provenance remains a caller assertion, not authenticated identity. The longer version is in [`docs/security-model.md`](docs/security-model.md), with the scope contract in [`docs/spaces.md`](docs/spaces.md).
+On the **local single-box install**, anyone who can present your `x-brain-key` (loopback, your LAN, or your tailnet if you front it with `tailscale serve`) enters the same shared-key trust boundary — treat the key like a database password. Personal spaces are disabled on that door unless the operator deliberately binds it to one deployment-wide `MCP_ACCESS_KEY_PRINCIPAL`. On any **Funnel or Qubes** deployment there is no static key at all: a valid RS256 JWT supplies a verified `sub`, whether it represents an interactive user or a [client-credentials service account](docs/service-account-oauth-client.md), and PostgreSQL RLS partitions personal rows by that subject while workspace/project rows follow the requested registered scope. Successful writes stamp machine JWTs as `service` and user JWTs as `funnel`; those are credential/provenance labels, not Caddy route evidence. The Anthropic-egress IP allowlist still restricts the public door before auth. Thought `author` / `agent` / `repo` / `branch` provenance remains a caller assertion, not authenticated identity. The longer version is in [`docs/security-model.md`](docs/security-model.md), with the scope contract in [`docs/spaces.md`](docs/spaces.md).
 
 ## Status & roadmap
 
