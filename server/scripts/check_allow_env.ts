@@ -893,13 +893,43 @@ function normalizeComposeEntrypoint(value: string, source: string): string {
   return normalized;
 }
 
+// Compose merge-tag keys the audit is allowed to erase: !reset / !override
+// only change how a later layer merges the tagged field, and none of these
+// reviewed fields can influence which launcher runs. A tag on any other
+// position — build, image, entrypoint, command, a whole service, a sequence
+// item — would make the audited merge diverge from Compose's, so it fails
+// closed until the key is reviewed here.
+const COMPOSE_MERGE_TAG_KEYS = new Set(["depends_on", "devices", "ports"]);
+
 function composeDocument(content: string, source: string): UnknownRecord {
   // Compose's !reset / !override tags are merge directives rather than data
   // types. Removing only the tag token preserves the value that std/yaml then
-  // validates; any other unknown YAML tag still fails closed.
+  // validates, but is sound only where the audit never reads the merged
+  // result: tags attached to a COMPOSE_MERGE_TAG_KEYS field are stripped,
+  // occurrences inside YAML comments are left for the parser to discard, and
+  // every other position fails closed. Any other unknown tag still fails
+  // closed at parse time.
   const standardYaml = content.replace(
     /(^|[\s:[{,])!(?:reset|override)(?=\s)/gm,
-    "$1",
+    (match, prefix: string, offset: number) => {
+      const lineStart = content.lastIndexOf("\n", offset) + 1;
+      const linePrefix = content.slice(lineStart, offset + prefix.length);
+      if (/(^|\s)#/.test(linePrefix)) return match;
+      const attachedKey = linePrefix.match(/([^\s:{,[\]]+):\s*$/)?.[1];
+      if (
+        attachedKey !== undefined && COMPOSE_MERGE_TAG_KEYS.has(attachedKey)
+      ) {
+        return prefix;
+      }
+      throw new Error(
+        `${source}: Compose merge tag on ${
+          attachedKey ?? "an unrecognised position"
+        } cannot be audited; !reset/!override are supported only on reviewed ` +
+          `launcher-irrelevant fields (${
+            [...COMPOSE_MERGE_TAG_KEYS].join(", ")
+          })`,
+      );
+    },
   );
   let document: unknown;
   try {
@@ -1013,6 +1043,15 @@ const KNOWN_NON_DENO_BASE_IMAGES = new Set([
   "scratch",
 ]);
 
+const KNOWN_NON_DENO_IMAGES = new Set([
+  // Reviewed image-only Compose services: these exact pins ship no Deno
+  // runtime, so their unresolvable launcher defaults cannot start a Deno
+  // process. Any other image-only service fails closed until its pin is
+  // reviewed and added here.
+  "ollama/ollama:0.24.0",
+  "pgvector/pgvector:pg16",
+]);
+
 function effectiveComposeArguments(
   rawService: UnknownRecord,
   source: string,
@@ -1041,13 +1080,32 @@ function effectiveComposeArguments(
     composeBaseDirectory,
   );
   if (dockerfile === undefined) {
-    if (explicitCommand === undefined) return undefined;
     if (rawService.image !== undefined) {
-      throw new Error(
-        `${source}: command overrides an image whose ENTRYPOINT cannot be resolved; ` +
-          "use a checked-in build or an explicit entrypoint",
-      );
+      if (explicitCommand !== undefined) {
+        throw new Error(
+          `${source}: command overrides an image whose ENTRYPOINT cannot be resolved; ` +
+            "use a checked-in build or an explicit entrypoint",
+        );
+      }
+      // Without a checked-in build, the launcher lives in the image and
+      // cannot be resolved from the repository. Only reviewed non-Deno pins
+      // may run on their unresolved defaults.
+      const image = rawService.image;
+      if (typeof image !== "string" || image.includes("$")) {
+        throw new Error(
+          `${source}: image must be a literal string to be audited`,
+        );
+      }
+      if (!KNOWN_NON_DENO_IMAGES.has(image)) {
+        throw new Error(
+          `${source}: image launcher defaults for ${image} cannot be resolved; ` +
+            "use a checked-in build, an explicit entrypoint, or review the " +
+            "pin into KNOWN_NON_DENO_IMAGES",
+        );
+      }
+      return undefined;
     }
+    if (explicitCommand === undefined) return undefined;
     // Parser fixtures without image metadata model an image with no ENTRYPOINT.
     return explicitCommand;
   }
@@ -1617,8 +1675,12 @@ function isNonValueIdentifier(node: t.Identifier, parent: t.Node): boolean {
     ].includes(parent.type)
   ) return true;
   const isFunctionBinding = (parent.type === "FunctionDeclaration" ||
-    parent.type === "FunctionExpression") &&
-    (parent.id === node || parent.params.includes(node));
+        parent.type === "FunctionExpression") &&
+      (parent.id === node || parent.params.includes(node)) ||
+    (parent.type === "ArrowFunctionExpression" ||
+        parent.type === "ObjectMethod" || parent.type === "ClassMethod" ||
+        parent.type === "ClassPrivateMethod") &&
+      parent.params.includes(node);
   const isClassName = (parent.type === "ClassDeclaration" ||
     parent.type === "ClassExpression") && parent.id === node;
   if (
@@ -1628,6 +1690,12 @@ function isNonValueIdentifier(node: t.Identifier, parent: t.Node): boolean {
   if (
     parent.type === "ObjectProperty" && parent.key === node &&
     !parent.computed && !parent.shorthand
+  ) return true;
+  if (
+    (parent.type === "ObjectMethod" || parent.type === "ClassMethod" ||
+      parent.type === "ClassProperty" ||
+      parent.type === "ClassAccessorProperty") &&
+    parent.key === node && !parent.computed
   ) return true;
   return [
     "ImportDefaultSpecifier",

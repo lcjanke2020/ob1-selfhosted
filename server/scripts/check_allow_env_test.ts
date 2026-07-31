@@ -169,6 +169,145 @@ Deno.test("Compose command overrides fail closed for unresolved images", () => {
   );
 });
 
+Deno.test("image-only Compose services fail closed on unresolved launchers", () => {
+  assertThrows(
+    () =>
+      parseComposeTargets(
+        `services:\n  bypass:\n    image: example.invalid/tool:1\n`,
+        "compose.yml",
+      ),
+    Error,
+    "image launcher defaults for example.invalid/tool:1 cannot be resolved",
+  );
+  assertThrows(
+    () =>
+      parseComposeStackTargets([
+        {
+          content: `services:\n  bypass:\n    image: example.invalid/tool:1\n`,
+          source: "base.yml",
+        },
+        {
+          content: `services:\n  bypass:\n    restart: always\n`,
+          source: "override.yml",
+        },
+      ]),
+    Error,
+    "image launcher defaults for example.invalid/tool:1 cannot be resolved",
+  );
+  assertThrows(
+    () =>
+      parseComposeTargets(
+        "services:\n  bypass:\n    image: ${REGISTRY}/tool:1\n",
+        "compose.yml",
+      ),
+    Error,
+    "image must be a literal string",
+  );
+});
+
+Deno.test("reviewed non-Deno images pass only on their unmodified defaults", () => {
+  for (const image of ["pgvector/pgvector:pg16", "ollama/ollama:0.24.0"]) {
+    assertEquals(
+      parseComposeTargets(
+        `services:\n  svc:\n    image: ${image}\n`,
+        "compose.yml",
+      ),
+      [],
+    );
+  }
+  assertThrows(
+    () =>
+      parseComposeTargets(
+        "services:\n  svc:\n    image: pgvector/pgvector:pg16\n" +
+          "    command: [postgres, -c, jit=off]\n",
+        "compose.yml",
+      ),
+    Error,
+    "command overrides an image whose ENTRYPOINT cannot be resolved",
+  );
+});
+
+Deno.test("Compose merge tags on launcher-relevant fields fail closed", () => {
+  assertThrows(
+    () =>
+      parseComposeStackTargets([
+        {
+          content: "services:\n  tool:\n    build:\n      context: ./actual\n" +
+            "      dockerfile: Dockerfile.safe\n",
+          source: "base.yml",
+        },
+        {
+          content:
+            "services:\n  tool:\n    build: !override\n      context: ./actual\n",
+          source: "override.yml",
+        },
+      ]),
+    Error,
+    "Compose merge tag on build cannot be audited",
+  );
+
+  const rejected: [string, string][] = [
+    [
+      "entrypoint: !override [deno, run, --allow-env=FOO, /app/tool.ts]",
+      "entrypoint",
+    ],
+    ["command: !reset null", "command"],
+    ["image: !override example.invalid/tool:1", "image"],
+  ];
+  for (const [line, field] of rejected) {
+    assertThrows(
+      () =>
+        parseComposeTargets(`services:\n  tool:\n    ${line}\n`, "compose.yml"),
+      Error,
+      `Compose merge tag on ${field} cannot be audited`,
+    );
+  }
+  assertThrows(
+    () =>
+      parseComposeTargets(
+        "services:\n  tool:\n    build:\n      dockerfile: !override Dockerfile.evil\n",
+        "compose.yml",
+      ),
+    Error,
+    "Compose merge tag on dockerfile cannot be audited",
+  );
+  assertThrows(
+    () =>
+      parseComposeTargets(
+        "services:\n  tool: !override\n    image: example.invalid/tool:1\n",
+        "compose.yml",
+      ),
+    Error,
+    "Compose merge tag on tool cannot be audited",
+  );
+  assertThrows(
+    () =>
+      parseComposeTargets(
+        "services:\n  tool:\n    entrypoint:\n      - !reset deno\n",
+        "compose.yml",
+      ),
+    Error,
+    "Compose merge tag on an unrecognised position cannot be audited",
+  );
+});
+
+Deno.test("Compose merge tags on reviewed non-launcher fields stay auditable", () => {
+  const target = onlyTarget(`
+services:
+  tool:
+    # comments may mention the tag, like pattern-b's ports: !reset
+    ports: !reset null
+    depends_on: !reset null
+    deploy:
+      resources:
+        reservations:
+          devices: !reset []
+    entrypoint: [deno, run, "--allow-env=FOO", /app/tool.ts]
+`);
+  assertEquals(target.entrypoint, "tool.ts");
+  assertEquals([...target.allowEnv], ["FOO"]);
+});
+
 Deno.test("Compose builds fail closed on unresolved launcher defaults", async () => {
   const directory = await Deno.makeTempDir();
   try {
@@ -758,6 +897,33 @@ export const value = nodeEnv.ALIASED_PROCESS_ENV;
         "node:process environment API cannot be audited",
       );
     }
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("binding positions named process or Deno stay auditable", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    const path = `${directory}/mod.ts`;
+    await Deno.writeTextFile(
+      path,
+      `export const helper = (value: string, process: number): number =>
+  value.length;
+export class Queue {
+  process = 0;
+  accessor Deno = "runtime";
+  drain(process: number): void {}
+}
+export const worker = {
+  process(input: string): string {
+    return input.trim();
+  },
+};
+export const key = Deno.env.get("PROCESS_PARAM_CONTROL");
+`,
+    );
+    assertEquals([...findEnvReads(path)], ["PROCESS_PARAM_CONTROL"]);
   } finally {
     await Deno.remove(directory, { recursive: true });
   }
