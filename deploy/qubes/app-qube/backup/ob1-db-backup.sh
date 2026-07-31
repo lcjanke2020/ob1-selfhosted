@@ -14,10 +14,16 @@
 
 set -euo pipefail
 
+# Capture the one-shot operator input before loading persistent configuration.
+# An accidental BACKUP_LABEL assignment in backup.env must not relabel the daily
+# timer or override a caller's explicit rollback label.
+BACKUP_LABEL_ARG="${BACKUP_LABEL:-}"
+
 # Source only the few vars this job needs. `set -a` so they reach pg_dump's env.
 ENV_FILE="${BACKUP_ENV_FILE:-/rw/config/openbrain-units/backup.env}"
 # shellcheck disable=SC1090
 set -a; . "$ENV_FILE"; set +a   # DB_HOST DB_PORT POSTGRES_DB READONLY_ROLE READONLY_PASSWORD PUBKEY OUT_DIR RETAIN_DAYS LABEL_RETAIN_DAYS
+BACKUP_LABEL="$BACKUP_LABEL_ARG"
 
 : "${DB_HOST:?set DB_HOST in $ENV_FILE (the db qube tailnet address)}"
 : "${DB_PORT:=5432}"
@@ -28,7 +34,6 @@ set -a; . "$ENV_FILE"; set +a   # DB_HOST DB_PORT POSTGRES_DB READONLY_ROLE READ
 : "${OUT_DIR:?set OUT_DIR in $ENV_FILE (off-box-replicated directory)}"
 RETAIN_DAYS="${RETAIN_DAYS:-14}"
 LABEL_RETAIN_DAYS="${LABEL_RETAIN_DAYS:-90}"
-BACKUP_LABEL="${BACKUP_LABEL:-}"
 
 if [[ ! "$RETAIN_DAYS" =~ ^[0-9]+$ ]]; then
 	echo "RETAIN_DAYS must be a non-negative integer (got: $RETAIN_DAYS)" >&2

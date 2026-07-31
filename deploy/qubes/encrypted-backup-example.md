@@ -32,12 +32,13 @@ set -euo pipefail
 # .env exports *every* variable to child processes (and a value with spaces / # / $
 # can misparse) — a dedicated backup env file, or a PGPASSFILE/.pgpass entry for the
 # password, keeps the surface small.
+BACKUP_LABEL_ARG=${BACKUP_LABEL:-}             # capture caller-only input first
 set -a; . /path/to/deploy/backup.env; set +a   # DB_HOST DB_PORT POSTGRES_DB READONLY_ROLE READONLY_PASSWORD
+BACKUP_LABEL=$BACKUP_LABEL_ARG                 # ignore any persistent setting
 OUT_DIR=/path/to/offbox-synced-dir
 PUBKEY=/path/to/backup-pubkey.asc            # PUBLIC key only
 RETAIN_DAYS=${RETAIN_DAYS:-14}
 LABEL_RETAIN_DAYS=${LABEL_RETAIN_DAYS:-90}
-BACKUP_LABEL=${BACKUP_LABEL:-}                # one-shot, e.g. pre-1.20.0
 
 [[ "$RETAIN_DAYS" =~ ^[0-9]+$ ]]
 [[ "$LABEL_RETAIN_DAYS" =~ ^[0-9]+$ ]]

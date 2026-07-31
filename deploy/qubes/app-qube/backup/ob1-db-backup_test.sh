@@ -68,6 +68,8 @@ PUBKEY=$TEST_ROOT/backup-pubkey.asc
 OUT_DIR=$OUT
 RETAIN_DAYS=14
 LABEL_RETAIN_DAYS=90
+# This persistent value must be ignored: labels are caller-only inputs.
+BACKUP_LABEL=stuck-in-env-file
 EOF
 
 export PATH="$BIN:$PATH"
@@ -136,6 +138,8 @@ assert_eq "before-migration" "$(payload_of "$first")" "preserved first payload"
 assert_eq "after-migration" "$(payload_of "$second")" "second daily payload"
 assert_contains "$TEST_ROOT/second.stdout" "$second" "reported collision-selected path"
 assert_eq "2" "$(wc -l < "$PG_DUMP_LOG" | tr -d ' ')" "two pg_dump invocations"
+assert_eq "0" "$(find "$OUT" -maxdepth 1 -name 'db-labelled-stuck-in-env-file-*' | wc -l | tr -d ' ')" \
+	"env-file label ignored for routine runs"
 
 # Invalid labels fail before pg_dump and cannot escape into another directory.
 set +e
@@ -187,6 +191,8 @@ run_labelled "pre-1.20.0" "labelled-rollback" > "$TEST_ROOT/labelled.stdout"
 labelled="$OUT/db-labelled-pre-1.20.0-20260731T003300Z.sql.gz.gpg"
 assert_exists "$labelled" "first-class labelled backup"
 assert_eq "labelled-rollback" "$(payload_of "$labelled")" "labelled payload"
+assert_eq "0" "$(find "$OUT" -maxdepth 1 -name 'db-labelled-stuck-in-env-file-*' | wc -l | tr -d ' ')" \
+	"caller label wins over env-file label"
 assert_missing "$OUT/db-20200101T000000Z.sql.gz.gpg" "expired routine backup"
 assert_missing "$OUT/db-20200101.sql.gz.gpg" "expired legacy routine backup"
 assert_missing "$OUT/db-20200101T000000Z-37.sql.gz.gpg" \
