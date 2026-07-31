@@ -502,7 +502,7 @@ function optionHasKnownBoundaries(
     standaloneOptions.has(name) ||
     /^--(?:allow|deny|ignore)-(?:env|ffi|import|net|read|run|sys|write)$/
       .test(name) ||
-    /^-[A-Za-z]{1,}$/.test(name);
+    /^-[A-Za-z]$/.test(name);
 }
 
 function invocationFromArguments(
@@ -570,14 +570,34 @@ function denoInvocation(
 
 function rejectUnauditableOption(argument: string, source: string): void {
   const name = optionName(argument);
+  const shortFlags = name.startsWith("-") && !name.startsWith("--")
+    ? name.slice(1)
+    : "";
   if (
     name === "--permission-set" ||
-    (argument.startsWith("-") && !argument.startsWith("--") &&
-      name.slice(1).includes("P"))
+    shortFlags.includes("P")
   ) {
     throw new Error(
       `${source}: -P/--permission-set can grant unaudited environment access; ` +
         "use explicit --allow-env=KEY,... permissions",
+    );
+  }
+  if (shortFlags.length > 1) {
+    if (shortFlags.includes("A")) {
+      throw new Error(
+        `${source}: -A/--allow-all grants every permission; ` +
+          "use bounded --allow-* flags",
+      );
+    }
+    if (shortFlags.includes("E")) {
+      throw new Error(
+        `${source}: combined or unbounded -E cannot be audited; ` +
+          "use --allow-env=KEY,...",
+      );
+    }
+    throw new Error(
+      `${source}: combined short options cannot be audited; ` +
+        "spell each option separately",
     );
   }
   if (UNAUDITABLE_CODE_OPTIONS.has(name)) {
@@ -684,6 +704,7 @@ function parseDenoRunTarget(
   args: string[],
   source: string,
 ): Pick<CheckTarget, "entrypoint" | "allowEnv"> | undefined {
+  rejectArgumentExpandingLaunchers(args, source);
   const invocation = denoInvocation(args, source);
   if (!invocation) return undefined;
   const parsed = parseRunArguments(invocation.runArguments, source);
@@ -762,7 +783,6 @@ export function parseComposeTargets(
       : literalArguments(rawService.command, label, "command");
     if (entrypointArgs.length === 0 && commandArgs.length === 0) continue;
     const launcherArgs = [...entrypointArgs, ...commandArgs];
-    rejectArgumentExpandingLaunchers(launcherArgs, label);
     const shellIndex = launcherArgs.findIndex(isShellExecutable);
     if (
       shellIndex >= 0 &&
@@ -947,9 +967,10 @@ export function walkImports(entrypoint: string, baseDir: string): Set<string> {
     }
     for (const specifier of importSpecifiers(content, full)) {
       if (!specifier.startsWith(".")) continue;
-      const withExtension = specifier.endsWith(".ts")
-        ? specifier
-        : `${specifier}.ts`;
+      const specifierPath = specifier.replace(/[?#].*$/, "");
+      const withExtension = /\.tsx?$/i.test(specifierPath)
+        ? specifierPath
+        : `${specifierPath}.ts`;
       const importerDir = dirname(file);
       const target = relative(
         baseDir,

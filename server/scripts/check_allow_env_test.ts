@@ -268,20 +268,37 @@ services:
 });
 
 Deno.test("Deno run option operands cannot become the audited module", () => {
-  const target = onlyTarget(`
+  for (const option of ["-c", "--config"]) {
+    const target = onlyTarget(`
 services:
   tool:
     entrypoint:
       - deno
       - run
-      - --config
+      - ${option}
       - /app/config.ts
       - --allow-env=FOO
       - /app/tool.ts
 `);
 
-  assertEquals(target.entrypoint, "tool.ts");
-  assertEquals([...target.allowEnv], ["FOO"]);
+    assertEquals(target.entrypoint, "tool.ts");
+    assertEquals([...target.allowEnv], ["FOO"]);
+  }
+});
+
+Deno.test("combined Deno short options fail closed before operands", () => {
+  for (const cluster of ["-qc", "-qL"]) {
+    assertThrows(
+      () =>
+        onlyTarget(`
+services:
+  unsafe-tool:
+    entrypoint: [deno, run, ${cluster}, /app/config.ts, -A, /app/tool.ts]
+`),
+      Error,
+      "combined short options cannot be audited",
+    );
+  }
 });
 
 Deno.test("Deno run log-level operands remain auditable", () => {
@@ -548,6 +565,34 @@ Deno.test("static template dynamic imports stay in the audited graph", async () 
 
     assertEquals([...analysis.files].sort(), ["child.ts", "main.ts"]);
     assertEquals(analysis.missing, ["TEMPLATE_IMPORT_ENV"]);
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("relative TSX imports stay in the audited graph", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      `${directory}/main.ts`,
+      'import "./view.tsx?component";\n',
+    );
+    await Deno.writeTextFile(
+      `${directory}/view.tsx`,
+      'export const view = <div>{Deno.env.get("TSX_ENV")}</div>;\n',
+    );
+
+    const analysis = analyzeTarget(
+      {
+        source: "compose.yml#tool",
+        entrypoint: "main.ts",
+        allowEnv: new Set(),
+      },
+      directory,
+    );
+
+    assertEquals([...analysis.files].sort(), ["main.ts", "view.tsx"]);
+    assertEquals(analysis.missing, ["TSX_ENV"]);
   } finally {
     await Deno.remove(directory, { recursive: true });
   }
@@ -943,6 +988,26 @@ Deno.test("Dockerfile parsing shares unrestricted-grant enforcement", async () =
       () => parseDockerfile(path),
       Error,
       "-A/--allow-all grants every permission",
+    );
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("Dockerfile parsing rejects env argument expansion", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    const path = `${directory}/Dockerfile`;
+    await Deno.writeTextFile(
+      path,
+      `FROM denoland/deno:2.9.4
+CMD ["env", "-u", "deno", "--split-string=deno run -A /app/evil.ts", "run", "--allow-env=SAFE", "/app/safe.ts"]
+`,
+    );
+    assertThrows(
+      () => parseDockerfile(path),
+      Error,
+      "env -S/--split-string launchers cannot be audited",
     );
   } finally {
     await Deno.remove(directory, { recursive: true });
