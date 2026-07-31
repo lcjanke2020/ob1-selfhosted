@@ -32,11 +32,11 @@ For compose or Caddyfile changes, sanity-check locally from the relevant `deploy
 
 ### Native Deno launchers
 
-CI checks the Dockerfiles and every checked-in Compose service with an explicit
-`deno run` entrypoint. It cannot inspect a systemd unit maintained only on a
-deployment host. Before restarting such a unit, load the same environment file
-the unit uses and import the server configuration under the unit's **exact**
-comma-separated allowlist:
+CI checks the Dockerfiles and every checked-in Compose service whose explicit
+`entrypoint` and/or `command` launches `deno run`. It cannot inspect a systemd
+unit maintained only on a deployment host. Before restarting such a unit, load
+the same environment file the unit uses and validate the real `index.ts` import
+graph under the unit's **exact** comma-separated allowlist:
 
 ```sh
 set -a
@@ -45,21 +45,24 @@ set +a
 cd /path/to/ob1-selfhosted/server
 
 deno run \
+  --allow-read=. \
   --allow-env=DB_HOST,DB_PORT,... \
   scripts/config_load_probe.ts
 ```
 
 Copy the complete `--allow-env=` value from `ExecStart`; do not derive it by
 grepping only variables assigned in the environment file. Keys with code
-defaults still need Deno permission. Restart only after the probe prints
-`CONFIG LOADED OK`; a missing permission fails with `Requires env access to
-"<KEY>"` and identifies the next key to add.
+defaults still need Deno permission, as do the seven keys read internally by
+the pinned Postgres driver. The probe checks all reachable source reads and the
+explicit driver policy before importing `config.ts` for value validation.
+Restart only after it prints `CONFIG AND ENTRYPOINT PERMISSIONS OK`; a missing
+grant reports every key that must be added.
 
 ## The five CI gates
 
 | Gate | What fails it | Reproduce locally |
 |---|---|---|
-| **CI** | A failing unit test, a bare Compose `--allow-env`, or an env read not covered by a checked-in Dockerfile/Compose launcher's bounded list | `cd server && deno task test && deno task check-allow-env` |
+| **CI** | A failing unit test, an unrestricted checked-in Deno launcher, or an env read not covered by a checked-in Dockerfile/Compose launcher's bounded list | `cd server && deno task test && deno task check-allow-env` |
 | **Leak gate** | Any tracked file matching the shared pattern set (credentials, private/tailnet IPs, internal identifiers) | The pre-commit hook above; patterns in [`.github/leak-patterns.txt`](.github/leak-patterns.txt) |
 | **Allowlist guard** | The Anthropic egress CIDR disappearing from the active Caddyfile — a PR that removes it will be rejected; that's the point | Inspect `deploy/compose-tailnet/Caddyfile` for the `client_ip` allow + deny pair |
 | **Caddyfile validate** | A Caddyfile that doesn't parse under the pinned Caddy image | [`scripts/validate_caddyfile.sh`](scripts/validate_caddyfile.sh) — validates a staged copy of the Caddyfile (SELinux-safe, `--network none`) under the image pinned by the perimeter Dockerfile's `FROM`, with the same official-image-only guard as [`caddy-validate.yml`](.github/workflows/caddy-validate.yml). Checking out a PR you haven't read? Run the canonical repo's copy of the script, not the PR's — trust the URL, not a remote name (in a fork checkout, `origin` is the fork), and hook-disable the fetch (with `core.hooksPath .githooks` set, the unread PR controls the hooks a plain fetch would run): `git -c core.hooksPath=/dev/null fetch https://github.com/lcjanke2020/ob1-selfhosted.git main && validator=$(git show FETCH_HEAD:scripts/validate_caddyfile.sh) && bash -c "$validator"` (the `&&` form fails closed if the extraction fails — don't substitute `bash <(git show …)`, which would silently run an empty script) |
