@@ -97,9 +97,11 @@ printf 'published encrypted backup: %s\n' "$PUBLISHED"
 
 # Routine (including legacy date-only) and labelled artifacts have deliberately
 # separate retention horizons. Unknown/manual names are not auto-deleted.
-find "$OUT_DIR" -maxdepth 1 -type f -name 'db-[0-9]*.sql.gz.gpg' \
+find "$OUT_DIR" -regextype posix-extended -maxdepth 1 -type f \
+  -regex '.*/db-[0-9]{8}(T[0-9]{6}Z(-[0-9]+)?)?\.sql\.gz\.gpg' \
   -mtime +"$RETAIN_DAYS" -delete
-find "$OUT_DIR" -maxdepth 1 -type f -name 'db-labelled-*.sql.gz.gpg' \
+find "$OUT_DIR" -regextype posix-extended -maxdepth 1 -type f \
+  -regex '.*/db-labelled-[A-Za-z0-9]([A-Za-z0-9._-]{0,62}[A-Za-z0-9])?-[0-9]{8}T[0-9]{6}Z(-[0-9]+)?\.sql\.gz\.gpg' \
   -mtime +"$LABEL_RETAIN_DAYS" -delete
 ```
 

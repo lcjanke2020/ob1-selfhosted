@@ -160,15 +160,28 @@ assert_missing "$TEST_ROOT/escape-20260731T003300Z.sql.gz.gpg" \
 # silently adopted into either retention policy.
 printf old > "$OUT/db-20200101T000000Z.sql.gz.gpg"
 printf old > "$OUT/db-20200101.sql.gz.gpg"
+printf old > "$OUT/db-20200101T000000Z-37.sql.gz.gpg"
 printf hold > "$OUT/db-labelled-hold-20200101T000000Z.sql.gz.gpg"
 printf expire > "$OUT/db-labelled-expire-20200101T000000Z.sql.gz.gpg"
 printf manual > "$OUT/pre-manual-20200101.sql.gz.gpg"
+printf manual > "$OUT/db-7year-manual-archive.sql.gz.gpg"
+printf manual > "$OUT/db-20200101-pre-migration.sql.gz.gpg"
+printf manual > "$OUT/db-20200101T000000Z-keep-me.sql.gz.gpg"
+printf manual > "$OUT/db-labelled-manual-archive.sql.gz.gpg"
+printf manual > "$OUT/db-labelled-hold-20200101T000000Z-keep-me.sql.gz.gpg"
 touch -d '30 days ago' \
 	"$OUT/db-20200101T000000Z.sql.gz.gpg" \
 	"$OUT/db-20200101.sql.gz.gpg" \
+	"$OUT/db-20200101T000000Z-37.sql.gz.gpg" \
 	"$OUT/db-labelled-hold-20200101T000000Z.sql.gz.gpg" \
+	"$OUT/db-7year-manual-archive.sql.gz.gpg" \
+	"$OUT/db-20200101-pre-migration.sql.gz.gpg" \
+	"$OUT/db-20200101T000000Z-keep-me.sql.gz.gpg" \
 	"$OUT/pre-manual-20200101.sql.gz.gpg"
-touch -d '100 days ago' "$OUT/db-labelled-expire-20200101T000000Z.sql.gz.gpg"
+touch -d '100 days ago' \
+	"$OUT/db-labelled-expire-20200101T000000Z.sql.gz.gpg" \
+	"$OUT/db-labelled-manual-archive.sql.gz.gpg" \
+	"$OUT/db-labelled-hold-20200101T000000Z-keep-me.sql.gz.gpg"
 
 run_labelled "pre-1.20.0" "labelled-rollback" > "$TEST_ROOT/labelled.stdout"
 labelled="$OUT/db-labelled-pre-1.20.0-20260731T003300Z.sql.gz.gpg"
@@ -176,12 +189,24 @@ assert_exists "$labelled" "first-class labelled backup"
 assert_eq "labelled-rollback" "$(payload_of "$labelled")" "labelled payload"
 assert_missing "$OUT/db-20200101T000000Z.sql.gz.gpg" "expired routine backup"
 assert_missing "$OUT/db-20200101.sql.gz.gpg" "expired legacy routine backup"
+assert_missing "$OUT/db-20200101T000000Z-37.sql.gz.gpg" \
+	"expired collision-suffixed routine backup"
 assert_exists "$OUT/db-labelled-hold-20200101T000000Z.sql.gz.gpg" \
 	"labelled backup inside extended retention"
 assert_missing "$OUT/db-labelled-expire-20200101T000000Z.sql.gz.gpg" \
 	"labelled backup beyond extended retention"
 assert_exists "$OUT/pre-manual-20200101.sql.gz.gpg" \
 	"unknown manual artifact outside automatic retention"
+assert_exists "$OUT/db-7year-manual-archive.sql.gz.gpg" \
+	"digit-prefixed manual artifact outside automatic retention"
+assert_exists "$OUT/db-20200101-pre-migration.sql.gz.gpg" \
+	"legacy-looking manual artifact outside automatic retention"
+assert_exists "$OUT/db-20200101T000000Z-keep-me.sql.gz.gpg" \
+	"non-numeric routine suffix outside automatic retention"
+assert_exists "$OUT/db-labelled-manual-archive.sql.gz.gpg" \
+	"timestamp-free labelled-looking artifact outside automatic retention"
+assert_exists "$OUT/db-labelled-hold-20200101T000000Z-keep-me.sql.gz.gpg" \
+	"non-numeric labelled suffix outside automatic retention"
 assert_eq "0" "$(find "$OUT" -maxdepth 1 -name '.db-*' | wc -l | tr -d ' ')" \
 	"staging files cleaned after successful runs"
 
