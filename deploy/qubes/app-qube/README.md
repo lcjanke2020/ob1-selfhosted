@@ -202,6 +202,54 @@ holds **no** private key), and drops the artifact into an off-box-replicated dir
 (Syncthing, rsync, …). Artifacts + units are in [`backup/`](backup/); the design rationale
 is in [`../encrypted-backup-example.md`](../encrypted-backup-example.md).
 
+The canonical script gives every routine artifact a full UTC timestamp
+(`db-YYYYMMDDTHHMMSSZ.sql.gz.gpg`). If two invocations select the same timestamp, the
+later one receives `-2`, `-3`, and so on; publication atomically refuses to replace any
+existing entry. The output filesystem must support hard links (ordinary ext4/XFS/Btrfs
+directories do). If it does not, the script fails closed instead of copying over a backup
+or exposing a partial final file.
+
+Routine artifacts use `RETAIN_DAYS` (14 by default). A one-off `BACKUP_LABEL` creates
+`db-labelled-<label>-<UTC timestamp>.sql.gz.gpg` and uses the longer
+`LABEL_RETAIN_DAYS` horizon (90 by default). Labels are limited to 1–64 ASCII letters,
+digits, dots, underscores, or hyphens and must start and end with a letter or digit. Do
+not set `BACKUP_LABEL` permanently in `backup.env`; the timer belongs in the routine
+namespace. Unknown hand-built filenames are intentionally outside both automatic prune
+rules.
+
+Before relying on this path in a deploy window, install the repository copy at the exact
+path named by `ExecStart` and confirm no older parallel wrapper is still being invoked:
+
+```sh
+install -m 0755 deploy/qubes/app-qube/backup/ob1-db-backup.sh \
+  /rw/config/openbrain-units/ob1-db-backup.sh
+cmp deploy/qubes/app-qube/backup/ob1-db-backup.sh \
+  /rw/config/openbrain-units/ob1-db-backup.sh
+systemctl cat ob1-db-backup.service
+```
+
+### Deploy-window rollback point
+
+Run the canonical script as the backup service's unprivileged user before applying a
+schema migration. Use a label that identifies the release or migration, capture the
+printed final path, wait for off-box replication, and verify/decrypt it on the separate
+restore host **before** changing the database:
+
+```sh
+sudo -u openbrain env BACKUP_LABEL=pre-1.20.0 \
+  /rw/config/openbrain-units/ob1-db-backup.sh
+```
+
+After deployment, exercise the ordinary service and inspect both the journal and output
+directory. This creates a distinct routine artifact; it cannot replace the labelled
+pre-migration rollback point, even if both runs happen in the same second.
+
+```sh
+sudo systemctl start ob1-db-backup.service
+systemctl show ob1-db-backup.service -p Result -p ExecMainStatus
+journalctl -u ob1-db-backup.service -n 50 --no-pager
+```
+
 ## Verify
 
 ```sh

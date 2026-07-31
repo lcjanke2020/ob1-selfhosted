@@ -14,10 +14,16 @@
 
 set -euo pipefail
 
+# Capture the one-shot operator input before loading persistent configuration.
+# An accidental BACKUP_LABEL assignment in backup.env must not relabel the daily
+# timer or override a caller's explicit rollback label.
+BACKUP_LABEL_ARG="${BACKUP_LABEL:-}"
+
 # Source only the few vars this job needs. `set -a` so they reach pg_dump's env.
 ENV_FILE="${BACKUP_ENV_FILE:-/rw/config/openbrain-units/backup.env}"
 # shellcheck disable=SC1090
-set -a; . "$ENV_FILE"; set +a   # DB_HOST DB_PORT POSTGRES_DB READONLY_ROLE READONLY_PASSWORD PUBKEY OUT_DIR RETAIN_DAYS
+set -a; . "$ENV_FILE"; set +a   # DB_HOST DB_PORT POSTGRES_DB READONLY_ROLE READONLY_PASSWORD PUBKEY OUT_DIR RETAIN_DAYS LABEL_RETAIN_DAYS
+BACKUP_LABEL="$BACKUP_LABEL_ARG"
 
 : "${DB_HOST:?set DB_HOST in $ENV_FILE (the db qube tailnet address)}"
 : "${DB_PORT:=5432}"
@@ -27,29 +33,57 @@ set -a; . "$ENV_FILE"; set +a   # DB_HOST DB_PORT POSTGRES_DB READONLY_ROLE READ
 : "${PUBKEY:?set PUBKEY in $ENV_FILE (path to the backup PUBLIC key, .asc)}"
 : "${OUT_DIR:?set OUT_DIR in $ENV_FILE (off-box-replicated directory)}"
 RETAIN_DAYS="${RETAIN_DAYS:-14}"
+LABEL_RETAIN_DAYS="${LABEL_RETAIN_DAYS:-90}"
+
+if [[ ! "$RETAIN_DAYS" =~ ^[0-9]+$ ]]; then
+	echo "RETAIN_DAYS must be a non-negative integer (got: $RETAIN_DAYS)" >&2
+	exit 2
+fi
+if [[ ! "$LABEL_RETAIN_DAYS" =~ ^[0-9]+$ ]]; then
+	echo "LABEL_RETAIN_DAYS must be a non-negative integer (got: $LABEL_RETAIN_DAYS)" >&2
+	exit 2
+fi
+if [[ -n "$BACKUP_LABEL" ]] &&
+	{ (( ${#BACKUP_LABEL} > 64 )) ||
+	  [[ ! "$BACKUP_LABEL" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]]; }; then
+	echo "BACKUP_LABEL must be 1-64 ASCII letters, digits, dots, underscores, or hyphens and start/end with a letter or digit" >&2
+	exit 2
+fi
 
 # Create OUT_DIR if missing so the mktemp below fails with a clear message rather
 # than an indirect mktemp error (a one-time miss otherwise becomes a silent gap).
 mkdir -p "$OUT_DIR" || { echo "cannot create OUT_DIR=$OUT_DIR" >&2; exit 2; }
 
+# Clean up private staging state on every ordinary exit. A successful publish
+# clears TMP after unlinking its staging name; the final hard link remains.
+TMP=""
+GNUPGHOME=""
+cleanup() {
+	[[ -z "$TMP" ]] || rm -f -- "$TMP"
+	[[ -z "$GNUPGHOME" ]] || rm -rf -- "$GNUPGHOME"
+}
+trap cleanup EXIT
+
 # gpg writes/locks state under ~/.gnupg by default, which the unit's
 # ProtectHome=read-only sandbox blocks. Point GNUPGHOME at a private temp dir
 # (0700) — --recipient-file reads the public key directly, so no keyring is
-# needed, but gpg still wants a home for its random_seed/trustdb. Cleaned up with
-# the temp dump file on exit.
+# needed, but gpg still wants a home for its random_seed/trustdb.
 GNUPGHOME="$(mktemp -d)"; export GNUPGHOME
 
-# Date-only stamp: the daily timer produces one artifact per day. A MANUAL re-run
-# the same day overwrites that day's file (intended — keeps the prune glob and
-# retention math simple); add %H%M%S if you want same-day runs kept separately.
-TS=$(date +%Y%m%d)
+# Every artifact gets a full UTC timestamp. BACKUP_LABEL is deliberately a
+# one-shot operator input rather than a persistent default: a pre-migration dump
+# should say what it protects, while the daily timer keeps the routine namespace.
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+if [[ -n "$BACKUP_LABEL" ]]; then
+	BASENAME="db-labelled-$BACKUP_LABEL-$TS"
+else
+	BASENAME="db-$TS"
+fi
 # Stage the temp file INSIDE OUT_DIR so the final publish is a same-filesystem
-# rename (a cross-FS mv from /tmp is copy-then-unlink, not atomic — a watcher
-# could replicate a half-written *.sql.gz.gpg). The leading dot keeps it clear
-# of the prune glob below; add `/.db-*` to the Syncthing folder's .stignore so
-# peers never sync the partial.
+# operation (a cross-FS copy from /tmp could expose a half-written artifact to a
+# watcher). The leading dot keeps it clear of the prune globs below; add
+# `/.db-*` to the Syncthing folder's .stignore so peers never sync the partial.
 TMP="$(mktemp "$OUT_DIR/.db-$TS.XXXXXX")"
-trap 'rm -f "$TMP"; rm -rf "$GNUPGHOME"' EXIT
 
 # pipefail makes the whole chain fail if pg_dump (e.g. lost connection), gzip, or
 # the gpg encrypt step errors — so a partial/failed dump is never published.
@@ -66,5 +100,48 @@ PGPASSWORD="$READONLY_PASSWORD" pg_dump \
 # Encrypt-only host can't decrypt to verify; just ensure a non-empty artifact
 # (the pipeline above already guaranteed each stage exited 0).
 [ -s "$TMP" ]
-mv -f "$TMP" "$OUT_DIR/db-$TS.sql.gz.gpg"    # same-FS atomic rename; publish first…
-find "$OUT_DIR" -maxdepth 1 -name 'db-*.sql.gz.gpg' -mtime +"$RETAIN_DAYS" -delete   # …then prune
+
+# Publish without a clobber window. A hard link is atomic, cannot replace an
+# existing directory entry, and exposes the already-complete inode at the final
+# name. Exact same-second collisions receive a deterministic numeric suffix.
+# `-T` prevents an attacker-created directory at a candidate path from being
+# treated as a target directory by GNU ln.
+PUBLISHED=""
+for ((attempt = 1; attempt <= 1000; attempt++)); do
+	if (( attempt == 1 )); then
+		candidate="$OUT_DIR/$BASENAME.sql.gz.gpg"
+	else
+		candidate="$OUT_DIR/$BASENAME-$attempt.sql.gz.gpg"
+	fi
+
+	if ln -T -- "$TMP" "$candidate" 2>/dev/null; then
+		PUBLISHED="$candidate"
+		rm -f -- "$TMP"
+		TMP=""
+		break
+	fi
+
+	# Existing files, symlinks, or directories are name collisions. Any other
+	# hard-link failure means the output filesystem cannot provide the atomic
+	# no-clobber guarantee, so fail rather than falling back to an unsafe copy.
+	if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+		echo "cannot atomically publish backup at $candidate (hard-link failed)" >&2
+		exit 1
+	fi
+done
+
+if [[ -z "$PUBLISHED" ]]; then
+	echo "cannot publish backup: all 1000 names for $BASENAME already exist" >&2
+	exit 1
+fi
+printf 'published encrypted backup: %s\n' "$PUBLISHED"
+
+# Routine and explicitly labelled rollback dumps have separate, bounded
+# retention horizons. The routine pattern also covers legacy db-YYYYMMDD files;
+# unknown hand-built names stay outside automatic deletion.
+find "$OUT_DIR" -regextype posix-extended -maxdepth 1 -type f \
+	-regex '.*/db-[0-9]{8}(T[0-9]{6}Z(-[0-9]+)?)?\.sql\.gz\.gpg' \
+	-mtime +"$RETAIN_DAYS" -delete
+find "$OUT_DIR" -regextype posix-extended -maxdepth 1 -type f \
+	-regex '.*/db-labelled-[A-Za-z0-9]([A-Za-z0-9._-]{0,62}[A-Za-z0-9])?-[0-9]{8}T[0-9]{6}Z(-[0-9]+)?\.sql\.gz\.gpg' \
+	-mtime +"$LABEL_RETAIN_DAYS" -delete

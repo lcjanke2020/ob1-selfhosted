@@ -32,15 +32,32 @@ set -euo pipefail
 # .env exports *every* variable to child processes (and a value with spaces / # / $
 # can misparse) — a dedicated backup env file, or a PGPASSFILE/.pgpass entry for the
 # password, keeps the surface small.
+BACKUP_LABEL_ARG=${BACKUP_LABEL:-}             # capture caller-only input first
 set -a; . /path/to/deploy/backup.env; set +a   # DB_HOST DB_PORT POSTGRES_DB READONLY_ROLE READONLY_PASSWORD
+BACKUP_LABEL=$BACKUP_LABEL_ARG                 # ignore any persistent setting
 OUT_DIR=/path/to/offbox-synced-dir
 PUBKEY=/path/to/backup-pubkey.asc            # PUBLIC key only
-TS=$(date +%Y%m%d)
+RETAIN_DAYS=${RETAIN_DAYS:-14}
+LABEL_RETAIN_DAYS=${LABEL_RETAIN_DAYS:-90}
+
+[[ "$RETAIN_DAYS" =~ ^[0-9]+$ ]]
+[[ "$LABEL_RETAIN_DAYS" =~ ^[0-9]+$ ]]
+if [[ -n "$BACKUP_LABEL" ]]; then
+  (( ${#BACKUP_LABEL} <= 64 ))
+  [[ "$BACKUP_LABEL" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]]
+fi
+
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+if [[ -n "$BACKUP_LABEL" ]]; then
+  STEM="db-labelled-$BACKUP_LABEL-$TS"
+else
+  STEM="db-$TS"
+fi
 # Stage the temp file *inside* OUT_DIR so the final publish is a same-filesystem
-# rename (a cross-FS mv from /tmp is copy-then-unlink, not atomic — a watcher could
-# replicate a half-written *.sql.gz.gpg). The leading dot keeps it clear of the
-# prune glob below; add it to .stignore (see note) so peers never sync the partial.
-TMP="$(mktemp "$OUT_DIR/.db-$TS.XXXXXX")"; trap 'rm -f "$TMP"' EXIT
+# operation (a cross-FS copy from /tmp could expose a half-written final file).
+# The leading dot keeps staging clear of the prune globs and Syncthing ignore rule.
+TMP="$(mktemp "$OUT_DIR/.db-$TS.XXXXXX")"
+trap '[[ -z "${TMP:-}" ]] || rm -f -- "$TMP"' EXIT
 
 # pipefail makes the whole chain fail if pg_dump (e.g. lost connection), gzip, or the
 # gpg encrypt step errors — so a partial/failed dump is never published.
@@ -58,8 +75,41 @@ PGPASSWORD="$READONLY_PASSWORD" pg_dump \
 # Encrypt-only host can't decrypt to verify; just ensure a non-empty artifact
 # (the pipeline above already guaranteed each stage exited 0).
 [ -s "$TMP" ]
-mv -f "$TMP" "$OUT_DIR/db-$TS.sql.gz.gpg"    # same-FS atomic rename; publish first…
-find "$OUT_DIR" -maxdepth 1 -name 'db-*.sql.gz.gpg' -mtime +14 -delete   # …then prune
+
+# Atomically add a hard link to the complete staging inode. An existing entry is
+# never replaced; exact same-second collisions receive -2, -3, and so on. `-T`
+# requires GNU coreutils and prevents a candidate directory becoming a target dir.
+PUBLISHED=""
+for ((attempt = 1; attempt <= 1000; attempt++)); do
+  if (( attempt == 1 )); then
+    OUT="$OUT_DIR/$STEM.sql.gz.gpg"
+  else
+    OUT="$OUT_DIR/$STEM-$attempt.sql.gz.gpg"
+  fi
+  if ln -T -- "$TMP" "$OUT" 2>/dev/null; then
+    PUBLISHED="$OUT"
+    rm -f -- "$TMP"; TMP=""
+    break
+  fi
+  if [[ ! -e "$OUT" && ! -L "$OUT" ]]; then
+    echo "cannot atomically publish backup at $OUT (hard-link failed)" >&2
+    exit 1
+  fi
+done
+if [[ -z "$PUBLISHED" ]]; then
+  echo "cannot publish backup: all 1000 names for $STEM already exist" >&2
+  exit 1
+fi
+printf 'published encrypted backup: %s\n' "$PUBLISHED"
+
+# Routine (including legacy date-only) and labelled artifacts have deliberately
+# separate retention horizons. Unknown/manual names are not auto-deleted.
+find "$OUT_DIR" -regextype posix-extended -maxdepth 1 -type f \
+  -regex '.*/db-[0-9]{8}(T[0-9]{6}Z(-[0-9]+)?)?\.sql\.gz\.gpg' \
+  -mtime +"$RETAIN_DAYS" -delete
+find "$OUT_DIR" -regextype posix-extended -maxdepth 1 -type f \
+  -regex '.*/db-labelled-[A-Za-z0-9]([A-Za-z0-9._-]{0,62}[A-Za-z0-9])?-[0-9]{8}T[0-9]{6}Z(-[0-9]+)?\.sql\.gz\.gpg' \
+  -mtime +"$LABEL_RETAIN_DAYS" -delete
 ```
 
 Drive it with a systemd `oneshot` service + a daily `timer` (or cron). `--recipient-file`
@@ -73,6 +123,17 @@ a partial:
 ```
 /.db-*
 ```
+
+The hard-link publish requires the staging and final names to share one filesystem and
+that filesystem to support hard links. That is normal for a Syncthing directory on a
+local Linux filesystem. Treat failure as a storage-configuration error; do not fall back
+to `mv -f` or a copy into the final name.
+
+For a pre-migration rollback point, invoke the job once with a descriptive label (for
+example, `BACKUP_LABEL=pre-1.20.0`). Wait for the labelled artifact to replicate and
+verify it from the private-key host before migrating. A post-deploy routine run gets its
+own timestamped name and can never replace that rollback point. Routine dumps default to
+14-day retention; labelled dumps default to 90 days.
 
 ## Verify (on the machine that holds the private key)
 
@@ -90,7 +151,7 @@ DSN="postgresql://restore:restore@localhost:5432/restore_test"   # throwaway DB 
 # Pipe straight into the throwaway DB so the decrypted plaintext never lands on disk
 # (avoids a predictable-path window, and `shred -u` is unreliable on journaling/CoW
 # filesystems and SSDs anyway). If you must stage a file, `mktemp` it 0600.
-ssh <offbox-host> "cat '/path/db-YYYYMMDD.sql.gz.gpg'" \
+ssh <offbox-host> "cat '/path/db-YYYYMMDDTHHMMSSZ.sql.gz.gpg'" \
   | gpg --decrypt | gunzip | psql "$DSN"
 
 # Then spot-check the restore — a backup that restores but is empty is still no backup:
