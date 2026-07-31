@@ -141,8 +141,44 @@ services:
       - "deno run --allow-env=FIRST_ENV /app/first.ts && deno run -A /app/second.ts"
 `),
     Error,
-    "multiple Deno invocations cannot be audited",
+    "shell-wrapped Deno launchers cannot be audited",
   );
+});
+
+Deno.test("shell control operators are invocation boundaries without spaces", () => {
+  assertThrows(
+    () =>
+      onlyTarget(`
+services:
+  unsafe-tool:
+    entrypoint:
+      - sh
+      - -c
+      - "deno run --allow-env=FIRST_ENV /app/first.ts arg;deno run -A /app/second.ts"
+`),
+    Error,
+    "shell-wrapped Deno launchers cannot be audited",
+  );
+});
+
+Deno.test("shell command substitution fails closed", () => {
+  for (
+    const command of [
+      "`printf deno` run -A /app/tool.ts",
+      "$(printf deno) run -A /app/tool.ts",
+    ]
+  ) {
+    assertThrows(
+      () =>
+        onlyTarget(`
+services:
+  unsafe-tool:
+    entrypoint: [sh, -c, '${command}']
+`),
+      Error,
+      "shell command substitution cannot be audited",
+    );
+  }
 });
 
 Deno.test("executable Deno subcommands outside run fail closed", () => {
@@ -183,6 +219,19 @@ services:
   assertEquals([...target.allowEnv], ["FOO"]);
 });
 
+Deno.test("Deno run log-level operands remain auditable", () => {
+  for (const option of ["-L", "--log-level"]) {
+    const target = onlyTarget(`
+services:
+  tool:
+    entrypoint: [deno, run, ${option}, info, --allow-env=FOO, /app/tool.ts]
+`);
+
+    assertEquals(target.entrypoint, "tool.ts");
+    assertEquals([...target.allowEnv], ["FOO"]);
+  }
+});
+
 Deno.test("self-contained option values ending in .ts do not shift the module", () => {
   const target = onlyTarget(`
 services:
@@ -191,6 +240,22 @@ services:
       - deno
       - run
       - --allow-read=/app/index.ts
+      - --allow-env=FOO
+      - /app/tool.ts
+`);
+
+  assertEquals(target.entrypoint, "tool.ts");
+  assertEquals([...target.allowEnv], ["FOO"]);
+});
+
+Deno.test("Deno paths inside option values are not extra invocations", () => {
+  const target = onlyTarget(`
+services:
+  tool:
+    entrypoint:
+      - deno
+      - run
+      - --allow-run=/usr/bin/deno
       - --allow-env=FOO
       - /app/tool.ts
 `);
@@ -395,6 +460,60 @@ export const present = Deno.env.get("PRESENT") ?? child;
   }
 });
 
+Deno.test("static template dynamic imports stay in the audited graph", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      `${directory}/main.ts`,
+      "await import(`./child.ts`);\n",
+    );
+    await Deno.writeTextFile(
+      `${directory}/child.ts`,
+      'export const child = Deno.env.get("TEMPLATE_IMPORT_ENV");\n',
+    );
+
+    const analysis = analyzeTarget(
+      {
+        source: "compose.yml#tool",
+        entrypoint: "main.ts",
+        allowEnv: new Set(),
+      },
+      directory,
+    );
+
+    assertEquals([...analysis.files].sort(), ["child.ts", "main.ts"]);
+    assertEquals(analysis.missing, ["TEMPLATE_IMPORT_ENV"]);
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("non-literal dynamic imports fail closed", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      `${directory}/main.ts`,
+      'const moduleName = "./child.ts";\nawait import(moduleName);\n',
+    );
+
+    assertThrows(
+      () =>
+        analyzeTarget(
+          {
+            source: "compose.yml#tool",
+            entrypoint: "main.ts",
+            allowEnv: new Set(),
+          },
+          directory,
+        ),
+      Error,
+      "dynamic import specifier must use a string or static template literal",
+    );
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
 Deno.test("known env wrappers fail closed on dynamic keys", async () => {
   const directory = await Deno.makeTempDir();
   try {
@@ -463,6 +582,64 @@ export const bracketStringFake = 'Deno["env"].get("BRACKET_STRING_FAKE")';
       "OPTIONAL_ENV",
       "TEMPLATE_ENV",
     ]);
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("env reads after unbraced control-flow regex literals remain visible", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    const path = `${directory}/control_regex.ts`;
+    await Deno.writeTextFile(
+      path,
+      `if (true) /'/.test(Deno.env.get("CONTROL_REGEX_ENV") ?? "") && /'/.test("");\n`,
+    );
+
+    assertEquals([...findEnvReads(path)], ["CONTROL_REGEX_ENV"]);
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("destructured Deno env aliases fail closed", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    const path = `${directory}/aliased.ts`;
+    await Deno.writeTextFile(
+      path,
+      `const { env } = Deno;\nexport const value = env.get("ALIASED_ENV");\n`,
+    );
+
+    assertThrows(
+      () => findEnvReads(path),
+      Error,
+      "unmodelled Deno binding cannot be audited",
+    );
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("invalid TypeScript lexical forms fail closed", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    const invalidSources = [
+      "export const value = /unterminated;\n",
+      "/* unterminated",
+      "export const value = 'unterminated\n",
+      "export const value = `unterminated\n",
+      'export const value = `value=${Deno.env.get("X")`;\n',
+    ];
+    for (const [index, content] of invalidSources.entries()) {
+      const path = `${directory}/invalid_${index}.ts`;
+      await Deno.writeTextFile(path, content);
+      assertThrows(
+        () => findEnvReads(path),
+        Error,
+        "TypeScript syntax cannot be audited",
+      );
+    }
   } finally {
     await Deno.remove(directory, { recursive: true });
   }
@@ -541,6 +718,27 @@ Deno.test("Dockerfile parsing shares unrestricted-grant enforcement", async () =
       () => parseDockerfile(path),
       Error,
       "-A/--allow-all grants every permission",
+    );
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("Docker shell operators expose adjacent Deno invocations", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    const path = `${directory}/Dockerfile`;
+    await Deno.writeTextFile(
+      path,
+      `FROM denoland/deno:2.9.4
+ENTRYPOINT ["sh", "-c", "exec deno run --allow-env=FIRST_ENV \\"$@\\";deno run -A second.ts", "sh"]
+CMD ["first.ts"]
+`,
+    );
+    assertThrows(
+      () => parseDockerfile(path),
+      Error,
+      "multiple Deno invocations cannot be audited",
     );
   } finally {
     await Deno.remove(directory, { recursive: true });

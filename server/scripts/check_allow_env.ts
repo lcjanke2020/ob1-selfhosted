@@ -11,11 +11,12 @@
 //      explicit `entrypoint` and/or `command` invokes `deno run`.
 //   2. Reject unrestricted grants, dynamic/multi-Deno Compose launchers, and
 //      executable Deno subcommands outside the supported `run` model.
-//   3. Walk the relative-import graph from each TypeScript entrypoint,
-//      collecting every reachable in-tree .ts file.
-//   4. Find string-literal env reads, fail closed when a known wrapper receives
-//      a dynamic key, add explicit out-of-tree dependency reads, and fail if
-//      any required key is absent from the launcher's allowlist.
+//   3. Parse each reachable TypeScript module into an AST, walk its relative
+//      import graph, and fail closed on non-literal dynamic imports.
+//   4. Find string-literal env reads in the AST, fail closed on aliases and
+//      dynamic keys that cannot be proved safe, add explicit out-of-tree
+//      dependency reads, and fail if any required key is absent from the
+//      launcher's allowlist.
 //
 // Over-permissive entries are generally not flagged. The deno-postgres driver
 // reads seven PG* keys outside this source tree, so any reachable import of the
@@ -26,6 +27,10 @@
 
 import { dirname, fromFileUrl, join, relative, resolve } from "@std/path";
 import { parse as parseYaml } from "@std/yaml";
+// These AST-only dependencies live in scripts/deno.{json,lock}; the root lock
+// is copied into production images and deliberately excludes CI tooling.
+import { parse as parseTypeScriptModule } from "@babel/parser";
+import type * as t from "@babel/types";
 
 const SERVER_DIR = fromFileUrl(new URL("..", import.meta.url));
 const REPO_DIR = resolve(SERVER_DIR, "..");
@@ -180,7 +185,8 @@ function splitCommand(value: string, source: string): string[] {
   let current = "";
   let quote: "'" | '"' | undefined;
   let escaped = false;
-  for (const character of value) {
+  for (let index = 0; index < value.length; index++) {
+    const character = value[index];
     if (escaped) {
       current += character;
       escaped = false;
@@ -194,6 +200,24 @@ function splitCommand(value: string, source: string): string[] {
       if (quote === character) quote = undefined;
       else if (!quote) quote = character;
       else current += character;
+      continue;
+    }
+    if (quote !== "'" && character === "`") {
+      throw new Error(
+        `${source}: shell command substitution cannot be audited; ` +
+          "use literal arguments",
+      );
+    }
+    if (quote !== "'" && character === "$" && value[index + 1] === "(") {
+      throw new Error(
+        `${source}: shell command substitution cannot be audited; ` +
+          "use literal arguments",
+      );
+    }
+    if (!quote && ";&|<>()".includes(character)) {
+      if (current) tokens.push(current);
+      tokens.push(character);
+      current = "";
       continue;
     }
     if (/\s/.test(character) && !quote) {
@@ -227,6 +251,14 @@ function literalArguments(
       `${source}: ${field} must be a literal string or string list`,
     );
   }
+  if (
+    args.some((argument) => argument.includes("`") || argument.includes("$("))
+  ) {
+    throw new Error(
+      `${source}: shell command substitution cannot be audited; ` +
+        "use literal arguments",
+    );
+  }
   if (args.some((argument) => argument.includes("$"))) {
     throw new Error(
       `${source}: interpolated ${field} cannot be audited; use literal arguments`,
@@ -251,19 +283,17 @@ const RUN_OPTIONS_WITH_VALUES = new Set([
   "--ext",
   "--import-map",
   "--location",
+  "-L",
+  "--log-level",
   "--minimum-dependency-age",
   "--seed",
 ]);
 
 // Deno exposes the run flags as root/global flags too. This set deliberately
-// includes every auditable required-value run option plus root-only log-level; an
-// unrecognised bare global option fails closed below instead of letting its
-// operand masquerade as a non-Deno subcommand.
-const GLOBAL_OPTIONS_WITH_VALUES = new Set([
-  ...RUN_OPTIONS_WITH_VALUES,
-  "-L",
-  "--log-level",
-]);
+// includes every auditable required-value run option; an unrecognised bare
+// global option fails closed below instead of letting its operand masquerade
+// as a non-Deno subcommand.
+const GLOBAL_OPTIONS_WITH_VALUES = new Set(RUN_OPTIONS_WITH_VALUES);
 
 const RUN_STANDALONE_OPTIONS = new Set([
   "--allow-all",
@@ -315,7 +345,31 @@ function optionName(argument: string): string {
 }
 
 function isDenoExecutable(value: string): boolean {
-  return /(^|[\\/])deno(?:\.exe)?$/i.test(value);
+  return !value.includes("=") && /(^|[\\/])deno(?:\.exe)?$/i.test(value);
+}
+
+function isShellExecutable(value: string): boolean {
+  if (value.includes("=")) return false;
+  const name = (value.replaceAll("\\", "/").split("/").at(-1) ?? "")
+    .toLowerCase();
+  return /^(?:(?:ba|da|a|k|z)?sh)(?:\.exe)?$/.test(name) ||
+    [
+      "cmd",
+      "cmd.exe",
+      "fish",
+      "nu",
+      "powershell",
+      "powershell.exe",
+      "pwsh",
+      "pwsh.exe",
+    ]
+      .includes(name);
+}
+
+function containsDenoExecutableText(value: string): boolean {
+  return /(^|[\\/\s;&|<>()`])deno(?:\.exe)?(?=$|[\s;&|<>()`])/i.test(
+    value,
+  );
 }
 
 function optionHasKnownBoundaries(
@@ -390,20 +444,7 @@ function denoInvocation(
         "use one launcher per service",
     );
   }
-  if (directCount === 1) return invocationFromArguments(args, source);
-
-  // A shell-form entrypoint may put the entire command in one `sh -c`
-  // argument. Flatten only as a fallback so direct list arguments keep their
-  // original boundaries.
-  const flattened = args.flatMap((value) => splitCommand(value, source));
-  const flattenedCount = flattened.filter(isDenoExecutable).length;
-  if (flattenedCount > 1) {
-    throw new Error(
-      `${source}: multiple Deno invocations cannot be audited; ` +
-        "use one launcher per service",
-    );
-  }
-  return invocationFromArguments(flattened, source);
+  return directCount === 1 ? invocationFromArguments(args, source) : undefined;
 }
 
 function rejectUnauditableOption(argument: string, source: string): void {
@@ -599,10 +640,18 @@ export function parseComposeTargets(
       ? []
       : literalArguments(rawService.command, label, "command");
     if (entrypointArgs.length === 0 && commandArgs.length === 0) continue;
-    const parsed = parseDenoRunTarget(
-      [...entrypointArgs, ...commandArgs],
-      label,
-    );
+    const launcherArgs = [...entrypointArgs, ...commandArgs];
+    const shellIndex = launcherArgs.findIndex(isShellExecutable);
+    if (
+      shellIndex >= 0 &&
+      launcherArgs.slice(shellIndex + 1).some(containsDenoExecutableText)
+    ) {
+      throw new Error(
+        `${label}: shell-wrapped Deno launchers cannot be audited; ` +
+          "use a literal Deno argv list",
+      );
+    }
+    const parsed = parseDenoRunTarget(launcherArgs, label);
     if (!parsed) continue;
     targets.push({
       source: label,
@@ -627,16 +676,105 @@ function composeFiles(directory: string): string[] {
   return matches.sort();
 }
 
-function importSpecifiers(content: string): Set<string> {
-  const specifiers = new Set<string>();
-  const patterns = [
-    /from\s+["']([^"']+)["']/g,
-    /\bimport\s*["']([^"']+)["']/g,
-    /\bimport\(\s*["']([^"']+)["']\s*\)/g,
-  ];
-  for (const pattern of patterns) {
-    for (const match of content.matchAll(pattern)) specifiers.add(match[1]);
+function parseTypeScript(content: string, source: string): t.File {
+  try {
+    return parseTypeScriptModule(content, {
+      sourceType: "module",
+      sourceFilename: source,
+      createImportExpressions: true,
+      plugins: source.toLowerCase().endsWith(".tsx")
+        ? ["typescript", "jsx"]
+        : ["typescript"],
+    });
+  } catch (error) {
+    const syntaxError = error as SyntaxError & {
+      loc?: { line: number; column: number };
+    };
+    const location = syntaxError.loc
+      ? `:${syntaxError.loc.line}:${syntaxError.loc.column + 1}`
+      : "";
+    throw new Error(
+      `${source}${location}: TypeScript syntax cannot be audited: ${syntaxError.message}`,
+    );
   }
+}
+
+function staticStringValue(
+  node: t.Node | null | undefined,
+): string | undefined {
+  if (node?.type === "StringLiteral") return node.value;
+  if (node?.type === "TemplateLiteral" && node.expressions.length === 0) {
+    return node.quasis[0]?.value.cooked ?? node.quasis[0]?.value.raw;
+  }
+  return undefined;
+}
+
+function isAstNode(value: unknown): value is t.Node {
+  return typeof value === "object" && value !== null &&
+    "type" in value && typeof value.type === "string";
+}
+
+function walkAst(
+  node: t.Node,
+  visitor: (node: t.Node, ancestors: readonly t.Node[]) => void,
+  ancestors: t.Node[] = [],
+): void {
+  visitor(node, ancestors);
+  ancestors.push(node);
+  try {
+    for (const [key, value] of Object.entries(node)) {
+      if (["comments", "errors", "extra", "loc", "tokens"].includes(key)) {
+        continue;
+      }
+      if (Array.isArray(value)) {
+        for (const child of value) {
+          if (isAstNode(child)) walkAst(child, visitor, ancestors);
+        }
+      } else if (isAstNode(value)) {
+        walkAst(value, visitor, ancestors);
+      }
+    }
+  } finally {
+    ancestors.pop();
+  }
+}
+
+function importSpecifiers(content: string, source: string): Set<string> {
+  const sourceFile = parseTypeScript(content, source);
+  const specifiers = new Set<string>();
+
+  const addSpecifier = (
+    node: t.Node | null | undefined,
+    description: string,
+  ): void => {
+    const value = staticStringValue(node);
+    if (value === undefined) {
+      throw new Error(
+        `${source}: ${description} must use a string or static template literal; ` +
+          "dynamic imports cannot be audited",
+      );
+    }
+    specifiers.add(value);
+  };
+
+  walkAst(sourceFile, (node) => {
+    if (node.type === "ImportDeclaration") {
+      addSpecifier(node.source, "import specifier");
+    } else if (
+      (node.type === "ExportNamedDeclaration" ||
+        node.type === "ExportAllDeclaration") && node.source
+    ) {
+      addSpecifier(node.source, "export specifier");
+    } else if (node.type === "ImportExpression") {
+      addSpecifier(node.source, "dynamic import specifier");
+    } else if (node.type === "TSImportType") {
+      addSpecifier(node.argument, "import type specifier");
+    } else if (
+      node.type === "CallExpression" && node.callee.type === "Import"
+    ) {
+      addSpecifier(node.arguments[0], "dynamic import specifier");
+    }
+  });
   return specifiers;
 }
 
@@ -645,9 +783,8 @@ function dependencyEnvForFiles(
   baseDir: string,
 ): Set<string> {
   for (const file of files) {
-    const specifiers = importSpecifiers(
-      Deno.readTextFileSync(join(baseDir, file)),
-    );
+    const path = join(baseDir, file);
+    const specifiers = importSpecifiers(Deno.readTextFileSync(path), path);
     if (
       specifiers.has("postgres") ||
       [...specifiers].some((specifier) =>
@@ -683,7 +820,7 @@ export function walkImports(entrypoint: string, baseDir: string): Set<string> {
         `Failed to read ${full}: ${(error as Error).message}`,
       );
     }
-    for (const specifier of importSpecifiers(content)) {
+    for (const specifier of importSpecifiers(content, full)) {
       if (!specifier.startsWith(".")) continue;
       const withExtension = specifier.endsWith(".ts")
         ? specifier
@@ -699,273 +836,195 @@ export function walkImports(entrypoint: string, baseDir: string): Set<string> {
   return visited;
 }
 
-function maskNonCode(content: string, source: string): string {
-  // Keep indexes aligned with the original UTF-16 string so regex match
-  // offsets can be used to read literal arguments from `content`.
-  const masked = Array<string>(content.length).fill(" ");
-  let index = 0;
+const WRAPPER_NAME_SET = new Set(WRAPPER_NAMES);
 
-  const maskOne = (): void => {
-    if (content[index] === "\n") masked[index] = "\n";
-    index++;
-  };
+type MemberExpression = t.MemberExpression | t.OptionalMemberExpression;
+type CallExpression = t.CallExpression | t.OptionalCallExpression;
 
-  const regexCanStart = (at: number): boolean => {
-    let previous = at - 1;
-    while (previous >= 0 && /\s/.test(masked[previous])) previous--;
-    if (previous < 0) return true;
-    if ("=(,:[!&|?{};+-*%~^<>".includes(masked[previous])) return true;
-    const prefix = masked.slice(0, at).join("").trimEnd();
-    return /(?:^|[^A-Za-z0-9_$])(?:await|case|default|delete|do|else|extends|in|instanceof|new|of|return|throw|typeof|void|yield)$/
-      .test(
-        prefix,
-      );
-  };
-
-  const skipLineComment = (): void => {
-    while (index < content.length && content[index] !== "\n") maskOne();
-  };
-
-  const skipBlockComment = (): void => {
-    maskOne();
-    maskOne();
-    while (index < content.length) {
-      if (content[index] === "*" && content[index + 1] === "/") {
-        maskOne();
-        maskOne();
-        return;
-      }
-      maskOne();
-    }
-    throw new Error(`${source}: unterminated block comment cannot be audited`);
-  };
-
-  const skipQuoted = (quote: "'" | '"'): void => {
-    maskOne();
-    while (index < content.length) {
-      if (content[index] === "\\") {
-        maskOne();
-        if (index < content.length) maskOne();
-      } else if (content[index] === quote) {
-        maskOne();
-        return;
-      } else if (content[index] === "\n") {
-        throw new Error(
-          `${source}: unterminated quoted string cannot be audited`,
-        );
-      } else {
-        maskOne();
-      }
-    }
-    throw new Error(`${source}: unterminated quoted string cannot be audited`);
-  };
-
-  const skipRegex = (): void => {
-    maskOne();
-    let inCharacterClass = false;
-    while (index < content.length) {
-      const character = content[index];
-      if (character === "\n") {
-        throw new Error(
-          `${source}: unterminated regex literal cannot be audited`,
-        );
-      }
-      if (character === "\\") {
-        maskOne();
-        if (index < content.length) maskOne();
-      } else if (character === "[") {
-        inCharacterClass = true;
-        maskOne();
-      } else if (character === "]") {
-        inCharacterClass = false;
-        maskOne();
-      } else if (character === "/" && !inCharacterClass) {
-        maskOne();
-        while (/[A-Za-z]/.test(content[index] ?? "")) maskOne();
-        return;
-      } else {
-        maskOne();
-      }
-    }
-    throw new Error(`${source}: unterminated regex literal cannot be audited`);
-  };
-
-  function skipTemplate(): void {
-    maskOne();
-    while (index < content.length) {
-      if (content[index] === "\\") {
-        maskOne();
-        if (index < content.length) maskOne();
-      } else if (content[index] === "`") {
-        maskOne();
-        return;
-      } else if (content[index] === "$" && content[index + 1] === "{") {
-        maskOne();
-        masked[index] = "{";
-        index++;
-        scanCode(true);
-      } else {
-        maskOne();
-      }
-    }
-    throw new Error(
-      `${source}: unterminated template literal cannot be audited`,
-    );
-  }
-
-  function scanCode(stopAtTemplateBrace: boolean): void {
-    let braceDepth = 0;
-    while (index < content.length) {
-      const character = content[index];
-      const next = content[index + 1];
-      if (stopAtTemplateBrace && character === "}" && braceDepth === 0) {
-        masked[index] = character;
-        index++;
-        return;
-      }
-      if (character === "/" && next === "/") {
-        skipLineComment();
-      } else if (character === "/" && next === "*") {
-        skipBlockComment();
-      } else if (character === "'") {
-        skipQuoted("'");
-      } else if (character === '"') {
-        skipQuoted('"');
-      } else if (character === "`") {
-        skipTemplate();
-      } else if (character === "/" && regexCanStart(index)) {
-        skipRegex();
-      } else {
-        masked[index] = character;
-        if (stopAtTemplateBrace && character === "{") braceDepth++;
-        else if (stopAtTemplateBrace && character === "}") braceDepth--;
-        index++;
-      }
-    }
-    if (stopAtTemplateBrace) {
-      throw new Error(
-        `${source}: unterminated template expression cannot be audited`,
-      );
-    }
-  }
-
-  scanCode(false);
-  return masked.join("");
+function isMemberExpression(
+  node: t.Node | null | undefined,
+): node is MemberExpression {
+  return node?.type === "MemberExpression" ||
+    node?.type === "OptionalMemberExpression";
 }
 
-function literalEnvArgument(
-  content: string,
-  openParen: number,
+function isCallExpression(
+  node: t.Node | null | undefined,
+): node is CallExpression {
+  return node?.type === "CallExpression" ||
+    node?.type === "OptionalCallExpression";
+}
+
+function memberName(node: MemberExpression): string | undefined {
+  if (!node.computed && node.property.type === "Identifier") {
+    return node.property.name;
+  }
+  return staticStringValue(node.property);
+}
+
+function isDirectDenoEnvAccess(node: t.Node): node is MemberExpression {
+  return isMemberExpression(node) && !node.computed &&
+    memberName(node) === "env" && node.object.type === "Identifier" &&
+    node.object.name === "Deno";
+}
+
+function isDirectDenoEnvGetCall(node: t.Node): node is CallExpression {
+  return isCallExpression(node) && isMemberExpression(node.callee) &&
+    !node.callee.computed && memberName(node.callee) === "get" &&
+    isDirectDenoEnvAccess(node.callee.object);
+}
+
+function isInsideKnownWrapper(ancestors: readonly t.Node[]): boolean {
+  const fn = ancestors.findLast((node) =>
+    [
+      "ArrowFunctionExpression",
+      "ClassMethod",
+      "ClassPrivateMethod",
+      "FunctionDeclaration",
+      "FunctionExpression",
+      "ObjectMethod",
+    ].includes(node.type)
+  );
+  return fn?.type === "FunctionDeclaration" && !!fn.id &&
+    WRAPPER_NAME_SET.has(fn.id.name);
+}
+
+function literalEnvKey(
+  node: t.Node | null | undefined,
   description: string,
 ): string {
-  let index = openParen + 1;
-  while (/\s/.test(content[index] ?? "")) index++;
-  const quote = content[index];
-  if (quote !== '"' && quote !== "'") {
+  const key = staticStringValue(node);
+  if (key === undefined) {
     throw new Error(
       `${description} must receive a string-literal env key; ` +
         "dynamic env reads cannot be audited",
     );
   }
-  const start = ++index;
-  while (index < content.length && content[index] !== quote) {
-    if (content[index] === "\\" || content[index] === "\n") {
-      throw new Error(
-        `${description} must use an unescaped string-literal env key`,
-      );
-    }
-    index++;
-  }
-  if (index >= content.length) {
-    throw new Error(`${description} has an unterminated env-key literal`);
-  }
-  const key = content.slice(start, index);
   if (!/^[A-Z][A-Z0-9_]*$/.test(key)) {
     throw new Error(`${description} has an invalid env key: ${key}`);
   }
   return key;
 }
 
-function wrapperFunctionRanges(code: string): Array<[number, number]> {
-  const ranges: Array<[number, number]> = [];
-  for (const name of WRAPPER_NAMES) {
-    const declaration = new RegExp(
-      String.raw`\bfunction\s+${name}\s*\([^)]*\)[^{]*\{`,
-      "g",
-    );
-    for (const match of code.matchAll(declaration)) {
-      const openBrace = match.index + match[0].lastIndexOf("{");
-      let depth = 1;
-      let end = openBrace + 1;
-      while (end < code.length && depth > 0) {
-        if (code[end] === "{") depth++;
-        else if (code[end] === "}") depth--;
-        end++;
-      }
-      ranges.push([openBrace, end]);
-    }
-  }
-  return ranges;
+function isAuditedEnvAccess(
+  node: MemberExpression,
+  ancestors: readonly t.Node[],
+): boolean {
+  const getter = ancestors.at(-1);
+  const call = ancestors.at(-2);
+  return isMemberExpression(getter) && getter.object === node &&
+    !getter.computed && memberName(getter) === "get" &&
+    isCallExpression(call) && call.callee === getter;
+}
+
+function isNonValueIdentifier(node: t.Identifier, parent: t.Node): boolean {
+  if (
+    parent.type.startsWith("TS") &&
+    ![
+      "TSAsExpression",
+      "TSInstantiationExpression",
+      "TSNonNullExpression",
+      "TSSatisfiesExpression",
+      "TSTypeAssertion",
+    ].includes(parent.type)
+  ) return true;
+  const isFunctionBinding = (parent.type === "FunctionDeclaration" ||
+    parent.type === "FunctionExpression") &&
+    (parent.id === node || parent.params.includes(node));
+  const isClassName = (parent.type === "ClassDeclaration" ||
+    parent.type === "ClassExpression") && parent.id === node;
+  if (
+    parent.type === "VariableDeclarator" && parent.id === node ||
+    isFunctionBinding || isClassName
+  ) return true;
+  if (
+    parent.type === "ObjectProperty" && parent.key === node &&
+    !parent.computed && !parent.shorthand
+  ) return true;
+  return [
+    "ImportDefaultSpecifier",
+    "ImportNamespaceSpecifier",
+    "ImportSpecifier",
+    "LabeledStatement",
+  ].includes(parent.type);
 }
 
 export function findEnvReads(filePath: string): Set<string> {
-  const content = Deno.readTextFileSync(filePath);
-  const code = maskNonCode(content, filePath);
-  const wrapperRanges = wrapperFunctionRanges(code);
+  const sourceFile = parseTypeScript(Deno.readTextFileSync(filePath), filePath);
   const reads = new Set<string>();
-  if (/\bDeno\s*(?:\?\.)?\s*\[/.test(code)) {
-    throw new Error(
-      `${filePath}: unmodelled computed Deno property access cannot be audited; ` +
-        "use a direct Deno property",
-    );
-  }
-  for (
-    const match of code.matchAll(/\bDeno\s*(?:\?\.|\.)\s*env\b/g)
-  ) {
-    const tail = code.slice(match.index + match[0].length);
-    const getter = tail.match(/^\s*(?:\?\.|\.)\s*get\s*\(/);
-    if (!getter) {
+
+  walkAst(sourceFile, (node, ancestors) => {
+    if (isDirectDenoEnvGetCall(node)) {
+      try {
+        reads.add(
+          literalEnvKey(node.arguments[0], `${filePath}: Deno.env.get()`),
+        );
+      } catch (error) {
+        // Source-local wrappers intentionally receive the name dynamically and
+        // are covered at their call sites below. Any other dynamic direct read
+        // fails closed rather than disappearing from launcher requirements.
+        if (
+          !(error as Error).message.includes("dynamic env reads") ||
+          !isInsideKnownWrapper(ancestors)
+        ) throw error;
+      }
+    }
+    if (
+      isCallExpression(node) && node.callee.type === "Identifier" &&
+      WRAPPER_NAME_SET.has(node.callee.name)
+    ) {
+      reads.add(
+        literalEnvKey(
+          node.arguments[0],
+          `${filePath}: ${node.callee.name}()`,
+        ),
+      );
+    }
+
+    if (
+      isDirectDenoEnvAccess(node) && !isAuditedEnvAccess(node, ancestors)
+    ) {
       throw new Error(
         `${filePath}: unmodelled Deno.env access cannot be audited; ` +
           'use Deno.env.get("LITERAL_KEY")',
       );
     }
-    const openParen = match.index + match[0].length +
-      getter[0].lastIndexOf("(");
-    try {
-      reads.add(
-        literalEnvArgument(content, openParen, `${filePath}: Deno.env.get()`),
+    if (
+      isMemberExpression(node) && node.computed &&
+      node.object.type === "Identifier" && node.object.name === "Deno"
+    ) {
+      throw new Error(
+        `${filePath}: unmodelled computed Deno property access cannot be audited; ` +
+          "use a direct Deno property",
       );
-    } catch (error) {
-      // Source-local wrappers intentionally receive the name dynamically and
-      // are covered at their call sites below. Any other dynamic direct read
-      // fails closed rather than disappearing from the launcher's requirements.
-      const insideWrapper = wrapperRanges.some(([start, end]) =>
-        match.index >= start && match.index < end
-      );
-      if (
-        !(error as Error).message.includes("dynamic env reads") ||
-        !insideWrapper
-      ) throw error;
     }
-  }
-  for (const name of WRAPPER_NAMES) {
-    const pattern = new RegExp(String.raw`\b${name}\s*\(`, "g");
-    for (const match of code.matchAll(pattern)) {
-      const previous = code[match.index - 1];
+    if (
+      isMemberExpression(node) && memberName(node) === "Deno" &&
+      node.object.type === "Identifier" &&
+      ["globalThis", "self", "window"].includes(node.object.name)
+    ) {
+      throw new Error(
+        `${filePath}: unmodelled Deno global access cannot be audited; ` +
+          "use direct Deno properties",
+      );
+    }
+    if (node.type === "Identifier" && node.name === "Deno") {
+      const parent = ancestors.at(-1);
+      const isDirectProperty = isMemberExpression(parent) &&
+        parent.object === node;
+      const isTypeof = parent?.type === "UnaryExpression" &&
+        parent.operator === "typeof";
       if (
-        previous !== undefined &&
-        (previous === "." || previous === "$" || /[A-Za-z0-9_]/.test(previous))
+        parent && !isDirectProperty && !isTypeof &&
+        !isNonValueIdentifier(node, parent)
       ) {
-        continue;
+        throw new Error(
+          `${filePath}: unmodelled Deno binding cannot be audited; ` +
+            "use direct Deno properties",
+        );
       }
-      if (/\bfunction\s*$/.test(code.slice(0, match.index))) continue;
-      const openParen = match.index + match[0].lastIndexOf("(");
-      reads.add(
-        literalEnvArgument(content, openParen, `${filePath}: ${name}()`),
-      );
     }
-  }
+  });
   return reads;
 }
 

@@ -45,6 +45,9 @@ set +a
 cd /path/to/ob1-selfhosted/server
 
 deno run \
+  --config scripts/deno.json \
+  --lock scripts/deno.lock \
+  --frozen \
   --allow-read=. \
   --allow-env=DB_HOST,DB_PORT,... \
   scripts/config_load_probe.ts
