@@ -9,16 +9,16 @@
 // Algorithm:
 //   1. Parse the mcp + ingester Dockerfiles and every Compose service whose
 //      effective `entrypoint` and/or `command` invokes `deno run`, including
-//      the supported base-plus-override stacks.
+//      built-image defaults and the supported base-plus-override stacks.
 //   2. Reject unrestricted grants, dynamic/multi-Deno Compose launchers, and
 //      executable Deno subcommands outside the supported `run` model.
 //   3. Validate the effective Deno config/import map against the checked-in
 //      resolution policy, parse each reachable TypeScript module into an AST,
 //      and fail closed on non-literal imports or unsupported semantics.
-//   4. Find string-literal env reads in the AST, fail closed on aliases and
-//      dynamic keys that cannot be proved safe, add explicit out-of-tree
-//      dependency reads, and fail if any required key is absent from the
-//      launcher's allowlist.
+//   4. Find string-literal Deno env reads in the AST, reject Node's process env
+//      surface, fail closed on aliases and dynamic keys that cannot be proved
+//      safe, add explicit out-of-tree dependency reads, and fail if any
+//      required key is absent from the launcher's allowlist.
 //
 // Over-permissive entries are generally not flagged. The deno-postgres driver
 // reads seven PG* keys outside this source tree, so any reachable import of the
@@ -121,17 +121,9 @@ export function parseDockerfile(dockerfilePath: string): {
   configPath?: string | null;
   importMapPath?: string;
 } {
-  const content = Deno.readTextFileSync(dockerfilePath);
-  const entrypointArgs = dockerInstructionArguments(
-    content,
-    "ENTRYPOINT",
-    dockerfilePath,
-  ) ?? [];
-  const commandArgs = dockerInstructionArguments(
-    content,
-    "CMD",
-    dockerfilePath,
-  );
+  const defaults = dockerImageDefaults(dockerfilePath);
+  const entrypointArgs = defaults.entrypoint ?? [];
+  const commandArgs = defaults.command;
   if (!commandArgs) throw new Error(`No CMD line in ${dockerfilePath}`);
   const target = parseDenoRunTarget(
     effectiveDockerArguments(entrypointArgs, commandArgs, dockerfilePath),
@@ -141,17 +133,53 @@ export function parseDockerfile(dockerfilePath: string): {
   return target;
 }
 
+interface DockerImageDefaults {
+  baseImage: string;
+  entrypoint?: string[];
+  command?: string[];
+}
+
+function dockerImageDefaults(dockerfilePath: string): DockerImageDefaults {
+  const content = Deno.readTextFileSync(dockerfilePath);
+  const stages = [...content.matchAll(
+    /^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)/gmi,
+  )];
+  const finalStage = stages.at(-1);
+  if (!finalStage || finalStage.index === undefined) {
+    throw new Error(`No FROM line in ${dockerfilePath}`);
+  }
+  const finalStageContent = content.slice(finalStage.index);
+  return {
+    baseImage: finalStage[1],
+    entrypoint: dockerInstructionArguments(
+      finalStageContent,
+      "ENTRYPOINT",
+      dockerfilePath,
+    ),
+    command: dockerInstructionArguments(
+      finalStageContent,
+      "CMD",
+      dockerfilePath,
+    ),
+  };
+}
+
 function dockerInstructionArguments(
   content: string,
   instruction: "CMD" | "ENTRYPOINT",
   source: string,
 ): string[] | undefined {
   const matches = [...content.matchAll(
-    new RegExp(`^${instruction}\\s+(.+)$`, "gm"),
+    new RegExp(`^\\s*${instruction}\\s+(.+)$`, "gmi"),
   )];
   const raw = matches.at(-1)?.[1].trim();
   if (!raw) return undefined;
-  if (!raw.startsWith("[")) return splitCommand(raw, source);
+  if (!raw.startsWith("[")) {
+    throw new Error(
+      `${source}: shell-form ${instruction} cannot be audited; ` +
+        "use a JSON string list",
+    );
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -180,11 +208,20 @@ function effectiveDockerArguments(
     entrypointArgs[1] === "-c" &&
     entrypointArgs[2] !== undefined
   ) {
-    // With an exec-form `sh -c` entrypoint, the next entrypoint argument is
-    // $0 and Docker's CMD arguments become $1... / "$@". Expand only that
-    // exact shell token; the rest of the script remains literal launcher data.
+    // With an exec-form `sh -c` entrypoint, the argument after the script is
+    // $0. If ENTRYPOINT provides no sentinel, Docker's first CMD argument is
+    // consumed as $0 and only the remainder becomes $1... / "$@".
+    const hasEntrypointArgv0 = entrypointArgs[3] !== undefined;
+    const argv0 = hasEntrypointArgv0 ? entrypointArgs[3] : commandArgs[0];
+    const positionals = hasEntrypointArgv0
+      ? [...entrypointArgs.slice(4), ...commandArgs]
+      : commandArgs.slice(1);
     return splitCommand(entrypointArgs[2], source).flatMap((argument) =>
-      argument === "$@" ? commandArgs : [argument]
+      argument === "$@"
+        ? positionals
+        : argument === "$0" && argv0 !== undefined
+        ? [argv0]
+        : [argument]
     );
   }
   return [...entrypointArgs, ...commandArgs];
@@ -892,12 +929,167 @@ export function parseComposeTargets(
   if (!isRecord(document.services)) {
     throw new Error(`${source}: services must be a mapping`);
   }
-  return parseComposeServiceTargets(document.services, source);
+  return parseComposeServiceTargets(
+    document.services,
+    source,
+    dirname(resolve(REPO_DIR, source)),
+  );
+}
+
+function literalComposeBuildPath(
+  value: unknown,
+  source: string,
+  field: "context" | "dockerfile",
+): string {
+  if (
+    typeof value !== "string" || value.length === 0 || value.includes("$") ||
+    /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value) || value.startsWith("git@")
+  ) {
+    throw new Error(
+      `${source}: build ${field} must be a literal local path`,
+    );
+  }
+  return value;
+}
+
+function composeBuildDockerfile(
+  rawService: UnknownRecord,
+  source: string,
+  composeBaseDirectory: string,
+): string | undefined {
+  const build = rawService.build;
+  if (build === undefined || build === null) return undefined;
+
+  let context = ".";
+  let dockerfile = "Dockerfile";
+  if (typeof build === "string") {
+    context = literalComposeBuildPath(build, source, "context");
+  } else if (isRecord(build)) {
+    if (build.dockerfile_inline !== undefined || build.target !== undefined) {
+      throw new Error(
+        `${source}: inline or target-specific Docker builds cannot be audited`,
+      );
+    }
+    if (build.context !== undefined) {
+      context = literalComposeBuildPath(build.context, source, "context");
+    }
+    if (build.dockerfile !== undefined) {
+      dockerfile = literalComposeBuildPath(
+        build.dockerfile,
+        source,
+        "dockerfile",
+      );
+    }
+  } else {
+    throw new Error(`${source}: build must be a path or mapping`);
+  }
+
+  const path = resolve(composeBaseDirectory, context, dockerfile);
+  try {
+    if (!Deno.statSync(path).isFile) {
+      throw new Error("not a regular file");
+    }
+  } catch (error) {
+    throw new Error(
+      `${source}: build Dockerfile cannot be resolved at ${path}: ${
+        (error as Error).message
+      }`,
+    );
+  }
+  return path;
+}
+
+function defaultsContainDeno(defaults: DockerImageDefaults): boolean {
+  return [...defaults.entrypoint ?? [], ...defaults.command ?? []].some(
+    (argument) =>
+      isDenoExecutable(argument) || containsDenoExecutableText(argument),
+  );
+}
+
+const KNOWN_NON_DENO_BASE_IMAGES = new Set([
+  // This checked-in derivative deliberately inherits Caddy's pinned launcher;
+  // it contains no Deno runtime and has no Compose command override.
+  "caddy:2.11.3-alpine",
+  "scratch",
+]);
+
+function effectiveComposeArguments(
+  rawService: UnknownRecord,
+  source: string,
+  composeBaseDirectory: string,
+): string[] | undefined {
+  const overridesEntrypoint = Object.hasOwn(rawService, "entrypoint") &&
+    rawService.entrypoint !== null;
+  const overridesCommand = Object.hasOwn(rawService, "command") &&
+    rawService.command !== null;
+  const explicitEntrypoint = overridesEntrypoint
+    ? literalArguments(rawService.entrypoint, source, "entrypoint")
+    : undefined;
+  const explicitCommand = overridesCommand
+    ? literalArguments(rawService.command, source, "command")
+    : undefined;
+
+  // A non-null Compose entrypoint replaces the image entrypoint and suppresses
+  // its default CMD. Only an explicit Compose command is appended.
+  if (explicitEntrypoint !== undefined) {
+    return [...explicitEntrypoint, ...explicitCommand ?? []];
+  }
+
+  const dockerfile = composeBuildDockerfile(
+    rawService,
+    source,
+    composeBaseDirectory,
+  );
+  if (dockerfile === undefined) {
+    if (explicitCommand === undefined) return undefined;
+    if (rawService.image !== undefined) {
+      throw new Error(
+        `${source}: command overrides an image whose ENTRYPOINT cannot be resolved; ` +
+          "use a checked-in build or an explicit entrypoint",
+      );
+    }
+    // Parser fixtures without image metadata model an image with no ENTRYPOINT.
+    return explicitCommand;
+  }
+
+  const defaults = dockerImageDefaults(dockerfile);
+  if (defaults.entrypoint === undefined) {
+    if (explicitCommand !== undefined || defaultsContainDeno(defaults)) {
+      throw new Error(
+        `${source}: built image ENTRYPOINT cannot be resolved from ${dockerfile}; ` +
+          "declare it explicitly before overriding or auditing CMD",
+      );
+    }
+    if (!KNOWN_NON_DENO_BASE_IMAGES.has(defaults.baseImage)) {
+      throw new Error(
+        `${source}: built image launcher defaults inherited from ${defaults.baseImage} ` +
+          `cannot be resolved from ${dockerfile}`,
+      );
+    }
+    return undefined;
+  }
+  const command = explicitCommand ?? defaults.command;
+  if (command === undefined) {
+    if (defaultsContainDeno(defaults)) {
+      throw new Error(
+        `${source}: built image CMD cannot be resolved from ${dockerfile}`,
+      );
+    }
+    if (!KNOWN_NON_DENO_BASE_IMAGES.has(defaults.baseImage)) {
+      throw new Error(
+        `${source}: built image launcher defaults inherited from ${defaults.baseImage} ` +
+          `cannot be resolved from ${dockerfile}`,
+      );
+    }
+    return undefined;
+  }
+  return effectiveDockerArguments(defaults.entrypoint, command, source);
 }
 
 function parseComposeServiceTargets(
   services: UnknownRecord,
   source: string,
+  composeBaseDirectory: string,
 ): CheckTarget[] {
   const targets: CheckTarget[] = [];
   for (const [serviceName, rawService] of Object.entries(services)) {
@@ -911,16 +1103,12 @@ function parseComposeServiceTargets(
         `${label}: Compose extends cannot be audited; use an explicit checked-in stack`,
       );
     }
-    const entrypointArgs = rawService.entrypoint === undefined ||
-        rawService.entrypoint === null
-      ? []
-      : literalArguments(rawService.entrypoint, label, "entrypoint");
-    const commandArgs = rawService.command === undefined ||
-        rawService.command === null
-      ? []
-      : literalArguments(rawService.command, label, "command");
-    if (entrypointArgs.length === 0 && commandArgs.length === 0) continue;
-    const launcherArgs = [...entrypointArgs, ...commandArgs];
+    const launcherArgs = effectiveComposeArguments(
+      rawService,
+      label,
+      composeBaseDirectory,
+    );
+    if (!launcherArgs || launcherArgs.length === 0) continue;
     const shellIndex = launcherArgs.findIndex(isShellExecutable);
     if (
       shellIndex >= 0 &&
@@ -971,9 +1159,14 @@ export function parseComposeStackTargets(
       const current = isRecord(effectiveServices[serviceName])
         ? { ...effectiveServices[serviceName] }
         : {};
-      for (const field of ["entrypoint", "command"] as const) {
+      for (
+        const field of ["build", "image", "entrypoint", "command"] as const
+      ) {
         if (Object.hasOwn(rawService, field)) {
-          current[field] = rawService[field];
+          current[field] = field === "build" &&
+              isRecord(current.build) && isRecord(rawService.build)
+            ? { ...current.build, ...rawService.build }
+            : rawService[field];
         }
       }
       effectiveServices[serviceName] = current;
@@ -982,6 +1175,7 @@ export function parseComposeStackTargets(
   return parseComposeServiceTargets(
     effectiveServices,
     layers.map((layer) => layer.source).join(" + "),
+    dirname(resolve(REPO_DIR, layers[0].source)),
   );
 }
 
@@ -1344,6 +1538,32 @@ function isDirectDenoEnvGetCall(node: t.Node): node is CallExpression {
     isDirectDenoEnvAccess(node.callee.object);
 }
 
+function isNodeProcessModuleReference(node: t.Node): boolean {
+  const isProcessSpecifier = (value: t.Node | null | undefined): boolean => {
+    const specifier = staticStringValue(value);
+    return specifier === "node:process" || specifier === "process";
+  };
+  if (node.type === "ImportDeclaration") {
+    return isProcessSpecifier(node.source);
+  }
+  if (
+    (node.type === "ExportNamedDeclaration" ||
+      node.type === "ExportAllDeclaration") && node.source
+  ) {
+    return isProcessSpecifier(node.source);
+  }
+  if (node.type === "ImportExpression") {
+    return isProcessSpecifier(node.source);
+  }
+  if (node.type === "TSImportType") {
+    return isProcessSpecifier(node.argument);
+  }
+  return isCallExpression(node) &&
+    (node.callee.type === "Import" ||
+      node.callee.type === "Identifier" && node.callee.name === "require") &&
+    isProcessSpecifier(node.arguments[0]);
+}
+
 function innermostFunction(ancestors: readonly t.Node[]): t.Node | undefined {
   return ancestors.findLast((node) =>
     [
@@ -1561,6 +1781,35 @@ export function findEnvReads(filePath: string): Set<string> {
   const reads = new Set<string>();
 
   walkAst(sourceFile, (node, ancestors) => {
+    if (isNodeProcessModuleReference(node)) {
+      throw new Error(
+        `${filePath}: node:process environment API cannot be audited; ` +
+          'use Deno.env.get("LITERAL_KEY")',
+      );
+    }
+    if (
+      isMemberExpression(node) && memberName(node) === "process" &&
+      node.object.type === "Identifier" &&
+      ["global", "globalThis", "self", "window"].includes(node.object.name)
+    ) {
+      throw new Error(
+        `${filePath}: node:process environment API cannot be audited; ` +
+          'use Deno.env.get("LITERAL_KEY")',
+      );
+    }
+    if (node.type === "Identifier" && node.name === "process") {
+      const parent = ancestors.at(-1);
+      const isNamedProperty = isMemberExpression(parent) &&
+        parent.property === node && !parent.computed;
+      if (
+        parent && !isNamedProperty && !isNonValueIdentifier(node, parent)
+      ) {
+        throw new Error(
+          `${filePath}: node:process environment API cannot be audited; ` +
+            'use Deno.env.get("LITERAL_KEY")',
+        );
+      }
+    }
     if (isDirectDenoEnvGetCall(node)) {
       try {
         reads.add(

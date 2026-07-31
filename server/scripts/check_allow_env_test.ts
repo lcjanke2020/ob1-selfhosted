@@ -120,6 +120,99 @@ services:
   );
 });
 
+Deno.test("Compose command overrides inherit built image launchers", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      `${directory}/Dockerfile`,
+      `FROM denoland/deno:2.9.4
+ENTRYPOINT ["deno", "run", "--no-config", "--allow-env=SAFE"]
+CMD ["safe.ts"]
+`,
+    );
+    await Deno.writeTextFile(
+      `${directory}/actual.ts`,
+      'export const value = Deno.env.get("IMAGE_DEFAULT_ONLY");\n',
+    );
+
+    const targets = parseComposeStackTargets([
+      {
+        content: `services:\n  tool:\n    build:\n      context: .\n`,
+        source: `${directory}/compose.yml`,
+      },
+      {
+        content: `services:\n  tool:\n    command: [actual.ts]\n`,
+        source: `${directory}/override.yml`,
+      },
+    ]);
+
+    assertEquals(targets.length, 1);
+    assertEquals(targets[0].entrypoint, "actual.ts");
+    assertEquals([...targets[0].allowEnv], ["SAFE"]);
+    assertEquals(analyzeTarget(targets[0], directory).missing, [
+      "IMAGE_DEFAULT_ONLY",
+    ]);
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("Compose command overrides fail closed for unresolved images", () => {
+  assertThrows(
+    () =>
+      parseComposeTargets(
+        `services:\n  tool:\n    image: example.invalid/tool:1\n    command: [actual.ts]\n`,
+        "compose.yml",
+      ),
+    Error,
+    "command overrides an image whose ENTRYPOINT cannot be resolved",
+  );
+});
+
+Deno.test("Compose builds fail closed on unresolved launcher defaults", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      `${directory}/Dockerfile`,
+      "FROM denoland/deno:2.9.4\n",
+    );
+    assertThrows(
+      () =>
+        parseComposeTargets(
+          `services:\n  tool:\n    build: .\n`,
+          `${directory}/compose.yml`,
+        ),
+      Error,
+      "built image launcher defaults inherited from denoland/deno:2.9.4 cannot be resolved",
+    );
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("Compose build defaults come only from the final Docker stage", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      `${directory}/Dockerfile`,
+      `FROM denoland/deno:2.9.4 AS builder
+ENTRYPOINT ["deno", "run", "--allow-env=EARLIER_STAGE"]
+CMD ["earlier.ts"]
+FROM caddy:2.11.3-alpine
+`,
+    );
+    assertEquals(
+      parseComposeTargets(
+        `services:\n  perimeter:\n    build: .\n`,
+        `${directory}/compose.yml`,
+      ),
+      [],
+    );
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
 Deno.test("Deno global options before run remain auditable", () => {
   for (
     const globalOptions of [
@@ -612,6 +705,59 @@ export const present = Deno.env.get("PRESENT") ?? child;
     );
 
     assertEquals(analysis.missing, ["CHILD_MISSING"]);
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("Node process environment access fails closed", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      `${directory}/main.ts`,
+      `import process from "node:process";
+export const value = process.env.PROCESS_ENV_ONLY;
+`,
+    );
+
+    assertThrows(
+      () =>
+        analyzeTarget(
+          {
+            source: "compose.yml#tool",
+            entrypoint: "main.ts",
+            allowEnv: new Set(["SAFE"]),
+            configPath: null,
+          },
+          directory,
+        ),
+      Error,
+      "node:process environment API cannot be audited",
+    );
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("global and aliased Node process bindings fail closed", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    const sources = [
+      "export const value = process.env.GLOBAL_PROCESS_ENV;\n",
+      "export const value = globalThis.process.env.GLOBAL_PROCESS_ENV;\n",
+      `import { env as nodeEnv } from "node:process";
+export const value = nodeEnv.ALIASED_PROCESS_ENV;
+`,
+    ];
+    for (const [index, content] of sources.entries()) {
+      const path = `${directory}/process_${index}.ts`;
+      await Deno.writeTextFile(path, content);
+      assertThrows(
+        () => findEnvReads(path),
+        Error,
+        "node:process environment API cannot be audited",
+      );
+    }
   } finally {
     await Deno.remove(directory, { recursive: true });
   }
@@ -1139,6 +1285,27 @@ Deno.test("Dockerfile parsing shares unrestricted-grant enforcement", async () =
   }
 });
 
+Deno.test("Docker shell-form launchers fail closed", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    const path = `${directory}/Dockerfile`;
+    await Deno.writeTextFile(
+      path,
+      `FROM denoland/deno:2.9.4
+ENTRYPOINT []
+CMD deno run --allow-env=SAFE tool.ts
+`,
+    );
+    assertThrows(
+      () => parseDockerfile(path),
+      Error,
+      "shell-form CMD cannot be audited",
+    );
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
 Deno.test("Dockerfile parsing rejects env argument expansion", async () => {
   const directory = await Deno.makeTempDir();
   try {
@@ -1174,6 +1341,35 @@ CMD ["first.ts"]
       () => parseDockerfile(path),
       Error,
       "multiple Deno invocations cannot be audited",
+    );
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("Docker shell entrypoints model sh -c argv0 consumption", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    const path = `${directory}/Dockerfile`;
+    await Deno.writeTextFile(
+      path,
+      `FROM denoland/deno:2.9.4
+ENTRYPOINT ["sh", "-c", "exec deno run --no-config --allow-env=SAFE \\"$@\\""]
+CMD ["safe.ts", "actual.ts"]
+`,
+    );
+    await Deno.writeTextFile(
+      `${directory}/actual.ts`,
+      'export const value = Deno.env.get("SHELL_POSITIONAL_ONLY");\n',
+    );
+
+    const target = parseDockerfile(path);
+    assertEquals(target.entrypoint, "actual.ts");
+    assertEquals(
+      analyzeTarget({ source: path, ...target }, directory).missing,
+      [
+        "SHELL_POSITIONAL_ONLY",
+      ],
     );
   } finally {
     await Deno.remove(directory, { recursive: true });

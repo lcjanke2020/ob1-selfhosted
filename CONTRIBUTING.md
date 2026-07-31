@@ -34,9 +34,12 @@ For compose or Caddyfile changes, sanity-check locally from the relevant `deploy
 
 CI checks the Dockerfiles and every checked-in Compose service whose effective
 `entrypoint` and/or `command` launches `deno run`, including the documented
-base-plus-override stacks. Custom Deno config/import-map semantics fail closed;
-the checked-in `server/deno.json` imports are the explicit audited policy. CI
-cannot inspect a systemd unit maintained only on a deployment host. Before
+base-plus-override stacks and launcher defaults inherited from their checked-in
+build Dockerfiles. Unresolved image defaults, ambiguous shell positional
+arguments, Node's `process.env` surface, and custom Deno config/import-map
+semantics fail closed; the checked-in `server/deno.json` imports are the
+explicit audited policy. CI cannot inspect a systemd unit maintained only on a
+deployment host. Before
 restarting such a unit, load the same environment file the unit uses and
 validate the real `index.ts` import graph under the unit's **exact**
 comma-separated allowlist:
