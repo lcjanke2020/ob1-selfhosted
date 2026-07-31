@@ -81,14 +81,89 @@ services:
 });
 
 Deno.test("Deno global options before run remain auditable", () => {
-  const target = onlyTarget(`
+  for (
+    const globalOptions of [
+      ["--quiet"],
+      ["--log-level", "info"],
+      ["-L", "debug"],
+    ]
+  ) {
+    const target = onlyTarget(`
 services:
   tool:
-    entrypoint: [deno, --quiet, run, --allow-env=FOO, /app/tool.ts]
+    entrypoint: [deno, ${
+      globalOptions.join(", ")
+    }, run, --allow-env=FOO, /app/tool.ts]
 `);
 
-  assertEquals(target.entrypoint, "tool.ts");
-  assertEquals([...target.allowEnv], ["FOO"]);
+    assertEquals(target.entrypoint, "tool.ts");
+    assertEquals([...target.allowEnv], ["FOO"]);
+  }
+});
+
+Deno.test("global option operands cannot hide a later unrestricted grant", () => {
+  for (const globalOptions of ["--log-level, info", "-L, info"]) {
+    assertThrows(
+      () =>
+        onlyTarget(`
+services:
+  unsafe-tool:
+    entrypoint: [deno, ${globalOptions}, run, -A, /app/tool.ts]
+`),
+      Error,
+      "-A/--allow-all grants every permission",
+    );
+  }
+});
+
+Deno.test("unknown global option boundaries fail closed after deno is found", () => {
+  assertThrows(
+    () =>
+      onlyTarget(`
+services:
+  unsafe-tool:
+    entrypoint: [deno, --future-global, value, run, -A, /app/tool.ts]
+`),
+    Error,
+    "global --future-global has unknown argument boundaries",
+  );
+});
+
+Deno.test("multiple Deno invocations in one shell launcher fail closed", () => {
+  assertThrows(
+    () =>
+      onlyTarget(`
+services:
+  unsafe-tool:
+    entrypoint:
+      - sh
+      - -c
+      - "deno run --allow-env=FIRST_ENV /app/first.ts && deno run -A /app/second.ts"
+`),
+    Error,
+    "multiple Deno invocations cannot be audited",
+  );
+});
+
+Deno.test("executable Deno subcommands outside run fail closed", () => {
+  for (
+    const launcher of [
+      '[deno, eval, "console.log(1)"]',
+      "[deno, serve, -A, /app/index.ts]",
+      "[deno, task, start]",
+    ]
+  ) {
+    assertThrows(
+      () =>
+        onlyTarget(`
+services:
+  unsafe-tool:
+    entrypoint: ${launcher}
+`),
+      Error,
+      "is not an auditable launcher",
+    );
+  }
 });
 
 Deno.test("Deno run option operands cannot become the audited module", () => {
@@ -369,16 +444,21 @@ Deno.test("env reads survive templates, optional chaining, and regex literals", 
     await Deno.writeTextFile(
       path,
       `
+export default /['"]/;
 const strip = (value: string) => value.replace(/['"]/g, "");
 export const rendered = \`value=\${Deno.env.get("TEMPLATE_ENV")}\`;
 export const optional = Deno.env?.get("OPTIONAL_ENV");
+export const afterDefaultRegex = Deno.env.get("AFTER_DEFAULT_REGEX");
 export const afterRegex = Deno.env.get("AFTER_REGEX");
 export const stringFake = 'Deno.env.get("STRING_FAKE")';
+export const bracketStringFake = 'Deno["env"].get("BRACKET_STRING_FAKE")';
 // Deno.env.get("COMMENT_FAKE");
+// Deno["env"].get("BRACKET_COMMENT_FAKE");
 `,
     );
 
     assertEquals([...findEnvReads(path)].sort(), [
+      "AFTER_DEFAULT_REGEX",
       "AFTER_REGEX",
       "OPTIONAL_ENV",
       "TEMPLATE_ENV",
@@ -397,6 +477,17 @@ Deno.test("unmodelled Deno.env APIs fail closed", async () => {
       () => findEnvReads(path),
       Error,
       "unmodelled Deno.env access cannot be audited",
+    );
+
+    const bracketPath = `${directory}/bracket.ts`;
+    await Deno.writeTextFile(
+      bracketPath,
+      'export const value = Deno["env"].get("BRACKET_ENV");\n',
+    );
+    assertThrows(
+      () => findEnvReads(bracketPath),
+      Error,
+      "unmodelled computed Deno property access cannot be audited",
     );
   } finally {
     await Deno.remove(directory, { recursive: true });

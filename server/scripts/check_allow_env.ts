@@ -9,8 +9,8 @@
 // Algorithm:
 //   1. Parse the mcp + ingester Dockerfiles and every Compose service whose
 //      explicit `entrypoint` and/or `command` invokes `deno run`.
-//   2. Reject unrestricted Deno grants and dynamic Compose launchers before
-//      deciding whether a checked-in command is auditable.
+//   2. Reject unrestricted grants, dynamic/multi-Deno Compose launchers, and
+//      executable Deno subcommands outside the supported `run` model.
 //   3. Walk the relative-import graph from each TypeScript entrypoint,
 //      collecting every reachable in-tree .ts file.
 //   4. Find string-literal env reads, fail closed when a known wrapper receives
@@ -240,38 +240,6 @@ interface DenoInvocation {
   runArguments: string[];
 }
 
-const DENO_SUBCOMMANDS = new Set([
-  "add",
-  "bench",
-  "check",
-  "clean",
-  "compile",
-  "coverage",
-  "deploy",
-  "doc",
-  "eval",
-  "fmt",
-  "info",
-  "install",
-  "jupyter",
-  "lint",
-  "repl",
-  "serve",
-  "task",
-  "test",
-  "upgrade",
-  "watch",
-]);
-
-const GLOBAL_OPTIONS_WITH_VALUES = new Set([
-  "--cert",
-  "--conditions",
-  "-c",
-  "--config",
-  "--location",
-  "--v8-flags",
-]);
-
 const RUN_OPTIONS_WITH_VALUES = new Set([
   "--cert",
   "--conditions",
@@ -285,6 +253,16 @@ const RUN_OPTIONS_WITH_VALUES = new Set([
   "--location",
   "--minimum-dependency-age",
   "--seed",
+]);
+
+// Deno exposes the run flags as root/global flags too. This set deliberately
+// includes every auditable required-value run option plus root-only log-level; an
+// unrecognised bare global option fails closed below instead of letting its
+// operand masquerade as a non-Deno subcommand.
+const GLOBAL_OPTIONS_WITH_VALUES = new Set([
+  ...RUN_OPTIONS_WITH_VALUES,
+  "-L",
+  "--log-level",
 ]);
 
 const RUN_STANDALONE_OPTIONS = new Set([
@@ -336,53 +314,95 @@ function optionName(argument: string): string {
   return argument.split("=", 1)[0];
 }
 
+function isDenoExecutable(value: string): boolean {
+  return /(^|[\\/])deno(?:\.exe)?$/i.test(value);
+}
+
+function optionHasKnownBoundaries(
+  argument: string,
+  standaloneOptions: ReadonlySet<string>,
+): boolean {
+  const name = optionName(argument);
+  return argument.includes("=") ||
+    standaloneOptions.has(name) ||
+    /^--(?:allow|deny|ignore)-(?:env|ffi|import|net|read|run|sys|write)$/
+      .test(name) ||
+    /^-[A-Za-z]{1,}$/.test(name);
+}
+
 function invocationFromArguments(
   args: string[],
   source: string,
 ): DenoInvocation | undefined {
-  const isDeno = (value: string) => /(^|[\\/])deno(?:\.exe)?$/i.test(value);
-  for (let denoIndex = 0; denoIndex < args.length; denoIndex++) {
-    if (!isDeno(args[denoIndex])) continue;
-    const globalOptions: string[] = [];
-    for (let index = denoIndex + 1; index < args.length; index++) {
-      const argument = args[index];
-      if (argument === "run") {
-        return { globalOptions, runArguments: args.slice(index + 1) };
+  const denoIndex = args.findIndex(isDenoExecutable);
+  if (denoIndex < 0) return undefined;
+
+  const globalOptions: string[] = [];
+  for (let index = denoIndex + 1; index < args.length; index++) {
+    const argument = args[index];
+    if (argument === "run") {
+      return { globalOptions, runArguments: args.slice(index + 1) };
+    }
+    if (!argument.startsWith("-")) {
+      if (/\.tsx?(?:[?#].*)?$/.test(argument)) {
+        throw new Error(
+          `${source}: implicit Deno execution cannot be audited; ` +
+            "spell the launcher as deno run ...",
+        );
       }
-      if (DENO_SUBCOMMANDS.has(argument)) break;
-      if (!argument.startsWith("-")) {
-        if (/\.tsx?(?:[?#].*)?$/.test(argument)) {
-          throw new Error(
-            `${source}: implicit Deno execution cannot be audited; ` +
-              "spell the launcher as deno run ...",
-          );
-        }
-        break;
+      throw new Error(
+        `${source}: deno ${argument} is not an auditable launcher; ` +
+          "use one explicit deno run ... command",
+      );
+    }
+
+    rejectUnauditableOption(argument, source);
+    globalOptions.push(argument);
+    const name = optionName(argument);
+    if (GLOBAL_OPTIONS_WITH_VALUES.has(name) && !argument.includes("=")) {
+      if (index + 1 >= args.length) {
+        throw new Error(`${source}: ${name} is missing its value`);
       }
-      globalOptions.push(argument);
-      const name = optionName(argument);
-      if (GLOBAL_OPTIONS_WITH_VALUES.has(name) && !argument.includes("=")) {
-        if (index + 1 >= args.length) {
-          throw new Error(`${source}: ${name} is missing its value`);
-        }
-        index++;
-      }
+      index++;
+      continue;
+    }
+    if (!optionHasKnownBoundaries(argument, RUN_STANDALONE_OPTIONS)) {
+      throw new Error(
+        `${source}: global ${argument} has unknown argument boundaries; ` +
+          "use a self-contained --option=value form",
+      );
     }
   }
-  return undefined;
+
+  throw new Error(
+    `${source}: Deno launcher has no explicit run subcommand`,
+  );
 }
 
 function denoInvocation(
   args: string[],
   source: string,
 ): DenoInvocation | undefined {
-  const direct = invocationFromArguments(args, source);
-  if (direct) return direct;
+  const directCount = args.filter(isDenoExecutable).length;
+  if (directCount > 1) {
+    throw new Error(
+      `${source}: multiple Deno invocations cannot be audited; ` +
+        "use one launcher per service",
+    );
+  }
+  if (directCount === 1) return invocationFromArguments(args, source);
 
   // A shell-form entrypoint may put the entire command in one `sh -c`
   // argument. Flatten only as a fallback so direct list arguments keep their
   // original boundaries.
   const flattened = args.flatMap((value) => splitCommand(value, source));
+  const flattenedCount = flattened.filter(isDenoExecutable).length;
+  if (flattenedCount > 1) {
+    throw new Error(
+      `${source}: multiple Deno invocations cannot be audited; ` +
+        "use one launcher per service",
+    );
+  }
   return invocationFromArguments(flattened, source);
 }
 
@@ -433,14 +453,7 @@ function parseRunArguments(
       continue;
     }
     if (
-      !argument.includes("=") &&
-      !RUN_STANDALONE_OPTIONS.has(name) &&
-      !/^--(?:allow|deny|ignore)-(?:env|ffi|import|net|read|run|sys|write)$/
-        .test(
-          name,
-        ) &&
-      !/^-[AEINPRSW]$/.test(name) &&
-      !/^-[A-Za-z]{2,}$/.test(name)
+      !optionHasKnownBoundaries(argument, RUN_STANDALONE_OPTIONS)
     ) {
       throw new Error(
         `${source}: ${argument} has unknown argument boundaries; ` +
@@ -686,7 +699,7 @@ export function walkImports(entrypoint: string, baseDir: string): Set<string> {
   return visited;
 }
 
-function maskNonCode(content: string): string {
+function maskNonCode(content: string, source: string): string {
   // Keep indexes aligned with the original UTF-16 string so regex match
   // offsets can be used to read literal arguments from `content`.
   const masked = Array<string>(content.length).fill(" ");
@@ -703,7 +716,7 @@ function maskNonCode(content: string): string {
     if (previous < 0) return true;
     if ("=(,:[!&|?{};+-*%~^<>".includes(masked[previous])) return true;
     const prefix = masked.slice(0, at).join("").trimEnd();
-    return /(?:^|[^A-Za-z0-9_$])(?:await|case|delete|do|else|in|instanceof|new|of|return|throw|typeof|void|yield)$/
+    return /(?:^|[^A-Za-z0-9_$])(?:await|case|default|delete|do|else|extends|in|instanceof|new|of|return|throw|typeof|void|yield)$/
       .test(
         prefix,
       );
@@ -724,6 +737,7 @@ function maskNonCode(content: string): string {
       }
       maskOne();
     }
+    throw new Error(`${source}: unterminated block comment cannot be audited`);
   };
 
   const skipQuoted = (quote: "'" | '"'): void => {
@@ -735,10 +749,15 @@ function maskNonCode(content: string): string {
       } else if (content[index] === quote) {
         maskOne();
         return;
+      } else if (content[index] === "\n") {
+        throw new Error(
+          `${source}: unterminated quoted string cannot be audited`,
+        );
       } else {
         maskOne();
       }
     }
+    throw new Error(`${source}: unterminated quoted string cannot be audited`);
   };
 
   const skipRegex = (): void => {
@@ -746,7 +765,11 @@ function maskNonCode(content: string): string {
     let inCharacterClass = false;
     while (index < content.length) {
       const character = content[index];
-      if (character === "\n") return;
+      if (character === "\n") {
+        throw new Error(
+          `${source}: unterminated regex literal cannot be audited`,
+        );
+      }
       if (character === "\\") {
         maskOne();
         if (index < content.length) maskOne();
@@ -764,6 +787,7 @@ function maskNonCode(content: string): string {
         maskOne();
       }
     }
+    throw new Error(`${source}: unterminated regex literal cannot be audited`);
   };
 
   function skipTemplate(): void {
@@ -784,6 +808,9 @@ function maskNonCode(content: string): string {
         maskOne();
       }
     }
+    throw new Error(
+      `${source}: unterminated template literal cannot be audited`,
+    );
   }
 
   function scanCode(stopAtTemplateBrace: boolean): void {
@@ -814,6 +841,11 @@ function maskNonCode(content: string): string {
         else if (stopAtTemplateBrace && character === "}") braceDepth--;
         index++;
       }
+    }
+    if (stopAtTemplateBrace) {
+      throw new Error(
+        `${source}: unterminated template expression cannot be audited`,
+      );
     }
   }
 
@@ -878,9 +910,15 @@ function wrapperFunctionRanges(code: string): Array<[number, number]> {
 
 export function findEnvReads(filePath: string): Set<string> {
   const content = Deno.readTextFileSync(filePath);
-  const code = maskNonCode(content);
+  const code = maskNonCode(content, filePath);
   const wrapperRanges = wrapperFunctionRanges(code);
   const reads = new Set<string>();
+  if (/\bDeno\s*(?:\?\.)?\s*\[/.test(code)) {
+    throw new Error(
+      `${filePath}: unmodelled computed Deno property access cannot be audited; ` +
+        "use a direct Deno property",
+    );
+  }
   for (
     const match of code.matchAll(/\bDeno\s*(?:\?\.|\.)\s*env\b/g)
   ) {
