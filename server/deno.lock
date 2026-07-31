@@ -7,6 +7,7 @@
     "jsr:@std/internal@^1.0.14": "1.0.14",
     "jsr:@std/path@^1.0.8": "1.1.5",
     "jsr:@std/toml@1.0.4": "1.0.4",
+    "jsr:@std/yaml@^1.1.2": "1.1.2",
     "npm:@hono/mcp@0.1.1": "0.1.1_@modelcontextprotocol+sdk@1.24.3__zod@4.1.13__ajv@8.20.0__express@5.2.1_hono@4.12.25_zod@4.1.13",
     "npm:@modelcontextprotocol/sdk@1.24.3": "1.24.3_zod@4.1.13_ajv@8.20.0_express@5.2.1",
     "npm:hono@4.12.25": "4.12.25",
@@ -37,6 +38,9 @@
       "dependencies": [
         "jsr:@std/collections"
       ]
+    },
+    "@std/yaml@1.1.2": {
+      "integrity": "de612653c036749ba2044165e316f52412b0f0698afffb7ee80b5331d6d2abae"
     }
   },
   "npm": {
@@ -677,7 +681,9 @@
   "workspace": {
     "dependencies": [
       "jsr:@std/assert@1",
+      "jsr:@std/path@^1.0.8",
       "jsr:@std/toml@1.0.4",
+      "jsr:@std/yaml@^1.1.2",
       "npm:@hono/mcp@0.1.1",
       "npm:@modelcontextprotocol/sdk@1.24.3",
       "npm:hono@4.12.25",
