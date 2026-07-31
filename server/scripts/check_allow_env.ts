@@ -18,8 +18,8 @@
 //      any required key is absent from the launcher's allowlist.
 //
 // Over-permissive entries are generally not flagged. The deno-postgres driver
-// reads seven PG* keys outside this source tree, so each entrypoint that builds
-// a Pool carries that explicit dependency policy.
+// reads seven PG* keys outside this source tree, so any reachable import of the
+// pinned driver adds that explicit dependency policy.
 //
 // Run locally: `deno task check-allow-env` (from server/).
 // CI: runs as the check-allow-env job in .github/workflows/ci.yml.
@@ -53,20 +53,6 @@ export const TOKEN_ADMIN_ALLOW_ENV = [
   "DB_PASSWORD",
   ...DENO_POSTGRES_ALLOW_ENV,
 ] as const;
-
-const POSTGRES_ENTRYPOINTS = new Set([
-  "index.ts",
-  "log_ingester.ts",
-  "token_admin.ts",
-]);
-
-export function dependencyEnvForEntrypoint(entrypoint: string): Set<string> {
-  const basename = entrypoint.replaceAll("\\", "/").split("/").at(-1) ??
-    entrypoint;
-  return POSTGRES_ENTRYPOINTS.has(basename)
-    ? new Set(DENO_POSTGRES_ALLOW_ENV)
-    : new Set();
-}
 
 // Each wrapper takes the env-var name as its first argument. Keep this list in
 // sync with source-local helpers; dynamic dependency reads belong in a launcher
@@ -116,7 +102,6 @@ function parseAllowEnv(value: string, source: string): Set<string> {
 export function parseDockerfile(dockerfilePath: string): {
   entrypoint: string;
   allowEnv: Set<string>;
-  requiredEnv: Set<string>;
 } {
   const content = Deno.readTextFileSync(dockerfilePath);
   const entrypointArgs = dockerInstructionArguments(
@@ -131,14 +116,13 @@ export function parseDockerfile(dockerfilePath: string): {
   );
   if (!commandArgs) throw new Error(`No CMD line in ${dockerfilePath}`);
   const target = parseDenoRunTarget(
-    [...entrypointArgs, ...commandArgs],
+    effectiveDockerArguments(entrypointArgs, commandArgs, dockerfilePath),
     dockerfilePath,
   );
   if (!target) throw new Error(`No deno run launcher in ${dockerfilePath}`);
   return {
     entrypoint: target.entrypoint,
     allowEnv: target.allowEnv,
-    requiredEnv: dependencyEnvForEntrypoint(target.entrypoint),
   };
 }
 
@@ -168,6 +152,27 @@ function dockerInstructionArguments(
     throw new Error(`${source}: ${instruction} must be a string list`);
   }
   return parsed;
+}
+
+function effectiveDockerArguments(
+  entrypointArgs: string[],
+  commandArgs: string[],
+  source: string,
+): string[] {
+  const shell = entrypointArgs[0]?.replaceAll("\\", "/").split("/").at(-1);
+  if (
+    (shell === "sh" || shell === "bash") &&
+    entrypointArgs[1] === "-c" &&
+    entrypointArgs[2] !== undefined
+  ) {
+    // With an exec-form `sh -c` entrypoint, the next entrypoint argument is
+    // $0 and Docker's CMD arguments become $1... / "$@". Expand only that
+    // exact shell token; the rest of the script remains literal launcher data.
+    return splitCommand(entrypointArgs[2], source).flatMap((argument) =>
+      argument === "$@" ? commandArgs : [argument]
+    );
+  }
+  return [...entrypointArgs, ...commandArgs];
 }
 
 function splitCommand(value: string, source: string): string[] {
@@ -230,73 +235,239 @@ function literalArguments(
   return args;
 }
 
+interface DenoInvocation {
+  globalOptions: string[];
+  runArguments: string[];
+}
+
+const DENO_SUBCOMMANDS = new Set([
+  "add",
+  "bench",
+  "check",
+  "clean",
+  "compile",
+  "coverage",
+  "deploy",
+  "doc",
+  "eval",
+  "fmt",
+  "info",
+  "install",
+  "jupyter",
+  "lint",
+  "repl",
+  "serve",
+  "task",
+  "test",
+  "upgrade",
+  "watch",
+]);
+
+const GLOBAL_OPTIONS_WITH_VALUES = new Set([
+  "--cert",
+  "--conditions",
+  "-c",
+  "--config",
+  "--location",
+  "--v8-flags",
+]);
+
+const RUN_OPTIONS_WITH_VALUES = new Set([
+  "--cert",
+  "--conditions",
+  "-c",
+  "--config",
+  "--cpu-prof-dir",
+  "--cpu-prof-interval",
+  "--cpu-prof-name",
+  "--ext",
+  "--import-map",
+  "--location",
+  "--minimum-dependency-age",
+  "--seed",
+]);
+
+const RUN_STANDALONE_OPTIONS = new Set([
+  "--allow-all",
+  "--cached-only",
+  "--check",
+  "--coverage",
+  "--cpu-prof",
+  "--cpu-prof-flamegraph",
+  "--cpu-prof-md",
+  "--env-file",
+  "--frozen",
+  "-h",
+  "--help",
+  "--inspect",
+  "--inspect-brk",
+  "--inspect-wait",
+  "--no-check",
+  "--no-clear-screen",
+  "--no-code-cache",
+  "--no-config",
+  "--no-lock",
+  "--no-npm",
+  "--no-prompt",
+  "--no-remote",
+  "--node-modules-dir",
+  "-q",
+  "--quiet",
+  "-r",
+  "--reload",
+  "-t",
+  "--tunnel",
+  "--unstable",
+  "--use-env-proxy",
+  "--v8-flags",
+  "--vendor",
+  "--watch",
+  "--watch-exclude",
+  "--watch-hmr",
+]);
+
+const UNAUDITABLE_CODE_OPTIONS = new Set([
+  "--allow-scripts",
+  "--preload",
+  "--require",
+]);
+
+function optionName(argument: string): string {
+  return argument.split("=", 1)[0];
+}
+
+function invocationFromArguments(
+  args: string[],
+  source: string,
+): DenoInvocation | undefined {
+  const isDeno = (value: string) => /(^|[\\/])deno(?:\.exe)?$/i.test(value);
+  for (let denoIndex = 0; denoIndex < args.length; denoIndex++) {
+    if (!isDeno(args[denoIndex])) continue;
+    const globalOptions: string[] = [];
+    for (let index = denoIndex + 1; index < args.length; index++) {
+      const argument = args[index];
+      if (argument === "run") {
+        return { globalOptions, runArguments: args.slice(index + 1) };
+      }
+      if (DENO_SUBCOMMANDS.has(argument)) break;
+      if (!argument.startsWith("-")) {
+        if (/\.tsx?(?:[?#].*)?$/.test(argument)) {
+          throw new Error(
+            `${source}: implicit Deno execution cannot be audited; ` +
+              "spell the launcher as deno run ...",
+          );
+        }
+        break;
+      }
+      globalOptions.push(argument);
+      const name = optionName(argument);
+      if (GLOBAL_OPTIONS_WITH_VALUES.has(name) && !argument.includes("=")) {
+        if (index + 1 >= args.length) {
+          throw new Error(`${source}: ${name} is missing its value`);
+        }
+        index++;
+      }
+    }
+  }
+  return undefined;
+}
+
 function denoInvocation(
   args: string[],
   source: string,
-): string[] | undefined {
-  const isDeno = (value: string) => /(^|[\\/])deno(?:\.exe)?$/i.test(value);
-  let index = args.findIndex((value, at) =>
-    isDeno(value) && args[at + 1] === "run"
-  );
-  if (index >= 0) return args.slice(index);
+): DenoInvocation | undefined {
+  const direct = invocationFromArguments(args, source);
+  if (direct) return direct;
 
   // A shell-form entrypoint may put the entire command in one `sh -c`
   // argument. Flatten only as a fallback so direct list arguments keep their
   // original boundaries.
   const flattened = args.flatMap((value) => splitCommand(value, source));
-  index = flattened.findIndex((value, at) =>
-    isDeno(value) && flattened[at + 1] === "run"
-  );
-  return index >= 0 ? flattened.slice(index) : undefined;
+  return invocationFromArguments(flattened, source);
 }
 
-function parseDenoRunTarget(
+function rejectUnauditableOption(argument: string, source: string): void {
+  const name = optionName(argument);
+  if (
+    name === "--permission-set" ||
+    (argument.startsWith("-") && !argument.startsWith("--") &&
+      name.slice(1).includes("P"))
+  ) {
+    throw new Error(
+      `${source}: -P/--permission-set can grant unaudited environment access; ` +
+        "use explicit --allow-env=KEY,... permissions",
+    );
+  }
+  if (UNAUDITABLE_CODE_OPTIONS.has(name)) {
+    throw new Error(
+      `${source}: ${name} executes code outside the audited main-module graph`,
+    );
+  }
+}
+
+function parseRunArguments(
   args: string[],
   source: string,
-): Pick<CheckTarget, "entrypoint" | "allowEnv"> | undefined {
-  const invocation = denoInvocation(args, source);
-  if (!invocation) return undefined;
+): { options: string[]; script: string } {
+  const options: string[] = [];
+  let script: string | undefined;
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    if (argument === "--") {
+      script = args[index + 1];
+      break;
+    }
+    if (!argument.startsWith("-") || argument === "-") {
+      script = argument;
+      break;
+    }
 
-  const firstTypeScript = invocation.findIndex((argument, index) =>
-    index >= 2 && /\.ts(?:[?#].*)?$/.test(argument)
-  );
-  const boundaryCandidate = invocation.indexOf("--", 2);
-  const optionBoundary = boundaryCandidate >= 0 &&
-      (firstTypeScript < 0 || boundaryCandidate < firstTypeScript)
-    ? boundaryCandidate
-    : -1;
-  const scriptIndex = optionBoundary >= 0
-    ? optionBoundary + 1
-    : firstTypeScript;
-  const script = invocation[scriptIndex];
-  if (scriptIndex < 0 || !script || !/\.ts(?:[?#].*)?$/.test(script)) {
-    throw new Error(`${source}: deno run launcher has no .ts module`);
+    rejectUnauditableOption(argument, source);
+    options.push(argument);
+    const name = optionName(argument);
+    if (RUN_OPTIONS_WITH_VALUES.has(name) && !argument.includes("=")) {
+      if (index + 1 >= args.length) {
+        throw new Error(`${source}: ${name} is missing its value`);
+      }
+      index++;
+      continue;
+    }
+    if (
+      !argument.includes("=") &&
+      !RUN_STANDALONE_OPTIONS.has(name) &&
+      !/^--(?:allow|deny|ignore)-(?:env|ffi|import|net|read|run|sys|write)$/
+        .test(
+          name,
+        ) &&
+      !/^-[AEINPRSW]$/.test(name) &&
+      !/^-[A-Za-z]{2,}$/.test(name)
+    ) {
+      throw new Error(
+        `${source}: ${argument} has unknown argument boundaries; ` +
+          "use a self-contained --option=value form",
+      );
+    }
   }
 
-  // Deno stops parsing runtime options at `--` or at the module. Permission-
-  // looking script arguments after that boundary must not be counted as grants.
-  const optionEnd = optionBoundary >= 0 ? optionBoundary : scriptIndex;
-  const options = invocation.slice(2, optionEnd);
+  if (!script || !/\.tsx?(?:[?#].*)?$/.test(script)) {
+    throw new Error(`${source}: deno run launcher has no .ts module`);
+  }
+  return { options, script };
+}
+
+function collectAllowEnv(
+  options: Iterable<string>,
+  source: string,
+): Set<string> {
+  const allowEnv = new Set<string>();
   for (const argument of options) {
+    rejectUnauditableOption(argument, source);
     if (argument === "--allow-all" || argument.startsWith("--allow-all=")) {
       throw new Error(
         `${source}: -A/--allow-all grants every permission; ` +
           "use bounded --allow-* flags",
       );
     }
-    if (argument.startsWith("-") && !argument.startsWith("--")) {
-      const shortFlags = argument.split("=", 1)[0].slice(1);
-      if (shortFlags.includes("A")) {
-        throw new Error(
-          `${source}: -A/--allow-all grants every permission; ` +
-            "use bounded --allow-* flags",
-        );
-      }
-    }
-  }
-
-  const allowEnv = new Set<string>();
-  for (const argument of options) {
     if (argument === "--allow-env" || argument === "-E") {
       throw new Error(
         `${source}: bare -E/--allow-env grants the entire environment; ` +
@@ -314,7 +485,14 @@ function parseDenoRunTarget(
     }
     if (argument.startsWith("-") && !argument.startsWith("--")) {
       const [shortFlags, value] = argument.split("=", 2);
-      if (!shortFlags.slice(1).includes("E")) continue;
+      const flags = shortFlags.slice(1);
+      if (flags.includes("A")) {
+        throw new Error(
+          `${source}: -A/--allow-all grants every permission; ` +
+            "use bounded --allow-* flags",
+        );
+      }
+      if (!flags.includes("E")) continue;
       if (shortFlags !== "-E" || value === undefined) {
         throw new Error(
           `${source}: combined or unbounded -E cannot be audited; ` +
@@ -324,9 +502,23 @@ function parseDenoRunTarget(
       for (const key of parseAllowEnv(value, source)) allowEnv.add(key);
     }
   }
+  return allowEnv;
+}
+
+function parseDenoRunTarget(
+  args: string[],
+  source: string,
+): Pick<CheckTarget, "entrypoint" | "allowEnv"> | undefined {
+  const invocation = denoInvocation(args, source);
+  if (!invocation) return undefined;
+  const parsed = parseRunArguments(invocation.runArguments, source);
+  const allowEnv = collectAllowEnv(
+    [...invocation.globalOptions, ...parsed.options],
+    source,
+  );
 
   return {
-    entrypoint: normalizeComposeEntrypoint(script, source),
+    entrypoint: normalizeComposeEntrypoint(parsed.script, source),
     allowEnv,
   };
 }
@@ -402,7 +594,6 @@ export function parseComposeTargets(
     targets.push({
       source: label,
       ...parsed,
-      requiredEnv: dependencyEnvForEntrypoint(parsed.entrypoint),
     });
   }
   return targets;
@@ -434,6 +625,33 @@ function importSpecifiers(content: string): Set<string> {
     for (const match of content.matchAll(pattern)) specifiers.add(match[1]);
   }
   return specifiers;
+}
+
+function dependencyEnvForFiles(
+  files: Iterable<string>,
+  baseDir: string,
+): Set<string> {
+  for (const file of files) {
+    const specifiers = importSpecifiers(
+      Deno.readTextFileSync(join(baseDir, file)),
+    );
+    if (
+      specifiers.has("postgres") ||
+      [...specifiers].some((specifier) =>
+        specifier.startsWith("https://deno.land/x/postgres@v0.19.3/")
+      )
+    ) {
+      return new Set(DENO_POSTGRES_ALLOW_ENV);
+    }
+  }
+  return new Set();
+}
+
+export function dependencyEnvForEntrypoint(
+  entrypoint: string,
+  baseDir = SERVER_DIR,
+): Set<string> {
+  return dependencyEnvForFiles(walkImports(entrypoint, baseDir), baseDir);
 }
 
 export function walkImports(entrypoint: string, baseDir: string): Set<string> {
@@ -469,64 +687,137 @@ export function walkImports(entrypoint: string, baseDir: string): Set<string> {
 }
 
 function maskNonCode(content: string): string {
-  const masked = [...content];
-  let state: "code" | "line" | "block" | "single" | "double" | "template" =
-    "code";
-  let escaped = false;
-  for (let index = 0; index < content.length; index++) {
-    const character = content[index];
-    const next = content[index + 1];
-    if (state === "code") {
-      if (character === "/" && next === "/") {
-        masked[index] = masked[index + 1] = " ";
-        state = "line";
-        index++;
-      } else if (character === "/" && next === "*") {
-        masked[index] = masked[index + 1] = " ";
-        state = "block";
-        index++;
-      } else if (character === "'") {
-        masked[index] = " ";
-        state = "single";
-      } else if (character === '"') {
-        masked[index] = " ";
-        state = "double";
-      } else if (character === "`") {
-        masked[index] = " ";
-        state = "template";
-      }
-      continue;
-    }
+  // Keep indexes aligned with the original UTF-16 string so regex match
+  // offsets can be used to read literal arguments from `content`.
+  const masked = Array<string>(content.length).fill(" ");
+  let index = 0;
 
-    if (character !== "\n") masked[index] = " ";
-    if (state === "line") {
-      if (character === "\n") state = "code";
-      continue;
-    }
-    if (state === "block") {
-      if (character === "*" && next === "/") {
-        masked[index + 1] = " ";
-        state = "code";
-        index++;
+  const maskOne = (): void => {
+    if (content[index] === "\n") masked[index] = "\n";
+    index++;
+  };
+
+  const regexCanStart = (at: number): boolean => {
+    let previous = at - 1;
+    while (previous >= 0 && /\s/.test(masked[previous])) previous--;
+    if (previous < 0) return true;
+    if ("=(,:[!&|?{};+-*%~^<>".includes(masked[previous])) return true;
+    const prefix = masked.slice(0, at).join("").trimEnd();
+    return /(?:^|[^A-Za-z0-9_$])(?:await|case|delete|do|else|in|instanceof|new|of|return|throw|typeof|void|yield)$/
+      .test(
+        prefix,
+      );
+  };
+
+  const skipLineComment = (): void => {
+    while (index < content.length && content[index] !== "\n") maskOne();
+  };
+
+  const skipBlockComment = (): void => {
+    maskOne();
+    maskOne();
+    while (index < content.length) {
+      if (content[index] === "*" && content[index + 1] === "/") {
+        maskOne();
+        maskOne();
+        return;
       }
-      continue;
+      maskOne();
     }
-    if (escaped) {
-      escaped = false;
-      continue;
+  };
+
+  const skipQuoted = (quote: "'" | '"'): void => {
+    maskOne();
+    while (index < content.length) {
+      if (content[index] === "\\") {
+        maskOne();
+        if (index < content.length) maskOne();
+      } else if (content[index] === quote) {
+        maskOne();
+        return;
+      } else {
+        maskOne();
+      }
     }
-    if (character === "\\") {
-      escaped = true;
-      continue;
+  };
+
+  const skipRegex = (): void => {
+    maskOne();
+    let inCharacterClass = false;
+    while (index < content.length) {
+      const character = content[index];
+      if (character === "\n") return;
+      if (character === "\\") {
+        maskOne();
+        if (index < content.length) maskOne();
+      } else if (character === "[") {
+        inCharacterClass = true;
+        maskOne();
+      } else if (character === "]") {
+        inCharacterClass = false;
+        maskOne();
+      } else if (character === "/" && !inCharacterClass) {
+        maskOne();
+        while (/[A-Za-z]/.test(content[index] ?? "")) maskOne();
+        return;
+      } else {
+        maskOne();
+      }
     }
-    if (
-      (state === "single" && character === "'") ||
-      (state === "double" && character === '"') ||
-      (state === "template" && character === "`")
-    ) {
-      state = "code";
+  };
+
+  function skipTemplate(): void {
+    maskOne();
+    while (index < content.length) {
+      if (content[index] === "\\") {
+        maskOne();
+        if (index < content.length) maskOne();
+      } else if (content[index] === "`") {
+        maskOne();
+        return;
+      } else if (content[index] === "$" && content[index + 1] === "{") {
+        maskOne();
+        masked[index] = "{";
+        index++;
+        scanCode(true);
+      } else {
+        maskOne();
+      }
     }
   }
+
+  function scanCode(stopAtTemplateBrace: boolean): void {
+    let braceDepth = 0;
+    while (index < content.length) {
+      const character = content[index];
+      const next = content[index + 1];
+      if (stopAtTemplateBrace && character === "}" && braceDepth === 0) {
+        masked[index] = character;
+        index++;
+        return;
+      }
+      if (character === "/" && next === "/") {
+        skipLineComment();
+      } else if (character === "/" && next === "*") {
+        skipBlockComment();
+      } else if (character === "'") {
+        skipQuoted("'");
+      } else if (character === '"') {
+        skipQuoted('"');
+      } else if (character === "`") {
+        skipTemplate();
+      } else if (character === "/" && regexCanStart(index)) {
+        skipRegex();
+      } else {
+        masked[index] = character;
+        if (stopAtTemplateBrace && character === "{") braceDepth++;
+        else if (stopAtTemplateBrace && character === "}") braceDepth--;
+        index++;
+      }
+    }
+  }
+
+  scanCode(false);
   return masked.join("");
 }
 
@@ -591,9 +882,18 @@ export function findEnvReads(filePath: string): Set<string> {
   const wrapperRanges = wrapperFunctionRanges(code);
   const reads = new Set<string>();
   for (
-    const match of code.matchAll(/Deno\s*\.\s*env\s*\.\s*get\s*\(/g)
+    const match of code.matchAll(/\bDeno\s*(?:\?\.|\.)\s*env\b/g)
   ) {
-    const openParen = match.index + match[0].lastIndexOf("(");
+    const tail = code.slice(match.index + match[0].length);
+    const getter = tail.match(/^\s*(?:\?\.|\.)\s*get\s*\(/);
+    if (!getter) {
+      throw new Error(
+        `${filePath}: unmodelled Deno.env access cannot be audited; ` +
+          'use Deno.env.get("LITERAL_KEY")',
+      );
+    }
+    const openParen = match.index + match[0].length +
+      getter[0].lastIndexOf("(");
     try {
       reads.add(
         literalEnvArgument(content, openParen, `${filePath}: Deno.env.get()`),
@@ -641,6 +941,7 @@ export function analyzeTarget(
     for (const key of findEnvReads(join(baseDir, file))) reads.add(key);
   }
   const required = new Set(reads);
+  for (const key of dependencyEnvForFiles(files, baseDir)) required.add(key);
   for (const key of target.requiredEnv ?? []) required.add(key);
   const missing = [...required].filter((key) => !target.allowEnv.has(key))
     .sort();

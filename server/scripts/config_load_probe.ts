@@ -4,17 +4,13 @@
 // network socket. Importing config.ts then retains its value-validation checks.
 // Run with --allow-read=. and the exact --allow-env= list from ExecStart.
 
-import {
-  analyzeTarget,
-  dependencyEnvForEntrypoint,
-} from "./check_allow_env.ts";
+import { analyzeTarget } from "./check_allow_env.ts";
 
 const entrypoint = "index.ts";
 const analysis = analyzeTarget({
   source: "native index.ts launcher",
   entrypoint,
   allowEnv: new Set(),
-  requiredEnv: dependencyEnvForEntrypoint(entrypoint),
 });
 if (Deno.permissions.querySync({ name: "env" }).state === "granted") {
   throw new Error(
