@@ -570,7 +570,7 @@ $$ LANGUAGE plpgsql;
 -- optional, created by 00-roles.sh when OPENBRAIN_MONITOR_PASSWORD is set).
 -- This credential lives on the internet-adjacent ingress qube, so the
 -- invariant that matters is a NEGATIVE one: the monitor has plain SELECT on
--- its two metadata relations and no privilege on any other application
+-- its one metadata relation and no privilege on any other application
 -- relation, including relations outside `public` and ones added later.
 --
 -- Enforcement is deliberately belt-and-braces, because each mechanism has a
@@ -602,7 +602,7 @@ $$ LANGUAGE plpgsql;
 -- future SECURITY DEFINER routine must revoke that default, extend the
 -- assertion, and receive a separate security review before deployment.
 --
--- The allowed SELECT on the two observability tables must also be plain —
+-- The allowed SELECT on the observability table must also be plain —
 -- WITH GRANT OPTION is rejected, or the monitor could re-grant its own
 -- access (e.g. to PUBLIC) and the widened grant would sit outside this
 -- file's per-role reasoning.
@@ -623,8 +623,7 @@ BEGIN
   -- scan and the required-grant checks below consume these same OIDs. Resolve
   -- it only after the optional-role guard so monitor-free installs still skip.
   allowed_relations := ARRAY[
-    'public.funnel_access_log'::regclass::oid,
-    'public.mcp_auth_events'::regclass::oid
+    'public.funnel_access_log'::regclass::oid
   ];
 
   SELECT oid INTO monitor_oid
@@ -762,10 +761,10 @@ BEGIN
     RAISE EXCEPTION
       'grants assertion failed: openbrain_monitor has a direct or effective '
       'privilege on relation(s) outside its allowlist: %. The edge-resident '
-      'monitor credential must reach only its two observability relations.', bad;
+      'monitor credential must reach only its sole observability relation.', bad;
   END IF;
 
-  -- The two allowlisted observability relations: SELECT present, and nothing
+  -- The allowlisted observability relation: SELECT present, and nothing
   -- but SELECT. The same array powered the negative scan above.
   FOREACH rel_oid IN ARRAY allowed_relations LOOP
     SELECT format('%I.%I', n.nspname, c.relname) INTO relation_name

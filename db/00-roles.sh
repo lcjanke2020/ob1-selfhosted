@@ -52,8 +52,8 @@ fi
 # SELECT-only metadata role for the host-side funnel monitor
 # (scripts/funnel_monitor.sh, run from the ingress qube in the three-qube
 # split). Created conditionally like the ingester: set
-# OPENBRAIN_MONITOR_PASSWORD to create it; its grants (SELECT on
-# funnel_access_log + mcp_auth_events ONLY) land in 02-observability.sql.
+# OPENBRAIN_MONITOR_PASSWORD to create it; its sole table grant (SELECT on
+# funnel_access_log) lands in 02-observability.sql.
 # Deliberately not openbrain_readonly (SELECT on everything): this
 # credential sits on the internet-adjacent edge, so it may read request
 # metadata but must never be able to read a thought.
