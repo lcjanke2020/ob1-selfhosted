@@ -348,6 +348,38 @@ function isDenoExecutable(value: string): boolean {
   return !value.includes("=") && /(^|[\\/])deno(?:\.exe)?$/i.test(value);
 }
 
+function isEnvExecutable(value: string): boolean {
+  return !value.includes("=") && /(^|[\\/])env(?:\.exe)?$/i.test(value);
+}
+
+function isEnvSplitOption(value: string): boolean {
+  if (/^-[^-]*S/.test(value)) return true;
+  if (!value.startsWith("--")) return false;
+  const optionName = value.slice(2).split("=", 1)[0];
+  return optionName.length > 0 && "split-string".startsWith(optionName);
+}
+
+function rejectArgumentExpandingLaunchers(
+  args: string[],
+  source: string,
+): void {
+  // `env -S` re-tokenizes one argv element into a new executable plus options.
+  // Reject that launcher boundary instead of duplicating GNU env's parser.
+  const denoIndex = args.findIndex(isDenoExecutable);
+  const launcherEnd = denoIndex < 0 ? args.length : denoIndex;
+  for (let index = 0; index < launcherEnd; index++) {
+    if (
+      isEnvExecutable(args[index]) &&
+      args.slice(index + 1, launcherEnd).some(isEnvSplitOption)
+    ) {
+      throw new Error(
+        `${source}: env -S/--split-string launchers cannot be audited; ` +
+          "use a literal Deno argv list",
+      );
+    }
+  }
+}
+
 function isShellExecutable(value: string): boolean {
   if (value.includes("=")) return false;
   const name = (value.replaceAll("\\", "/").split("/").at(-1) ?? "")
@@ -641,6 +673,7 @@ export function parseComposeTargets(
       : literalArguments(rawService.command, label, "command");
     if (entrypointArgs.length === 0 && commandArgs.length === 0) continue;
     const launcherArgs = [...entrypointArgs, ...commandArgs];
+    rejectArgumentExpandingLaunchers(launcherArgs, label);
     const shellIndex = launcherArgs.findIndex(isShellExecutable);
     if (
       shellIndex >= 0 &&
@@ -682,9 +715,12 @@ function parseTypeScript(content: string, source: string): t.File {
       sourceType: "module",
       sourceFilename: source,
       createImportExpressions: true,
-      plugins: source.toLowerCase().endsWith(".tsx")
-        ? ["typescript", "jsx"]
-        : ["typescript"],
+      plugins: [
+        "typescript",
+        ["decorators", {}],
+        "decoratorAutoAccessors",
+        ...(source.toLowerCase().endsWith(".tsx") ? ["jsx"] as const : []),
+      ],
     });
   } catch (error) {
     const syntaxError = error as SyntaxError & {
@@ -874,7 +910,10 @@ function isDirectDenoEnvGetCall(node: t.Node): node is CallExpression {
     isDirectDenoEnvAccess(node.callee.object);
 }
 
-function isInsideKnownWrapper(ancestors: readonly t.Node[]): boolean {
+function isInsideKnownWrapper(
+  ancestors: readonly t.Node[],
+  declarations: ReadonlyMap<string, t.FunctionDeclaration>,
+): boolean {
   const fn = ancestors.findLast((node) =>
     [
       "ArrowFunctionExpression",
@@ -886,7 +925,7 @@ function isInsideKnownWrapper(ancestors: readonly t.Node[]): boolean {
     ].includes(node.type)
   );
   return fn?.type === "FunctionDeclaration" && !!fn.id &&
-    WRAPPER_NAME_SET.has(fn.id.name);
+    declarations.get(fn.id.name) === fn;
 }
 
 function literalEnvKey(
@@ -949,8 +988,42 @@ function isNonValueIdentifier(node: t.Identifier, parent: t.Node): boolean {
   ].includes(parent.type);
 }
 
+function knownWrapperDeclarations(
+  sourceFile: t.File,
+  filePath: string,
+): Map<string, t.FunctionDeclaration> {
+  // A dynamic Deno.env.get(name) is safe to suppress only while its wrapper
+  // binding remains source-local and every use is a direct, audited call.
+  const declarations = new Map<string, t.FunctionDeclaration>();
+  walkAst(sourceFile, (node, ancestors) => {
+    if (
+      node.type !== "FunctionDeclaration" || !node.id ||
+      !WRAPPER_NAME_SET.has(node.id.name)
+    ) return;
+    const name = node.id.name;
+    if (declarations.has(name)) {
+      throw new Error(
+        `${filePath}: known env wrapper ${name}() is redeclared and cannot be audited`,
+      );
+    }
+    const parent = ancestors.at(-1);
+    if (
+      parent?.type === "ExportNamedDeclaration" ||
+      parent?.type === "ExportDefaultDeclaration"
+    ) {
+      throw new Error(
+        `${filePath}: known env wrapper ${name}() cannot be exported; ` +
+          "keep it source-local with direct literal call sites",
+      );
+    }
+    declarations.set(name, node);
+  });
+  return declarations;
+}
+
 export function findEnvReads(filePath: string): Set<string> {
   const sourceFile = parseTypeScript(Deno.readTextFileSync(filePath), filePath);
+  const wrapperDeclarations = knownWrapperDeclarations(sourceFile, filePath);
   const reads = new Set<string>();
 
   walkAst(sourceFile, (node, ancestors) => {
@@ -965,7 +1038,7 @@ export function findEnvReads(filePath: string): Set<string> {
         // fails closed rather than disappearing from launcher requirements.
         if (
           !(error as Error).message.includes("dynamic env reads") ||
-          !isInsideKnownWrapper(ancestors)
+          !isInsideKnownWrapper(ancestors, wrapperDeclarations)
         ) throw error;
       }
     }
@@ -979,6 +1052,24 @@ export function findEnvReads(filePath: string): Set<string> {
           `${filePath}: ${node.callee.name}()`,
         ),
       );
+    }
+
+    if (node.type === "Identifier" && wrapperDeclarations.has(node.name)) {
+      const declaration = wrapperDeclarations.get(node.name)!;
+      const parent = ancestors.at(-1);
+      const isDeclaration = parent === declaration && declaration.id === node;
+      const isDirectCall = isCallExpression(parent) && parent.callee === node;
+      const isNamedProperty = isMemberExpression(parent) &&
+        parent.property === node && !parent.computed;
+      if (
+        parent && !isDeclaration && !isDirectCall && !isNamedProperty &&
+        !isNonValueIdentifier(node, parent)
+      ) {
+        throw new Error(
+          `${filePath}: known env wrapper ${node.name}() cannot be aliased or exported; ` +
+            "use direct calls with literal env keys",
+        );
+      }
     }
 
     if (

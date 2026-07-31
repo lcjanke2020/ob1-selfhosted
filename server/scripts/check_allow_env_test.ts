@@ -181,6 +181,55 @@ services:
   }
 });
 
+Deno.test("env split-string launchers fail closed", () => {
+  for (
+    const launcher of [
+      '[env, -S, "deno run -A /app/tool.ts"]',
+      '[env, --split-string, "deno run -A /app/tool.ts"]',
+      '[/usr/bin/env, "--split-string=deno run -A /app/tool.ts"]',
+      '[/usr/bin/env, "-Sdeno run -A /app/tool.ts"]',
+      '[env, -iS, "deno run -A /app/tool.ts"]',
+      '[env, "--s=deno run -A /app/tool.ts"]',
+    ]
+  ) {
+    assertThrows(
+      () =>
+        parseComposeTargets(
+          `
+services:
+  unsafe-tool:
+    entrypoint: ${launcher}
+`,
+          "compose.yml",
+        ),
+      Error,
+      "env -S/--split-string launchers cannot be audited",
+    );
+  }
+});
+
+Deno.test("plain env wrappers preserve literal Deno argv", () => {
+  const target = onlyTarget(`
+services:
+  tool:
+    entrypoint: [env, MODE=production, deno, run, --allow-env=FOO, /app/tool.ts]
+`);
+
+  assertEquals(target.entrypoint, "tool.ts");
+  assertEquals([...target.allowEnv], ["FOO"]);
+});
+
+Deno.test("env split options after the Deno module remain script arguments", () => {
+  const target = onlyTarget(`
+services:
+  tool:
+    entrypoint: [deno, run, --allow-env=FOO, /app/tool.ts, env, -S]
+`);
+
+  assertEquals(target.entrypoint, "tool.ts");
+  assertEquals([...target.allowEnv], ["FOO"]);
+});
+
 Deno.test("executable Deno subcommands outside run fail closed", () => {
   for (
     const launcher of [
@@ -536,6 +585,58 @@ export const value = indirect("DYNAMIC_KEY");
   }
 });
 
+Deno.test("known env wrapper aliases and exports fail closed", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    const aliasPath = `${directory}/alias.ts`;
+    await Deno.writeTextFile(
+      aliasPath,
+      `function required(name: string): string {
+  return Deno.env.get(name) ?? "";
+}
+const readRequired = required;
+export const value = readRequired("ALIASED_WRAPPER_ENV");
+`,
+    );
+    assertThrows(
+      () => findEnvReads(aliasPath),
+      Error,
+      "known env wrapper required() cannot be aliased or exported",
+    );
+
+    const exportPath = `${directory}/exported.ts`;
+    await Deno.writeTextFile(
+      exportPath,
+      `export function optional(name: string): string {
+  return Deno.env.get(name) ?? "";
+}
+`,
+    );
+    assertThrows(
+      () => findEnvReads(exportPath),
+      Error,
+      "known env wrapper optional() cannot be exported",
+    );
+
+    const reExportPath = `${directory}/re_exported.ts`;
+    await Deno.writeTextFile(
+      reExportPath,
+      `function env(name: string): string {
+  return Deno.env.get(name) ?? "";
+}
+export { env as readEnv };
+`,
+    );
+    assertThrows(
+      () => findEnvReads(reExportPath),
+      Error,
+      "known env wrapper env() cannot be aliased or exported",
+    );
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
 Deno.test("direct dynamic env reads outside known wrappers fail closed", async () => {
   const directory = await Deno.makeTempDir();
   try {
@@ -640,6 +741,27 @@ Deno.test("invalid TypeScript lexical forms fail closed", async () => {
         "TypeScript syntax cannot be audited",
       );
     }
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("decorators and auto-accessors remain auditable", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    const path = `${directory}/decorated.ts`;
+    await Deno.writeTextFile(
+      path,
+      `function registered() {}
+@registered
+class Config {
+  accessor value = Deno.env.get("DECORATED_ENV");
+}
+export const config = new Config();
+`,
+    );
+
+    assertEquals([...findEnvReads(path)], ["DECORATED_ENV"]);
   } finally {
     await Deno.remove(directory, { recursive: true });
   }
