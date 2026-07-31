@@ -91,9 +91,15 @@ for ((attempt = 1; attempt <= 1000; attempt++)); do
     rm -f -- "$TMP"; TMP=""
     break
   fi
-  [[ -e "$OUT" || -L "$OUT" ]] || exit 1  # hard-link guarantee unavailable
+  if [[ ! -e "$OUT" && ! -L "$OUT" ]]; then
+    echo "cannot atomically publish backup at $OUT (hard-link failed)" >&2
+    exit 1
+  fi
 done
-[[ -n "$PUBLISHED" ]] || exit 1
+if [[ -z "$PUBLISHED" ]]; then
+  echo "cannot publish backup: all 1000 names for $STEM already exist" >&2
+  exit 1
+fi
 printf 'published encrypted backup: %s\n' "$PUBLISHED"
 
 # Routine (including legacy date-only) and labelled artifacts have deliberately

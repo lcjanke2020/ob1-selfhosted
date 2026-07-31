@@ -99,6 +99,13 @@ assert_missing() {
 		failures=$((failures + 1))
 	fi
 }
+assert_symlink() {
+	local path="$1" message="$2"
+	if [[ ! -L "$path" ]]; then
+		echo "FAIL: $message (missing symlink $path)" >&2
+		failures=$((failures + 1))
+	fi
+}
 assert_contains() {
 	local path="$1" needle="$2" message="$3"
 	if ! grep -Fq -- "$needle" "$path"; then
@@ -213,6 +220,37 @@ assert_exists "$OUT/db-labelled-manual-archive.sql.gz.gpg" \
 	"timestamp-free labelled-looking artifact outside automatic retention"
 assert_exists "$OUT/db-labelled-hold-20200101T000000Z-keep-me.sql.gz.gpg" \
 	"non-numeric labelled suffix outside automatic retention"
+
+# A directory at the preferred final path is a collision, not a destination.
+# GNU ln without -T would silently place the staging file inside that directory.
+export TEST_TIMESTAMP="20260731T004400Z"
+squat="$OUT/db-20260731T004400Z.sql.gz.gpg"
+mkdir "$squat"
+run_daily "directory-guard" > "$TEST_ROOT/directory.stdout"
+directory_fallback="$OUT/db-20260731T004400Z-2.sql.gz.gpg"
+assert_exists "$directory_fallback" "directory-collision fallback backup"
+assert_eq "directory-guard" "$(payload_of "$directory_fallback")" \
+	"directory-collision fallback payload"
+assert_eq "0" "$(find "$squat" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" \
+	"candidate directory remains empty"
+assert_contains "$TEST_ROOT/directory.stdout" "$directory_fallback" \
+	"reported directory-collision fallback path"
+
+# A dangling symlink does not satisfy -e, but it still occupies the name. It
+# must be treated as a collision so publication can continue at the suffix.
+export TEST_TIMESTAMP="20260731T005500Z"
+dangling="$OUT/db-20260731T005500Z.sql.gz.gpg"
+ln -s "$TEST_ROOT/missing-target" "$dangling"
+run_daily "symlink-guard" > "$TEST_ROOT/symlink.stdout"
+symlink_fallback="$OUT/db-20260731T005500Z-2.sql.gz.gpg"
+assert_symlink "$dangling" "dangling candidate preserved"
+assert_missing "$TEST_ROOT/missing-target" "dangling target remains absent"
+assert_exists "$symlink_fallback" "dangling-symlink fallback backup"
+assert_eq "symlink-guard" "$(payload_of "$symlink_fallback")" \
+	"dangling-symlink fallback payload"
+assert_contains "$TEST_ROOT/symlink.stdout" "$symlink_fallback" \
+	"reported dangling-symlink fallback path"
+
 assert_eq "0" "$(find "$OUT" -maxdepth 1 -name '.db-*' | wc -l | tr -d ' ')" \
 	"staging files cleaned after successful runs"
 
