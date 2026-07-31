@@ -190,6 +190,12 @@ Deno.test("env split-string launchers fail closed", () => {
       '[/usr/bin/env, "-Sdeno run -A /app/tool.ts"]',
       '[env, -iS, "deno run -A /app/tool.ts"]',
       '[env, "--s=deno run -A /app/tool.ts"]',
+      '[env, -u, deno, "--split-string=deno run -A /app/evil.ts", run, --allow-env=SAFE, /app/safe.ts]',
+      '[env, --unset, deno, "--split-string=deno run -A /app/evil.ts", run, --allow-env=SAFE, /app/safe.ts]',
+      '[env, --unset=deno, "--split-string=deno run -A /app/evil.ts", run, --allow-env=SAFE, /app/safe.ts]',
+      '[env, -a, deno, "--split-string=deno run -A /app/evil.ts", run, --allow-env=SAFE, /app/safe.ts]',
+      '[env, -udeno, "--split-string=deno run -A /app/evil.ts", run, --allow-env=SAFE, /app/safe.ts]',
+      '[env, -C, deno, "--split-string=deno run -A /app/evil.ts", run, --allow-env=SAFE, /app/safe.ts]',
     ]
   ) {
     assertThrows(
@@ -209,14 +215,24 @@ services:
 });
 
 Deno.test("plain env wrappers preserve literal Deno argv", () => {
-  const target = onlyTarget(`
+  for (
+    const prefix of [
+      "MODE=production",
+      "-i",
+      "-u, IGNORED_KEY",
+      "-a, -S",
+      "-C, /tmp",
+    ]
+  ) {
+    const target = onlyTarget(`
 services:
   tool:
-    entrypoint: [env, MODE=production, deno, run, --allow-env=FOO, /app/tool.ts]
+    entrypoint: [env, ${prefix}, deno, run, --allow-env=FOO, /app/tool.ts]
 `);
 
-  assertEquals(target.entrypoint, "tool.ts");
-  assertEquals([...target.allowEnv], ["FOO"]);
+    assertEquals(target.entrypoint, "tool.ts");
+    assertEquals([...target.allowEnv], ["FOO"]);
+  }
 });
 
 Deno.test("env split options after the Deno module remain script arguments", () => {
@@ -563,14 +579,16 @@ Deno.test("non-literal dynamic imports fail closed", async () => {
   }
 });
 
-Deno.test("known env wrappers fail closed on dynamic keys", async () => {
+Deno.test("derived env wrappers fail closed on dynamic keys", async () => {
   const directory = await Deno.makeTempDir();
   try {
     const path = `${directory}/dynamic.ts`;
     await Deno.writeTextFile(
       path,
       `
-function optionalTrimmed(name: string): string { return name; }
+function optionalTrimmed(name: string): string {
+  return Deno.env.get(name) ?? "";
+}
 function indirect(name: string): string { return optionalTrimmed(name); }
 export const value = indirect("DYNAMIC_KEY");
 `,
@@ -580,6 +598,92 @@ export const value = indirect("DYNAMIC_KEY");
       Error,
       "optionalTrimmed() must receive a string-literal env key",
     );
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("wrapper suppression requires the unmodified key parameter", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    const derivedPath = `${directory}/derived.ts`;
+    await Deno.writeTextFile(
+      derivedPath,
+      `function optional(name: string): string {
+  return Deno.env.get(name) ?? Deno.env.get(\`\${name}_FALLBACK\`) ?? "";
+}
+export const value = optional("MODE");
+`,
+    );
+    assertThrows(
+      () => findEnvReads(derivedPath),
+      Error,
+      "Deno.env.get() must receive a string-literal env key",
+    );
+
+    const modifiedPath = `${directory}/modified.ts`;
+    await Deno.writeTextFile(
+      modifiedPath,
+      `function required(name: string): string {
+  name += "_FALLBACK";
+  return Deno.env.get(name) ?? "";
+}
+export const value = required("MODE");
+`,
+    );
+    assertThrows(
+      () => findEnvReads(modifiedPath),
+      Error,
+      "cannot modify or shadow its name parameter",
+    );
+
+    const shadowedPath = `${directory}/shadowed.ts`;
+    await Deno.writeTextFile(
+      shadowedPath,
+      `function optional(name: string): string {
+  {
+    const name = "SHADOWED_ENV";
+    return Deno.env.get(name) ?? "";
+  }
+}
+export const value = optional("MODE");
+`,
+    );
+    assertThrows(
+      () => findEnvReads(shadowedPath),
+      Error,
+      "cannot modify or shadow its name parameter",
+    );
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("env wrappers are derived without common-name false positives", async () => {
+  const directory = await Deno.makeTempDir();
+  try {
+    const unrelatedPath = `${directory}/unrelated.ts`;
+    await Deno.writeTextFile(
+      unrelatedPath,
+      `export function required(value: string): string {
+  return value.trim();
+}
+function env(value: number): number { return value * 2; }
+export const doubled = env(2);
+`,
+    );
+    assertEquals([...findEnvReads(unrelatedPath)], []);
+
+    const wrapperPath = `${directory}/wrapper.ts`;
+    await Deno.writeTextFile(
+      wrapperPath,
+      `function readSetting(key: string): string {
+  return Deno.env.get(key) ?? "";
+}
+export const value = readSetting("DERIVED_WRAPPER_ENV");
+`,
+    );
+    assertEquals([...findEnvReads(wrapperPath)], ["DERIVED_WRAPPER_ENV"]);
   } finally {
     await Deno.remove(directory, { recursive: true });
   }
@@ -643,9 +747,8 @@ Deno.test("direct dynamic env reads outside known wrappers fail closed", async (
     const path = `${directory}/dynamic_direct.ts`;
     await Deno.writeTextFile(
       path,
-      `export function read(name: string): string | undefined {
-  return Deno.env.get(name);
-}\n`,
+      `const name = "DYNAMIC_DIRECT_ENV";
+export const value = Deno.env.get(name);\n`,
     );
     assertThrows(
       () => findEnvReads(path),

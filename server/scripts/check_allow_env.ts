@@ -59,18 +59,6 @@ export const TOKEN_ADMIN_ALLOW_ENV = [
   ...DENO_POSTGRES_ALLOW_ENV,
 ] as const;
 
-// Each wrapper takes the env-var name as its first argument. Keep this list in
-// sync with source-local helpers; dynamic dependency reads belong in a launcher
-// policy such as TOKEN_ADMIN_ALLOW_ENV above.
-const WRAPPER_NAMES = [
-  "required",
-  "requiredInt",
-  "optionalTrimmed",
-  "optional",
-  "optionalInt",
-  "env",
-];
-
 export interface CheckTarget {
   source: string;
   entrypoint: string;
@@ -352,11 +340,119 @@ function isEnvExecutable(value: string): boolean {
   return !value.includes("=") && /(^|[\\/])env(?:\.exe)?$/i.test(value);
 }
 
-function isEnvSplitOption(value: string): boolean {
-  if (/^-[^-]*S/.test(value)) return true;
-  if (!value.startsWith("--")) return false;
-  const optionName = value.slice(2).split("=", 1)[0];
-  return optionName.length > 0 && "split-string".startsWith(optionName);
+const ENV_LONG_OPTIONS = new Map<string, "none" | "required" | "optional">([
+  ["argv0", "required"],
+  ["ignore-environment", "none"],
+  ["null", "none"],
+  ["unset", "required"],
+  ["chdir", "required"],
+  ["split-string", "required"],
+  ["block-signal", "optional"],
+  ["default-signal", "optional"],
+  ["ignore-signal", "optional"],
+  ["list-signal-handling", "none"],
+  ["debug", "none"],
+  ["help", "none"],
+  ["version", "none"],
+]);
+
+function resolvedEnvLongOption(value: string):
+  | { name: string; arity: "none" | "required" | "optional" }
+  | undefined {
+  const requested = value.slice(2).split("=", 1)[0];
+  if (!requested) return undefined;
+  const matches = [...ENV_LONG_OPTIONS].filter(([name]) =>
+    name.startsWith(requested)
+  );
+  if (matches.length !== 1) return undefined;
+  const [name, arity] = matches[0];
+  return { name, arity };
+}
+
+function scanEnvOptions(
+  args: string[],
+  envIndex: number,
+  source: string,
+): void {
+  for (let index = envIndex + 1; index < args.length;) {
+    const argument = args[index];
+    if (argument === "--") return;
+    if (argument === "-") {
+      index++;
+      continue;
+    }
+    if (!argument.startsWith("-")) {
+      if (argument.includes("=")) {
+        index++;
+        continue;
+      }
+      return;
+    }
+
+    if (argument.startsWith("--")) {
+      const option = resolvedEnvLongOption(argument);
+      if (!option) {
+        throw new Error(
+          `${source}: ${argument} has unknown env option boundaries; ` +
+            "use a literal Deno argv list",
+        );
+      }
+      if (option.name === "split-string") {
+        throw new Error(
+          `${source}: env -S/--split-string launchers cannot be audited; ` +
+            "use a literal Deno argv list",
+        );
+      }
+      const hasAttachedValue = argument.includes("=");
+      if (option.arity === "none" && hasAttachedValue) {
+        throw new Error(
+          `${source}: ${argument} has an unexpected env option value`,
+        );
+      }
+      if (option.arity === "required" && !hasAttachedValue) {
+        if (index + 1 >= args.length) {
+          throw new Error(
+            `${source}: --${option.name} is missing its env option value`,
+          );
+        }
+        index += 2;
+      } else {
+        index++;
+      }
+      continue;
+    }
+
+    let consumesNext = false;
+    for (let offset = 1; offset < argument.length; offset++) {
+      const option = argument[offset];
+      if (option === "S") {
+        throw new Error(
+          `${source}: env -S/--split-string launchers cannot be audited; ` +
+            "use a literal Deno argv list",
+        );
+      }
+      if (["a", "u", "C"].includes(option)) {
+        consumesNext = offset === argument.length - 1;
+        break;
+      }
+      if (!["i", "0", "v"].includes(option)) {
+        throw new Error(
+          `${source}: -${option} has unknown env option boundaries; ` +
+            "use a literal Deno argv list",
+        );
+      }
+    }
+    if (consumesNext) {
+      if (index + 1 >= args.length) {
+        throw new Error(
+          `${source}: ${argument} is missing its env option value`,
+        );
+      }
+      index += 2;
+    } else {
+      index++;
+    }
+  }
 }
 
 function rejectArgumentExpandingLaunchers(
@@ -364,19 +460,12 @@ function rejectArgumentExpandingLaunchers(
   source: string,
 ): void {
   // `env -S` re-tokenizes one argv element into a new executable plus options.
-  // Reject that launcher boundary instead of duplicating GNU env's parser.
+  // Parse preceding env option arity so an operand named `deno` cannot look
+  // like the command boundary and hide a later split-string option.
   const denoIndex = args.findIndex(isDenoExecutable);
   const launcherEnd = denoIndex < 0 ? args.length : denoIndex;
   for (let index = 0; index < launcherEnd; index++) {
-    if (
-      isEnvExecutable(args[index]) &&
-      args.slice(index + 1, launcherEnd).some(isEnvSplitOption)
-    ) {
-      throw new Error(
-        `${source}: env -S/--split-string launchers cannot be audited; ` +
-          "use a literal Deno argv list",
-      );
-    }
+    if (isEnvExecutable(args[index])) scanEnvOptions(args, index, source);
   }
 }
 
@@ -872,8 +961,6 @@ export function walkImports(entrypoint: string, baseDir: string): Set<string> {
   return visited;
 }
 
-const WRAPPER_NAME_SET = new Set(WRAPPER_NAMES);
-
 type MemberExpression = t.MemberExpression | t.OptionalMemberExpression;
 type CallExpression = t.CallExpression | t.OptionalCallExpression;
 
@@ -910,11 +997,8 @@ function isDirectDenoEnvGetCall(node: t.Node): node is CallExpression {
     isDirectDenoEnvAccess(node.callee.object);
 }
 
-function isInsideKnownWrapper(
-  ancestors: readonly t.Node[],
-  declarations: ReadonlyMap<string, t.FunctionDeclaration>,
-): boolean {
-  const fn = ancestors.findLast((node) =>
+function innermostFunction(ancestors: readonly t.Node[]): t.Node | undefined {
+  return ancestors.findLast((node) =>
     [
       "ArrowFunctionExpression",
       "ClassMethod",
@@ -924,8 +1008,6 @@ function isInsideKnownWrapper(
       "ObjectMethod",
     ].includes(node.type)
   );
-  return fn?.type === "FunctionDeclaration" && !!fn.id &&
-    declarations.get(fn.id.name) === fn;
 }
 
 function literalEnvKey(
@@ -988,22 +1070,112 @@ function isNonValueIdentifier(node: t.Identifier, parent: t.Node): boolean {
   ].includes(parent.type);
 }
 
+interface EnvWrapperDeclaration {
+  declaration: t.FunctionDeclaration;
+  parameter: t.Identifier;
+}
+
+function passThroughWrapperCandidate(
+  node: CallExpression,
+  ancestors: readonly t.Node[],
+): EnvWrapperDeclaration | undefined {
+  const fn = innermostFunction(ancestors);
+  const argument = node.arguments[0];
+  if (
+    fn?.type !== "FunctionDeclaration" || !fn.id ||
+    fn.params[0]?.type !== "Identifier" ||
+    argument?.type !== "Identifier" || argument.name !== fn.params[0].name
+  ) return undefined;
+  return { declaration: fn, parameter: fn.params[0] };
+}
+
+function patternBindsName(
+  node: t.Node | null | undefined,
+  name: string,
+): boolean {
+  if (!node) return false;
+  if (node.type === "Identifier") return node.name === name;
+  if (node.type === "RestElement") {
+    return patternBindsName(node.argument, name);
+  }
+  if (node.type === "AssignmentPattern") {
+    return patternBindsName(node.left, name);
+  }
+  if (node.type === "ArrayPattern") {
+    return node.elements.some((element) => patternBindsName(element, name));
+  }
+  if (node.type === "ObjectPattern") {
+    return node.properties.some((property) =>
+      property.type === "RestElement"
+        ? patternBindsName(property.argument, name)
+        : patternBindsName(property.value, name)
+    );
+  }
+  if (node.type === "TSParameterProperty") {
+    return patternBindsName(node.parameter, name);
+  }
+  return false;
+}
+
+function assertWrapperParameterUnmodified(
+  wrapper: EnvWrapperDeclaration,
+  filePath: string,
+): void {
+  const name = wrapper.parameter.name;
+  let modified = false;
+  walkAst(wrapper.declaration.body, (node) => {
+    if (modified) return;
+    if (
+      node.type === "VariableDeclarator" && patternBindsName(node.id, name) ||
+      node.type === "CatchClause" && patternBindsName(node.param, name) ||
+      node.type === "FunctionDeclaration" && node.id?.name === name ||
+      node.type === "ClassDeclaration" && node.id?.name === name ||
+      node.type === "AssignmentExpression" &&
+        patternBindsName(node.left, name) ||
+      node.type === "UpdateExpression" &&
+        patternBindsName(node.argument, name) ||
+      (node.type === "ForInStatement" || node.type === "ForOfStatement") &&
+        node.left.type !== "VariableDeclaration" &&
+        patternBindsName(node.left, name)
+    ) modified = true;
+  });
+  if (modified) {
+    throw new Error(
+      `${filePath}: known env wrapper ${wrapper.declaration.id!.name}() ` +
+        `cannot modify or shadow its ${name} parameter`,
+    );
+  }
+}
+
 function knownWrapperDeclarations(
   sourceFile: t.File,
   filePath: string,
-): Map<string, t.FunctionDeclaration> {
-  // A dynamic Deno.env.get(name) is safe to suppress only while its wrapper
-  // binding remains source-local and every use is a direct, audited call.
-  const declarations = new Map<string, t.FunctionDeclaration>();
+): Map<string, EnvWrapperDeclaration> {
+  // Derive wrappers from a direct Deno.env.get(firstParameter) read. A dynamic
+  // read is safe to suppress only for that exact, unmodified parameter while
+  // the wrapper remains source-local and every use is a direct audited call.
+  const declarations = new Map<string, EnvWrapperDeclaration>();
   walkAst(sourceFile, (node, ancestors) => {
-    if (
-      node.type !== "FunctionDeclaration" || !node.id ||
-      !WRAPPER_NAME_SET.has(node.id.name)
-    ) return;
-    const name = node.id.name;
-    if (declarations.has(name)) {
+    if (!isDirectDenoEnvGetCall(node)) return;
+    const wrapper = passThroughWrapperCandidate(node, ancestors);
+    if (!wrapper) return;
+    const name = wrapper.declaration.id!.name;
+    const existing = declarations.get(name);
+    if (existing && existing.declaration !== wrapper.declaration) {
       throw new Error(
         `${filePath}: known env wrapper ${name}() is redeclared and cannot be audited`,
+      );
+    }
+    declarations.set(name, wrapper);
+  });
+
+  walkAst(sourceFile, (node, ancestors) => {
+    if (node.type !== "FunctionDeclaration" || !node.id) return;
+    const wrapper = declarations.get(node.id.name);
+    if (!wrapper) return;
+    if (wrapper.declaration !== node) {
+      throw new Error(
+        `${filePath}: known env wrapper ${node.id.name}() is redeclared and cannot be audited`,
       );
     }
     const parent = ancestors.at(-1);
@@ -1012,13 +1184,28 @@ function knownWrapperDeclarations(
       parent?.type === "ExportDefaultDeclaration"
     ) {
       throw new Error(
-        `${filePath}: known env wrapper ${name}() cannot be exported; ` +
+        `${filePath}: known env wrapper ${node.id.name}() cannot be exported; ` +
           "keep it source-local with direct literal call sites",
       );
     }
-    declarations.set(name, node);
   });
+  for (const wrapper of declarations.values()) {
+    assertWrapperParameterUnmodified(wrapper, filePath);
+  }
   return declarations;
+}
+
+function isPassThroughWrapperRead(
+  node: CallExpression,
+  ancestors: readonly t.Node[],
+  declarations: ReadonlyMap<string, EnvWrapperDeclaration>,
+): boolean {
+  const fn = innermostFunction(ancestors);
+  if (fn?.type !== "FunctionDeclaration" || !fn.id) return false;
+  const wrapper = declarations.get(fn.id.name);
+  const argument = node.arguments[0];
+  return wrapper?.declaration === fn && argument?.type === "Identifier" &&
+    argument.name === wrapper.parameter.name;
 }
 
 export function findEnvReads(filePath: string): Set<string> {
@@ -1038,13 +1225,13 @@ export function findEnvReads(filePath: string): Set<string> {
         // fails closed rather than disappearing from launcher requirements.
         if (
           !(error as Error).message.includes("dynamic env reads") ||
-          !isInsideKnownWrapper(ancestors, wrapperDeclarations)
+          !isPassThroughWrapperRead(node, ancestors, wrapperDeclarations)
         ) throw error;
       }
     }
     if (
       isCallExpression(node) && node.callee.type === "Identifier" &&
-      WRAPPER_NAME_SET.has(node.callee.name)
+      wrapperDeclarations.has(node.callee.name)
     ) {
       reads.add(
         literalEnvKey(
@@ -1055,7 +1242,7 @@ export function findEnvReads(filePath: string): Set<string> {
     }
 
     if (node.type === "Identifier" && wrapperDeclarations.has(node.name)) {
-      const declaration = wrapperDeclarations.get(node.name)!;
+      const declaration = wrapperDeclarations.get(node.name)!.declaration;
       const parent = ancestors.at(-1);
       const isDeclaration = parent === declaration && declaration.id === node;
       const isDirectCall = isCallExpression(parent) && parent.callee === node;
