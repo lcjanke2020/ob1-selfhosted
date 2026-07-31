@@ -46,6 +46,8 @@
 
 services:
   postgres:
+    # Image-only pin: bumping it also requires updating KNOWN_NON_DENO_IMAGES
+    # in server/scripts/check_allow_env.ts (the allow-env drift gate).
     image: pgvector/pgvector:pg16
     restart: unless-stopped
     # Light hardening only: postgres's entrypoint uses gosu to drop from
@@ -330,6 +332,8 @@ services:
     # Pinned to the version currently in production (0.24.0). Bump
     # deliberately when you're ready to re-test embeddings/chat output —
     # `:latest` is a supply-chain risk and a silent-upgrade footgun.
+    # Image-only pin: bumping it also requires updating KNOWN_NON_DENO_IMAGES
+    # in server/scripts/check_allow_env.ts (the allow-env drift gate).
     image: ollama/ollama:0.24.0
     restart: unless-stopped
     # Light hardening: no-new-privileges is safe across the board. Skipping

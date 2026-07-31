@@ -919,6 +919,15 @@ function composeDocument(content: string, source: string): UnknownRecord {
       if (
         attachedKey !== undefined && COMPOSE_MERGE_TAG_KEYS.has(attachedKey)
       ) {
+        // A tag travels with its node through anchors/aliases, so a tagged
+        // anchored node defined under a reviewed key could be replayed onto
+        // a launcher-relevant field. Reject the combination outright.
+        if (/^\s*&/.test(content.slice(offset + match.length))) {
+          throw new Error(
+            `${source}: Compose merge tag on ${attachedKey} carries a YAML anchor; ` +
+              "a tagged node reused through an alias cannot be audited",
+          );
+        }
         return prefix;
       }
       throw new Error(
@@ -1080,7 +1089,9 @@ function effectiveComposeArguments(
     composeBaseDirectory,
   );
   if (dockerfile === undefined) {
-    if (rawService.image !== undefined) {
+    // A null image is Compose for "unset" (the rendered config drops the
+    // key), so it cannot anchor an image-only service.
+    if (rawService.image !== undefined && rawService.image !== null) {
       if (explicitCommand !== undefined) {
         throw new Error(
           `${source}: command overrides an image whose ENTRYPOINT cannot be resolved; ` +
@@ -1203,7 +1214,10 @@ export function parseComposeStackTargets(
     for (const [serviceName, rawService] of Object.entries(document.services)) {
       const label = `${layer.source}#${serviceName}`;
       if (rawService === null) {
-        effectiveServices[serviceName] = null;
+        // Compose treats a null service override (including a bare `name:`
+        // stub) as a no-op: the rendered config retains the accumulated
+        // service. Measured on the pinned Compose; see the null-override
+        // regressions.
         continue;
       }
       if (!isRecord(rawService)) {
@@ -1220,12 +1234,21 @@ export function parseComposeStackTargets(
       for (
         const field of ["build", "image", "entrypoint", "command"] as const
       ) {
-        if (Object.hasOwn(rawService, field)) {
-          current[field] = field === "build" &&
-              isRecord(current.build) && isRecord(rawService.build)
-            ? { ...current.build, ...rawService.build }
-            : rawService[field];
+        if (!Object.hasOwn(rawService, field)) continue;
+        // Compose null semantics are field-dependent (measured on the pinned
+        // Compose): null build/image are no-ops that retain the accumulated
+        // value, while null entrypoint/command reset the field to the image
+        // defaults and so must be copied through.
+        if (
+          rawService[field] === null &&
+          (field === "build" || field === "image")
+        ) {
+          continue;
         }
+        current[field] = field === "build" &&
+            isRecord(current.build) && isRecord(rawService.build)
+          ? { ...current.build, ...rawService.build }
+          : rawService[field];
       }
       effectiveServices[serviceName] = current;
     }

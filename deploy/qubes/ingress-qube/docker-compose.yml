@@ -119,6 +119,8 @@ services:
   # are never used — which is exactly what keeps this qube free of the superuser
   # and app credentials.
   postgres:
+    # Image-only pin: bumping it also requires updating KNOWN_NON_DENO_IMAGES
+    # in server/scripts/check_allow_env.ts (the allow-env drift gate).
     image: pgvector/pgvector:pg16
     restart: unless-stopped
     profiles:
