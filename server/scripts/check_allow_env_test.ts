@@ -6,6 +6,7 @@ import {
   DENO_POSTGRES_ALLOW_ENV,
   dependencyEnvForEntrypoint,
   findEnvReads,
+  parseComposeStackTargets,
   parseComposeTargets,
   parseDockerfile,
   TOKEN_ADMIN_ALLOW_ENV,
@@ -80,6 +81,45 @@ services:
   assertEquals([...target.allowEnv], ["FOO"]);
 });
 
+Deno.test("Compose override stacks audit inherited Deno launchers", () => {
+  const base = `
+services:
+  tool:
+    entrypoint: [deno]
+    command: [run, --allow-env=SAFE, /app/tool.ts]
+`;
+  const bounded = parseComposeStackTargets([
+    { content: base, source: "base.yml" },
+    {
+      content: `
+services:
+  tool:
+    command: [run, --allow-env=OVERRIDE, /app/tool.ts]
+`,
+      source: "override.yml",
+    },
+  ]);
+  assertEquals(bounded.length, 1);
+  assertEquals([...bounded[0].allowEnv], ["OVERRIDE"]);
+
+  assertThrows(
+    () =>
+      parseComposeStackTargets([
+        { content: base, source: "base.yml" },
+        {
+          content: `
+services:
+  tool:
+    command: [run, --allow-env, /app/tool.ts]
+`,
+          source: "override.yml",
+        },
+      ]),
+    Error,
+    "bare -E/--allow-env grants the entire environment",
+  );
+});
+
 Deno.test("Deno global options before run remain auditable", () => {
   for (
     const globalOptions of [
@@ -127,6 +167,26 @@ services:
     Error,
     "global --future-global has unknown argument boundaries",
   );
+});
+
+Deno.test("unknown single-letter Deno options fail closed", () => {
+  for (
+    const launcher of [
+      "[deno, -Z, value, run, --allow-env=SAFE, /app/tool.ts]",
+      "[deno, run, -Z, /app/config.ts, -A, /app/tool.ts]",
+    ]
+  ) {
+    assertThrows(
+      () =>
+        onlyTarget(`
+services:
+  unsafe-tool:
+    entrypoint: ${launcher}
+`),
+      Error,
+      "unknown argument boundaries",
+    );
+  }
 });
 
 Deno.test("multiple Deno invocations in one shell launcher fail closed", () => {
@@ -357,6 +417,21 @@ services:
 
   assertEquals(target.entrypoint, "tool.ts");
   assertEquals([...target.allowEnv], ["FOO"]);
+});
+
+Deno.test("external Compose inheritance mechanisms fail closed", () => {
+  for (
+    const content of [
+      `include: [other.yml]\nservices: {}\n`,
+      `services:\n  tool:\n    extends:\n      file: other.yml\n      service: tool\n`,
+    ]
+  ) {
+    assertThrows(
+      () => parseComposeTargets(content, "compose.yml"),
+      Error,
+      "cannot be audited",
+    );
+  }
 });
 
 Deno.test("Compose interpolated entrypoints fail closed", () => {
@@ -595,6 +670,76 @@ Deno.test("relative TSX imports stay in the audited graph", async () => {
     assertEquals(analysis.missing, ["TSX_ENV"]);
   } finally {
     await Deno.remove(directory, { recursive: true });
+  }
+});
+
+Deno.test("unsupported Deno import maps fail closed before source analysis", async () => {
+  for (
+    const variant of [
+      {
+        name: "explicit import map",
+        configName: "import_map.json",
+        globalOptions: [],
+        runOptions: ["--import-map=/app/import_map.json"],
+        expectedError: "custom Deno import maps cannot be audited",
+      },
+      {
+        name: "explicit global config",
+        configName: "deno.json",
+        globalOptions: ["-c", "/app/deno.json"],
+        runOptions: [],
+        expectedError:
+          "Deno config imports differ from the checked-in audited policy",
+      },
+      {
+        name: "auto-discovered config",
+        configName: "deno.json",
+        globalOptions: [],
+        runOptions: [],
+        expectedError:
+          "Deno config imports differ from the checked-in audited policy",
+      },
+    ]
+  ) {
+    const directory = await Deno.makeTempDir();
+    try {
+      await Deno.writeTextFile(
+        `${directory}/main.ts`,
+        'import "./selected.ts";\n',
+      );
+      await Deno.writeTextFile(
+        `${directory}/selected.ts`,
+        'export const selected = "not executed";\n',
+      );
+      await Deno.writeTextFile(
+        `${directory}/actual.ts`,
+        'export const actual = Deno.env.get("IMPORT_MAP_ONLY");\n',
+      );
+      await Deno.writeTextFile(
+        `${directory}/${variant.configName}`,
+        JSON.stringify({ imports: { "./selected.ts": "./actual.ts" } }),
+      );
+
+      const globalOptions = variant.globalOptions.length > 0
+        ? `${variant.globalOptions.join(", ")}, `
+        : "";
+      const runOptions = variant.runOptions.length > 0
+        ? `${variant.runOptions.join(", ")}, `
+        : "";
+      const target = onlyTarget(`
+services:
+  tool:
+    entrypoint: [deno, ${globalOptions}run, ${runOptions}--allow-env=SAFE, /app/main.ts]
+`);
+      assertThrows(
+        () => analyzeTarget(target, directory),
+        Error,
+        variant.expectedError,
+        variant.name,
+      );
+    } finally {
+      await Deno.remove(directory, { recursive: true });
+    }
   }
 });
 
@@ -1056,4 +1201,5 @@ Deno.test("repository token-admin entrypoint carries the exact driver policy", (
   const analysis = analyzeTarget(target, serverDir);
   assertEquals(analysis.missing, []);
   assertEquals(analysis.required.size, TOKEN_ADMIN_ALLOW_ENV.length);
+  assertEquals(analysis.files.has("postgres_deferred_patched.ts"), true);
 });

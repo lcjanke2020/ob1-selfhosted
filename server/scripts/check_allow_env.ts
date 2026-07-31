@@ -8,11 +8,13 @@
 //
 // Algorithm:
 //   1. Parse the mcp + ingester Dockerfiles and every Compose service whose
-//      explicit `entrypoint` and/or `command` invokes `deno run`.
+//      effective `entrypoint` and/or `command` invokes `deno run`, including
+//      the supported base-plus-override stacks.
 //   2. Reject unrestricted grants, dynamic/multi-Deno Compose launchers, and
 //      executable Deno subcommands outside the supported `run` model.
-//   3. Parse each reachable TypeScript module into an AST, walk its relative
-//      import graph, and fail closed on non-literal dynamic imports.
+//   3. Validate the effective Deno config/import map against the checked-in
+//      resolution policy, parse each reachable TypeScript module into an AST,
+//      and fail closed on non-literal imports or unsupported semantics.
 //   4. Find string-literal env reads in the AST, fail closed on aliases and
 //      dynamic keys that cannot be proved safe, add explicit out-of-tree
 //      dependency reads, and fail if any required key is absent from the
@@ -59,11 +61,32 @@ export const TOKEN_ADMIN_ALLOW_ENV = [
   ...DENO_POSTGRES_ALLOW_ENV,
 ] as const;
 
+// The production launchers auto-discover server/deno.json. Keeping its import
+// policy explicit lets this guard reject arbitrary config/import-map semantics
+// without reimplementing Deno's resolver. The one local override is added to
+// the audited graph below; the remaining mappings stay external and pinned.
+const SUPPORTED_DENO_CONFIG_IMPORTS: Readonly<Record<string, string>> = {
+  "@hono/mcp": "npm:@hono/mcp@0.1.1",
+  "@modelcontextprotocol/sdk": "npm:@modelcontextprotocol/sdk@1.24.3",
+  "@std/assert": "jsr:@std/assert@1",
+  "@std/path": "jsr:@std/path@^1.0.8",
+  "@std/toml": "jsr:@std/toml@1.0.4",
+  "@std/yaml": "jsr:@std/yaml@^1.1.2",
+  "hono": "npm:hono@4.12.25",
+  "jose": "npm:jose@5.9.6",
+  "zod": "npm:zod@4.1.13",
+  "postgres": "https://deno.land/x/postgres@v0.19.3/mod.ts",
+  "https://deno.land/x/postgres@v0.19.3/utils/deferred.ts":
+    "./postgres_deferred_patched.ts",
+};
+
 export interface CheckTarget {
   source: string;
   entrypoint: string;
   allowEnv: Set<string>;
   requiredEnv?: Set<string>;
+  configPath?: string | null;
+  importMapPath?: string;
 }
 
 export interface TargetAnalysis {
@@ -95,6 +118,8 @@ function parseAllowEnv(value: string, source: string): Set<string> {
 export function parseDockerfile(dockerfilePath: string): {
   entrypoint: string;
   allowEnv: Set<string>;
+  configPath?: string | null;
+  importMapPath?: string;
 } {
   const content = Deno.readTextFileSync(dockerfilePath);
   const entrypointArgs = dockerInstructionArguments(
@@ -113,10 +138,7 @@ export function parseDockerfile(dockerfilePath: string): {
     dockerfilePath,
   );
   if (!target) throw new Error(`No deno run launcher in ${dockerfilePath}`);
-  return {
-    entrypoint: target.entrypoint,
-    allowEnv: target.allowEnv,
-  };
+  return target;
 }
 
 function dockerInstructionArguments(
@@ -257,7 +279,13 @@ function literalArguments(
 
 interface DenoInvocation {
   globalOptions: string[];
+  resolution: DenoResolutionOptions;
   runArguments: string[];
+}
+
+interface DenoResolutionOptions {
+  configPath?: string | null;
+  importMapPath?: string;
 }
 
 const RUN_OPTIONS_WITH_VALUES = new Set([
@@ -322,6 +350,19 @@ const RUN_STANDALONE_OPTIONS = new Set([
   "--watch-hmr",
 ]);
 
+// These are the operand-free short aliases exposed by the pinned Deno CLI
+// that are not already listed above. Unknown single-letter flags fail closed:
+// a future flag may consume an operand and shift the apparent module boundary.
+const KNOWN_PERMISSION_SHORT_OPTIONS = new Set([
+  "-A",
+  "-E",
+  "-I",
+  "-N",
+  "-R",
+  "-S",
+  "-W",
+]);
+
 const UNAUDITABLE_CODE_OPTIONS = new Set([
   "--allow-scripts",
   "--preload",
@@ -330,6 +371,68 @@ const UNAUDITABLE_CODE_OPTIONS = new Set([
 
 function optionName(argument: string): string {
   return argument.split("=", 1)[0];
+}
+
+function recordResolutionOption(
+  resolution: DenoResolutionOptions,
+  argument: string,
+  separateValue: string | undefined,
+  source: string,
+): void {
+  const name = optionName(argument);
+  const attachedValue = argument.includes("=")
+    ? argument.slice(argument.indexOf("=") + 1)
+    : undefined;
+  if (name === "-c" || name === "--config") {
+    const value = attachedValue ?? separateValue;
+    if (!value) throw new Error(`${source}: ${name} is missing its value`);
+    if (resolution.configPath !== undefined) {
+      throw new Error(
+        `${source}: multiple Deno config options cannot be audited`,
+      );
+    }
+    resolution.configPath = value;
+  } else if (name === "--no-config") {
+    if (resolution.configPath !== undefined) {
+      throw new Error(
+        `${source}: conflicting Deno config options cannot be audited`,
+      );
+    }
+    resolution.configPath = null;
+  } else if (name === "--import-map") {
+    const value = attachedValue ?? separateValue;
+    if (!value) throw new Error(`${source}: ${name} is missing its value`);
+    if (resolution.importMapPath !== undefined) {
+      throw new Error(`${source}: multiple Deno import maps cannot be audited`);
+    }
+    resolution.importMapPath = value;
+  }
+}
+
+function mergeResolutionOptions(
+  source: string,
+  ...parts: DenoResolutionOptions[]
+): DenoResolutionOptions {
+  const merged: DenoResolutionOptions = {};
+  for (const part of parts) {
+    if (part.configPath !== undefined) {
+      if (merged.configPath !== undefined) {
+        throw new Error(
+          `${source}: multiple Deno config options cannot be audited`,
+        );
+      }
+      merged.configPath = part.configPath;
+    }
+    if (part.importMapPath !== undefined) {
+      if (merged.importMapPath !== undefined) {
+        throw new Error(
+          `${source}: multiple Deno import maps cannot be audited`,
+        );
+      }
+      merged.importMapPath = part.importMapPath;
+    }
+  }
+  return merged;
 }
 
 function isDenoExecutable(value: string): boolean {
@@ -500,9 +603,9 @@ function optionHasKnownBoundaries(
   const name = optionName(argument);
   return argument.includes("=") ||
     standaloneOptions.has(name) ||
+    KNOWN_PERMISSION_SHORT_OPTIONS.has(name) ||
     /^--(?:allow|deny|ignore)-(?:env|ffi|import|net|read|run|sys|write)$/
-      .test(name) ||
-    /^-[A-Za-z]$/.test(name);
+      .test(name);
 }
 
 function invocationFromArguments(
@@ -513,10 +616,11 @@ function invocationFromArguments(
   if (denoIndex < 0) return undefined;
 
   const globalOptions: string[] = [];
+  const resolution: DenoResolutionOptions = {};
   for (let index = denoIndex + 1; index < args.length; index++) {
     const argument = args[index];
     if (argument === "run") {
-      return { globalOptions, runArguments: args.slice(index + 1) };
+      return { globalOptions, resolution, runArguments: args.slice(index + 1) };
     }
     if (!argument.startsWith("-")) {
       if (/\.tsx?(?:[?#].*)?$/.test(argument)) {
@@ -534,13 +638,16 @@ function invocationFromArguments(
     rejectUnauditableOption(argument, source);
     globalOptions.push(argument);
     const name = optionName(argument);
+    let separateValue: string | undefined;
     if (GLOBAL_OPTIONS_WITH_VALUES.has(name) && !argument.includes("=")) {
       if (index + 1 >= args.length) {
         throw new Error(`${source}: ${name} is missing its value`);
       }
+      separateValue = args[index + 1];
       index++;
-      continue;
     }
+    recordResolutionOption(resolution, argument, separateValue, source);
+    if (separateValue !== undefined) continue;
     if (!optionHasKnownBoundaries(argument, RUN_STANDALONE_OPTIONS)) {
       throw new Error(
         `${source}: global ${argument} has unknown argument boundaries; ` +
@@ -610,8 +717,9 @@ function rejectUnauditableOption(argument: string, source: string): void {
 function parseRunArguments(
   args: string[],
   source: string,
-): { options: string[]; script: string } {
+): { options: string[]; resolution: DenoResolutionOptions; script: string } {
   const options: string[] = [];
+  const resolution: DenoResolutionOptions = {};
   let script: string | undefined;
   for (let index = 0; index < args.length; index++) {
     const argument = args[index];
@@ -627,13 +735,16 @@ function parseRunArguments(
     rejectUnauditableOption(argument, source);
     options.push(argument);
     const name = optionName(argument);
+    let separateValue: string | undefined;
     if (RUN_OPTIONS_WITH_VALUES.has(name) && !argument.includes("=")) {
       if (index + 1 >= args.length) {
         throw new Error(`${source}: ${name} is missing its value`);
       }
+      separateValue = args[index + 1];
       index++;
-      continue;
     }
+    recordResolutionOption(resolution, argument, separateValue, source);
+    if (separateValue !== undefined) continue;
     if (
       !optionHasKnownBoundaries(argument, RUN_STANDALONE_OPTIONS)
     ) {
@@ -647,7 +758,7 @@ function parseRunArguments(
   if (!script || !/\.tsx?(?:[?#].*)?$/.test(script)) {
     throw new Error(`${source}: deno run launcher has no .ts module`);
   }
-  return { options, script };
+  return { options, resolution, script };
 }
 
 function collectAllowEnv(
@@ -703,7 +814,12 @@ function collectAllowEnv(
 function parseDenoRunTarget(
   args: string[],
   source: string,
-): Pick<CheckTarget, "entrypoint" | "allowEnv"> | undefined {
+):
+  | Pick<
+    CheckTarget,
+    "entrypoint" | "allowEnv" | "configPath" | "importMapPath"
+  >
+  | undefined {
   rejectArgumentExpandingLaunchers(args, source);
   const invocation = denoInvocation(args, source);
   if (!invocation) return undefined;
@@ -712,10 +828,16 @@ function parseDenoRunTarget(
     [...invocation.globalOptions, ...parsed.options],
     source,
   );
+  const resolution = mergeResolutionOptions(
+    source,
+    invocation.resolution,
+    parsed.resolution,
+  );
 
   return {
     entrypoint: normalizeComposeEntrypoint(parsed.script, source),
     allowEnv,
+    ...resolution,
   };
 }
 
@@ -753,6 +875,11 @@ function composeDocument(content: string, source: string): UnknownRecord {
   if (!isRecord(document)) {
     throw new Error(`${source}: Compose document must be a mapping`);
   }
+  if (document.include !== undefined) {
+    throw new Error(
+      `${source}: Compose include cannot be audited; classify the files as an explicit stack`,
+    );
+  }
   return document;
 }
 
@@ -765,13 +892,24 @@ export function parseComposeTargets(
   if (!isRecord(document.services)) {
     throw new Error(`${source}: services must be a mapping`);
   }
+  return parseComposeServiceTargets(document.services, source);
+}
 
+function parseComposeServiceTargets(
+  services: UnknownRecord,
+  source: string,
+): CheckTarget[] {
   const targets: CheckTarget[] = [];
-  for (const [serviceName, rawService] of Object.entries(document.services)) {
+  for (const [serviceName, rawService] of Object.entries(services)) {
     const label = `${source}#${serviceName}`;
     if (rawService === null) continue;
     if (!isRecord(rawService)) {
       throw new Error(`${label}: service definition must be a mapping`);
+    }
+    if (rawService.extends !== undefined) {
+      throw new Error(
+        `${label}: Compose extends cannot be audited; use an explicit checked-in stack`,
+      );
     }
     const entrypointArgs = rawService.entrypoint === undefined ||
         rawService.entrypoint === null
@@ -801,6 +939,50 @@ export function parseComposeTargets(
     });
   }
   return targets;
+}
+
+export function parseComposeStackTargets(
+  layers: readonly { content: string; source: string }[],
+): CheckTarget[] {
+  if (layers.length === 0) {
+    throw new Error("Compose stack must contain at least one file");
+  }
+  const effectiveServices: UnknownRecord = {};
+  for (const layer of layers) {
+    const document = composeDocument(layer.content, layer.source);
+    if (document.services === undefined) continue;
+    if (!isRecord(document.services)) {
+      throw new Error(`${layer.source}: services must be a mapping`);
+    }
+    for (const [serviceName, rawService] of Object.entries(document.services)) {
+      const label = `${layer.source}#${serviceName}`;
+      if (rawService === null) {
+        effectiveServices[serviceName] = null;
+        continue;
+      }
+      if (!isRecord(rawService)) {
+        throw new Error(`${label}: service definition must be a mapping`);
+      }
+      if (rawService.extends !== undefined) {
+        throw new Error(
+          `${label}: Compose extends cannot be audited; use an explicit checked-in stack`,
+        );
+      }
+      const current = isRecord(effectiveServices[serviceName])
+        ? { ...effectiveServices[serviceName] }
+        : {};
+      for (const field of ["entrypoint", "command"] as const) {
+        if (Object.hasOwn(rawService, field)) {
+          current[field] = rawService[field];
+        }
+      }
+      effectiveServices[serviceName] = current;
+    }
+  }
+  return parseComposeServiceTargets(
+    effectiveServices,
+    layers.map((layer) => layer.source).join(" + "),
+  );
 }
 
 function composeFiles(directory: string): string[] {
@@ -923,6 +1105,145 @@ function importSpecifiers(content: string, source: string): Set<string> {
   return specifiers;
 }
 
+interface ModuleResolutionInput {
+  source?: string;
+  configPath?: string | null;
+  importMapPath?: string;
+}
+
+function relativeAuditPath(
+  absolutePath: string,
+  baseDir: string,
+  source: string,
+  description: string,
+): string {
+  const path = relative(baseDir, absolutePath).replaceAll("\\", "/");
+  if (path === ".." || path.startsWith("../")) {
+    throw new Error(
+      `${source}: ${description} must resolve inside /app: ${absolutePath}`,
+    );
+  }
+  return path;
+}
+
+function localAuditPath(
+  value: string,
+  baseDir: string,
+  relativeTo: string,
+  source: string,
+  description: string,
+): string {
+  const portable = value.replace(/[?#].*$/, "").replaceAll("\\", "/");
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(portable)) {
+    throw new Error(
+      `${source}: remote ${description} cannot be audited: ${value}`,
+    );
+  }
+  const absolutePath = portable.startsWith("/app/")
+    ? resolve(baseDir, portable.slice("/app/".length))
+    : resolve(relativeTo, portable);
+  return relativeAuditPath(absolutePath, baseDir, source, description);
+}
+
+function readJsonDocument(path: string, description: string): UnknownRecord {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Deno.readTextFileSync(path));
+  } catch (error) {
+    throw new Error(
+      `${description} must be strict JSON that can be audited: ${
+        (error as Error).message
+      }`,
+    );
+  }
+  if (!isRecord(parsed)) {
+    throw new Error(`${description} must contain a JSON object`);
+  }
+  return parsed;
+}
+
+function fileExists(path: string): boolean {
+  try {
+    return Deno.statSync(path).isFile;
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) return false;
+    throw error;
+  }
+}
+
+function resolutionLocalFiles(
+  baseDir: string,
+  input: ModuleResolutionInput,
+): Set<string> {
+  const source = input.source ?? "Deno launcher";
+  if (input.importMapPath !== undefined) {
+    throw new Error(
+      `${source}: custom Deno import maps cannot be audited; ` +
+        "use the checked-in server/deno.json policy",
+    );
+  }
+  let configPath: string | undefined;
+  if (input.configPath !== null) {
+    if (input.configPath !== undefined) {
+      const path = localAuditPath(
+        input.configPath,
+        baseDir,
+        baseDir,
+        source,
+        "Deno config",
+      );
+      configPath = join(baseDir, path);
+    } else {
+      for (const name of ["deno.json", "deno.jsonc"]) {
+        const candidate = join(baseDir, name);
+        if (fileExists(candidate)) {
+          configPath = candidate;
+          break;
+        }
+      }
+    }
+  }
+  if (configPath === undefined) return new Set();
+  const expectedPath = join(baseDir, "deno.json");
+  if (resolve(configPath) !== resolve(expectedPath)) {
+    throw new Error(
+      `${source}: custom Deno configs cannot be audited; ` +
+        "use the checked-in server/deno.json policy",
+    );
+  }
+  const config = readJsonDocument(
+    configPath,
+    `${source}: Deno config ${configPath}`,
+  );
+  const unsupportedKeys = Object.keys(config).filter((key) =>
+    key !== "imports" && key !== "tasks"
+  );
+  if (unsupportedKeys.length > 0 || !isRecord(config.imports)) {
+    throw new Error(
+      `${source}: Deno config contains unsupported resolution semantics`,
+    );
+  }
+  const actualImports = Object.entries(config.imports).sort(([left], [right]) =>
+    left.localeCompare(right)
+  );
+  const expectedImports = Object.entries(SUPPORTED_DENO_CONFIG_IMPORTS).sort(
+    ([left], [right]) => left.localeCompare(right),
+  );
+  if (
+    actualImports.length !== expectedImports.length ||
+    actualImports.some(([key, value], index) => {
+      const expected = expectedImports[index];
+      return typeof value !== "string" || key !== expected[0] ||
+        value !== expected[1];
+    })
+  ) {
+    throw new Error(
+      `${source}: Deno config imports differ from the checked-in audited policy`,
+    );
+  }
+  return new Set(["postgres_deferred_patched.ts"]);
+}
+
 function dependencyEnvForFiles(
   files: Iterable<string>,
   baseDir: string,
@@ -949,9 +1270,14 @@ export function dependencyEnvForEntrypoint(
   return dependencyEnvForFiles(walkImports(entrypoint, baseDir), baseDir);
 }
 
-export function walkImports(entrypoint: string, baseDir: string): Set<string> {
+export function walkImports(
+  entrypoint: string,
+  baseDir: string,
+  resolution: ModuleResolutionInput = {},
+): Set<string> {
+  const configFiles = resolutionLocalFiles(baseDir, resolution);
   const visited = new Set<string>();
-  const queue: string[] = [entrypoint];
+  const queue: string[] = [entrypoint, ...configFiles];
   while (queue.length > 0) {
     const file = queue.shift()!;
     if (visited.has(file)) continue;
@@ -1331,7 +1657,7 @@ export function analyzeTarget(
   target: CheckTarget,
   baseDir = SERVER_DIR,
 ): TargetAnalysis {
-  const files = walkImports(target.entrypoint, baseDir);
+  const files = walkImports(target.entrypoint, baseDir, target);
   const reads = new Set<string>();
   for (const file of files) {
     for (const key of findEnvReads(join(baseDir, file))) reads.add(key);
@@ -1342,6 +1668,24 @@ export function analyzeTarget(
   const missing = [...required].filter((key) => !target.allowEnv.has(key))
     .sort();
   return { files, reads, required, missing };
+}
+
+function uniqueTargets(targets: CheckTarget[]): CheckTarget[] {
+  const seen = new Set<string>();
+  return targets.filter((target) => {
+    const signature = JSON.stringify({
+      entrypoint: target.entrypoint,
+      allowEnv: [...target.allowEnv].sort(),
+      requiredEnv: [...target.requiredEnv ?? []].sort(),
+      configPath: target.configPath === undefined
+        ? "<auto>"
+        : target.configPath,
+      importMapPath: target.importMapPath ?? "<none>",
+    });
+    if (seen.has(signature)) return false;
+    seen.add(signature);
+    return true;
+  });
 }
 
 export function repositoryTargets(): CheckTarget[] {
@@ -1357,11 +1701,61 @@ export function repositoryTargets(): CheckTarget[] {
       ...parseDockerfile(join(SERVER_DIR, "Dockerfile.ingester")),
     },
   ];
-  for (const path of composeFiles(DEPLOY_DIR)) {
-    const source = relative(REPO_DIR, path).replaceAll("\\", "/");
-    targets.push(...parseComposeTargets(Deno.readTextFileSync(path), source));
+  const composeLayers = new Map(
+    composeFiles(DEPLOY_DIR).map((path) => [
+      path,
+      {
+        content: Deno.readTextFileSync(path),
+        source: relative(REPO_DIR, path).replaceAll("\\", "/"),
+      },
+    ]),
+  );
+  const basePath = join(DEPLOY_DIR, "compose-local", "docker-compose.yml");
+  const overlayPaths = [
+    join(DEPLOY_DIR, "compose-tailnet", "docker-compose.pattern-b.yml"),
+    join(DEPLOY_DIR, "qubes", "docker-compose.external-db.yml"),
+    join(DEPLOY_DIR, "qubes", "docker-compose.cpu-ollama.yml"),
+  ];
+  const standalonePaths = [
+    join(DEPLOY_DIR, "qubes", "app-qube", "docker-compose.yml"),
+    join(DEPLOY_DIR, "qubes", "ingress-qube", "docker-compose.yml"),
+  ];
+  const classifiedPaths = new Set([
+    basePath,
+    ...overlayPaths,
+    ...standalonePaths,
+  ]);
+  for (const path of composeLayers.keys()) {
+    if (!classifiedPaths.has(path)) {
+      throw new Error(
+        `Compose file is not classified as standalone or a supported override: ${path}`,
+      );
+    }
   }
-  return targets;
+  for (const layer of composeLayers.values()) {
+    targets.push(...parseComposeTargets(layer.content, layer.source));
+  }
+
+  // These three override files are documented as optional layers on the
+  // compose-local base. Audit every supported subset in its documented order
+  // so an override command is combined with an inherited Deno entrypoint.
+  const baseLayer = composeLayers.get(basePath);
+  if (!baseLayer) {
+    throw new Error(`Missing supported Compose base: ${basePath}`);
+  }
+  for (let mask = 1; mask < 1 << overlayPaths.length; mask++) {
+    const stack = [baseLayer];
+    for (const [index, path] of overlayPaths.entries()) {
+      if ((mask & (1 << index)) === 0) continue;
+      const layer = composeLayers.get(path);
+      if (!layer) {
+        throw new Error(`Missing supported Compose override: ${path}`);
+      }
+      stack.push(layer);
+    }
+    targets.push(...parseComposeStackTargets(stack));
+  }
+  return uniqueTargets(targets);
 }
 
 export function reportTargets(targets: CheckTarget[]): boolean {
