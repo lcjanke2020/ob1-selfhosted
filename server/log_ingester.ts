@@ -625,7 +625,6 @@ async function main(): Promise<void> {
 
   // Tick-loop forever. Errors in tickOnce are caught + logged so a single
   // bad batch doesn't crash the process.
-  // deno-lint-ignore no-constant-condition
   while (true) {
     try {
       await tickOnce();
