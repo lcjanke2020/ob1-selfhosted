@@ -16,8 +16,12 @@
 -- change vector(768) here AND in db/01-schema.sql together and re-embed.
 --
 -- IDEMPOTENT and re-runnable: init scripts only auto-run on a fresh data dir,
--- so apply to an existing deployment manually (safe to re-run):
+-- so apply to an existing deployment manually (safe to re-run). On the
+-- single-box compose install:
 --   docker compose exec -T postgres psql -U postgres -d openbrain < db/04-sessions.sql
+-- A deployment whose database is not in the compose project has nothing to
+-- exec into; deploy/qubes/app-qube/README.md §"Upgrading an existing
+-- deployment" carries the equivalent over a network connection.
 --
 -- Roles openbrain_app / openbrain_readonly are created by 00-roles.sh.
 

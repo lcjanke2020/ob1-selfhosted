@@ -2,11 +2,16 @@
 --
 -- All tables are idempotent (IF NOT EXISTS) so this file is safe to re-run
 -- by hand against an existing database. The docker entrypoint only runs
--- /docker-entrypoint-initdb.d/* on a freshly-initialized data dir, so the
--- expected path for existing deployments is:
+-- /docker-entrypoint-initdb.d/* on a freshly-initialized data dir, so an
+-- existing deployment has to apply it by hand. On the single-box compose
+-- install:
 --
 --   docker compose exec -T postgres \
 --     psql -U postgres -d openbrain < db/02-observability.sql
+--
+-- A deployment whose database is not in the compose project has nothing to
+-- exec into; deploy/qubes/app-qube/README.md §"Upgrading an existing
+-- deployment" carries the equivalent over a network connection.
 --
 -- See deploy/compose-tailnet/README.md §"Observability".
 
