@@ -43,8 +43,8 @@ x-brain-key: ob1_<public-prefix>_<secret>
 ```
 
 Do not put it in a URL, command history, ticket, or log. The prefix and label
-are safe for inventory and support conversations; the complete token is a
-bearer secret.
+are safe for inventory and support conversations; the complete token is a bearer
+secret.
 
 ## Issue, list, and revoke
 
@@ -62,35 +62,35 @@ docker compose --profile tools run --rm token-admin list
 docker compose --profile tools run --rm token-admin revoke ob1_AAAAAAAA
 ```
 
-`--json` is available for automation. Be especially careful with `create
---json`: its output necessarily contains the one-time plaintext and must not be
-captured by routine job logs.
+`--json` is available for automation. Be especially careful with
+`create
+--json`: its output necessarily contains the one-time plaintext and must
+not be captured by routine job logs.
 
 Rotation is create-new, update and verify the client, then revoke-old. A
 repeated revoke or an unknown prefix fails without changing another token.
-Labels are mutable only by replacing a token, which keeps historical
-attribution stable.
+Labels are mutable only by replacing a token, which keeps historical attribution
+stable.
 
 ## Moving from `MCP_ACCESS_KEY`
 
-The static key remains supported as a migration bridge. Keep it configured
-while issuing one native token per client, update and smoke-test each client,
-then remove `MCP_ACCESS_KEY` from `.env` and recreate the MCP service:
+The static key remains supported as a migration bridge. Keep it configured while
+issuing one native token per client, update and smoke-test each client, then
+remove `MCP_ACCESS_KEY` from `.env` and recreate the MCP service:
 
 ```bash
 docker compose up -d --force-recreate mcp
 ```
 
 The static key cannot be revoked through the token table. Removing it from the
-server environment is the revocation step. Keep
-`MCP_ACCESS_KEY_PRINCIPAL` stable during the transition so existing personal
-rows retain the same owner.
+server environment is the revocation step. Keep `MCP_ACCESS_KEY_PRINCIPAL`
+stable during the transition so existing personal rows retain the same owner.
 
 ## Existing database upgrade
 
 PostgreSQL init scripts do not rerun on an existing data directory. Quiesce
-writes and take a verified backup, then set
-`OPENBRAIN_TOKEN_ADMIN_PASSWORD` in `.env` and run:
+writes and take a verified backup, then set `OPENBRAIN_TOKEN_ADMIN_PASSWORD` in
+`.env` and run:
 
 ```bash
 cd deploy/compose-local
@@ -107,8 +107,8 @@ docker compose up -d --no-deps mcp
 
 Migration 08 is required by this server version even when native tokens are
 disabled. On an OAuth-only deployment the administrator role may remain
-`NOLOGIN`, and `ENABLE_NATIVE_TOKENS=false` keeps every presented
-`x-brain-key` outside the accepted credential set.
+`NOLOGIN`, and `ENABLE_NATIVE_TOKENS=false` keeps every presented `x-brain-key`
+outside the accepted credential set.
 
 ## Storage, roles, and attribution
 
@@ -136,6 +136,6 @@ be reconstructed from the database. Protect dumps as credential material and
 review/revoke restored tokens after a recovery.
 
 The lifecycle shape was informed by the MIT-licensed
-[memory-vault project](https://github.com/MihaiBuilds/memory-vault); Open Brain's
-database roles, request integration, attribution, and public-deployment gate are
-implemented for this repository's own trust model.
+[memory-vault project](https://github.com/MihaiBuilds/memory-vault); Open
+Brain's database roles, request integration, attribution, and public-deployment
+gate are implemented for this repository's own trust model.

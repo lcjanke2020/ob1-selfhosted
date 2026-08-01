@@ -1,30 +1,30 @@
 # OAuth service accounts (client credentials)
 
-Open Brain accepts unattended agents through the same OAuth resource-server
-door used by interactive clients. A service account obtains a short-lived JWT
-with the OAuth 2.0 `client_credentials` grant, sends it as a Bearer token, and
+Open Brain accepts unattended agents through the same OAuth resource-server door
+used by interactive clients. A service account obtains a short-lived JWT with
+the OAuth 2.0 `client_credentials` grant, sends it as a Bearer token, and
 performs MCP or REST calls without a browser or human login.
 
 This is OAuth, not an interactive OpenID Connect login: there is no user,
 authorization code, consent screen, refresh token, or `openid` scope in the
-machine flow. The configured enterprise issuer and JWKS still provide the
-signed access-token trust boundary.
+machine flow. The configured enterprise issuer and JWKS still provide the signed
+access-token trust boundary.
 
 ## Identity and provenance contract
 
 Authentication remains unchanged. Open Brain accepts only an RS256 JWT whose
-signature, issuer, audience, expiration, and `sub` pass the existing checks.
-The subject must be a non-empty string of at most 1,024 characters with no
-control characters. A machine identity does not introduce another credential
-verifier or bypass authorization.
+signature, issuer, audience, expiration, and `sub` pass the existing checks. The
+subject must be a non-empty string of at most 1,024 characters with no control
+characters. A machine identity does not introduce another credential verifier or
+bypass authorization.
 
 After verification, the server assigns one of three provenance labels:
 
-| `door` label | Verified credential class | Principal |
-|---|---|---|
-| `funnel` | OAuth user token | verified JWT `sub` |
-| `service` | OAuth client-credentials token | verified JWT `sub` |
-| `tailnet` | native/static `x-brain-key` | configured deployment-wide principal, or none |
+| `door` label | Verified credential class      | Principal                                     |
+| ------------ | ------------------------------ | --------------------------------------------- |
+| `funnel`     | OAuth user token               | verified JWT `sub`                            |
+| `service`    | OAuth client-credentials token | verified JWT `sub`                            |
+| `tailnet`    | native/static `x-brain-key`    | configured deployment-wide principal, or none |
 
 The historical `funnel` and `tailnet` names are compatibility labels, not proof
 of the Caddy network route. A service-account request normally arrives through
@@ -37,23 +37,23 @@ automatically. Auth0's selectable **RFC 9068 profile does not use `gty`**; it
 uses `client_id` instead, and therefore needs the same exact-subject mapping as
 a generic issuer. See Auth0's
 [access-token profile comparison](https://auth0.com/docs/secure/tokens/access-tokens/access-token-profiles).
-The OAuth access-token standard does not define a universal grant-type claim,
-so any token profile without `gty` needs an exact, operator-controlled subject
+The OAuth access-token standard does not define a universal grant-type claim, so
+any token profile without `gty` needs an exact, operator-controlled subject
 mapping:
 
 ```dotenv
 OAUTH_SERVICE_ACCOUNT_SUBJECTS=scheduled-capture-client,search-indexer-client
 ```
 
-Whitespace around comma-separated entries is trimmed; matching remains exact
-and case-sensitive. Empty entries, duplicates, control characters, more than
-256 subjects, and subjects longer than 1,024 characters fail at boot. The
-setting requires the OAuth door. It changes attribution only: listing a subject
-does not make an invalid token valid and does not broaden its memory scope.
+Whitespace around comma-separated entries is trimmed; matching remains exact and
+case-sensitive. Empty entries, duplicates, control characters, more than 256
+subjects, and subjects longer than 1,024 characters fail at boot. The setting
+requires the OAuth door. It changes attribution only: listing a subject does not
+make an invalid token valid and does not broaden its memory scope.
 
 The verified service `sub` is also its personal-memory principal. Use a
-different provider application for each agent or automation boundary rather
-than sharing one M2M client. That gives each agent stable ownership of its own
+different provider application for each agent or automation boundary rather than
+sharing one M2M client. That gives each agent stable ownership of its own
 personal rows and makes compromise and rotation narrower. Workspace and project
 audiences remain shared among authenticated callers as described in
 [Memory spaces](spaces.md).
@@ -69,15 +69,15 @@ AUTH0_JWKS_URI=https://issuer.example/.well-known/jwks.json
 AUTH0_AUDIENCE=https://brain.example/mcp
 ```
 
-All three values are required together. `AUTH0_ISSUER` and `AUTH0_AUDIENCE`
-must match the JWT claims exactly, including trailing slashes and paths. The
-issuer must publish RSA signing keys at the configured HTTPS JWKS URI. Open
-Brain does not accept opaque tokens, token introspection, symmetric signatures,
-or algorithms other than RS256.
+All three values are required together. `AUTH0_ISSUER` and `AUTH0_AUDIENCE` must
+match the JWT claims exactly, including trailing slashes and paths. The issuer
+must publish RSA signing keys at the configured HTTPS JWKS URI. Open Brain does
+not accept opaque tokens, token introspection, symmetric signatures, or
+algorithms other than RS256.
 
 On the Tailnet/Funnel and Qubes deployments, keep `MCP_ACCESS_KEY` unset and
-`ENABLE_NATIVE_TOKENS=false`. The machine flow uses OAuth; it is not a reason
-to reopen either `x-brain-key` credential type on the public deployment. A
+`ENABLE_NATIVE_TOKENS=false`. The machine flow uses OAuth; it is not a reason to
+reopen either `x-brain-key` credential type on the public deployment. A
 scheduled agent outside Anthropic's egress range must connect over the tailnet
 route, because the public Funnel branch will correctly reject it at Caddy with
 403 before OAuth is attempted.
@@ -105,8 +105,10 @@ route, because the public Funnel branch will correctly reject it at Caddy with
    entry is needed. If it reports no signed `gty` (including the Auth0 RFC 9068
    profile), perform the one-time verified-subject mapping procedure below.
 
-Auth0's [Machine-to-Machine application guide](https://auth0.com/docs/get-started/auth0-overview/create-applications/machine-to-machine-apps)
-and [client-credentials token request](https://auth0.com/docs/api/authentication/client-credential-flow/get-token)
+Auth0's
+[Machine-to-Machine application guide](https://auth0.com/docs/get-started/auth0-overview/create-applications/machine-to-machine-apps)
+and
+[client-credentials token request](https://auth0.com/docs/api/authentication/client-credential-flow/get-token)
 are the provider source of truth.
 
 ## Supported application authentication methods
@@ -144,10 +146,11 @@ token endpoint, client authentication method, required audience/resource
 parameter, scopes, and JWT signing profile from its documentation.
 
 Auth0 RFC 9068 tokens and most non-Auth0 tokens will not contain `gty`. Run the
-smoke once with `OAUTH_SMOKE_PRINT_SUBJECT=true`, copy only the reported verified
-subject into `OAUTH_SERVICE_ACCOUNT_SUBJECTS` on the server, recreate the MCP
-container, and run the smoke again. Never infer the subject from a dashboard
-label: use the exact value in the token that Open Brain successfully verified.
+smoke once with `OAUTH_SMOKE_PRINT_SUBJECT=true`, copy only the reported
+verified subject into `OAUTH_SERVICE_ACCOUNT_SUBJECTS` on the server, recreate
+the MCP container, and run the smoke again. Never infer the subject from a
+dashboard label: use the exact value in the token that Open Brain successfully
+verified.
 
 RFC 9068 recommends that a client-credentials JWT `sub` identify the client
 application; it also requires a `client_id` claim for that JWT profile. Open
@@ -164,10 +167,10 @@ attribution only, not access or memory scope.
 
 ## Browserless smoke test
 
-The tracked helper obtains a token and sends a real MCP `initialize` request.
-It never opens a browser, prints a token or secret, writes credentials to disk,
-or echoes provider response bodies. Run it from the repository root on a
-tailnet peer that can reach Open Brain:
+The tracked helper obtains a token and sends a real MCP `initialize` request. It
+never opens a browser, prints a token or secret, writes credentials to disk, or
+echoes provider response bodies. Run it from the repository root on a tailnet
+peer that can reach Open Brain:
 
 ```bash
 export OAUTH_TOKEN_URL='https://issuer.example/oauth/token'
@@ -210,9 +213,9 @@ testing; thoughts intentionally have no application DELETE path.
 ## Audit decision
 
 Successful writes distinguish machines from people in durable server-owned
-provenance: `service` versus `funnel`, plus the verified `sub`. Caddy access logs
-continue to record the actual `tailnet` or `funnel` socket without JWT contents.
-These are complementary facts, not interchangeable meanings of `door`.
+provenance: `service` versus `funnel`, plus the verified `sub`. Caddy access
+logs continue to record the actual `tailnet` or `funnel` socket without JWT
+contents. These are complementary facts, not interchangeable meanings of `door`.
 
 An operator can summarize successful write attribution without reading thought
 content:
@@ -239,24 +242,24 @@ which occur before Open Brain receives a Bearer token.
 
 ## Failure modes
 
-| Symptom | Likely cause and response |
-|---|---|
-| Token endpoint returns `invalid_client` | Wrong secret, wrong client-auth method, disabled application, or a rotated credential. Confirm provider configuration; do not paste the secret into logs. |
-| Helper refuses a token or MCP redirect | Use the final token and MCP endpoint URLs. Redirects are intentionally disabled so a 307/308 cannot replay a client secret or bearer token. |
-| Token endpoint rejects audience or scope | The API was not authorized for the M2M application, the audience differs byte-for-byte, or the authorization-server policy does not grant the requested scope. |
-| Helper reports an opaque/malformed token | The provider did not issue the RS256 JWT access-token profile Open Brain accepts. Configure a custom authorization server/API that emits JWTs; introspection is not supported. |
-| MCP returns 401 | Check `iss`, `aud`, `exp`, `sub`, RS256, the configured JWKS URI, and clock skew. Open Brain deliberately returns the same public message for every validation failure; use the reason-coded auth audit and provider logs. |
-| MCP returns 403 before the helper reaches auth | The request used the public Funnel path from outside the Anthropic allowlist. Route the scheduled agent over the tailnet. |
-| Authentication works but writes show `door=funnel` | The issuer supplied no signed `gty=client-credentials`; add the exact verified `sub` to `OAUTH_SERVICE_ACCOUNT_SUBJECTS` and recreate the MCP service. |
-| The agent cannot see old personal rows after client recreation | Its verified `sub` changed. That isolation is intentional; restore the original client identity or migrate ownership through a reviewed administrative procedure. |
-| Server fails its JWKS boot probe | The issuer/JWKS URL is wrong, unreachable, non-HTTPS, or not serving a JSON `keys` array. Fix it before retrying tokens. |
+| Symptom                                                        | Likely cause and response                                                                                                                                                                                                  |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Token endpoint returns `invalid_client`                        | Wrong secret, wrong client-auth method, disabled application, or a rotated credential. Confirm provider configuration; do not paste the secret into logs.                                                                  |
+| Helper refuses a token or MCP redirect                         | Use the final token and MCP endpoint URLs. Redirects are intentionally disabled so a 307/308 cannot replay a client secret or bearer token.                                                                                |
+| Token endpoint rejects audience or scope                       | The API was not authorized for the M2M application, the audience differs byte-for-byte, or the authorization-server policy does not grant the requested scope.                                                             |
+| Helper reports an opaque/malformed token                       | The provider did not issue the RS256 JWT access-token profile Open Brain accepts. Configure a custom authorization server/API that emits JWTs; introspection is not supported.                                             |
+| MCP returns 401                                                | Check `iss`, `aud`, `exp`, `sub`, RS256, the configured JWKS URI, and clock skew. Open Brain deliberately returns the same public message for every validation failure; use the reason-coded auth audit and provider logs. |
+| MCP returns 403 before the helper reaches auth                 | The request used the public Funnel path from outside the Anthropic allowlist. Route the scheduled agent over the tailnet.                                                                                                  |
+| Authentication works but writes show `door=funnel`             | The issuer supplied no signed `gty=client-credentials`; add the exact verified `sub` to `OAUTH_SERVICE_ACCOUNT_SUBJECTS` and recreate the MCP service.                                                                     |
+| The agent cannot see old personal rows after client recreation | Its verified `sub` changed. That isolation is intentional; restore the original client identity or migrate ownership through a reviewed administrative procedure.                                                          |
+| Server fails its JWKS boot probe                               | The issuer/JWKS URL is wrong, unreachable, non-HTTPS, or not serving a JSON `keys` array. Fix it before retrying tokens.                                                                                                   |
 
 ## Rotation and revocation
 
 Rotate each M2M client secret in the provider and its automation secret store;
 Open Brain never stores that secret. Prefer a provider-supported overlap window:
-install the new secret in the agent, verify one headless request, then revoke the
-old secret. Existing access JWTs remain usable until expiration because Open
+install the new secret in the agent, verify one headless request, then revoke
+the old secret. Existing access JWTs remain usable until expiration because Open
 Brain validates them locally and does not introspect or revoke them. Choose an
 access-token lifetime that bounds that residual window.
 

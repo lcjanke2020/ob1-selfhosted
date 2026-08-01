@@ -3,25 +3,27 @@
 > One possible approach, provided **for reference** — not a turnkey component.
 > Adapt the paths, role names, transport, and scheduler to your environment.
 >
-> A concrete instantiation of this approach — the script, the systemd
-> service + timer, and a scoped env file — is shipped for the app qube under
+> A concrete instantiation of this approach — the script, the systemd service +
+> timer, and a scoped env file — is shipped for the app qube under
 > [`app-qube/backup/`](app-qube/backup/). This page is the rationale + the
 > restore/verify procedure behind it.
 
-When Postgres runs in a dedicated qube (see [`three-qube-design.md`](three-qube-design.md)
-and [`docker-compose.external-db.yml`](docker-compose.external-db.yml)), a small daily
-job can produce an **encrypted, off-box** dump *without putting any private key on the
-edge/app host*.
+When Postgres runs in a dedicated qube (see
+[`three-qube-design.md`](three-qube-design.md) and
+[`docker-compose.external-db.yml`](docker-compose.external-db.yml)), a small
+daily job can produce an **encrypted, off-box** dump _without putting any
+private key on the edge/app host_.
 
 ## Shape
 
-- **App host** — holds only the backup **public key** (encrypt-only; no private key, no
-  secret keyring). Dumps with a read-only DB role, gzips, GPG-encrypts to the public key,
-  and drops the artifact into an off-box-replicated directory (Syncthing, `rsync`, …).
-- **Off-box store** — receives the `*.sql.gz.gpg` only: encrypted at rest, so a compromise
-  there does not expose the data.
-- **A separate machine** holds the **private key** and is the only place that can decrypt
-  and test-restore.
+- **App host** — holds only the backup **public key** (encrypt-only; no private
+  key, no secret keyring). Dumps with a read-only DB role, gzips, GPG-encrypts
+  to the public key, and drops the artifact into an off-box-replicated directory
+  (Syncthing, `rsync`, …).
+- **Off-box store** — receives the `*.sql.gz.gpg` only: encrypted at rest, so a
+  compromise there does not expose the data.
+- **A separate machine** holds the **private key** and is the only place that
+  can decrypt and test-restore.
 
 ## Daily job (runs on the app host as an unprivileged user)
 
@@ -112,33 +114,36 @@ find "$OUT_DIR" -regextype posix-extended -maxdepth 1 -type f \
   -mtime +"$LABEL_RETAIN_DAYS" -delete
 ```
 
-Drive it with a systemd `oneshot` service + a daily `timer` (or cron). `--recipient-file`
-needs no keyring or ownertrust — the public key in the file is used directly.
+Drive it with a systemd `oneshot` service + a daily `timer` (or cron).
+`--recipient-file` needs no keyring or ownertrust — the public key in the file
+is used directly.
 
-A daily job that fails silently becomes an incident the day you need a restore. Wire the
-unit with `OnFailure=` (or a cron wrapper that mails/logs) so a broken pipeline is noticed.
-If `OUT_DIR` is a Syncthing folder, add the staging temp to `.stignore` so peers never see
-a partial:
+A daily job that fails silently becomes an incident the day you need a restore.
+Wire the unit with `OnFailure=` (or a cron wrapper that mails/logs) so a broken
+pipeline is noticed. If `OUT_DIR` is a Syncthing folder, add the staging temp to
+`.stignore` so peers never see a partial:
 
 ```
 /.db-*
 ```
 
-The hard-link publish requires the staging and final names to share one filesystem and
-that filesystem to support hard links. That is normal for a Syncthing directory on a
-local Linux filesystem. Treat failure as a storage-configuration error; do not fall back
-to `mv -f` or a copy into the final name.
+The hard-link publish requires the staging and final names to share one
+filesystem and that filesystem to support hard links. That is normal for a
+Syncthing directory on a local Linux filesystem. Treat failure as a
+storage-configuration error; do not fall back to `mv -f` or a copy into the
+final name.
 
-For a pre-migration rollback point, invoke the job once with a descriptive label (for
-example, `BACKUP_LABEL=pre-1.20.0`). Wait for the labelled artifact to replicate and
-verify it from the private-key host before migrating. A post-deploy routine run gets its
-own timestamped name and can never replace that rollback point. Routine dumps default to
-14-day retention; labelled dumps default to 90 days.
+For a pre-migration rollback point, invoke the job once with a descriptive label
+(for example, `BACKUP_LABEL=pre-1.20.0`). Wait for the labelled artifact to
+replicate and verify it from the private-key host before migrating. A
+post-deploy routine run gets its own timestamped name and can never replace that
+rollback point. Routine dumps default to 14-day retention; labelled dumps
+default to 90 days.
 
 ## Verify (on the machine that holds the private key)
 
-A backup you haven't restored is not a backup. With the encrypted dumps on the off-box
-store and the private key on a separate machine that can reach it:
+A backup you haven't restored is not a backup. With the encrypted dumps on the
+off-box store and the private key on a separate machine that can reach it:
 
 ```bash
 #!/bin/bash
@@ -161,11 +166,13 @@ psql "$DSN" -c "SELECT count(*) FROM thoughts;"
 
 ## Notes
 
-- **Encrypt-only on the app host is the point** — the public-facing box never holds material
-  that can decrypt the corpus.
-- **Back up the private key itself.** Data encrypted to a key you can lose is data you can lose.
-- Move the public key with a **binary-safe transport** (file copy / sync), not email or chat
-  paste, which reflow armored text and corrupt the key block.
-- **Want incremental off-box backups?** Plain `gpg` output can't be diffed — each run re-ships
-  the whole artifact. If daily bandwidth matters, reach for a tool that dedups at the block
-  level *under* its own encryption (e.g. `borg`, `restic`) instead of `pg_dump | gpg`.
+- **Encrypt-only on the app host is the point** — the public-facing box never
+  holds material that can decrypt the corpus.
+- **Back up the private key itself.** Data encrypted to a key you can lose is
+  data you can lose.
+- Move the public key with a **binary-safe transport** (file copy / sync), not
+  email or chat paste, which reflow armored text and corrupt the key block.
+- **Want incremental off-box backups?** Plain `gpg` output can't be diffed —
+  each run re-ships the whole artifact. If daily bandwidth matters, reach for a
+  tool that dedups at the block level _under_ its own encryption (e.g. `borg`,
+  `restic`) instead of `pg_dump | gpg`.

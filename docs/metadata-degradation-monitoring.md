@@ -3,20 +3,20 @@
 The metadata extractor has three operator-relevant degradation outcome classes:
 primary failure, fallback classification, and uncategorized stub persistence.
 The privacy-sensitive fallback class can mean **a thought's full text left your
-network** (whether it did depends on where `FALLBACK_CHAT_API_BASE` points).
-The server intentionally never blocks a capture on classification.
+network** (whether it did depends on where `FALLBACK_CHAT_API_BASE` points). The
+server intentionally never blocks a capture on classification.
 
 `METADATA_FALLBACK_POLICY` decides whether that fallback path may run: `off`
-uses the local stub after a primary failure, `alert` permits fallback only with a
-configured notification channel, and `allow` permits it without delivery. The
+uses the local stub after a primary failure, `alert` permits fallback only with
+a configured notification channel, and `allow` permits it without delivery. The
 setting is required and has no default.
 
 Server 1.16.0 makes these outcomes durable. Each degraded capture writes a
 content-free audit record, every newly captured thought carries a server-owned
-classifier stamp, and an optional Pushover/ntfy worker delivers
-first-occurrence alerts plus periodic rollups from the database ledger. The
-existing stderr lines stay stable for diagnosis and for older log-scraping
-monitors, but container logs are no longer the source of truth.
+classifier stamp, and an optional Pushover/ntfy worker delivers first-occurrence
+alerts plus periodic rollups from the database ledger. The existing stderr lines
+stay stable for diagnosis and for older log-scraping monitors, but container
+logs are no longer the source of truth.
 
 ## Durable audit trail
 
@@ -26,14 +26,13 @@ relations:
 - `metadata_degradation_events` is append-only to the application role. One or
   more rows share a `capture_id` and point at the persisted `thought_id`. If a
   database owner later deletes that thought, the link becomes null while the
-  content-free audit survives.
-  Failure rows carry the finite reason from `server/metadata.ts` and the HTTP
-  status for `non_2xx`; fallback/stub outcome rows make the three alert classes
-  directly queryable. Endpoint model and base URL are retained for historical
-  audit, but URL userinfo, query parameters, and fragments are stripped before
-  insertion so those common credential-bearing components cannot enter the
-  table. Do not put a secret in an endpoint path or model name; those fields are
-  audit data and remain verbatim.
+  content-free audit survives. Failure rows carry the finite reason from
+  `server/metadata.ts` and the HTTP status for `non_2xx`; fallback/stub outcome
+  rows make the three alert classes directly queryable. Endpoint model and base
+  URL are retained for historical audit, but URL userinfo, query parameters, and
+  fragments are stripped before insertion so those common credential-bearing
+  components cannot enter the table. Do not put a secret in an endpoint path or
+  model name; those fields are audit data and remain verbatim.
 - `metadata_degradation_outbox` is a durable, content-free pending-delivery
   queue populated in the same transaction as history. Its `created_at` records
   queue age. The worker deletes only committed rows, so concurrent captures that
@@ -85,9 +84,9 @@ degradation event or alert; only a configured path that actually fails produces
 the privacy audit across container replacement and configuration changes. It is
 included in normal database backups.
 
-With delivery enabled, successfully accounted-for queue rows are consumed. If
-an operator deliberately does not need old stub-only history, the database
-owner may then prune already-consumed rows without weakening the off-box audit:
+With delivery enabled, successfully accounted-for queue rows are consumed. If an
+operator deliberately does not need old stub-only history, the database owner
+may then prune already-consumed rows without weakening the off-box audit:
 
 ```sql
 DELETE FROM metadata_degradation_events AS event
@@ -127,11 +126,11 @@ stub rows if desired.
 
 Existing databases must apply migration 07 as the database owner and run
 `db/03-grants-assertion.sql` last before starting server 1.16.0. The boot probe
-fails closed when an audit/outbox relation, required column/constraint, sequence,
-or the singleton ledger row is missing. Reapplying migration 07 also converges
-the earlier preview schema: because its unsafe sequence cursor cannot reveal
-which history rows it skipped, the upgrade requeues all existing history once
-and clears old aggregate counts. That may repeat a preview alert, choosing
+fails closed when an audit/outbox relation, required column/constraint,
+sequence, or the singleton ledger row is missing. Reapplying migration 07 also
+converges the earlier preview schema: because its unsafe sequence cursor cannot
+reveal which history rows it skipped, the upgrade requeues all existing history
+once and clears old aggregate counts. That may repeat a preview alert, choosing
 at-least-once delivery over silent loss.
 
 This release also makes every positive-integer environment setting strict.
@@ -142,10 +141,10 @@ restart.
 ## Durable notification worker
 
 Delivery is opt-in; real degradation auditing is not. Set
-`METADATA_NOTIFY_CHANNELS` to
-`pushover`, `ntfy`, or `pushover,ntfy`, then provide the selected adapters'
-credentials from the deployment's `0600` `.env` file. The complete variable
-set and defaults live in the two deployment `.env.example` files.
+`METADATA_NOTIFY_CHANNELS` to `pushover`, `ntfy`, or `pushover,ntfy`, then
+provide the selected adapters' credentials from the deployment's `0600` `.env`
+file. The complete variable set and defaults live in the two deployment
+`.env.example` files.
 
 ```dotenv
 METADATA_NOTIFY_CHANNELS=pushover
@@ -230,20 +229,20 @@ but do not count it as a per-capture degradation trigger. The lines below come
 from [`server/metadata.ts`](../server/metadata.ts), contain no thought content,
 and use the stable substrings shown.
 
-| log line (substring) | what it means | suggested priority |
-|---|---|---|
-| `classified via FALLBACK endpoint` | Content may have left your network (depends on `FALLBACK_CHAT_API_BASE`). The headline event. | high |
-| `stamping uncategorized stub` | Every configured endpoint failed; the thought is stored with placeholder metadata and won't surface under topic/type filters until backfilled. | normal |
-| `primary endpoint failed (transport/timeout)` | The request could not complete. On a deployment that keeps a resident local model, recurring firings are an availability signal: diagnose reachability, cold starts, timeouts, and residency (see the [GPU-qube transport doc](../deploy/qubes/gpu-offload-transport.md) §6–7). | normal |
-| `primary endpoint failed (non-2xx response)` | The endpoint was reachable but rejected or failed the request. The line appends the final HTTP status (for example, `— HTTP 401`) so authentication/configuration failures, rate limits, and server failures can be distinguished before consulting the endpoint's logs. | normal |
-| `primary endpoint returned an invalid response` | The endpoint returned 2xx, but not a usable OpenAI-compatible completion envelope. | normal |
-| `primary endpoint returned unparseable metadata` | The completion envelope was usable, but the model's content was not JSON. This is an output-quality signal, not an availability signal. | normal |
-| `primary endpoint returned schema-invalid metadata` | The model returned JSON that failed the local runtime schema. A recurring rejection is a model-quality or compatibility regression; when fallback is configured and policy permits it, this can systematically route capture content to that fallback. | high |
+| log line (substring)                                | what it means                                                                                                                                                                                                                                                                   | suggested priority |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| `classified via FALLBACK endpoint`                  | Content may have left your network (depends on `FALLBACK_CHAT_API_BASE`). The headline event.                                                                                                                                                                                   | high               |
+| `stamping uncategorized stub`                       | Every configured endpoint failed; the thought is stored with placeholder metadata and won't surface under topic/type filters until backfilled.                                                                                                                                  | normal             |
+| `primary endpoint failed (transport/timeout)`       | The request could not complete. On a deployment that keeps a resident local model, recurring firings are an availability signal: diagnose reachability, cold starts, timeouts, and residency (see the [GPU-qube transport doc](../deploy/qubes/gpu-offload-transport.md) §6–7). | normal             |
+| `primary endpoint failed (non-2xx response)`        | The endpoint was reachable but rejected or failed the request. The line appends the final HTTP status (for example, `— HTTP 401`) so authentication/configuration failures, rate limits, and server failures can be distinguished before consulting the endpoint's logs.        | normal             |
+| `primary endpoint returned an invalid response`     | The endpoint returned 2xx, but not a usable OpenAI-compatible completion envelope.                                                                                                                                                                                              | normal             |
+| `primary endpoint returned unparseable metadata`    | The completion envelope was usable, but the model's content was not JSON. This is an output-quality signal, not an availability signal.                                                                                                                                         | normal             |
+| `primary endpoint returned schema-invalid metadata` | The model returned JSON that failed the local runtime schema. A recurring rejection is a model-quality or compatibility regression; when fallback is configured and policy permits it, this can systematically route capture content to that fallback.                          | high               |
 
 **Upgrade note:** if you deployed an earlier revision of the monitor sketch,
 replace its `grep -c "primary endpoint failed"` expression when this server
-change rolls out. The old expression counts only the two availability forms
-and silently misses the three new `primary endpoint returned …` forms. The
+change rolls out. The old expression counts only the two availability forms and
+silently misses the three new `primary endpoint returned …` forms. The
 fallback-classified and stub counters are unchanged.
 
 The reference monitor deliberately aggregates all five primary failure forms
@@ -251,13 +250,13 @@ into one `primary-fail` counter. When schema rejection actually routes content
 to a configured, policy-permitted fallback, that capture also emits the
 high-priority `classified via FALLBACK endpoint` line; without a fallback, it
 stubs locally and remains a normal-priority quality event. That companion signal
-is why the sketch does not need a second schema-only counter to honor the table's
-priority.
+is why the sketch does not need a second schema-only counter to honor the
+table's priority.
 
 These are all `console.warn` lines, which Deno emits on **stderr**; only the
 healthy `classified via primary endpoint` confirmation goes to stdout. The
-sketch below sees them because `docker logs` replays the container's stderr
-onto its own and the `2>&1` merges it into the scanned text — that redirect is
+sketch below sees them because `docker logs` replays the container's stderr onto
+its own and the `2>&1` merges it into the scanned text — that redirect is
 load-bearing, not error plumbing. If you adapt the sketch to anything that
 splits the streams — `docker logs` piped without `2>&1`, journald forwarding, a
 log shipper — make sure the stderr leg survives, or the monitor goes silent on
@@ -267,9 +266,9 @@ exactly the lines it exists to catch.
 
 The alert says **that** captures degraded and **how many**, never **what** was
 captured. What leaves the host is exactly: a fixed title, an operator-chosen
-deployment label, three integers, and the time window — no thought content,
-and no infrastructure identifiers either. Hostnames and container names count
-as identifiers: the notification service is a third party, and handing it your
+deployment label, three integers, and the time window — no thought content, and
+no infrastructure identifiers either. Hostnames and container names count as
+identifiers: the notification service is a third party, and handing it your
 topology in the message body is a smaller cousin of the leak this monitor
 watches for. The sketch uses `$LABEL` (default `ob1`, override with
 `OB1_MONITOR_LABEL`) everywhere a machine or container name would be tempting.
@@ -277,28 +276,28 @@ An alert body quoting the thought would recreate the leak outright in a second
 channel.
 
 The counts are labeled honestly: the push says `fallback=`, not "off-box",
-because whether a fallback classification left your network depends entirely
-on where `FALLBACK_CHAT_API_BASE` points — the monitor can't see that, so it
+because whether a fallback classification left your network depends entirely on
+where `FALLBACK_CHAT_API_BASE` points — the monitor can't see that, so it
 doesn't claim it.
 
 ## Legacy monitor anti-spam, and failing loudly
 
-- **First occurrence alerts immediately; further events accumulate** and roll
-  up no more often than every 30 minutes. When the primary is down, *every*
-  capture degrades — one push plus periodic rollups, not one push per capture.
-- **A failed send carries its counts forward** into the next attempt rather
-  than dropping them.
+- **First occurrence alerts immediately; further events accumulate** and roll up
+  no more often than every 30 minutes. When the primary is down, _every_ capture
+  degrades — one push plus periodic rollups, not one push per capture.
+- **A failed send carries its counts forward** into the next attempt rather than
+  dropping them.
 - **A monitor that cannot see is itself an alert**: if the container log can't
-  be read, send a "monitor is blind" notification instead of silently
-  skipping — throttled at the rollup cadence on its **own** stamp (a dead
-  container is one push per rollup period, not one per timer tick, and
-  neither alert class delays the other's first push), and **without advancing
-  the scan cursor**, so the unread window is scanned once visibility returns.
-  Fail-alert, never fail-silent.
-- **The cursor and the counts move together.** Scan position and pending
-  counts live in one atomically-replaced state record, committed *before* any
-  send — so a crash or failed send at any point can at worst repeat an alert,
-  never lose events that were already read.
+  be read, send a "monitor is blind" notification instead of silently skipping —
+  throttled at the rollup cadence on its **own** stamp (a dead container is one
+  push per rollup period, not one per timer tick, and neither alert class delays
+  the other's first push), and **without advancing the scan cursor**, so the
+  unread window is scanned once visibility returns. Fail-alert, never
+  fail-silent.
+- **The cursor and the counts move together.** Scan position and pending counts
+  live in one atomically-replaced state record, committed _before_ any send — so
+  a crash or failed send at any point can at worst repeat an alert, never lose
+  events that were already read.
 
 ## Legacy fallback: bash + systemd user timer
 
@@ -308,11 +307,11 @@ migration until the durable worker has been live-fired. It remains useful when
 the server process itself cannot run its polling loop.
 
 Secrets live in two `0600` files outside any repo —
-`~/.config/ob1-metadata-monitor/pushover-token` (the application API token)
-and `…/pushover-user` (the user key). Create them so the values never touch
-shell history or argv, and **without a trailing newline** — the curl
-`-F name=<file` form sends the file bytes *verbatim*, so a newline appended
-by `echo` or an editor becomes part of the credential and every send fails:
+`~/.config/ob1-metadata-monitor/pushover-token` (the application API token) and
+`…/pushover-user` (the user key). Create them so the values never touch shell
+history or argv, and **without a trailing newline** — the curl `-F name=<file`
+form sends the file bytes _verbatim_, so a newline appended by `echo` or an
+editor becomes part of the credential and every send fails:
 
 ```bash
 umask 077
@@ -453,8 +452,8 @@ AccuracySec=30s
 WantedBy=timers.target
 ```
 
-Enable, as the account *already* authorized to access the Docker daemon — do
-not grant Docker-socket access solely for this monitor (on rootful Docker,
+Enable, as the account _already_ authorized to access the Docker daemon — do not
+grant Docker-socket access solely for this monitor (on rootful Docker,
 `docker`-group membership is root-equivalent; rootless Docker is the genuinely
 unprivileged case):
 
@@ -473,27 +472,27 @@ Otherwise point `CHAT_API_BASE` at a dead port for one capture and restore it.
 Two caveats worth knowing:
 
 - **Container recreation wipes `docker logs` history** (a deploy that rebuilds
-  the container, not a mere restart). Everything since the last *successful*
-  scan is lost with it — normally one five-minute window, but a blind spell
-  or a stopped timer stretches the unread interval, and a recreation during
-  it takes the whole backlog. Either way the log is not an audit trail; use the
-  durable database history described above.
-- **Egress**: the monitor runs on the *host*, so container-scoped egress
+  the container, not a mere restart). Everything since the last _successful_
+  scan is lost with it — normally one five-minute window, but a blind spell or a
+  stopped timer stretches the unread interval, and a recreation during it takes
+  the whole backlog. Either way the log is not an audit trail; use the durable
+  database history described above.
+- **Egress**: the monitor runs on the _host_, so container-scoped egress
   firewalls (e.g. a `DOCKER-USER` chain) don't apply to it — but check the
   host's own path once: `curl -sI https://api.pushover.net` from the account
-  that will run the timer. On a Qubes deployment the knob that actually
-  governs that path is the app qube's own Qubes-firewall egress policy —
-  check there first if the probe fails.
+  that will run the timer. On a Qubes deployment the knob that actually governs
+  that path is the app qube's own Qubes-firewall egress policy — check there
+  first if the probe fails.
 
 ## Fallback policy
 
 Set `METADATA_FALLBACK_POLICY` to exactly one of:
 
-| value | behavior |
-|---|---|
-| `off` | Never call `FALLBACK_CHAT_*`. A failed enabled primary records `primary_failure` + `stub_used` and stores placeholder metadata. With no enabled primary, suppressing a configured fallback is an intentional disabled-extraction posture: each thought keeps stub provenance, but no degradation row is emitted. |
-| `alert` | Permit the configured fallback, but refuse to boot unless `METADATA_NOTIFY_CHANNELS` contains at least one fully configured adapter. Boot validates configuration, not provider reachability; delivery remains best-effort. |
-| `allow` | Permit the configured fallback without requiring delivery. Durable audit rows are still written; this is the privacy-weakest mode. |
+| value   | behavior                                                                                                                                                                                                                                                                                                         |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `off`   | Never call `FALLBACK_CHAT_*`. A failed enabled primary records `primary_failure` + `stub_used` and stores placeholder metadata. With no enabled primary, suppressing a configured fallback is an intentional disabled-extraction posture: each thought keeps stub provenance, but no degradation row is emitted. |
+| `alert` | Permit the configured fallback, but refuse to boot unless `METADATA_NOTIFY_CHANNELS` contains at least one fully configured adapter. Boot validates configuration, not provider reachability; delivery remains best-effort.                                                                                      |
+| `allow` | Permit the configured fallback without requiring delivery. Durable audit rows are still written; this is the privacy-weakest mode.                                                                                                                                                                               |
 
 There is deliberately no default. Missing or invalid policy values stop the
 server at boot, and compose deployments require the variable before rendering
@@ -506,6 +505,6 @@ guaranteed channel. The active policy is printed at boot beside the extraction
 posture.
 
 Related reading: [`docs/why-local-only.md`](why-local-only.md) for why the
-fallback exists at all, and the [GPU-qube transport
-doc](../deploy/qubes/gpu-offload-transport.md) §6–7 for keeping the primary
-healthy enough that this monitor stays quiet.
+fallback exists at all, and the
+[GPU-qube transport doc](../deploy/qubes/gpu-offload-transport.md) §6–7 for
+keeping the primary healthy enough that this monitor stays quiet.

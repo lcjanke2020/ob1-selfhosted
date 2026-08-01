@@ -22,13 +22,13 @@ name: Allowlist guard
 on:
   pull_request:
     paths:
-      - 'deploy/compose-tailnet/Caddyfile'
-      - '.github/workflows/allowlist-guard.yml'
+      - "deploy/compose-tailnet/Caddyfile"
+      - ".github/workflows/allowlist-guard.yml"
   push:
     branches: [main]
     paths:
-      - 'deploy/compose-tailnet/Caddyfile'
-      - '.github/workflows/allowlist-guard.yml'
+      - "deploy/compose-tailnet/Caddyfile"
+      - ".github/workflows/allowlist-guard.yml"
   workflow_dispatch:
 
 permissions:

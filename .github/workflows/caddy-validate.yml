@@ -17,15 +17,15 @@ name: Caddyfile validate
 on:
   pull_request:
     paths:
-      - 'deploy/compose-tailnet/Caddyfile'
-      - 'deploy/compose-tailnet/caddy/Dockerfile'
-      - '.github/workflows/caddy-validate.yml'
+      - "deploy/compose-tailnet/Caddyfile"
+      - "deploy/compose-tailnet/caddy/Dockerfile"
+      - ".github/workflows/caddy-validate.yml"
   push:
     branches: [main]
     paths:
-      - 'deploy/compose-tailnet/Caddyfile'
-      - 'deploy/compose-tailnet/caddy/Dockerfile'
-      - '.github/workflows/caddy-validate.yml'
+      - "deploy/compose-tailnet/Caddyfile"
+      - "deploy/compose-tailnet/caddy/Dockerfile"
+      - ".github/workflows/caddy-validate.yml"
   workflow_dispatch:
 
 permissions:

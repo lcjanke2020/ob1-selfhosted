@@ -72,35 +72,33 @@ the existing classification keys:
 
 The trust boundary is:
 
-| Persisted key                           | Set by               | Meaning                                                 |
-| --------------------------------------- | -------------------- | ------------------------------------------------------- |
-| `metadata.source`                       | Server               | Validated transport: `mcp` or `rest`                    |
-| `metadata.door`                         | Server               | Credential label: `tailnet`, `funnel`, or `service`     |
+| Persisted key                           | Set by               | Meaning                                                    |
+| --------------------------------------- | -------------------- | ---------------------------------------------------------- |
+| `metadata.source`                       | Server               | Validated transport: `mcp` or `rest`                       |
+| `metadata.door`                         | Server               | Credential label: `tailnet`, `funnel`, or `service`        |
 | `metadata.sub`                          | Server               | Verified OAuth `sub`, or `null` for the native/static door |
-| `metadata.token_label`                  | Server               | Verified native-token label, otherwise `null`           |
-| `metadata.metadata_extraction`          | Server               | Classifier path and model                               |
-| `metadata.provenance.schema_version`    | Server               | Version of the nested caller-claims contract            |
-| `metadata.provenance.caller_asserted.*` | Authenticated caller | Validated but unverified author/work-context claims     |
+| `metadata.token_label`                  | Server               | Verified native-token label, otherwise `null`              |
+| `metadata.metadata_extraction`          | Server               | Classifier path and model                                  |
+| `metadata.provenance.schema_version`    | Server               | Version of the nested caller-claims contract               |
+| `metadata.provenance.caller_asserted.*` | Authenticated caller | Validated but unverified author/work-context claims        |
 
 The top-level `source`, `door`, `sub`, and `token_label` keys remain canonical
-compatibility keys; they are not copied from caller input.
-`metadata_extraction` is versioned
-and uses `endpoint: "stub"` without a model field when no endpoint classified
-the thought. Classifier base URLs remain in the owner-visible degradation audit
-rather than this client-visible metadata. The metadata extractor is prevented
-from populating any of these reserved keys, `metadata_extraction`, or
-`provenance`.
+compatibility keys; they are not copied from caller input. `metadata_extraction`
+is versioned and uses `endpoint: "stub"` without a model field when no endpoint
+classified the thought. Classifier base URLs remain in the owner-visible
+degradation audit rather than this client-visible metadata. The metadata
+extractor is prevented from populating any of these reserved keys,
+`metadata_extraction`, or `provenance`.
 
 `funnel` identifies a verified OAuth user token, `service` a verified OAuth
-client-credentials identity, and `tailnet` the native/static `x-brain-key`
-door. A native token adds its server-verified non-secret `token_label`; the
-legacy static key records `null`. These
-historical names are provenance labels rather than proof of the Caddy socket;
-an OAuth service can arrive through the private tailnet route. A verified
-`gty=client-credentials` claim (emitted by Auth0's default token profile)
-selects `service` automatically; Auth0's RFC 9068 profile and other profiles
-without that signed claim use the exact operator mapping documented in
-[OAuth service accounts](service-account-oauth-client.md).
+client-credentials identity, and `tailnet` the native/static `x-brain-key` door.
+A native token adds its server-verified non-secret `token_label`; the legacy
+static key records `null`. These historical names are provenance labels rather
+than proof of the Caddy socket; an OAuth service can arrive through the private
+tailnet route. A verified `gty=client-credentials` claim (emitted by Auth0's
+default token profile) selects `service` automatically; Auth0's RFC 9068 profile
+and other profiles without that signed claim use the exact operator mapping
+documented in [OAuth service accounts](service-account-oauth-client.md).
 
 Callers do not submit `schema_version`. Open Brain writes it. A future
 incompatible change to the nested key layout must increment the integer;
@@ -123,9 +121,9 @@ old readers continue to interpret every existing key correctly.
   workspace/project/visibility/owner audience is a separate row. The
   last-writer-wins statements above apply only inside one exact audience.
 
-The claims are not promoted to columns. Consumers that inspect metadata
-directly should treat a missing `provenance` key as "unclaimed/legacy", never
-as a match for an arbitrary author or repository.
+The claims are not promoted to columns. Consumers that inspect metadata directly
+should treat a missing `provenance` key as "unclaimed/legacy", never as a match
+for an arbitrary author or repository.
 
 ## Search filtering
 
@@ -150,8 +148,8 @@ optional `filter` object:
 
 `include` and `exclude` accept the same four fields and bounds as capture-time
 claims. Every object that is present must contain at least one field; unknown
-fields are rejected. Comparisons are exact and case-sensitive after input
-values are trimmed.
+fields are rejected. Comparisons are exact and case-sensitive after input values
+are trimmed.
 
 The boolean contract is deliberately asymmetric:
 
@@ -165,16 +163,16 @@ The positive side compiles to one nested `metadata @> ...` containment
 predicate, which the existing `idx_thoughts_metadata` GIN index supports.
 Negative predicates are applied as residual filters; a negated JSONB predicate
 alone is not expected to use that index. The query builder emits the same bound
-predicate in both the vector and lexical candidate legs *before* either leg is
+predicate in both the vector and lexical candidate legs _before_ either leg is
 ranked and fused. It emits no metadata predicate when `filter` is absent.
 
 pgvector applies residual predicates after an approximate HNSW candidate scan.
 Every search raises transaction-local `hnsw.ef_search` to the hybrid candidate
 depth (at least 50), and every filtered search additionally enables
 `hnsw.iterative_scan = strict_order`, allowing the vector leg to scan beyond an
-initial candidate batch that the provenance filter rejects. Both settings
-revert at commit or rollback instead of leaking through the connection pool.
-The lexical leg applies the same filter before its full-text/trigram candidate
+initial candidate batch that the provenance filter rejects. Both settings revert
+at commit or rollback instead of leaking through the connection pool. The
+lexical leg applies the same filter before its full-text/trigram candidate
 limit, so a row excluded from one retrieval method cannot re-enter through the
 other. The fail-closed scoped candidate function applies the same resolved
 memory audience before both candidate limits, so a row cannot cross a space
@@ -193,9 +191,9 @@ If it is older than `0.8.0`, first install a pgvector package or container image
 that provides `0.8.0` or newer, then run `ALTER EXTENSION vector UPDATE;` as the
 database owner. Re-run the version query before starting the updated MCP server.
 
-This filter is intentionally limited to the versioned provenance keys instead
-of exposing an open-ended JSON query language. Workspace/project/visibility is
-a separate, current fail-closed partitioning concern; the hybrid candidate
+This filter is intentionally limited to the versioned provenance keys instead of
+exposing an open-ended JSON query language. Workspace/project/visibility is a
+separate, current fail-closed partitioning concern; the hybrid candidate
 function applies both contracts to every retrieval leg before ranking and
 fusion.
 
