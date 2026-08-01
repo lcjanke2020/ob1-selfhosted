@@ -99,11 +99,16 @@ writes and take a verified backup, then set `OPENBRAIN_TOKEN_ADMIN_PASSWORD` in
 > also unusable (it drives `docker compose exec`); leave
 > `OPENBRAIN_TOKEN_ADMIN_PASSWORD` unset and migration 08 creates the
 > administrator as a `NOLOGIN` role, which is the correct end state for an
-> OAuth-only deployment that will not mint native tokens. Should such a
-> deployment later want to mint them, grant the login by hand over that same
-> connection — `ALTER ROLE openbrain_token_admin WITH LOGIN PASSWORD '…';` —
-> which is what the helper would otherwise have run. Reapplying migration 08
-> preserves whichever state you chose.
+> OAuth-only deployment that will not mint native tokens. Reapplying migration
+> 08 preserves whichever state you chose, so the choice survives later windows.
+> Granting the role `LOGIN` by hand
+> (`ALTER ROLE openbrain_token_admin WITH LOGIN PASSWORD '…';`, the statement
+> the helper would otherwise run) prepares the database role and nothing
+> further: the shipped split topology has no `pg_hba` line for
+> `openbrain_token_admin`, no administrator client, and pins
+> `ENABLE_NATIVE_TOKENS=false`, so issuing and accepting native tokens there is
+> not a supported procedure today. Leaving the role `NOLOGIN` is the safer
+> default.
 
 ```bash
 cd deploy/compose-local
