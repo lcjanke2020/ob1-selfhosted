@@ -112,8 +112,8 @@ project. Run the same files from this qube's repository checkout, over the
 tailnet, as the database superuser:
 
 ```sh
-cd deploy/qubes/app-qube
 (
+  cd deploy/qubes/app-qube || exit
   . ./.env || exit
   : "${DB_HOST:?set DB_HOST in .env}"
   : "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
@@ -123,6 +123,15 @@ cd deploy/qubes/app-qube
       -f ../../../db/08-access-tokens.sql
 )
 ```
+
+Every step is inside the subshell, and each one that can fail stops it. An
+unguarded `cd` is the interesting case: on failure the shell simply continues in
+the caller's directory, so a stray `.env` there would be sourced instead and the
+run would target whatever database _that_ file names — reporting success.
+`env -i` cannot help, because those values arrive as arguments rather than
+environment. Keep `|| exit` **inside** the parentheses: hoisted out, it would
+close the operator's interactive shell rather than abandon the recipe. Nothing
+here changes the caller's directory or environment.
 
 Source without `set -a`, keep it in a subshell, and build the client's
 environment rather than handing it the shell's. `env -i` starts `psql` from
