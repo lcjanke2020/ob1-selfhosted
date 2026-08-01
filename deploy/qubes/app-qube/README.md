@@ -115,9 +115,17 @@ tailnet, as the database superuser:
 cd deploy/qubes/app-qube
 set -a; . ./.env; set +a
 export PGPASSWORD="$POSTGRES_PASSWORD"
-psql -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-  -v ON_ERROR_STOP=1 -f ../../../db/08-access-tokens.sql
+psql -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
+  -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f ../../../db/08-access-tokens.sql
 ```
+
+This qube's `.env` carries the superuser _password_ but no `POSTGRES_USER`, so
+the default above names the db qube's `postgres` superuser. Keep the override
+hook: an operator who renamed that role sets `POSTGRES_USER` to match the
+`pg_hba` line
+([`../db-qube/pg_hba.snippet.conf`](../db-qube/pg_hba.snippet.conf)). Passing an
+empty `-U` is not equivalent — libpq treats it as absent and substitutes the
+**login account's** name, which the db qube's `pg_hba` does not recognize.
 
 Fedora's `postgresql` package provides the host `psql` client; it is commonly
 already present beside the `pg_dump` client used by the encrypted backup. If it
