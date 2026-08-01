@@ -19,21 +19,21 @@ on:
     types: [opened, synchronize, reopened]
     branches: [main]
     paths:
-      - 'server/**'
-      - 'deploy/**/docker-compose*.yml'
-      - 'deploy/**/docker-compose*.yaml'
-      - 'deploy/**/compose*.yml'
-      - 'deploy/**/compose*.yaml'
-      - '.github/workflows/ci.yml'
+      - "server/**"
+      - "deploy/**/docker-compose*.yml"
+      - "deploy/**/docker-compose*.yaml"
+      - "deploy/**/compose*.yml"
+      - "deploy/**/compose*.yaml"
+      - ".github/workflows/ci.yml"
   push:
     branches: [main]
     paths:
-      - 'server/**'
-      - 'deploy/**/docker-compose*.yml'
-      - 'deploy/**/docker-compose*.yaml'
-      - 'deploy/**/compose*.yml'
-      - 'deploy/**/compose*.yaml'
-      - '.github/workflows/ci.yml'
+      - "server/**"
+      - "deploy/**/docker-compose*.yml"
+      - "deploy/**/docker-compose*.yaml"
+      - "deploy/**/compose*.yml"
+      - "deploy/**/compose*.yaml"
+      - ".github/workflows/ci.yml"
   workflow_dispatch:
 
 permissions:

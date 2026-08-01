@@ -8,11 +8,11 @@ to every application-role query. Missing database context matches no rows.
 The contract deliberately aligns with upstream Open Brain's `workspace_id`,
 `project_id`, and `visibility` vocabulary:
 
-| Field | Meaning |
-|---|---|
-| `workspace_id` | A registered top-level memory space. Omission selects exactly `DEFAULT_WORKSPACE_ID` (`default` unless configured), never every workspace. |
-| `project_id` | An optional registered project inside that workspace. |
-| `visibility` | `personal`, `project`, or `workspace`. On capture it chooses one audience; on recall it optionally narrows the readable audience to one class. |
+| Field          | Meaning                                                                                                                                        |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workspace_id` | A registered top-level memory space. Omission selects exactly `DEFAULT_WORKSPACE_ID` (`default` unless configured), never every workspace.     |
+| `project_id`   | An optional registered project inside that workspace.                                                                                          |
+| `visibility`   | `personal`, `project`, or `workspace`. On capture it chooses one audience; on recall it optionally narrows the readable audience to one class. |
 
 Unknown workspaces and projects are validation errors, resolved before content
 is sent to an embedder or metadata extractor. Unknown input fields are rejected
@@ -21,8 +21,8 @@ rather than stripped into an accidentally broader default.
 ## Capture and recall semantics
 
 On a write, omitting `visibility` chooses project visibility when `project_id`
-is present; otherwise it uses the registered workspace's default visibility.
-The canonical audiences are:
+is present; otherwise it uses the registered workspace's default visibility. The
+canonical audiences are:
 
 - `personal`: the current trusted principal in one workspace; `project_id` is
   stored as null;
@@ -107,10 +107,10 @@ its three scope fields stay inside `toml_text`.
 
 > [!IMPORTANT]
 > `sensitive` is an authorization boundary, not field-level or tablespace
-> encryption. Database administrators and the read-only backup role can read
-> it, and it is present in database dumps. Protect the host, database-owner
-> credential, disks, and backups with controls appropriate for the content.
-> The space also does not change the processing pipeline: capture content still
+> encryption. Database administrators and the read-only backup role can read it,
+> and it is present in database dumps. Protect the host, database-owner
+> credential, disks, and backups with controls appropriate for the content. The
+> space also does not change the processing pipeline: capture content still
 > reaches the configured embedding and metadata-classification endpoints, and
 > recall queries reach the embedder. Use local endpoints and set
 > `METADATA_FALLBACK_POLICY=off` before storing content that must not leave your
@@ -226,16 +226,16 @@ docker compose exec -T postgres \
 
 Migrations 07 and 08 are the next required server schemas and are included here
 so the completed-catalog grant assertion remains last. Neither extends or
-weakens the space boundary; see [Metadata degradation
-monitoring](metadata-degradation-monitoring.md) and [Native access
-tokens](native-access-tokens.md).
+weakens the space boundary; see
+[Metadata degradation monitoring](metadata-degradation-monitoring.md) and
+[Native access tokens](native-access-tokens.md).
 
 The migration backfills existing thoughts and sessions into the `default`
 workspace at workspace visibility. It takes table locks while adding and
-backfilling audience columns and rebuilding the fingerprint unique index, so
-use a full maintenance window and budget index headroom. It is idempotent, but
-not cheap: every reapplication intentionally restores the canonical `default`
-and `sensitive` registry settings and unconditionally drops and rebuilds the
+backfilling audience columns and rebuilding the fingerprint unique index, so use
+a full maintenance window and budget index headroom. It is idempotent, but not
+cheap: every reapplication intentionally restores the canonical `default` and
+`sensitive` registry settings and unconditionally drops and rebuilds the
 audience-aware fingerprint index. Budget the same lock window and temporary
 index headroom on every run. Rollback of a completed migration is
 restore-from-backup rather than dropping the new columns: once audience-aware

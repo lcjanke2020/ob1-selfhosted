@@ -32,13 +32,13 @@ and redistribute the Software for any Permitted Purpose identified below.
 ### Permitted Purpose
 
 A Permitted Purpose is any purpose other than a Competing Use. A Competing Use
-means making the Software available to others in a commercial product or
-service that:
+means making the Software available to others in a commercial product or service
+that:
 
 1. substitutes for the Software;
 
-2. substitutes for any other product or service we offer using the Software
-   that exists as of the date we make the Software available; or
+2. substitutes for any other product or service we offer using the Software that
+   exists as of the date we make the Software available; or
 
 3. offers the same or substantially similar functionality as the Software.
 
@@ -50,15 +50,15 @@ Permitted Purposes specifically include using the Software:
 
 3. for non-commercial research; and
 
-4. in connection with professional services that you provide to a licensee
-   using the Software in accordance with these Terms and Conditions.
+4. in connection with professional services that you provide to a licensee using
+   the Software in accordance with these Terms and Conditions.
 
 ### Patents
 
 To the extent your use for a Permitted Purpose would necessarily infringe our
 patents, the license grant above includes a license under our patents. If you
-make a claim against any party that the Software infringes or contributes to
-the infringement of any patent, then your patent license to the Software ends
+make a claim against any party that the Software infringes or contributes to the
+infringement of any patent, then your patent license to the Software ends
 immediately.
 
 ### Redistribution
@@ -77,8 +77,8 @@ IMPLIED, INCLUDING WITHOUT LIMITATION WARRANTIES OF FITNESS FOR A PARTICULAR
 PURPOSE, MERCHANTABILITY, TITLE OR NON-INFRINGEMENT.
 
 IN NO EVENT WILL WE HAVE ANY LIABILITY TO YOU ARISING OUT OF OR RELATED TO THE
-SOFTWARE, INCLUDING INDIRECT, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES,
-EVEN IF WE HAVE BEEN INFORMED OF THEIR POSSIBILITY IN ADVANCE.
+SOFTWARE, INCLUDING INDIRECT, SPECIAL, INCIDENTAL OR CONSEQUENTIAL DAMAGES, EVEN
+IF WE HAVE BEEN INFORMED OF THEIR POSSIBILITY IN ADVANCE.
 
 ### Trademarks
 
@@ -96,17 +96,16 @@ the MIT license, in which case the following will apply:
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the "Software"), to deal in
 the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions:
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

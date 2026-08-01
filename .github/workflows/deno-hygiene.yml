@@ -1,0 +1,55 @@
+# Repository-wide Deno formatting and lint gates. Keep this workflow unfiltered:
+# `deno fmt` covers Markdown and YAML as well as TypeScript, so a docs-only pull
+# request can introduce a formatting regression even when the server is untouched.
+#
+# Deno is pinned to the same version as server/Dockerfile and ci.yml so formatter
+# output and lint rules do not drift between local validation, CI, and production.
+
+name: Deno hygiene
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    name: Deno format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head safely
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          fetch-depth: 1
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.4
+
+      - name: Check formatting
+        run: deno fmt --check
+
+  lint:
+    name: Deno lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head safely
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          fetch-depth: 1
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.4
+
+      - name: Run lint
+        run: deno lint

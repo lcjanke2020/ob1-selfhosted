@@ -9,10 +9,10 @@ Thought recall combines two independent candidate lists:
 The server fuses their rank positions with reciprocal rank fusion (RRF), using
 the method from Cormack, Clarke, and Büttcher's SIGIR 2009 paper,
 [“Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning
-Methods”](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf). It does not
-blend cosine similarity with `ts_rank_cd`: those scores have unrelated scales,
-so normalizing or weighting their raw values would make ranking depend on
-corpus-specific score distributions.
+Methods”](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf). It does
+not blend cosine similarity with `ts_rank_cd`: those scores have unrelated
+scales, so normalizing or weighting their raw values would make ranking depend
+on corpus-specific score distributions.
 
 ## Query behavior
 
@@ -44,7 +44,7 @@ The vector and lexical legs each inspect at least 50 candidates, or the
 requested final `limit` when it is larger. Each search raises transaction-local
 `hnsw.ef_search` to that candidate depth; filtered searches also enable
 `hnsw.iterative_scan = strict_order`. Both legs apply the same provenance
-include/exclude predicates and the same resolved memory-space audience *before*
+include/exclude predicates and the same resolved memory-space audience _before_
 assigning ranks.
 
 pgvector still bounds an iterative HNSW leg with `hnsw.max_scan_tuples` and its
@@ -82,11 +82,12 @@ as the reason it matched, while preserving RRF order.
 ## Testing
 
 The production query boundary is [`server/queries.ts`](../server/queries.ts).
-[`db/hybrid-search-smoke.sql`](../db/hybrid-search-smoke.sql) exercises exact-reference
-and hybrid-fusion behavior, including audience and provenance exclusion, while
-[`db/search-filter-plan-smoke.sql`](../db/search-filter-plan-smoke.sql) provides the
-larger filtered-ANN and planner fixture. When changing full-text/literal composition,
-fallback gating, or lexical candidate plans, follow
+[`db/hybrid-search-smoke.sql`](../db/hybrid-search-smoke.sql) exercises
+exact-reference and hybrid-fusion behavior, including audience and provenance
+exclusion, while
+[`db/search-filter-plan-smoke.sql`](../db/search-filter-plan-smoke.sql) provides
+the larger filtered-ANN and planner fixture. When changing full-text/literal
+composition, fallback gating, or lexical candidate plans, follow
 [`review-hybrid-search-fallbacks`](../skills/review-hybrid-search-fallbacks/SKILL.md).
 When adding approximate-index assertions or changing search settings, follow the
 deterministic-versus-statistical split in
@@ -94,11 +95,12 @@ deterministic-versus-statistical split in
 
 ## Database migration
 
-Fresh compose installs run [`db/05-hybrid-search.sql`](../db/05-hybrid-search.sql)
-after the base thoughts and sessions schemas. Existing deployments require both
-pgvector 0.8.0 or newer (for filtered iterative scans) and this migration.
-Verify `SELECT extversion FROM pg_extension WHERE extname = 'vector';`, upgrade
-the extension if needed, and apply the migration as the database owner before
+Fresh compose installs run
+[`db/05-hybrid-search.sql`](../db/05-hybrid-search.sql) after the base thoughts
+and sessions schemas. Existing deployments require both pgvector 0.8.0 or newer
+(for filtered iterative scans) and this migration. Verify
+`SELECT extversion FROM pg_extension WHERE extname = 'vector';`, upgrade the
+extension if needed, and apply the migration as the database owner before
 deploying the hybrid-query server:
 
 ```bash
@@ -136,11 +138,11 @@ Fail-closed spaces add a second required migration,
 [`db/06-spaces.sql`](../db/06-spaces.sql), after this one. PostgreSQL's RLS
 security barrier keeps non-leakproof full-text, trigram, and JSONB predicates
 from being pushed into the protected table scan. The spaces migration therefore
-installs one narrowly granted, fixed-SQL `SECURITY DEFINER` function that applies
-the resolved audience before candidate limits and returns only IDs and ranks.
-The server joins those candidates back through the RLS-protected `thoughts`
-table before returning content. Unlike `05-hybrid-search.sql`, the spaces
-migration requires PostgreSQL 15 or newer and must run as a PostgreSQL
+installs one narrowly granted, fixed-SQL `SECURITY DEFINER` function that
+applies the resolved audience before candidate limits and returns only IDs and
+ranks. The server joins those candidates back through the RLS-protected
+`thoughts` table before returning content. Unlike `05-hybrid-search.sql`, the
+spaces migration requires PostgreSQL 15 or newer and must run as a PostgreSQL
 superuser. Its candidate function also checks for exactly 768 embedding
 dimensions. Changing embedding models or dimensions therefore requires one
 coordinated migration that updates both `vector(768)` in `db/01-schema.sql` and

@@ -6,19 +6,19 @@
 > format it sends (see the verification note at the end) — so it routes with
 > equal ease to:
 >
-> 1. **Another machine on your network running a local LLM** (LM Studio,
->    ollama, …) — just set `CHAT_API_BASE` to its URL; no plumbing.
+> 1. **Another machine on your network running a local LLM** (LM Studio, ollama,
+>    …) — just set `CHAT_API_BASE` to its URL; no plumbing.
 > 2. **Any hosted OpenAI-compatible provider** with an API key — same, plus
 >    `CHAT_API_KEY`; thought content leaves your network.
 > 3. **A GPU qube on the same Qubes host** whose model server is bound to
 >    **loopback only** — no network-facing listener on the serving qube: no
->    tailnet/LAN bind, no sshd. This is the only option that needs the
->    plumbing below (a host-side forwarder + a qrexec `ConnectTCP` transport),
->    and it is **not a good fit for everyone**: it trades setup effort and a
->    console-only administration model for the smallest network exposure. For
->    the rationale — what the no-listener posture buys, the GPU-passthrough
->    privilege argument, and the honest tradeoffs (no sshd means no remote
->    administration without purpose-built tooling) — see
+>    tailnet/LAN bind, no sshd. This is the only option that needs the plumbing
+>    below (a host-side forwarder + a qrexec `ConnectTCP` transport), and it is
+>    **not a good fit for everyone**: it trades setup effort and a console-only
+>    administration model for the smallest network exposure. For the rationale —
+>    what the no-listener posture buys, the GPU-passthrough privilege argument,
+>    and the honest tradeoffs (no sshd means no remote administration without
+>    purpose-built tooling) — see
 >    [Serving From a Qube With No Network-Facing Listener](https://github.com/lcjanke2020/qubes-os-explorations/blob/master/qrexec-connecttcp-service-qube.md)
 >    in the qubes-os-explorations repo. This doc is the OB1-specific how-to.
 
@@ -41,16 +41,16 @@ unavailable, leave the safety knobs below in place — the `autostart=no` **poli
 option** (step 1), with the forwarder unit left enabled and running (it has no
 `autostart` setting of its own). The primary attempt then fails fast without
 starting the halted qube. OB1 follows `METADATA_FALLBACK_POLICY`: `off` stores a
-local stub, while `alert` or `allow` may classify through `FALLBACK_CHAT_*`.
-The permitted-fallback path is field-verified: with the GPU qube halted, the
+local stub, while `alert` or `allow` may classify through `FALLBACK_CHAT_*`. The
+permitted-fallback path is field-verified: with the GPU qube halted, the
 forwarder accepts the TCP connection, the qrexec call is refused, the connection
 closes with no timeout burn, fallback classifies in the same request, and the
-GPU qube stays halted. Re-enable by
-starting the GPU qube; no code or config change is required (the extractor is
-endpoint-agnostic). To park the transport entirely, additionally stop + disable
-the forwarder unit, remove its rc.local restage lines, and drop the step-3
-accept stanza from `qubes-firewall-user-script` — otherwise the firewall hook
-re-adds the (now-listenerless) `:11434` accept at each boot.
+GPU qube stays halted. Re-enable by starting the GPU qube; no code or config
+change is required (the extractor is endpoint-agnostic). To park the transport
+entirely, additionally stop + disable the forwarder unit, remove its rc.local
+restage lines, and drop the step-3 accept stanza from
+`qubes-firewall-user-script` — otherwise the firewall hook re-adds the
+(now-listenerless) `:11434` accept at each boot.
 
 ---
 
@@ -69,7 +69,7 @@ A caller that names an explicit target does **not** match a rule written with
 the rule.
 
 **Safety — `autostart=no` (strongly recommended).** qrexec **auto-starts a
-halted target** by default, so a capture-path classification call would *boot*
+halted target** by default, so a capture-path classification call would _boot_
 the GPU qube. If booting it is ever undesirable (it's down for maintenance, or
 starting it is risky), append `autostart=no`:
 
@@ -89,8 +89,9 @@ qubes-policy-lint /etc/qubes/policy.d/30-ob1-connecttcp.policy  # ships with qub
 python3 -c "from qrexec.policy.parser import FilePolicy; import pathlib; FilePolicy(policy_path=pathlib.Path('/etc/qubes/policy.d')); print('OK')"
 ```
 
-Nothing is installed in `<gpu-qube>` for the transport itself: `qubes.ConnectTCP`
-is a stock qrexec service that connects to `127.0.0.1:<port>` on the target. The
+Nothing is installed in `<gpu-qube>` for the transport itself:
+`qubes.ConnectTCP` is a stock qrexec service that connects to `127.0.0.1:<port>`
+on the target. The
 [companion guide](https://github.com/lcjanke2020/qubes-os-explorations/blob/master/qrexec-connecttcp-service-qube.md)
 walks the server side — binding the model server to loopback and verifying the
 qube ends up with no network-facing listener.
@@ -142,17 +143,17 @@ RestartSec=2
 WantedBy=multi-user.target
 ```
 
-**Gotcha — inter-bridge isolation.** A container on a *user-defined* docker
-bridge (any compose project) **cannot** reach `docker0` /
-`host.docker.internal` — docker isolates bridges from each other. Bind the
-forwarder to the container's **own** compose-network gateway and point
-`CHAT_API_BASE` there. Find the gateway:
+**Gotcha — inter-bridge isolation.** A container on a _user-defined_ docker
+bridge (any compose project) **cannot** reach `docker0` / `host.docker.internal`
+— docker isolates bridges from each other. Bind the forwarder to the container's
+**own** compose-network gateway and point `CHAT_API_BASE` there. Find the
+gateway:
 
 ```sh
 docker network inspect <project>_default -f '{{(index .IPAM.Config 0).Gateway}}'
 ```
 
-For a *stable* gateway across recreates, pin the subnet/gateway in a local,
+For a _stable_ gateway across recreates, pin the subnet/gateway in a local,
 uncommitted `docker-compose.override.yml` next to
 [`app-qube/docker-compose.yml`](app-qube/docker-compose.yml) (compose
 auto-merges an override that sits beside the base file; keeping it local and
@@ -182,7 +183,7 @@ fi
 
 `qubes-firewall` runs this script when its worker starts — boot or a service
 restart. An ordinary firewall **reload** reapplies the QubesDB rules but does
-*not* re-run the user script, so treat this as boot-time persistence (the rule,
+_not_ re-run the user script, so treat this as boot-time persistence (the rule,
 once added, stays in the chain for the qube's uptime). Two scope caveats:
 
 - **`br-*` matches every docker user-defined bridge on the qube**, not just this
@@ -238,10 +239,9 @@ ENABLE_PRIMARY_EXTRACTION=true
 
 Choose `METADATA_FALLBACK_POLICY` explicitly. Use `off` to keep a downed GPU
 qube from sending content anywhere else, `alert` to permit the configured
-fallback only with a notification channel, or `allow` to permit fallback
-without requiring delivery. Configure `FALLBACK_CHAT_*` only for the latter two
-choices. See
-[`app-qube/.env.example`](app-qube/.env.example) for the full block and the
+fallback only with a notification channel, or `allow` to permit fallback without
+requiring delivery. Configure `FALLBACK_CHAT_*` only for the latter two choices.
+See [`app-qube/.env.example`](app-qube/.env.example) for the full block and the
 `ENABLE_PRIMARY_EXTRACTION` safety gate (off unless exactly `true`).
 
 ## 6. Host RAM on the GPU qube — size it generously
@@ -249,29 +249,29 @@ choices. See
 It is tempting to trim the GPU qube's memory down — "the model lives in VRAM,
 the host side is just a shim". Field experience says otherwise: **an undersized
 GPU qube produces exactly the silent-fallback failure class this transport
-exists to prevent**, and it does so *intermittently*, which makes it expensive
+exists to prevent**, and it does so _intermittently_, which makes it expensive
 to diagnose.
 
-What actually happens (mechanics per ollama 0.30 on Linux with a discrete
-GPU; the numbers used below are a worked hypothetical, not any particular
+What actually happens (mechanics per ollama 0.30 on Linux with a discrete GPU;
+the numbers used below are a worked hypothetical, not any particular
 deployment's profile):
 
 - The model server's host-side process legitimately needs several GiB even with
-  the weights in VRAM: load machinery, per-request state, and — on newer
-  ollama — large transient allocations that arrive at *request* time (prompt-
-  cache state saves approaching 1 GiB).
+  the weights in VRAM: load machinery, per-request state, and — on newer ollama
+  — large transient allocations that arrive at _request_ time (prompt- cache
+  state saves approaching 1 GiB).
 - ollama wants enough **free** host RAM to **mmap** the model file at load —
   when it expects the model to fit on the GPU, the scheduler's host-pressure
   check (upstream `server/sched.go`) requires
-  `system_free ≥ model_size + loaded_mmap_size + max(8 GB, total_memory/10)`
-  — the floor is decimal (ollama's `format.GigaByte` is 1000³): 8 GB
-  ≈ 7.45 GiB.
-  Below that it logs `disabling mmap for llama-server load due to host memory
-  pressure` and takes a heavier buffered load path — more anonymous host RAM,
-  slower loads, and no page cache to make the next load cheap. The log line
-  prints every input to the decision (`model_size`, `loaded_mmap_size`,
-  `headroom`, `system_free`, `system_total`) — size from those fields, not
-  from guesses.
+  `system_free ≥ model_size + loaded_mmap_size + max(8 GB, total_memory/10)` —
+  the floor is decimal (ollama's `format.GigaByte` is 1000³): 8 GB ≈ 7.45 GiB.
+  Below that it logs
+  `disabling mmap for llama-server load due to host memory
+  pressure` and takes
+  a heavier buffered load path — more anonymous host RAM, slower loads, and no
+  page cache to make the next load cheap. The log line prints every input to the
+  decision (`model_size`, `loaded_mmap_size`, `headroom`, `system_free`,
+  `system_total`) — size from those fields, not from guesses.
 - A GPU-passthrough qube typically runs with **fixed memory** (`maxmem 0` — no
   ballooning), so nothing rescues a spike: the kernel OOM killer kills the
   server. `Restart=always` brings it back in seconds — **empty**. The resident
@@ -279,13 +279,13 @@ deployment's profile):
   wrong until the next capture pays a cold load, then stores a stub under `off`
   or may use `FALLBACK_CHAT_*` under `alert`/`allow`.
 
-The symptom set masquerades as an eviction or keep-alive bug, which is the
-trap: `/api/ps` shows the model pinned with a far-future `expires_at` on one
-check and absent on the next; captures classify via primary at HH:MM and leak
-via fallback at HH:MM+20. Note also that this failure **burns the full
-`CHAT_TIMEOUT_MS`** when the kill lands mid-request — unlike the halted-qube
-case in the degradation section above, which fails fast — because the
-connection is accepted and then never answered.
+The symptom set masquerades as an eviction or keep-alive bug, which is the trap:
+`/api/ps` shows the model pinned with a far-future `expires_at` on one check and
+absent on the next; captures classify via primary at HH:MM and leak via fallback
+at HH:MM+20. Note also that this failure **burns the full `CHAT_TIMEOUT_MS`**
+when the kill lands mid-request — unlike the halted-qube case in the degradation
+section above, which fails fast — because the connection is accepted and then
+never answered.
 
 **Diagnosis** (on the GPU qube; unit name per your install):
 
@@ -301,35 +301,35 @@ systemctl show ollama -p NRestarts    # restarts you didn't perform
 thresholds matter, and they are not the same number.
 
 - **The OOM floor.** Assigned RAM must cover the server's host-side peak
-  (several GiB of anonymous memory at request time, per the first bullet
-  above) plus the OS and services. Below this the qube is OOM roulette on
-  every request, whatever mmap decides.
-- **The mmap threshold.** Cheap loads additionally need *free* RAM at load
-  time to clear the `model_size + loaded_mmap_size + max(8 GB,
-  total_memory/10)` check — *free*, not assigned: the OS, services, and
-  whatever else is resident all bite into it first, so assigned RAM has to
-  sit comfortably above the sum.
+  (several GiB of anonymous memory at request time, per the first bullet above)
+  plus the OS and services. Below this the qube is OOM roulette on every
+  request, whatever mmap decides.
+- **The mmap threshold.** Cheap loads additionally need _free_ RAM at load time
+  to clear the `model_size + loaded_mmap_size + max(8 GB,
+  total_memory/10)`
+  check — _free_, not assigned: the OS, services, and whatever else is resident
+  all bite into it first, so assigned RAM has to sit comfortably above the sum.
 
 A worked hypothetical: a 16 GiB model file, no other mmap-loaded model, and a
-qube small enough that the headroom term is its 8 GB floor (≈ 7.45 GiB) —
-the raw threshold is ≈ 23.5 GiB *free*; treat "≥ 24 GiB free" as the
-rounded-up target. An 8 GiB qube is below even the OOM floor for that model. A
-24 GiB qube clears the OOM floor but can never clear the mmap check (the OS
-and services already hold a few GiB), so every load quietly takes the
-buffered path. ~32 GiB keeps mmap on with margin — and the spare RAM is not
-wasted: it becomes page cache for the model file, which makes post-restart
-reloads dramatically cheaper. After resizing, confirm the load journal no
-longer shows the mmap-disable line and the oom-kill entries stop recurring —
-the line's own fields tell you how much margin you actually have.
+qube small enough that the headroom term is its 8 GB floor (≈ 7.45 GiB) — the
+raw threshold is ≈ 23.5 GiB _free_; treat "≥ 24 GiB free" as the rounded-up
+target. An 8 GiB qube is below even the OOM floor for that model. A 24 GiB qube
+clears the OOM floor but can never clear the mmap check (the OS and services
+already hold a few GiB), so every load quietly takes the buffered path. ~32 GiB
+keeps mmap on with margin — and the spare RAM is not wasted: it becomes page
+cache for the model file, which makes post-restart reloads dramatically cheaper.
+After resizing, confirm the load journal no longer shows the mmap-disable line
+and the oom-kill entries stop recurring — the line's own fields tell you how
+much margin you actually have.
 
 ## 7. Keep the model resident (pre-warm at boot, re-warm on a timer)
 
 The first request after a model (re)load pays a cold start of tens of seconds;
 with a 30B-class model that can consume most of the extractor's
 `CHAT_TIMEOUT_MS` budget (default 60 s) and tip a capture into the fallback.
-Load the model *before* any capture arrives, and re-assert residency on a
-timer so a crash or restart self-heals instead of leaking. Three files on the
-GPU qube (ollama flavor; adjust for your server):
+Load the model _before_ any capture arrives, and re-assert residency on a timer
+so a crash or restart self-heals instead of leaking. Three files on the GPU qube
+(ollama flavor; adjust for your server):
 
 `/usr/local/bin/ollama-warmup.sh`:
 
@@ -383,27 +383,26 @@ WantedBy=timers.target
 systemctl daemon-reload && systemctl enable --now ollama-warmup.timer
 ```
 
-The five-minute tick bounds the window in which a crash can put a cold model
-in front of a capture. Two companion settings, same qube:
+The five-minute tick bounds the window in which a crash can put a cold model in
+front of a capture. Two companion settings, same qube:
 
-- **Pin residency server-side, not per-request.** A per-request `keep_alive`
-  pin is weaker than it looks — not because ordinary traffic overwrites it
-  (in ollama 0.30 a request that *omits* `keep_alive` leaves a loaded
-  runner's expiry alone, and the OpenAI-compatible endpoint never sends one),
-  but because the pin lives in the runner, and runners get replaced by events
-  ordinary operation produces: a crash, a server restart, an option change
-  forcing a reload, a real request racing the boot warm-up. Every **fresh**
-  load whose request carries no `keep_alive` starts from the *server default*
-  of five minutes (upstream `server/sched.go` takes `envconfig.KeepAlive()`
-  unless the request overrides it) — so a probe-applied pin quietly
-  downgrades to five minutes on the next reload. Set
-  `Environment=OLLAMA_KEEP_ALIVE=-1` in a unit drop-in: that makes the
-  default itself infinite and covers every load path, including the ones the
-  warm-up timer exists to catch.
-- **Privacy note for ollama ≥ 0.30:** unless `OLLAMA_NO_CLOUD=true` is set,
-  the server periodically phones ollama.com (registry / model-metadata cache
-  hydration) — from the qube whose reason to exist is that content never
-  leaves it. Add it to the same drop-in.
+- **Pin residency server-side, not per-request.** A per-request `keep_alive` pin
+  is weaker than it looks — not because ordinary traffic overwrites it (in
+  ollama 0.30 a request that _omits_ `keep_alive` leaves a loaded runner's
+  expiry alone, and the OpenAI-compatible endpoint never sends one), but because
+  the pin lives in the runner, and runners get replaced by events ordinary
+  operation produces: a crash, a server restart, an option change forcing a
+  reload, a real request racing the boot warm-up. Every **fresh** load whose
+  request carries no `keep_alive` starts from the _server default_ of five
+  minutes (upstream `server/sched.go` takes `envconfig.KeepAlive()` unless the
+  request overrides it) — so a probe-applied pin quietly downgrades to five
+  minutes on the next reload. Set `Environment=OLLAMA_KEEP_ALIVE=-1` in a unit
+  drop-in: that makes the default itself infinite and covers every load path,
+  including the ones the warm-up timer exists to catch.
+- **Privacy note for ollama ≥ 0.30:** unless `OLLAMA_NO_CLOUD=true` is set, the
+  server periodically phones ollama.com (registry / model-metadata cache
+  hydration) — from the qube whose reason to exist is that content never leaves
+  it. Add it to the same drop-in.
 
 ## Notes
 
@@ -416,8 +415,9 @@ in front of a capture. Two companion settings, same qube:
   stderr for diagnosis. Optional Pushover/ntfy first-occurrence alerts and
   rollups, plus the legacy log-monitor fallback, are in
   [`docs/metadata-degradation-monitoring.md`](../../docs/metadata-degradation-monitoring.md).
-- **Verify the transport:** from the app-qube host, `curl http://<compose-gw>:11434/v1/models`
-  (should list the model); from inside the container,
+- **Verify the transport:** from the app-qube host,
+  `curl http://<compose-gw>:11434/v1/models` (should list the model); from
+  inside the container,
   `docker exec <mcp-container> deno eval 'console.log((await fetch("http://<compose-gw>:11434/v1/models")).status)'`
   should print `200`.
 - **Then verify classification — transport alone isn't enough.** `/v1/models`
@@ -428,16 +428,16 @@ in front of a capture. Two companion settings, same qube:
   local stub and never calls `FALLBACK_CHAT_*`; under `alert` or `allow`, it may
   fall through to that endpoint and thought content may leave the box. Captures
   still succeed; the extractor writes a durable event and warns on every
-  fallback classification. For a transport
-  smoke test, also check the immediate log deliberately: capture a test thought
-  and look for `[metadata] classified via primary endpoint`. Failure lines now
-  identify the broad cause: `primary endpoint failed (transport/timeout)` is an
-  availability signal, `primary endpoint failed (non-2xx response)` is a server or request-
-  compatibility failure with the final HTTP status appended, and lines
-  beginning `primary endpoint returned …` identify an invalid completion
-  envelope, unparseable model output, or runtime-schema-rejected metadata.
-  Check the model server's own logs for detail beyond that status or within the
-  output-quality class.
+  fallback classification. For a transport smoke test, also check the immediate
+  log deliberately: capture a test thought and look for
+  `[metadata] classified via primary endpoint`. Failure lines now identify the
+  broad cause: `primary endpoint failed (transport/timeout)` is an availability
+  signal, `primary endpoint failed (non-2xx response)` is a server or request-
+  compatibility failure with the final HTTP status appended, and lines beginning
+  `primary endpoint returned …` identify an invalid completion envelope,
+  unparseable model output, or runtime-schema-rejected metadata. Check the model
+  server's own logs for detail beyond that status or within the output-quality
+  class.
 - This plumbing exists only to keep content on a **loopback-only** GPU qube. A
   reachable OpenAI-compatible server (local or over the tailnet) used directly
   as `CHAT_API_BASE` needs none of it.
