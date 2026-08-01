@@ -113,10 +113,15 @@ tailnet, as the database superuser:
 
 ```sh
 cd deploy/qubes/app-qube
-( . ./.env
+(
+  . ./.env || exit
+  : "${DB_HOST:?set DB_HOST in .env}"
+  : "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
   PGPASSWORD="$POSTGRES_PASSWORD" \
-  psql -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
-    -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f ../../../db/08-access-tokens.sql )
+  psql -w -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
+    -d "${POSTGRES_DB:-openbrain}" -v ON_ERROR_STOP=1 \
+    -f ../../../db/08-access-tokens.sql
+)
 ```
 
 Source without `set -a` and keep it in a subshell. `psql` needs exactly one
@@ -127,6 +132,18 @@ once the subshell returns. `-h`/`-p`/`-d` are argument expansions and need no
 export at all. This is the same rule the backup job states in
 [`backup/backup.env.example`](backup/backup.env.example): only what the client
 needs reaches the client.
+
+The guards carry as much weight as the scoping. A failed `. ./.env` does not
+stop a subshell by itself: without `|| exit` the recipe runs on to `psql` with
+an empty host and database, where libpq falls back to a local socket and can
+exit 0 having touched something other than the intended remote target. `:?`
+rejects an unset or empty required value before any connection is attempted, and
+`-w` keeps a missing password from becoming an interactive prompt.
+
+`.env` is read as shell code, so keep it to the plain `KEY=value` lines
+`.env.example` ships. An `export`-prefixed line re-exports its value to `psql`
+despite the subshell, and a value carrying shell metacharacters is evaluated
+rather than read.
 
 This qube's `.env` carries the superuser _password_ but no `POSTGRES_USER`, so
 the default above names the db qube's `postgres` superuser. Keep the override
