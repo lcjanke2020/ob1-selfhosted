@@ -117,19 +117,21 @@ cd deploy/qubes/app-qube
   . ./.env || exit
   : "${DB_HOST:?set DB_HOST in .env}"
   : "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
-  PGPASSWORD="$POSTGRES_PASSWORD" \
-  psql -w -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
-    -d "${POSTGRES_DB:-openbrain}" -v ON_ERROR_STOP=1 \
-    -f ../../../db/08-access-tokens.sql
+  env -i PATH="$PATH" PGPASSWORD="$POSTGRES_PASSWORD" \
+    psql -w -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
+      -d "${POSTGRES_DB:-openbrain}" -v ON_ERROR_STOP=1 \
+      -f ../../../db/08-access-tokens.sql
 )
 ```
 
-Source without `set -a` and keep it in a subshell. `psql` needs exactly one
-secret from that file; the rest — the app and read-only role passwords, the
-model API keys, the notification credentials — stay unexported shell variables
-that the client process never sees, and leave no trace in the operator's shell
-once the subshell returns. `-h`/`-p`/`-d` are argument expansions and need no
-export at all. This is the same rule the backup job states in
+Source without `set -a`, keep it in a subshell, and build the client's
+environment rather than handing it the shell's. `env -i` starts `psql` from
+empty, so the only values it can see are the two named on that line — every
+`$DB_HOST`-style expansion happens in the parent shell before `env` runs, so the
+arguments are unaffected. The app and read-only role passwords, the model API
+keys, and the notification credentials never reach the client process, and
+nothing survives in the operator's shell once the subshell returns. This is the
+rule the backup job states in
 [`backup/backup.env.example`](backup/backup.env.example): only what the client
 needs reaches the client.
 
@@ -140,10 +142,15 @@ exit 0 having touched something other than the intended remote target. `:?`
 rejects an unset or empty required value before any connection is attempted, and
 `-w` keeps a missing password from becoming an interactive prompt.
 
-`.env` is read as shell code, so keep it to the plain `KEY=value` lines
-`.env.example` ships. An `export`-prefixed line re-exports its value to `psql`
-despite the subshell, and a value carrying shell metacharacters is evaluated
-rather than read.
+Two limits are worth stating rather than papering over. `env -i` makes the
+scoping hold however `.env` was written — an `export`-prefixed line no longer
+reaches the client — but the file is still _sourced_, so a value containing
+shell metacharacters is evaluated when it is read, well before `psql` is
+reached. Keep `.env` to the plain `KEY=value` lines `.env.example` ships;
+nothing here defends a file that has stopped being one. And because the client
+now starts from an empty environment, a deployment that depends on additional
+libpq variables — `PGSSLMODE`, say — must name them on the `env -i` line, since
+they are no longer inherited.
 
 This qube's `.env` carries the superuser _password_ but no `POSTGRES_USER`, so
 the default above names the db qube's `postgres` superuser. Keep the override
