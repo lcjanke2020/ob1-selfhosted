@@ -205,7 +205,12 @@ existing deployment, PostgreSQL 15 or newer is required because audience-aware
 uniqueness uses `NULLS NOT DISTINCT`. Stop or quiesce the MCP service and take a
 verified backup, then run as a PostgreSQL superuser (normally `postgres`). The
 superuser is required because the migration sets `BYPASSRLS` on the backup role
-and creates or replaces a `LEAKPROOF` function:
+and creates or replaces a `LEAKPROOF` function.
+
+A deployment whose database is not in the compose project has nothing to `exec`
+into; see
+[Upgrading an existing deployment](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
+for the equivalent over a network connection.
 
 ```bash
 docker compose exec -T postgres \

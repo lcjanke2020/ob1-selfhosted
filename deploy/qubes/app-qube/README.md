@@ -93,7 +93,142 @@ Server 1.19.0 also requires `db/08-access-tokens.sql` on the DB qube followed by
 `ENABLE_NATIVE_TOKENS=false` is pinned in compose and `MCP_ACCESS_KEY` remains
 absent, so the new schema does not add an accepted credential at the public
 edge. See
-[Native access tokens](../../../docs/native-access-tokens.md#existing-database-upgrade).
+[Native access tokens](../../../docs/native-access-tokens.md#existing-database-upgrade)
+for what the schema contains, and
+[Upgrading an existing deployment](#upgrading-an-existing-deployment) for how to
+apply it in this topology.
+
+## Upgrading an existing deployment
+
+`db/*.sql` are `docker-entrypoint-initdb.d` scripts: PostgreSQL runs them only
+on a fresh data directory. On an existing database they never rerun, so neither
+a new migration nor a tightened grant reaches a running deployment by itself.
+Apply them by hand, in order, during an operator window.
+
+The per-migration recipes under [`docs/`](../../../docs/) assume the single-box
+compose install and `docker compose exec -T postgres`. **In this split topology
+that command has nothing to exec into** — Postgres is not in the app compose
+project. Run the same files from this qube's repository checkout, over the
+tailnet, as the database superuser:
+
+```sh
+(
+  cd deploy/qubes/app-qube || exit
+  . ./.env || exit
+  : "${DB_HOST:?set DB_HOST in .env}"
+  : "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+  env -i PATH="$PATH" PGPASSWORD="$POSTGRES_PASSWORD" \
+    psql -w -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
+      -d "${POSTGRES_DB:-openbrain}" -v ON_ERROR_STOP=1 \
+      -f ../../../db/08-access-tokens.sql
+)
+```
+
+Run it from the top of the checkout. The example applies migration 08 —
+substitute the file named by the row you are moving to, and apply several in
+ascending order, one invocation each.
+
+Every step is inside the subshell, and each one that can fail stops it. An
+unguarded `cd` is the interesting case: on failure the shell simply continues in
+the caller's directory, so a stray `.env` there would be sourced instead and the
+run would target whatever database _that_ file names — reporting success.
+`env -i` cannot help, because those values arrive as arguments rather than
+environment. Keep `|| exit` **inside** the parentheses: hoisted out, it would
+close the operator's interactive shell rather than abandon the recipe. Nothing
+here changes the caller's directory or environment.
+
+Source without `set -a`, keep it in a subshell, and build the client's
+environment rather than handing it the shell's. `env -i` starts `psql` from
+empty, so the only values it can see are the two named on that line — every
+`$DB_HOST`-style expansion happens in the parent shell before `env` runs, so the
+arguments are unaffected. The app and read-only role passwords, the model API
+keys, and the notification credentials never reach the client process, and
+nothing survives in the operator's shell once the subshell returns. This is the
+rule the backup job states in
+[`backup/backup.env.example`](backup/backup.env.example): only what the client
+needs reaches the client.
+
+The guards carry as much weight as the scoping. A failed `. ./.env` does not
+stop a subshell by itself: without `|| exit` the recipe runs on to `psql` with
+an empty host and database, where libpq falls back to a local socket and can
+exit 0 having touched something other than the intended remote target. `:?`
+rejects an unset or empty required value before any connection is attempted, and
+`-w` keeps a missing password from becoming an interactive prompt.
+
+Two limits are worth stating rather than papering over. `env -i` makes the
+scoping hold however `.env` was written — an `export`-prefixed line no longer
+reaches the client — but the file is still _sourced_, so a value containing
+shell metacharacters is evaluated when it is read, well before `psql` is
+reached. Keep `.env` to the plain `KEY=value` lines `.env.example` ships;
+nothing here defends a file that has stopped being one. And because the client
+now starts from an empty environment, a deployment that depends on additional
+libpq variables — `PGSSLMODE`, say — must name them on the `env -i` line, since
+they are no longer inherited.
+
+This qube's `.env` carries the superuser _password_ but no `POSTGRES_USER`, so
+the default above names the db qube's `postgres` superuser. Keep the override
+hook: an operator who renamed that role sets `POSTGRES_USER` to match the
+`pg_hba` line
+([`../db-qube/pg_hba.snippet.conf`](../db-qube/pg_hba.snippet.conf)). Passing an
+empty `-U` is not equivalent — libpq treats it as absent and substitutes the
+**login account's** name, which the db qube's `pg_hba` does not recognize.
+
+Fedora's `postgresql` package provides the host `psql` client; it is commonly
+already present beside the `pg_dump` client used by the encrypted backup. If it
+is absent, install the package in this qube's Fedora **template** — an
+AppVM-local install disappears on reboot.
+
+### Which migration each server version requires
+
+Rows start at 1.7.0. `db/01-schema.sql`, `db/02-observability.sql`, and
+`db/04-sessions.sql` have no upgrade row of their own; a database predating any
+of them needs it applied first, in that order. `db/03-grants-assertion.sql` is
+deliberately not third — it is a read-only check of the completed catalog, so it
+runs after every pending row below and fails by design if run before the
+relations it asserts on exist. The db qube records the same canonical order
+([First boot / provisioning](../db-qube/README.md#first-boot--provisioning)).
+
+| Server | Migration                        | Additional requirement                                        |
+| ------ | -------------------------------- | ------------------------------------------------------------- |
+| 1.7.0  | `db/05-hybrid-search.sql`        | pgvector 0.8.0+ (filtered iterative scans)                    |
+| 1.9.0  | `db/06-spaces.sql`               | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner   |
+| 1.16.0 | `db/07-metadata-degradation.sql` | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env` |
+| 1.19.0 | `db/08-access-tokens.sql`        | —                                                             |
+
+Migration 08 is required by 1.19.0 **even when native tokens are disabled**.
+`ENABLE_NATIVE_TOKENS` gates the credential door, not the schema: the server's
+boot probe refuses to start without `native_auth`, so applying it _after_ the
+container roll takes the deployment down rather than leaving it on the old
+version. Apply migrations before the roll, not with it.
+
+### Window order
+
+1. Take the labelled pre-migration rollback point and verify it off-box —
+   [Deploy-window rollback point](#deploy-window-rollback-point).
+2. Tag the running image so a rollback needs no rebuild:
+   `docker tag app-qube-mcp:latest app-qube-mcp:rollback-<previous-commit>`.
+3. `git pull` the checkout on **every** qube that installs something from it:
+   this one for compose and the rollup, the ingress qube for the Funnel monitor.
+4. Reconcile `.env` against `.env.example`. `docker compose config --quiet` is a
+   cheap dry run — it fails on a missing required variable without touching the
+   running container.
+5. **Install host-side consumers before replaying SQL that narrows a grant.**
+   Several credentials in this topology live outside the compose project: the
+   Funnel monitor's role on the ingress qube, the rollup's role here. Replaying
+   a `REVOKE` before the matching script is updated leaves that consumer failing
+   on its own timer cadence until it catches up — silently, if it only writes to
+   a local log. The reverse order is safe, because a new script is written
+   against both the old and the new grant set. See
+   [the v3 → v4 Funnel monitor upgrade](../ingress-qube/README.md#funnel-monitor-host-side-not-compose)
+   for a worked example.
+6. Stop `mcp`, apply the migrations in ascending order, then run
+   `db/03-grants-assertion.sql`. It must exit 0. It reads the completed catalog,
+   so a partial migration or a widened role fails it loudly.
+7. `docker compose build mcp && docker compose up -d --no-deps mcp`. Confirm the
+   boot log names the schemas it found and the auth door you expect, then
+   `/health`.
+8. Verify from the outside — a real request through the public door, not only a
+   local health check.
 
 ## Daily Funnel rollup and retention (host-side)
 

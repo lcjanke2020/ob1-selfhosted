@@ -101,7 +101,10 @@ and sessions schemas. Existing deployments require both pgvector 0.8.0 or newer
 (for filtered iterative scans) and this migration. Verify
 `SELECT extversion FROM pg_extension WHERE extname = 'vector';`, upgrade the
 extension if needed, and apply the migration as the database owner before
-deploying the hybrid-query server:
+deploying the hybrid-query server. A deployment whose database is not in the
+compose project has nothing to `exec` into; see
+[Upgrading an existing deployment](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
+for the equivalent over a network connection.
 
 ```bash
 docker compose exec -T postgres \

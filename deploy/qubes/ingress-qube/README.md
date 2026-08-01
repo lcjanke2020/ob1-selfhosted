@@ -109,12 +109,25 @@ before `db/00-roles.sh` runs; on an existing DB, run
 [`scripts/upgrade-add-monitor-role.sh`](../../../scripts/upgrade-add-monitor-role.sh)
 (compose) or the equivalent `CREATE ROLE` by hand on the db qube (see
 [`../db-qube/README.md`](../db-qube/README.md)), then re-run
-`db/02-observability.sql` for the grants. Existing v3 deployments must also
-replay that file before installing v4: it grants `funnel_access_log`, revokes
-the obsolete `mcp_auth_events` access, and converges the edge credential to the
-one-table contract. Run `db/03-grants-assertion.sql` afterward to verify it. The
-db qube's `pg_hba` must permit `openbrain_monitor` from **this** qube's tailnet
-IP ([`../db-qube/pg_hba.snippet.conf`](../db-qube/pg_hba.snippet.conf)).
+`db/02-observability.sql` for the grants and `db/03-grants-assertion.sql` to
+verify them. The db qube's `pg_hba` must permit `openbrain_monitor` from
+**this** qube's tailnet IP
+([`../db-qube/pg_hba.snippet.conf`](../db-qube/pg_hba.snippet.conf)).
+
+**Upgrading a v3 deployment — install v4 here first, then replay the SQL.**
+`db/02-observability.sql` revokes the monitor role's obsolete `mcp_auth_events`
+access, converging this edge credential to the one-table contract. v3 probes
+that table. Replaying the SQL while v3 is still installed therefore breaks its
+second probe: the query returns `permission denied`, the probe reads as empty,
+and every subsequent run logs `monitor probe FAILED` on the timer's cadence —
+with the local auth-failure alarm effectively down for the whole gap. The
+reverse order has no such window, because v4 never reads `mcp_auth_events` and
+its `funnel_access_log` grant is unchanged, so it runs correctly against a
+not-yet-converged database. Install v4 below, then replay
+`db/02-observability.sql`, then verify with `db/03-grants-assertion.sql` —
+ideally back to back in one window. This is the general rule for host-side
+consumers in the split topology; see
+[Upgrading an existing deployment](../app-qube/README.md#upgrading-an-existing-deployment).
 
 **Install on this qube** (as the regular user, from the repo checkout):
 

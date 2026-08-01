@@ -92,6 +92,26 @@ PostgreSQL init scripts do not rerun on an existing data directory. Quiesce
 writes and take a verified backup, then set `OPENBRAIN_TOKEN_ADMIN_PASSWORD` in
 `.env` and run:
 
+> The commands below are for the single-box compose install. A deployment whose
+> database is not in the compose project has nothing to `exec` into — see
+> [Upgrading an existing deployment](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
+> for the equivalent over a network connection. There, the upgrade helper is
+> also unusable (it drives `docker compose exec`); leave
+> `OPENBRAIN_TOKEN_ADMIN_PASSWORD` unset and migration 08 creates the
+> administrator as a `NOLOGIN` role, which is the correct end state for an
+> OAuth-only deployment that will not mint native tokens. Reapplying migration
+> 08 preserves whichever state you chose, so the choice survives later windows.
+> Granting the role `LOGIN` by hand —
+> `ALTER ROLE openbrain_token_admin WITH LOGIN PASSWORD '…';` — prepares the
+> database role and nothing further. The helper issues that grant alongside a
+> `NOSUPERUSER`/`NOCREATEDB`/`NOCREATEROLE`/`NOREPLICATION`/`NOBYPASSRLS`
+> reconciliation; migration 08 applies those same flags every time it runs, so
+> the hand statement does not repeat them. What it does not supply is the rest:
+> the shipped split topology has no `pg_hba` line for `openbrain_token_admin`,
+> no administrator client, and pins `ENABLE_NATIVE_TOKENS=false`, so issuing and
+> accepting native tokens there is not a supported procedure today. Leaving the
+> role `NOLOGIN` is the safer default.
+
 ```bash
 cd deploy/compose-local
 bash ../../scripts/upgrade-enable-token-admin-role.sh
