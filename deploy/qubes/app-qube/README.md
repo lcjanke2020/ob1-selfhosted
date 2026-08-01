@@ -143,6 +143,10 @@ AppVM-local install disappears on reboot.
 
 ### Which migration each server version requires
 
+Rows start at 1.7.0. `db/01-schema.sql` through `db/04-sessions.sql` belong to
+the initial install rather than to a version upgrade; a database predating any
+of them needs it applied, in order, before the rows below.
+
 | Server | Migration                        | Additional requirement                                        |
 | ------ | -------------------------------- | ------------------------------------------------------------- |
 | 1.7.0  | `db/05-hybrid-search.sql`        | pgvector 0.8.0+ (filtered iterative scans)                    |
