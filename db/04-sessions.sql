@@ -21,9 +21,11 @@
 -- .env present:
 --   docker compose exec -T postgres \
 --     psql -U postgres -d openbrain < ../../db/04-sessions.sql
--- A deployment whose database is not in the compose project has nothing to
--- exec into; deploy/qubes/app-qube/README.md §"Upgrading an existing
--- deployment" carries the equivalent over a network connection.
+-- A deployment whose database is not in that compose project has nothing to
+-- exec into. The split Qubes topology's procedure — a guarded network psql
+-- connection — is in deploy/qubes/app-qube/README.md §"Upgrading an existing
+-- deployment"; any other external-Postgres layout applies this same file over
+-- its own connection.
 --
 -- Roles openbrain_app / openbrain_readonly are created by 00-roles.sh.
 
