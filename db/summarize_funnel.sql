@@ -4,9 +4,10 @@
 -- Wraps everything in a single transaction so partial failure leaves the
 -- previous day's summary state intact.
 --
--- Manual invocation (after the host wires Pattern B):
+-- Manual invocation (after the host wires Pattern B), from
+-- deploy/compose-tailnet with .env present:
 --   docker compose exec -T postgres psql -U openbrain_app -d openbrain \
---     < db/summarize_funnel.sql > /tmp/funnel.md
+--     < ../../db/summarize_funnel.sql > /tmp/funnel.md
 -- The split Qubes deployment uses scripts/funnel_daily_summary.sh's postgres
 -- backend and the shipped app-qube user timer instead of a local container.
 --
