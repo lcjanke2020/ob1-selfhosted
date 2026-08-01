@@ -15,7 +15,7 @@
 -- deployment"; any other external-Postgres layout applies this same file over
 -- its own connection.
 --
--- See deploy/compose-tailnet/README.md §"Observability".
+-- See deploy/compose-tailnet/README.md §"Observability (Pattern B)".
 
 -- ---------- Raw access log ------------------------------------------------
 -- One row per HTTP request hitting Caddy. Populated by the log-ingester

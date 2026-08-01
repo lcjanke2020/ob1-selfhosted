@@ -19,8 +19,10 @@
 -- so apply to an existing deployment manually (safe to re-run). Run it from
 -- your compose directory (deploy/compose-local or deploy/compose-tailnet),
 -- .env present:
+--
 --   docker compose exec -T postgres \
 --     psql -U postgres -d openbrain < ../../db/04-sessions.sql
+--
 -- A deployment whose database is not in that compose project has nothing to
 -- exec into. The split Qubes topology's procedure — a guarded network psql
 -- connection — is in deploy/qubes/app-qube/README.md §"Upgrading an existing
