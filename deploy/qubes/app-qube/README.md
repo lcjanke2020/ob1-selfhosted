@@ -160,9 +160,13 @@ AppVM-local install disappears on reboot.
 
 ### Which migration each server version requires
 
-Rows start at 1.7.0. `db/01-schema.sql` through `db/04-sessions.sql` belong to
-the initial install rather than to a version upgrade; a database predating any
-of them needs it applied, in order, before the rows below.
+Rows start at 1.7.0. `db/01-schema.sql`, `db/02-observability.sql`, and
+`db/04-sessions.sql` have no upgrade row of their own; a database predating any
+of them needs it applied first, in that order. `db/03-grants-assertion.sql` is
+deliberately not third — it is a read-only check of the completed catalog, so it
+runs after every pending row below and fails by design if run before the
+relations it asserts on exist. The db qube records the same canonical order
+([First boot / provisioning](../db-qube/README.md#first-boot--provisioning)).
 
 | Server | Migration                        | Additional requirement                                        |
 | ------ | -------------------------------- | ------------------------------------------------------------- |
