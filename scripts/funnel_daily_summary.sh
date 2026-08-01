@@ -145,8 +145,16 @@ run_summary() {
       # this wrapper. psql connects to the container-local socket under the
       # image's local trust rule.
       if [[ -f .env ]]; then
+        # An inherited COMPOSE_PROJECT_NAME (the documented override above)
+        # must beat the .env's pinned value — compose's own env-beats-.env
+        # precedence — so preserve it across the source.
+        local inherited_project_set="${COMPOSE_PROJECT_NAME+x}"
+        local inherited_project="${COMPOSE_PROJECT_NAME-}"
         # shellcheck disable=SC1091
         . .env
+        if [[ -n "$inherited_project_set" ]]; then
+          export COMPOSE_PROJECT_NAME="$inherited_project"
+        fi
         export -n OPENBRAIN_APP_PASSWORD POSTGRES_PASSWORD 2>/dev/null || true
       fi
 
