@@ -73,7 +73,7 @@ Group fields with `#` comments for readability; they round-trip.
 | When             | `started_at`, `last_update`, `ended_at`, `session_date`                                                                                                                   |
 | What             | `title`, `goal`, `status` (enum), `tags`, `linked_issues`, `related_sessions`, `next_actions`, `blockers`                                                                 |
 | Prose            | `summary`, `resume_context` (TOML `"""…"""` multiline)                                                                                                                    |
-| Memory scope     | `workspace_id`, `project_id`, `visibility` (`personal                                                                                                                     |
+| Memory scope     | `workspace_id`, `project_id`, `visibility` (`personal \| project \| workspace`)                                                                                           |
 | Artifacts        | `[[artifacts]]` array-of-tables — `kind` + `title` required, `detail` optional (see below)                                                                                |
 | Upsert key       | `id` (integer) — **only ever the value the server returned** (see Capturing)                                                                                              |
 | Resumable handle | `session_id` — optional, free-form, nullable; the _harness conversation id_ for re-opening the chat transcript later (see _The resumable handle_ below). **NOT** the key. |
