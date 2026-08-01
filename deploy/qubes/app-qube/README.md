@@ -124,6 +124,10 @@ tailnet, as the database superuser:
 )
 ```
 
+Run it from the top of the checkout. The example applies migration 08 —
+substitute the file named by the row you are moving to, and apply several in
+ascending order, one invocation each.
+
 Every step is inside the subshell, and each one that can fail stops it. An
 unguarded `cd` is the interesting case: on failure the shell simply continues in
 the caller's directory, so a stray `.env` there would be sourced instead and the
