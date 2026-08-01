@@ -3,7 +3,9 @@
     "@hono/mcp": "npm:@hono/mcp@0.1.1",
     "@modelcontextprotocol/sdk": "npm:@modelcontextprotocol/sdk@1.24.3",
     "@std/assert": "jsr:@std/assert@1",
+    "@std/path": "jsr:@std/path@^1.0.8",
     "@std/toml": "jsr:@std/toml@1.0.4",
+    "@std/yaml": "jsr:@std/yaml@^1.1.2",
     "hono": "npm:hono@4.12.25",
     "jose": "npm:jose@5.9.6",
     "zod": "npm:zod@4.1.13",
@@ -11,7 +13,7 @@
     "https://deno.land/x/postgres@v0.19.3/utils/deferred.ts": "./postgres_deferred_patched.ts"
   },
   "tasks": {
-    "test": "deno test --frozen --allow-env --allow-net=127.0.0.1 --allow-read --allow-write --allow-run=deno",
-    "check-allow-env": "deno run --allow-read scripts/check_allow_env.ts"
+    "test": "deno test --frozen --allow-env --allow-net=127.0.0.1 --allow-read --allow-write --allow-run=deno --ignore=scripts/check_allow_env_test.ts && deno test --config scripts/deno.json --lock scripts/deno.lock --frozen --allow-read --allow-write scripts/check_allow_env_test.ts",
+    "check-allow-env": "deno run --config scripts/deno.json --lock scripts/deno.lock --frozen --allow-read scripts/check_allow_env.ts"
   }
 }

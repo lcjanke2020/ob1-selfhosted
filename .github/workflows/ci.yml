@@ -1,12 +1,12 @@
 # CI for the MCP server: the unit test suite plus the --allow-env drift
 # guard (check_allow_env.ts), so a new Deno.env.get key can't ship without
-# the matching Dockerfile --allow-env entry — that drift is a silent boot
-# failure in production (the container exits with "Requires env access"
-# only after deploy).
+# the matching bounded Dockerfile or Compose-launcher entry — that drift is
+# a silent boot failure in production (the process exits with "Requires env
+# access" only after deploy).
 #
-# Scoped via the paths: filter so this workflow only runs on PRs that
-# touch the server tree OR this workflow file itself. Self-triggering on
-# workflow edits means changes here (Deno version bump, ref-expression
+# Scoped via the paths filter so this workflow runs for server code,
+# checked-in Compose launchers, or this workflow file itself. Self-triggering
+# on workflow edits means changes here (Deno version bump, ref-expression
 # tweak, etc.) get exercised on the PR that introduces them.
 #
 # Deno version pinned to match server/Dockerfile (FROM denoland/deno:2.9.4)
@@ -20,11 +20,19 @@ on:
     branches: [main]
     paths:
       - 'server/**'
+      - 'deploy/**/docker-compose*.yml'
+      - 'deploy/**/docker-compose*.yaml'
+      - 'deploy/**/compose*.yml'
+      - 'deploy/**/compose*.yaml'
       - '.github/workflows/ci.yml'
   push:
     branches: [main]
     paths:
       - 'server/**'
+      - 'deploy/**/docker-compose*.yml'
+      - 'deploy/**/docker-compose*.yaml'
+      - 'deploy/**/compose*.yml'
+      - 'deploy/**/compose*.yaml'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
 
@@ -56,7 +64,7 @@ jobs:
         run: deno task test
 
   check-allow-env:
-    name: Dockerfile --allow-env drift
+    name: Deno launcher --allow-env drift
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR head safely

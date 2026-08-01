@@ -47,8 +47,12 @@ export const DB_POOL_SIZE = requiredInt("DB_POOL_SIZE", 10);
 // to every workspace. db/06-spaces.sql seeds `default`; operators may select a
 // different pre-registered workspace. Keep the same bounded, trimmed ID shape
 // as the shared Zod/SQL contract so a bad default fails at boot, not per call.
-function validatedScopeId(name: string, fallback: string): string {
-  const value = optionalTrimmed(name) || fallback;
+function validatedScopeId(
+  value: string,
+  name: string,
+  fallback: string,
+): string {
+  value ||= fallback;
   if (value.length > 128) {
     throw new Error(`${name} must be at most 128 characters`);
   }
@@ -56,6 +60,7 @@ function validatedScopeId(name: string, fallback: string): string {
 }
 
 export const DEFAULT_WORKSPACE_ID = validatedScopeId(
+  optionalTrimmed("DEFAULT_WORKSPACE_ID"),
   "DEFAULT_WORKSPACE_ID",
   "default",
 );
