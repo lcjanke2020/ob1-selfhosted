@@ -93,7 +93,80 @@ Server 1.19.0 also requires `db/08-access-tokens.sql` on the DB qube followed by
 `ENABLE_NATIVE_TOKENS=false` is pinned in compose and `MCP_ACCESS_KEY` remains
 absent, so the new schema does not add an accepted credential at the public
 edge. See
-[Native access tokens](../../../docs/native-access-tokens.md#existing-database-upgrade).
+[Native access tokens](../../../docs/native-access-tokens.md#existing-database-upgrade)
+for what the schema contains, and
+[Upgrading an existing deployment](#upgrading-an-existing-deployment) for how to
+apply it in this topology.
+
+## Upgrading an existing deployment
+
+`db/*.sql` are `docker-entrypoint-initdb.d` scripts: PostgreSQL runs them only
+on a fresh data directory. On an existing database they never rerun, so neither
+a new migration nor a tightened grant reaches a running deployment by itself.
+Apply them by hand, in order, during an operator window.
+
+The per-migration recipes under [`docs/`](../../../docs/) assume the single-box
+compose install and `docker compose exec -T postgres`. **In this split topology
+that command has nothing to exec into** — Postgres is not in the app compose
+project. Run the same files from this qube's repository checkout, over the
+tailnet, as the database superuser:
+
+```sh
+cd deploy/qubes/app-qube
+set -a; . ./.env; set +a
+export PGPASSWORD="$POSTGRES_PASSWORD"
+psql -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -v ON_ERROR_STOP=1 -f ../../../db/08-access-tokens.sql
+```
+
+Fedora's `postgresql` package provides the host `psql` client; it is commonly
+already present beside the `pg_dump` client used by the encrypted backup. If it
+is absent, install the package in this qube's Fedora **template** — an
+AppVM-local install disappears on reboot.
+
+### Which migration each server version requires
+
+| Server | Migration                        | Additional requirement                                        |
+| ------ | -------------------------------- | ------------------------------------------------------------- |
+| 1.7.0  | `db/05-hybrid-search.sql`        | pgvector 0.8.0+ (filtered iterative scans)                    |
+| 1.9.0  | `db/06-spaces.sql`               | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner   |
+| 1.16.0 | `db/07-metadata-degradation.sql` | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env` |
+| 1.19.0 | `db/08-access-tokens.sql`        | —                                                             |
+
+Migration 08 is required by 1.19.0 **even when native tokens are disabled**.
+`ENABLE_NATIVE_TOKENS` gates the credential door, not the schema: the server's
+boot probe refuses to start without `native_auth`, so applying it _after_ the
+container roll takes the deployment down rather than leaving it on the old
+version. Apply migrations before the roll, not with it.
+
+### Window order
+
+1. Take the labelled pre-migration rollback point and verify it off-box —
+   [Deploy-window rollback point](#deploy-window-rollback-point).
+2. Tag the running image so a rollback needs no rebuild:
+   `docker tag app-qube-mcp:latest app-qube-mcp:rollback-<previous-commit>`.
+3. `git pull` the checkout on **every** qube that installs something from it:
+   this one for compose and the rollup, the ingress qube for the Funnel monitor.
+4. Reconcile `.env` against `.env.example`. `docker compose config --quiet` is a
+   cheap dry run — it fails on a missing required variable without touching the
+   running container.
+5. **Install host-side consumers before replaying SQL that narrows a grant.**
+   Several credentials in this topology live outside the compose project: the
+   Funnel monitor's role on the ingress qube, the rollup's role here. Replaying
+   a `REVOKE` before the matching script is updated leaves that consumer failing
+   on its own timer cadence until it catches up — silently, if it only writes to
+   a local log. The reverse order is safe, because a new script is written
+   against both the old and the new grant set. See
+   [the v3 → v4 Funnel monitor upgrade](../ingress-qube/README.md#funnel-monitor-host-side-not-compose)
+   for a worked example.
+6. Stop `mcp`, apply the migrations in ascending order, then run
+   `db/03-grants-assertion.sql`. It must exit 0. It reads the completed catalog,
+   so a partial migration or a widened role fails it loudly.
+7. `docker compose build mcp && docker compose up -d --no-deps mcp`. Confirm the
+   boot log names the schemas it found and the auth door you expect, then
+   `/health`.
+8. Verify from the outside — a real request through the public door, not only a
+   local health check.
 
 ## Daily Funnel rollup and retention (host-side)
 
