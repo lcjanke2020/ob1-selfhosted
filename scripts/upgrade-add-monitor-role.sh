@@ -19,7 +19,12 @@
 # copy from ~/.config/funnel-monitor.env (0600, host-side). If you rotate
 # one, update the other.
 #
-# Run from your compose directory (deploy/compose-local or deploy/compose-tailnet) with .env present.
+# Works against deploy/compose-tailnet by default; set COMPOSE_DIR to point it
+# at another compose project directory (e.g. deploy/compose-local). Your cwd
+# doesn't matter — the script cd's there itself. The directory must hold the
+# running stack's .env: that's what lets the bare `docker compose` calls below
+# resolve the same project as the running stack, or they find no container
+# (deploy/compose-tailnet/README.md §"Start the stack" gives both start forms).
 # Idempotent and reconciling — safe to re-run, and the "role exists"
 # branch runs `ALTER ROLE ... WITH PASSWORD` so the role's password is
 # brought into sync with the current OPENBRAIN_MONITOR_PASSWORD value
@@ -40,7 +45,7 @@ COMPOSE_DIR="${COMPOSE_DIR:-$(cd "$SCRIPT_DIR/../deploy/compose-tailnet" && pwd)
 cd "$COMPOSE_DIR"
 
 if [[ ! -f .env ]]; then
-  echo "[upgrade-monitor-role] .env not found in $(pwd); run from your compose directory" >&2
+  echo "[upgrade-monitor-role] .env not found in $(pwd); set COMPOSE_DIR to your compose project directory" >&2
   exit 1
 fi
 

@@ -95,7 +95,8 @@ forms are equivalent on both axes that matter: paths resolve per-file (both
 forms are exercised by `docker compose config` in CI-less smoke tests), and
 project identity is pinned by `COMPOSE_PROJECT_NAME` in the `.env` — so later
 `exec`/`logs`/`ps`/`down` commands resolve the running stack whichever form
-started it.
+started it. A `.env` that predates the pin doesn't get that guarantee — see
+§"Upgrading an existing deployment" before crossing forms.
 
 ### Wire Tailscale
 

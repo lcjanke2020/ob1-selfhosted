@@ -183,6 +183,13 @@ _"remember that I set up Open Brain today."_
 
 ## Upgrading an existing database
 
+**Adopting the `COMPOSE_PROJECT_NAME` line** (stacks whose `.env` predates it):
+set it to the name `docker compose ls` reports for your running stack — for a
+stack started from this directory before the pin existed, that is typically
+`compose-local`, not the example's `openbrain`. A changed project name strands
+the running containers and re-homes named volumes — including `postgres_data` —
+to a fresh, empty project.
+
 Postgres init files run only when the data directory is first created. Before
 deploying a server version that uses hybrid thought search, verify pgvector is
 0.8.0 or newer with
