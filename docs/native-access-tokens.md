@@ -101,14 +101,16 @@ writes and take a verified backup, then set `OPENBRAIN_TOKEN_ADMIN_PASSWORD` in
 > administrator as a `NOLOGIN` role, which is the correct end state for an
 > OAuth-only deployment that will not mint native tokens. Reapplying migration
 > 08 preserves whichever state you chose, so the choice survives later windows.
-> Granting the role `LOGIN` by hand
-> (`ALTER ROLE openbrain_token_admin WITH LOGIN PASSWORD '…';`, the statement
-> the helper would otherwise run) prepares the database role and nothing
-> further: the shipped split topology has no `pg_hba` line for
-> `openbrain_token_admin`, no administrator client, and pins
-> `ENABLE_NATIVE_TOKENS=false`, so issuing and accepting native tokens there is
-> not a supported procedure today. Leaving the role `NOLOGIN` is the safer
-> default.
+> Granting the role `LOGIN` by hand —
+> `ALTER ROLE openbrain_token_admin WITH LOGIN PASSWORD '…';` — prepares the
+> database role and nothing further. The helper issues that grant alongside a
+> `NOSUPERUSER`/`NOCREATEDB`/`NOCREATEROLE`/`NOREPLICATION`/`NOBYPASSRLS`
+> reconciliation; migration 08 applies those same flags every time it runs, so
+> the hand statement does not repeat them. What it does not supply is the rest:
+> the shipped split topology has no `pg_hba` line for `openbrain_token_admin`,
+> no administrator client, and pins `ENABLE_NATIVE_TOKENS=false`, so issuing and
+> accepting native tokens there is not a supported procedure today. Leaving the
+> role `NOLOGIN` is the safer default.
 
 ```bash
 cd deploy/compose-local
