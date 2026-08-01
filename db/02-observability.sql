@@ -2,13 +2,23 @@
 --
 -- All tables are idempotent (IF NOT EXISTS) so this file is safe to re-run
 -- by hand against an existing database. The docker entrypoint only runs
--- /docker-entrypoint-initdb.d/* on a freshly-initialized data dir, so the
--- expected path for existing deployments is:
+-- /docker-entrypoint-initdb.d/* on a freshly-initialized data dir, so it
+-- never reaches an existing deployment on its own. Apply it from your compose
+-- project directory, invoked the way you start the stack there
+-- (deploy/compose-tailnet/README.md §"Start the stack" gives both forms) — the
+-- exec has to resolve the same project as the running stack or it finds no
+-- container:
 --
 --   docker compose exec -T postgres \
---     psql -U postgres -d openbrain < db/02-observability.sql
+--     psql -U postgres -d openbrain < ../../db/02-observability.sql
 --
--- See deploy/compose-tailnet/README.md §"Observability".
+-- A deployment whose database is not in that compose project has nothing to
+-- exec into. The split Qubes topology's procedure — a guarded network psql
+-- connection — is in deploy/qubes/app-qube/README.md §"Upgrading an existing
+-- deployment"; any other external-Postgres layout applies this same file over
+-- its own connection.
+--
+-- See deploy/compose-tailnet/README.md §"Observability (Pattern B)".
 
 -- ---------- Raw access log ------------------------------------------------
 -- One row per HTTP request hitting Caddy. Populated by the log-ingester
