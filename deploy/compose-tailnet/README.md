@@ -90,9 +90,12 @@ docker compose --project-directory . \
 ```
 
 …or uncomment `COMPOSE_FILE` + `COMPOSE_PROFILES` at the bottom of the `.env` so
-a bare `docker compose up -d` from this directory does the same thing. Both
-invocations are equivalent (and both are exercised by `docker compose config` in
-CI-less smoke tests — paths resolve per-file).
+a bare `docker compose up -d` from this directory does the same thing. The two
+forms are equivalent on both axes that matter: paths resolve per-file (both
+forms are exercised by `docker compose config` in CI-less smoke tests), and
+project identity is pinned by `COMPOSE_PROJECT_NAME` in the `.env` — so later
+`exec`/`logs`/`ps`/`down` commands resolve the running stack whichever form
+started it.
 
 ### Wire Tailscale
 
@@ -250,6 +253,12 @@ GROUP BY reason, middleware ORDER BY n DESC;
 Postgres only runs `db/` init scripts on a **fresh data directory** — schema
 changes after first deploy need manual application.
 
+**Adopting the `COMPOSE_PROJECT_NAME` line** (stacks whose `.env` predates it):
+set it to the name `docker compose ls` reports for your running stack, not
+necessarily the example's default. A changed project name strands the running
+containers and re-homes named volumes — including `postgres_data` — to a fresh,
+empty project.
+
 Filtered provenance search requires pgvector `0.8.0` or newer. Before updating
 the MCP container against an existing data directory, check the installed
 extension version:
@@ -273,9 +282,11 @@ docker compose exec -T postgres \
 ```
 
 **New schema files** (observability, sessions, hybrid search, spaces, metadata
-degradation audit, native-token storage) apply cleanly and are idempotent. The
-spaces migration is not a cheap no-op on reapplication; it rebuilds its
-fingerprint index each time:
+degradation audit, native-token storage) apply cleanly and are idempotent. Run
+the block below from this directory with the running stack's `.env` present —
+that `.env` is what lets each `docker compose exec` resolve the running project
+(§"Start the stack"). The spaces migration is not a cheap no-op on
+reapplication; it rebuilds its fingerprint index each time:
 
 ```bash
 # Set OPENBRAIN_INGESTER_PASSWORD in .env first (openssl rand -hex 24), then:
