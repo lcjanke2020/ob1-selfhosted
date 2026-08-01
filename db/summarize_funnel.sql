@@ -5,7 +5,10 @@
 -- previous day's summary state intact.
 --
 -- Manual invocation (after the host wires Pattern B), from
--- deploy/compose-tailnet with .env present:
+-- deploy/compose-tailnet with COMPOSE_FILE and COMPOSE_PROFILES uncommented
+-- in .env — that directory holds only the Pattern B override, so a bare
+-- `docker compose` finds no project without them (or pass the same explicit
+-- -f flags the stack was started with):
 --   docker compose exec -T postgres psql -U openbrain_app -d openbrain \
 --     < ../../db/summarize_funnel.sql > /tmp/funnel.md
 -- The split Qubes deployment uses scripts/funnel_daily_summary.sh's postgres

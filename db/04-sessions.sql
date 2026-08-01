@@ -16,9 +16,12 @@
 -- change vector(768) here AND in db/01-schema.sql together and re-embed.
 --
 -- IDEMPOTENT and re-runnable: init scripts only auto-run on a fresh data dir,
--- so apply to an existing deployment manually (safe to re-run). Run it from
--- your compose directory (deploy/compose-local or deploy/compose-tailnet),
--- .env present:
+-- so apply to an existing deployment manually (safe to re-run). Run it from a
+-- compose project directory with .env in place: deploy/compose-local, or
+-- deploy/compose-tailnet with that file's COMPOSE_FILE and COMPOSE_PROFILES
+-- uncommented — that directory holds only the Pattern B override, so a bare
+-- `docker compose` finds no project without them (an operator who starts the
+-- stack with explicit -f flags passes those here instead):
 --
 --   docker compose exec -T postgres \
 --     psql -U postgres -d openbrain < ../../db/04-sessions.sql
