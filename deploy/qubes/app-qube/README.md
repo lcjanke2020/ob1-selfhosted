@@ -113,11 +113,20 @@ tailnet, as the database superuser:
 
 ```sh
 cd deploy/qubes/app-qube
-set -a; . ./.env; set +a
-export PGPASSWORD="$POSTGRES_PASSWORD"
-psql -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
-  -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f ../../../db/08-access-tokens.sql
+( . ./.env
+  PGPASSWORD="$POSTGRES_PASSWORD" \
+  psql -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
+    -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f ../../../db/08-access-tokens.sql )
 ```
+
+Source without `set -a` and keep it in a subshell. `psql` needs exactly one
+secret from that file; the rest — the app and read-only role passwords, the
+model API keys, the notification credentials — stay unexported shell variables
+that the client process never sees, and leave no trace in the operator's shell
+once the subshell returns. `-h`/`-p`/`-d` are argument expansions and need no
+export at all. This is the same rule the backup job states in
+[`backup/backup.env.example`](backup/backup.env.example): only what the client
+needs reaches the client.
 
 This qube's `.env` carries the superuser _password_ but no `POSTGRES_USER`, so
 the default above names the db qube's `postgres` superuser. Keep the override
