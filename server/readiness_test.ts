@@ -38,3 +38,24 @@ Deno.test("readiness failure logs DB detail without exposing it in the 503 body"
   assertEquals(logged[0].dbTarget, dbTarget);
   assertStringIncludes((logged[0].error as Error).message, driverDetail);
 });
+
+Deno.test("default readiness failure logger names the DB target", async () => {
+  const dbTarget = "db.internal.example:5432";
+  const originalError = console.error;
+  const lines: string[] = [];
+  console.error = (...args: unknown[]) => {
+    lines.push(args.map((arg) => String(arg)).join(" "));
+  };
+
+  try {
+    await readinessResponse(
+      () => Promise.reject(new Error("connection refused")),
+      dbTarget,
+    );
+  } finally {
+    console.error = originalError;
+  }
+
+  assertEquals(lines.length, 1);
+  assertStringIncludes(lines[0], dbTarget);
+});
