@@ -123,8 +123,9 @@ services:
   # and app credentials.
   postgres:
     # Image-only pin: bumping it also requires updating KNOWN_NON_DENO_IMAGES
-    # in server/scripts/check_allow_env.ts (the allow-env drift gate).
-    image: pgvector/pgvector:pg16
+    # in server/scripts/check_allow_env.ts (the allow-env drift gate) and the
+    # same pin in deploy/compose-local/docker-compose.yml.
+    image: pgvector/pgvector:0.8.6-pg16
     restart: unless-stopped
     profiles:
       - logs-future

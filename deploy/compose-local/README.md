@@ -44,12 +44,14 @@ native-token install, also set a stable, non-secret `MCP_ACCESS_KEY_PRINCIPAL`
 separate authorization identities; without the stable principal, personal scope
 fails closed. See [Memory spaces](../../docs/spaces.md).
 
-Also choose `METADATA_FALLBACK_POLICY` explicitly; there is no default. Use
-`off` for a local-only posture (a primary-classifier failure stores placeholder
-metadata and never calls `FALLBACK_CHAT_*`), `alert` to permit fallback only
-with a configured Pushover/ntfy channel, or `allow` to permit fallback without
-requiring delivery. `allow` is the privacy-weakest option. The server prints the
-active choice as `[metadata] fallback policy: ...` at every boot.
+The server requires `METADATA_FALLBACK_POLICY`; the copied `.env.example`
+preselects `off`, the strictest posture, so the cold-start path works without
+weakening privacy. Keep `off` for a local-only posture (a primary-classifier
+failure stores placeholder metadata and never calls `FALLBACK_CHAT_*`), or
+deliberately change it to `alert` to permit fallback only with a configured
+Pushover/ntfy channel, or `allow` to permit fallback without requiring delivery.
+`allow` is the privacy-weakest option. The server prints the active choice as
+`[metadata] fallback policy: ...` at every boot.
 
 ### 2. Pre-pull the embedding model
 

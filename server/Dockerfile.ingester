@@ -29,7 +29,7 @@ RUN deno install --frozen
 COPY *.ts ./
 
 # Cache + type-check at build time.
-RUN deno cache --frozen log_ingester.ts
+RUN deno cache --check --frozen log_ingester.ts
 
 # Pre-create the cursor mount-point directory while we still have root +
 # a writable rootfs. The container runs with `read_only: true` (per the pre-exposure host audit

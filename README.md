@@ -422,8 +422,9 @@ The five-minute version (full guide in
 ```bash
 git clone https://github.com/lcjanke2020/ob1-selfhosted.git
 cd ob1-selfhosted/deploy/compose-local
-cp .env.example .env       # fill DB secrets and choose METADATA_FALLBACK_POLICY
-docker compose up -d ollama
+cp .env.example .env       # fill DB secrets; METADATA_FALLBACK_POLICY ships as `off` (strictest)
+docker compose up -d ollama   # reserves an NVIDIA GPU — on a CPU-only box, comment out the
+                              # `deploy:` block under `ollama:` (see deploy/compose-local/README.md)
 docker compose exec ollama ollama pull nomic-embed-text
 docker compose up -d
 docker compose --profile tools run --rm token-admin create "laptop client"
@@ -507,9 +508,13 @@ Contributions are welcome —
 [`docs/why-not-cloudflare.md`](docs/why-not-cloudflare.md) even sketches a
 `deploy/compose-cloudflare/` variant waiting to be built. Start with
 [CONTRIBUTING.md](CONTRIBUTING.md); the one non-negotiable is enabling the local
-leak guard first (`git config core.hooksPath .githooks`) — this is a public repo
-and CI blocks anything that looks like a credential or private-infrastructure
-identifier.
+leak guard first (`git config core.hooksPath .githooks`) — this is a public
+repo, and the hook plus its CI twin scan tracked files for credential-shaped
+strings. That scan is a convenience net, not a guarantee: it does not see commit
+messages, its CI twin inspects only the PR-head tree rather than file contents
+removed in earlier commits, and pattern matching cannot identify every
+private-infrastructure identifier. Keeping those out of a contribution stays the
+author's job (see [SECURITY.md](SECURITY.md)).
 
 ## License & attribution
 

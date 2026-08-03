@@ -15,7 +15,7 @@ RUN deno install --frozen
 COPY *.ts ./
 
 # Cache and type-check at build time so first request is fast.
-RUN deno cache --frozen index.ts token_admin.ts
+RUN deno cache --check --frozen index.ts token_admin.ts
 
 USER deno
 

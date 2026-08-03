@@ -253,7 +253,7 @@ security review.
 
 ### Supply chain / process
 
-- Base images pinned by version (`pgvector/pgvector:pg16`,
+- Base images pinned by version (`pgvector/pgvector:0.8.6-pg16`,
   `denoland/deno:2.9.4`, `caddy:2.11.3-alpine` with `pull: true` so a stale
   local cache can't feed an older base into the perimeter image; `ollama/ollama`
   pinned, not `:latest`).

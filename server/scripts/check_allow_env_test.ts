@@ -206,7 +206,9 @@ Deno.test("image-only Compose services fail closed on unresolved launchers", () 
 });
 
 Deno.test("reviewed non-Deno images pass only on their unmodified defaults", () => {
-  for (const image of ["pgvector/pgvector:pg16", "ollama/ollama:0.24.0"]) {
+  for (
+    const image of ["pgvector/pgvector:0.8.6-pg16", "ollama/ollama:0.24.0"]
+  ) {
     assertEquals(
       parseComposeTargets(
         `services:\n  svc:\n    image: ${image}\n`,
@@ -218,7 +220,7 @@ Deno.test("reviewed non-Deno images pass only on their unmodified defaults", () 
   assertThrows(
     () =>
       parseComposeTargets(
-        "services:\n  svc:\n    image: pgvector/pgvector:pg16\n" +
+        "services:\n  svc:\n    image: pgvector/pgvector:0.8.6-pg16\n" +
           "    command: [postgres, -c, jit=off]\n",
         "compose.yml",
       ),

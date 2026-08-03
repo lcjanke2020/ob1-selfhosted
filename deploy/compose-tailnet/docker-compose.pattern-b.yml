@@ -78,12 +78,11 @@ services:
       DB_PORT: ${DB_PORT:-5432}
       DB_NAME: ${POSTGRES_DB:-openbrain}
       # Observability-only role with INSERT-only on
-      # funnel_access_log. Compose will fail to start the ingester if
-      # OPENBRAIN_INGESTER_PASSWORD isn't set in .env (no `:-` default),
-      # which is the desired fail-fast for Pattern B operators who
-      # forgot the new env var. See db/00-roles.sh.
+      # funnel_access_log. `:?` (not plain ${VAR}) so a blank value after
+      # `cp .env.example .env` fails at `docker compose config` time, not as a
+      # runtime DB-auth error. See db/00-roles.sh.
       DB_USER: openbrain_ingester
-      DB_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD}
+      DB_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD:?set OPENBRAIN_INGESTER_PASSWORD (the log-ingester INSERT-only role) in .env for Pattern B}
       # Default 5s polling cadence is fine for personal traffic; bump via
       # .env if the box ever gets slammed and the loop runs into the next
       # poll window before finishing.
