@@ -91,19 +91,19 @@ docker compose --project-directory . \
 
 …or uncomment `COMPOSE_FILE` + `COMPOSE_PROFILES` at the bottom of the `.env` so
 a bare `docker compose up -d` from this directory does the same thing. The two
-forms agree on file paths (resolved per-file) and on project identity (pinned
-by `COMPOSE_PROJECT_NAME`) — so later `exec`/`logs`/`ps`/`down` commands
-resolve the running stack whichever form started it.
+forms agree on file paths (resolved per-file) and on project identity (pinned by
+`COMPOSE_PROJECT_NAME`) — so later `exec`/`logs`/`ps`/`down` commands resolve
+the running stack whichever form started it.
 
 **They are NOT equivalent on a third axis: which `.env` files load.** With
-`COMPOSE_FILE` set (form 2), Compose resolves its *project directory* to
-`deploy/compose-local` (the first file's directory), and that directory's
-`.env` loads **in addition to** this one. This directory's values win on
-conflict — but any key **absent** here silently inherits the local install's
-value. Verified on Compose 5.3.1: with `METADATA_FALLBACK_POLICY` deleted from
-this directory's `.env` and set to `allow` in `deploy/compose-local/.env`,
-form 2 renders `allow` on the internet-facing box, while form 1 (which pins
-`--project-directory .`) fails fast with the intended `:?` error.
+`COMPOSE_FILE` set (form 2), Compose resolves its _project directory_ to
+`deploy/compose-local` (the first file's directory), and that directory's `.env`
+loads **in addition to** this one. This directory's values win on conflict — but
+any key **absent** here silently inherits the local install's value. Verified on
+Compose 5.3.1: with `METADATA_FALLBACK_POLICY` deleted from this directory's
+`.env` and set to `allow` in `deploy/compose-local/.env`, form 2 renders `allow`
+on the internet-facing box, while form 1 (which pins `--project-directory .`)
+fails fast with the intended `:?` error.
 
 Two rules keep form 2 safe: copy the **complete** filled `.env` into this
 directory, never a trimmed subset; and to unset a choice, leave the key
