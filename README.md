@@ -511,8 +511,10 @@ Contributions are welcome —
 leak guard first (`git config core.hooksPath .githooks`) — this is a public
 repo, and the hook plus its CI twin scan tracked files for credential-shaped
 strings. That scan is a convenience net, not a guarantee: it does not see commit
-messages or every private-infrastructure identifier, so keeping those out of a
-contribution stays the author's job (see [SECURITY.md](SECURITY.md)).
+messages, its CI twin inspects only the PR-head tree rather than file contents
+removed in earlier commits, and pattern matching cannot identify every
+private-infrastructure identifier. Keeping those out of a contribution stays the
+author's job (see [SECURITY.md](SECURITY.md)).
 
 ## License & attribution
 
