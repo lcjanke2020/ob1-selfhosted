@@ -23,6 +23,8 @@ import { authenticateAccessToken } from "./access_tokens.ts";
 import { type AuthContext, authContextFromValues } from "./auth_context.ts";
 
 import {
+  DB_HOST,
+  DB_PORT,
   ENABLE_BRAIN_KEY,
   ENABLE_FALLBACK_EXTRACTION,
   ENABLE_METADATA_EXTRACTION,
@@ -62,6 +64,7 @@ import {
   startMetadataNotificationWorker,
 } from "./metadata_notifications.ts";
 import { pingDb } from "./queries.ts";
+import { readinessResponse } from "./readiness.ts";
 
 // Hono Variables typed so `c.set/c.get` on door/sub/tokenLabel are checked
 // at the boundaries (requireAuth sets, /mcp + / handlers get). Without
@@ -87,19 +90,14 @@ app.get("/health", (c) => c.json({ ok: true }));
 // monitors and the in-container healthcheck — and, with each auth door now
 // optional per deployment, there is no single static credential that could gate
 // it on an Auth0-only install anyway.
-app.get("/ready", async (c) => {
-  try {
-    await pingDb(pool);
-    return c.json({ ok: true, db: "connected" });
-  } catch (e) {
-    // Driver detail (DB host:port, auth-failure text) goes to the server log
-    // only — the 503 body stays a fixed string so an unauthenticated caller
-    // learns reachability, not topology (docs/security-model.md: /ready
-    // "returns DB connectivity (not data)").
-    console.error("[ready] DB ping failed:", e);
-    return c.json({ ok: false, error: "database unavailable" }, 503);
-  }
-});
+app.get(
+  "/ready",
+  () =>
+    readinessResponse(
+      () => pingDb(pool),
+      `${DB_HOST}:${DB_PORT}`,
+    ),
+);
 
 // RFC 9728 Protected Resource Metadata. Wired only when OAuth is enabled —
 // no point advertising an authorization server when we don't accept its
