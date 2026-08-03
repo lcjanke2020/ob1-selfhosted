@@ -92,7 +92,12 @@ app.get("/ready", async (c) => {
     await pingDb(pool);
     return c.json({ ok: true, db: "connected" });
   } catch (e) {
-    return c.json({ ok: false, error: (e as Error).message }, 503);
+    // Driver detail (DB host:port, auth-failure text) goes to the server log
+    // only — the 503 body stays a fixed string so an unauthenticated caller
+    // learns reachability, not topology (docs/security-model.md: /ready
+    // "returns DB connectivity (not data)").
+    console.error("[ready] DB ping failed:", e);
+    return c.json({ ok: false, error: "database unavailable" }, 503);
   }
 });
 

@@ -47,8 +47,10 @@
 services:
   postgres:
     # Image-only pin: bumping it also requires updating KNOWN_NON_DENO_IMAGES
-    # in server/scripts/check_allow_env.ts (the allow-env drift gate).
-    image: pgvector/pgvector:pg16
+    # in server/scripts/check_allow_env.ts (the allow-env drift gate) and the
+    # same pin in deploy/qubes/ingress-qube/docker-compose.yml.
+    # db-init.yml derives its CI test image from this line.
+    image: pgvector/pgvector:0.8.6-pg16
     restart: unless-stopped
     # Light hardening only: postgres's entrypoint uses gosu to drop from
     # root to the postgres user, which needs SETUID/SETGID; aggressive

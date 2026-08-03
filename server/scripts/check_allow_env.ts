@@ -1058,7 +1058,7 @@ const KNOWN_NON_DENO_IMAGES = new Set([
   // process. Any other image-only service fails closed until its pin is
   // reviewed and added here.
   "ollama/ollama:0.24.0",
-  "pgvector/pgvector:pg16",
+  "pgvector/pgvector:0.8.6-pg16",
 ]);
 
 function effectiveComposeArguments(
