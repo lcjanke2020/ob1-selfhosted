@@ -1,4 +1,6 @@
-export type ReadinessPing = () => Promise<void>;
+// Readiness depends only on fulfillment vs rejection; callers may return a
+// diagnostic value (pingDb returns boolean), which is intentionally ignored.
+export type ReadinessPing = () => Promise<unknown>;
 export type ReadinessFailureLogger = (
   dbTarget: string,
   error: unknown,
