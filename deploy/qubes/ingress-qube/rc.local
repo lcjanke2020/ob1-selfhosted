@@ -40,11 +40,18 @@ rm -f /var/run/docker.sock
 # --- Host firewall (custom-input rules) ---
 # The qubes-firewall service's hook doesn't fire on this qube, so this
 # one-shot (After=tailscaled) is what applies
-# /rw/config/qubes-firewall-user-script: the tailnet door's :443 accept and
-# (optional) tailnet SSH. See both file headers.
-cp /rw/config/ob1-ingress-firewall.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now ob1-ingress-firewall.service
+# /rw/config/qubes-firewall-user-script: tailnet SSH and a conservative :443
+# accept (see the script header for why :443 is not load-bearing on current
+# Tailscale). Guarded with a LOUD warning: silently skipping this block would
+# cost tailnet SSH at the next boot with nothing in the log to say why.
+if [ -f /rw/config/ob1-ingress-firewall.service ] \
+	&& [ -x /rw/config/qubes-firewall-user-script ]; then
+	cp /rw/config/ob1-ingress-firewall.service /etc/systemd/system/
+	systemctl daemon-reload
+	systemctl enable --now ob1-ingress-firewall.service
+else
+	echo "WARNING: ob1-ingress-firewall.service or qubes-firewall-user-script not staged in /rw/config — custom-input accepts (tailnet SSH) NOT applied this boot"
+fi
 
 # --- OB1 mcp forwarder (Caddy → app qube over qubes.ConnectTCP) ---
 # See ob1-mcp-forward.sh; Caddy's MCP_UPSTREAM points at it. Restart=always

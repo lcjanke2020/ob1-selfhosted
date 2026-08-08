@@ -56,9 +56,11 @@ This qube's boot-time root-side work lives in the shipped
 (same block and rationale as the app qube's — this is the public edge, where the
 root-equivalent `docker` group matters most), applies
 [`qubes-firewall-user-script`](qubes-firewall-user-script) via the
-[`ob1-ingress-firewall.service`](ob1-ingress-firewall.service) one-shot (the
-tailnet door's `:443` accept + optional SSH; the Funnel path itself needs no
-inbound rule — tailscaled hands decrypted requests to Caddy over loopback), and
+[`ob1-ingress-firewall.service`](ob1-ingress-firewall.service) one-shot (a
+tailnet SSH accept plus a **conservative** `:443` accept — neither serving door
+actually needs an inbound rule on current Tailscale: Funnel rides tailscaled's
+outbound tunnel, and tailnet-direct `serve` traffic is netstack-intercepted
+inside tailscaled before it reaches the input chain; see the script header), and
 restages the ConnectTCP forwarder unit below.
 
 ## The ingress→app hop (qubes.ConnectTCP)
@@ -83,16 +85,25 @@ default-drop (nothing accepts `:18787`).
 Install (the qube's **template** must have `socat`; `/usr` is template-provided,
 so an AppVM-local install vanishes on reboot):
 
-1. Stage the two files (root-owned, script `chmod +x`):
-   [`ob1-mcp-forward.sh`](ob1-mcp-forward.sh) → `/rw/config/ob1-mcp-forward.sh`
-   (set the `APP_QUBE=` line at the top to your app qube's name) and
-   [`ob1-mcp-forward.service`](ob1-mcp-forward.service) →
-   `/rw/config/ob1-mcp-forward.service`.
-2. Install the shipped [`rc.local`](rc.local) at `/rw/config/rc.local` (chmod
-   +x) — its final block restages + enables the forwarder unit each boot
-   (`/etc/systemd` is wiped on AppVM reboot), alongside this qube's other boot
-   work (rootful-off, the firewall one-shot).
-3. dom0 policy (e.g. `/etc/qubes/policy.d/30-ob1-connecttcp.policy`) — the
+1. Stage this qube's boot + firewall files under `/rw/config/` (all root-owned;
+   scripts `chmod +x`). `rc.local` restages + enables both units at every boot
+   (`/etc/systemd` is wiped on AppVM reboot) and logs a WARNING to
+   `/var/log/ob1-ingress-boot.log` if a file is missing:
+
+   | File                                                               | Install at                                   |
+   | ------------------------------------------------------------------ | -------------------------------------------- |
+   | [`ob1-mcp-forward.sh`](ob1-mcp-forward.sh) — set `APP_QUBE=` first | `/rw/config/ob1-mcp-forward.sh` (+x)         |
+   | [`ob1-mcp-forward.service`](ob1-mcp-forward.service)               | `/rw/config/ob1-mcp-forward.service`         |
+   | [`qubes-firewall-user-script`](qubes-firewall-user-script)         | `/rw/config/qubes-firewall-user-script` (+x) |
+   | [`ob1-ingress-firewall.service`](ob1-ingress-firewall.service)     | `/rw/config/ob1-ingress-firewall.service`    |
+   | [`rc.local`](rc.local)                                             | `/rw/config/rc.local` (+x)                   |
+
+   After the first boot (or a manual `sudo sh /rw/config/rc.local`), verify:
+   `systemctl status ob1-ingress-firewall ob1-mcp-forward` both active, and
+   `/var/log/ob1-ingress-firewall.log` showing each accept added (or "already
+   present; skipping").
+
+2. dom0 policy (e.g. `/etc/qubes/policy.d/30-ob1-connecttcp.policy`) — the
    destination must be **explicit** (a call naming a target does not match an
    `@default` rule), and `autostart=no` keeps a proxied request from ever
    booting a halted app qube as a side effect:
@@ -104,7 +115,7 @@ so an AppVM-local install vanishes on reboot):
    Lint it after editing (`qubes-policy-lint`, or the parser one-liner in
    [`../gpu-offload-transport.md`](../gpu-offload-transport.md#1-dom0-policy)).
 
-4. Point `MCP_UPSTREAM` at `<this-qube-ip>:18787` in `.env` and recreate Caddy.
+3. Point `MCP_UPSTREAM` at `<this-qube-ip>:18787` in `.env` and recreate Caddy.
 
 Verify: from this qube's host, `curl -s http://<this-qube-ip>:18787/health`
 should return mcp's health JSON — that one request exercises the whole chain
@@ -123,16 +134,26 @@ in the app-qube compose, and scope the re-opened wide bind on the app qube:
 
 - a `custom-input` accept for the ingress peer only — under **rootless** docker
   a published port is a plain host listener governed by the qubes input chain
-  (default-drop), so without this accept the rollback fails closed. On the app
-  qube:
+  (default-drop), so without this accept the rollback fails closed. Immediate
+  (root — nft mutation needs it):
 
   ```sh
-  nft add rule ip qubes custom-input iifname "tailscale0" \
+  sudo nft add rule ip qubes custom-input iifname "tailscale0" \
     ip saddr <ingress-qube-tailnet-ip> tcp dport 8787 ct state new accept
   ```
 
-  (This replaces the retired rootful design's `DOCKER-USER` rule, which cannot
-  see rootless-published traffic. One improvement over the old shape: a
+  **Make it survive a reboot**: the live rule alone dies with the ruleset — the
+  app qube's boot applier re-runs its `qubes-firewall-user-script`, which
+  carries no `:8787` rule — so for any rollback longer than the current boot,
+  also add the same `nft add rule …` line (with the concrete ingress IP) to the
+  app qube's `/rw/config/qubes-firewall-user-script` before its `exit 0`, then
+  `sudo systemctl restart ob1-app-firewall.service` and check
+  `/var/log/ob1-app-firewall.log`. Remove that line again when rolling forward
+  to ConnectTCP — it is the one piece of rollback state that would otherwise
+  linger.
+
+  (This accept replaces the retired rootful design's `DOCKER-USER` rule, which
+  cannot see rootless-published traffic. One improvement over the old shape: a
   `custom-input` rule isn't flushed by docker daemon restarts, so the "firewall
   state must stay continuously right" weakness does not return.)
 - the Tailscale ACL grant ingress→app:8787, if it was removed after cutover.

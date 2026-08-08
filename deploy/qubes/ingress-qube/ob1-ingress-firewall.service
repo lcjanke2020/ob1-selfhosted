@@ -1,10 +1,11 @@
 [Unit]
-# Applies /rw/config/qubes-firewall-user-script (custom-input accepts: the
-# tailnet door's :443, optional SSH) once tailscaled is up, so the
-# tailscale0-scoped rules land on the running interface. Same rationale as
-# the app qube's unit: the qubes-firewall service's own hook never fires on
-# this qube, so this one-shot IS the applier — rc.local restages + enables it
-# each boot (/etc/systemd/system is wiped on every AppVM reboot).
+# Applies /rw/config/qubes-firewall-user-script (custom-input accepts:
+# tailnet SSH + a conservative :443 — see the script header) once tailscaled
+# is up, so the tailscale0-scoped rules land on the running interface. Same
+# rationale as the app qube's unit: the qubes-firewall service's own hook
+# never fires on this qube, so this one-shot IS the applier — rc.local
+# restages + enables it each boot (/etc/systemd/system is wiped on every
+# AppVM reboot).
 #
 # Stash at: /rw/config/ob1-ingress-firewall.service
 Description=OB1 ingress qube host firewall (custom-input rules, after tailscale)

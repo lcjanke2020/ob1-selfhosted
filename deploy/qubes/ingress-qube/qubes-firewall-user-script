@@ -11,13 +11,23 @@
 # What does NOT need a rule here:
 #  - The public Funnel door: tailscaled maintains its own outbound connection
 #    and hands decrypted requests to Caddy on 127.0.0.1:9787 over loopback.
+#  - Tailnet-direct `tailscale serve` clients, on current Tailscale: inbound
+#    peer traffic to serve ports is netstack-intercepted INSIDE tailscaled
+#    and never traverses the kernel input chain. (Verified live on 1.98.10,
+#    TUN mode: with a tailnet-direct TLS session held open, the kernel socket
+#    table shows no established :443 flow — tailscaled's node-address
+#    listener serves locally-originated dials only.)
 #  - The ConnectTCP mcp forwarder (:18787): the rootless caddy container
 #    reaches it via slirp4netns at the qube's own IP, arriving on lo, which
 #    the stock chain accepts; nothing else can reach it (no accept exists).
 #
-# What DOES: tailnet-direct clients of `tailscale serve` connect to this
-# node's tailscale IP :443 — tailscaled's listener on tailscale0 — which the
-# qubes input default-drop would otherwise eat.
+# What DOES: SSH — sshd is an ordinary kernel socket, so tailnet SSH lives or
+# dies by its accept below. The :443 accept, by contrast, is CONSERVATIVE:
+# not load-bearing today, kept because serve-path interception is a
+# tailscaled implementation detail that has moved across versions, and this
+# scoped rule is the cheap guard for a future tailscaled that goes back to
+# kernel-path listeners. Drop it if you prefer a strictly minimal chain —
+# re-verify the tailnet door after Tailscale upgrades if you do.
 #
 # Idempotent + logged (same shape as the db qube's script): re-running won't
 # stack duplicate accepts, and a failed add (nft layout can drift across
@@ -44,11 +54,13 @@ add_rule() {
 	fi
 }
 
-# Tailnet door: TLS via `tailscale serve` (tailscaled listens on tailscale0:443).
-add_rule ip tcp 443 tailnet-door
-add_rule ip6 tcp 443 tailnet-door
+# Conservative :443 accept (NOT load-bearing on current Tailscale — see the
+# header; peer serve traffic is intercepted inside tailscaled).
+add_rule ip tcp 443 tailnet-door-conservative
+add_rule ip6 tcp 443 tailnet-door-conservative
 
-# Remote admin over the tailnet. Remove if you administer via dom0 qvm-run only.
+# Remote admin over the tailnet — load-bearing (sshd is a kernel socket).
+# Remove if you administer via dom0 qvm-run only.
 add_rule ip tcp 22 ssh
 add_rule ip6 tcp 22 ssh
 
