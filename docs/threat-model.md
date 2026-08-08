@@ -70,9 +70,10 @@ what backs it up.
   and db each in their own qube. The paths to the db qube (app→db, plus the
   edge's two scoped observability paths) are enforced at three independent
   layers — Tailscale ACL, Qubes nftables, `pg_hba.conf` per-role-per-IP; the
-  ingress→app HTTP path (`:8787`) has its own three — Tailscale ACL, the app
-  qube's `DOCKER-USER` host-firewall rule, and the OAuth door itself. Detail:
-  [`three-qube-design.md`](../deploy/qubes/three-qube-design.md#implemented-appdb-transport-firewall-scoped-tailnet).
+  ingress→app hop rides a dom0-policy-gated `qubes.ConnectTCP` channel — mcp
+  binds loopback only (no network listener at all), dom0 policy names the one
+  permitted caller, and the OAuth door authenticates what arrives. Detail:
+  [`three-qube-design.md`](../deploy/qubes/three-qube-design.md#implemented-ingressapp-transport-qubesconnecttcp--no-listener).
 
 Full statement of both doors:
 [`security-model.md` § Trust boundaries](security-model.md#trust-boundaries).

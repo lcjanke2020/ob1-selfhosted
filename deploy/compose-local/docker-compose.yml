@@ -272,9 +272,11 @@ services:
     environment:
       # Reverse-proxy upstream. Defaults to the in-compose `mcp` service
       # (single-qube deployments). For the ingress/app split, set MCP_UPSTREAM
-      # in .env to the app qube's tailnet address (host:8787) so Caddy proxies
-      # over the tailnet. Kept in .env — never the committed Caddyfile — so no
-      # tailnet address is committed. The Caddyfile reads it as `{$MCP_UPSTREAM}`.
+      # in .env to the ingress qube's ConnectTCP forwarder (see
+      # deploy/qubes/ingress-qube/ — the app qube's mcp has no network-facing
+      # listener). Kept in .env — never the committed Caddyfile — so no
+      # deployment address is committed. The Caddyfile reads it as
+      # `{$MCP_UPSTREAM}`.
       MCP_UPSTREAM: "${MCP_UPSTREAM:-mcp:8787}"
     # Gated by the `pattern-b` profile — Pattern A deployments don't start
     # caddy at all (saves one running container and removes the unused

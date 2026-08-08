@@ -1,0 +1,67 @@
+#!/bin/sh
+# Ingress qube host firewall — custom-input accepts for the tailnet door.
+#
+# Install at: /rw/config/qubes-firewall-user-script   (chmod +x)
+#
+# HOW THIS RUNS: same as the app qube — on a qube that doesn't route other
+# qubes, the qubes-firewall service's own hook never fires, so rc.local
+# installs a one-shot unit (ob1-ingress-firewall.service) whose ExecStart IS
+# this script, ordered After=tailscaled.
+#
+# What does NOT need a rule here:
+#  - The public Funnel door: tailscaled maintains its own outbound connection
+#    and hands decrypted requests to Caddy on 127.0.0.1:9787 over loopback.
+#  - Tailnet-direct `tailscale serve` clients, on current Tailscale: inbound
+#    peer traffic to serve ports is netstack-intercepted INSIDE tailscaled
+#    and never traverses the kernel input chain. (Verified live on 1.98.10,
+#    TUN mode: with a tailnet-direct TLS session held open, the kernel socket
+#    table shows no established :443 flow — tailscaled's node-address
+#    listener serves locally-originated dials only.)
+#  - The ConnectTCP mcp forwarder (:18787): the rootless caddy container
+#    reaches it via slirp4netns at the qube's own IP, arriving on lo, which
+#    the stock chain accepts; nothing else can reach it (no accept exists).
+#
+# What DOES: SSH — sshd is an ordinary kernel socket, so tailnet SSH lives or
+# dies by its accept below. The :443 accept, by contrast, is CONSERVATIVE:
+# not load-bearing today, kept because serve-path interception is a
+# tailscaled implementation detail that has moved across versions, and this
+# scoped rule is the cheap guard for a future tailscaled that goes back to
+# kernel-path listeners. Drop it if you prefer a strictly minimal chain —
+# re-verify the tailnet door after Tailscale upgrades if you do.
+#
+# Idempotent + logged (same shape as the db qube's script): re-running won't
+# stack duplicate accepts, and a failed add (nft layout can drift across
+# Qubes versions) is visible in $LOG instead of silently dropping a layer.
+# Pre-flight check:  nft list ruleset | grep custom-input
+
+LOG=/var/log/ob1-ingress-firewall.log
+
+add_rule() {
+	fam=$1
+	proto=$2
+	port=$3
+	label=$4
+	if nft list chain "$fam" qubes custom-input 2>/dev/null \
+		| grep -q "iifname \"tailscale0\" $proto dport $port ct state new accept"; then
+		echo "$(date -Is) [$fam] tailscale0:$port/$proto ($label) already present; skipping" >>"$LOG"
+		return 0
+	fi
+	if nft add rule "$fam" qubes custom-input \
+		iifname "tailscale0" "$proto" dport "$port" ct state new accept 2>>"$LOG"; then
+		echo "$(date -Is) [$fam] added tailscale0:$port/$proto accept ($label)" >>"$LOG"
+	else
+		echo "$(date -Is) [$fam] FAILED to add tailscale0:$port/$proto ($label) — chain/table missing? check: nft list ruleset | grep custom-input" >>"$LOG"
+	fi
+}
+
+# Conservative :443 accept (NOT load-bearing on current Tailscale — see the
+# header; peer serve traffic is intercepted inside tailscaled).
+add_rule ip tcp 443 tailnet-door-conservative
+add_rule ip6 tcp 443 tailnet-door-conservative
+
+# Remote admin over the tailnet — load-bearing (sshd is a kernel socket).
+# Remove if you administer via dom0 qvm-run only.
+add_rule ip tcp 22 ssh
+add_rule ip6 tcp 22 ssh
+
+exit 0

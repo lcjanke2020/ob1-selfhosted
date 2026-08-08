@@ -5,8 +5,16 @@
 #
 # /etc/systemd/system is wiped on every AppVM reboot, so units that must persist
 # are stashed under /rw/config and (re)installed + enabled here at each boot.
-# Ordering: bring tailscale0 up, ensure docker is up, re-apply the DOCKER-USER
-# firewall scoping, then (re)enable the encrypted-backup timer.
+# Boot order: tailscaled → re-assert rootful docker OFF → custom-input firewall
+# one-shot → encrypted-backup timer → GPU-offload forwarder (optional).
+#
+# What is deliberately ABSENT: any docker start. The app stack runs under the
+# operator account's ROOTLESS dockerd (a systemd --user unit; storage in
+# ~/.local/share/docker, which persists natively inside home — see the Qubes
+# README § Rootless docker). `loginctl enable-linger user` — persisted via the
+# /var/lib/systemd/linger bind-dir — makes the user manager bring the daemon
+# up at boot, and `restart: unless-stopped` resumes the containers: no
+# root-side docker start, no compose self-heal.
 
 LOG=/var/log/ob1-app-boot.log
 exec >>"$LOG" 2>&1
@@ -18,25 +26,26 @@ echo "=== rc.local $(date -Is) ==="
 # that stage → EAI_ADDRFAMILY). Start it explicitly in the AppVM instead.
 systemctl start tailscaled
 
-# --- Docker + its firewall drop-in ---
-# Install the docker.service drop-in (re-applies the DOCKER-USER rule on every
-# later daemon restart) and the boot one-shot unit BEFORE bringing docker up,
-# then daemon-reload so the drop-in is active. /etc/systemd/system is wiped each
-# reboot, so both are restaged here every boot.
-mkdir -p /etc/systemd/system/docker.service.d
-cp /rw/config/docker-ob1-firewall.conf /etc/systemd/system/docker.service.d/ob1-firewall.conf
+# --- Rootful docker: off and unreachable, every boot ---
+# The shared template still ships rootful docker, and /etc (unit enablement)
+# plus /etc/group (docker membership — root-equivalent by construction) are
+# reset from the template on each AppVM boot. Re-assert the rootless-only
+# posture here so a template update can't quietly resurrect the root daemon:
+systemctl disable --now docker.service docker.socket containerd.service 2>/dev/null || true
+systemctl mask docker.service docker.socket containerd.service 2>/dev/null || true
+gpasswd -d user docker 2>/dev/null || true
+# Tidy: a template-enabled docker.socket makes systemd create the rootful
+# socket inode at boot BEFORE the mask above lands — remove the dead inode so
+# nothing can be confused by a socket no daemon serves.
+rm -f /var/run/docker.sock
+
+# --- Host firewall (custom-input rules) ---
+# The qubes-firewall service's hook doesn't fire on this qube, so this
+# one-shot (After=tailscaled) is what applies
+# /rw/config/qubes-firewall-user-script at boot. See both file headers.
 cp /rw/config/ob1-app-firewall.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl start docker
-
-# --- Host firewall: scope mcp :8787 to the ingress qube (DOCKER-USER) ---
-# Apply once now via the one-shot (its ExecStartPre waits for tailscale0 AND
-# DOCKER-USER to exist). If docker was already auto-started before rc.local ran,
-# the drop-in's ExecStartPost didn't fire this boot — this one-shot is what
-# guarantees the rule lands at boot; the drop-in then covers later restarts.
-# --no-block so rc.local doesn't stall on that wait.
-systemctl enable ob1-app-firewall.service
-systemctl start --no-block ob1-app-firewall.service
+systemctl enable --now ob1-app-firewall.service
 
 # --- Encrypted DB backup timer ---
 # Units stashed under /rw/config/openbrain-units/ (the .service + .timer from
@@ -46,4 +55,14 @@ if [ -d /rw/config/openbrain-units ]; then
 	cp /rw/config/openbrain-units/*.service /rw/config/openbrain-units/*.timer /etc/systemd/system/ 2>/dev/null
 	systemctl daemon-reload
 	systemctl enable --now ob1-db-backup.timer 2>/dev/null
+fi
+
+# --- GPU-offload forwarder (optional; see ../gpu-offload-transport.md) ---
+# Restage + enable the qube-IP socat forwarder that bridges the mcp container
+# to a GPU qube over qubes.ConnectTCP. Guarded: absent files = transport not
+# installed, and the boot carries on cleanly.
+if [ -f /rw/config/ob1-ollama-forward.service ]; then
+	cp /rw/config/ob1-ollama-forward.service /etc/systemd/system/
+	systemctl daemon-reload
+	systemctl enable --now ob1-ollama-forward.service
 fi
