@@ -48,17 +48,23 @@ dumps can still read it.
 
 ### Network layer
 
-- Every service binds `127.0.0.1` only — on the single-host install paths the
-  LAN can't reach any port directly, and exposure is an explicit
-  `tailscale serve`/`funnel` act. This now includes the split-Qubes app qube:
-  its `mcp` publishes loopback only, and the ingress qube's Caddy reaches it
-  over a dom0-policy-gated `qubes.ConnectTCP` channel (a socat forwarder on the
-  ingress qube bridges Caddy to the qrexec call). There is no network-facing mcp
-  listener to scope — an earlier revision published `0.0.0.0:8787` and scoped
-  the wide bind with a Tailscale ACL grant plus a `DOCKER-USER` host-firewall
-  rule that had to stay continuously correct; the qrexec transport removed that
-  listener class entirely. See
+- Every OB1 container service binds `127.0.0.1` only — on the single-host
+  install paths the LAN can't reach any port directly, and exposure is an
+  explicit `tailscale serve`/`funnel` act. This now includes the split-Qubes app
+  qube: its `mcp` publishes loopback only, and the ingress qube's Caddy reaches
+  it over a dom0-policy-gated `qubes.ConnectTCP` channel (a socat forwarder on
+  the ingress qube bridges Caddy to the qrexec call). There is no network-facing
+  mcp listener to scope — an earlier revision published `0.0.0.0:8787` and
+  scoped the wide bind with a Tailscale ACL grant plus a `DOCKER-USER`
+  host-firewall rule that had to stay continuously correct; the qrexec transport
+  removed that listener class entirely. See
   [the ingress→app hop](../deploy/qubes/ingress-qube/README.md#the-ingressapp-hop-qubesconnecttcp).
+  The split topology keeps two deliberate **non-loopback listeners**, neither an
+  OB1 container service, each documented where it lives: the host-side qrexec
+  forwarders bind their qube's own IP (reachable only from that qube's own
+  workloads — the qubes input chain default-drops eth0/tailnet sources), and the
+  db qube's Postgres listens on its tailnet address behind the three-layer ACL +
+  nftables + `pg_hba` scoping.
 - In Pattern B the override file **removes** mcp's host port
   (`ports: !reset null`). The raw backend is unreachable from the host, so a
   misconfigured `tailscale funnel` pointed at `:8787` fails closed instead of

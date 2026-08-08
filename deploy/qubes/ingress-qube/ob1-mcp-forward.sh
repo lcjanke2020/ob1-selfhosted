@@ -22,7 +22,12 @@
 # (/usr is template-provided; an AppVM-local install vanishes on reboot).
 # The companion unit ob1-mcp-forward.service is restaged from rc.local each
 # boot. See README.md § The ingress→app hop.
+
+# >>> EDIT THIS: the app qube's name (the qrexec ConnectTCP destination —
+#     must match the dom0 policy line's destination exactly).
+APP_QUBE="<app-qube>"
+
 set -e
 BIND_IP="$(qubesdb-read /qubes-ip)"
 exec socat TCP-LISTEN:18787,fork,reuseaddr,bind="${BIND_IP}" \
-  EXEC:'/usr/bin/qrexec-client-vm <app-qube> qubes.ConnectTCP+8787'
+  EXEC:"/usr/bin/qrexec-client-vm ${APP_QUBE} qubes.ConnectTCP+8787"

@@ -13,18 +13,43 @@
 # The qubes nft `input` chain default-drops, so only what you add here is
 # reachable. Loopback is accepted by the stock chain — that detail is
 # load-bearing for both forwarder transports (see the NOTE at the bottom).
+#
+# Idempotent + logged (same shape as the db qube's script): re-running (the
+# one-shot, a manual run) won't stack duplicate accepts, and a failed add
+# (nft layout can drift across Qubes versions) is visible in $LOG instead of
+# silently dropping a layer. Pre-flight check:
+#   nft list ruleset | grep custom-input
 
-# Allow inbound SSH on tailscale0 only (remote admin from tailnet peers).
-# Remove if you administer this qube exclusively via dom0 qvm-run.
-nft add rule ip  qubes custom-input iifname "tailscale0" tcp dport 22 ct state new accept 2>/dev/null || true
-nft add rule ip6 qubes custom-input iifname "tailscale0" tcp dport 22 ct state new accept 2>/dev/null || true
+LOG=/var/log/ob1-app-firewall.log
+
+add_rule() {
+	fam=$1
+	proto=$2
+	port=$3
+	label=$4
+	if nft list chain "$fam" qubes custom-input 2>/dev/null \
+		| grep -q "iifname \"tailscale0\" $proto dport $port ct state new accept"; then
+		echo "$(date -Is) [$fam] tailscale0:$port/$proto ($label) already present; skipping" >>"$LOG"
+		return 0
+	fi
+	if nft add rule "$fam" qubes custom-input \
+		iifname "tailscale0" "$proto" dport "$port" ct state new accept 2>>"$LOG"; then
+		echo "$(date -Is) [$fam] added tailscale0:$port/$proto accept ($label)" >>"$LOG"
+	else
+		echo "$(date -Is) [$fam] FAILED to add tailscale0:$port/$proto ($label) — chain/table missing? check: nft list ruleset | grep custom-input" >>"$LOG"
+	fi
+}
+
+# Remote admin over the tailnet. Remove if you administer via dom0 qvm-run only.
+add_rule ip tcp 22 ssh
+add_rule ip6 tcp 22 ssh
 
 # Optional — if your encrypted-backup replication (see backup/) runs Syncthing
 # on this qube, accept it on tailscale0 only:
-#   nft add rule ip  qubes custom-input iifname "tailscale0" tcp dport 22000 ct state new accept 2>/dev/null || true
-#   nft add rule ip6 qubes custom-input iifname "tailscale0" tcp dport 22000 ct state new accept 2>/dev/null || true
-#   nft add rule ip  qubes custom-input iifname "tailscale0" udp dport 22000 accept 2>/dev/null || true
-#   nft add rule ip6 qubes custom-input iifname "tailscale0" udp dport 22000 accept 2>/dev/null || true
+#   add_rule ip  tcp 22000 syncthing
+#   add_rule ip6 tcp 22000 syncthing
+#   add_rule ip  udp 22000 syncthing
+#   add_rule ip6 udp 22000 syncthing
 
 # NOTE: two rule sets earlier revisions of this deployment carried are
 # deliberately GONE:

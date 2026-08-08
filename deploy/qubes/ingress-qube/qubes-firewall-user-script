@@ -1,0 +1,55 @@
+#!/bin/sh
+# Ingress qube host firewall — custom-input accepts for the tailnet door.
+#
+# Install at: /rw/config/qubes-firewall-user-script   (chmod +x)
+#
+# HOW THIS RUNS: same as the app qube — on a qube that doesn't route other
+# qubes, the qubes-firewall service's own hook never fires, so rc.local
+# installs a one-shot unit (ob1-ingress-firewall.service) whose ExecStart IS
+# this script, ordered After=tailscaled.
+#
+# What does NOT need a rule here:
+#  - The public Funnel door: tailscaled maintains its own outbound connection
+#    and hands decrypted requests to Caddy on 127.0.0.1:9787 over loopback.
+#  - The ConnectTCP mcp forwarder (:18787): the rootless caddy container
+#    reaches it via slirp4netns at the qube's own IP, arriving on lo, which
+#    the stock chain accepts; nothing else can reach it (no accept exists).
+#
+# What DOES: tailnet-direct clients of `tailscale serve` connect to this
+# node's tailscale IP :443 — tailscaled's listener on tailscale0 — which the
+# qubes input default-drop would otherwise eat.
+#
+# Idempotent + logged (same shape as the db qube's script): re-running won't
+# stack duplicate accepts, and a failed add (nft layout can drift across
+# Qubes versions) is visible in $LOG instead of silently dropping a layer.
+# Pre-flight check:  nft list ruleset | grep custom-input
+
+LOG=/var/log/ob1-ingress-firewall.log
+
+add_rule() {
+	fam=$1
+	proto=$2
+	port=$3
+	label=$4
+	if nft list chain "$fam" qubes custom-input 2>/dev/null \
+		| grep -q "iifname \"tailscale0\" $proto dport $port ct state new accept"; then
+		echo "$(date -Is) [$fam] tailscale0:$port/$proto ($label) already present; skipping" >>"$LOG"
+		return 0
+	fi
+	if nft add rule "$fam" qubes custom-input \
+		iifname "tailscale0" "$proto" dport "$port" ct state new accept 2>>"$LOG"; then
+		echo "$(date -Is) [$fam] added tailscale0:$port/$proto accept ($label)" >>"$LOG"
+	else
+		echo "$(date -Is) [$fam] FAILED to add tailscale0:$port/$proto ($label) — chain/table missing? check: nft list ruleset | grep custom-input" >>"$LOG"
+	fi
+}
+
+# Tailnet door: TLS via `tailscale serve` (tailscaled listens on tailscale0:443).
+add_rule ip tcp 443 tailnet-door
+add_rule ip6 tcp 443 tailnet-door
+
+# Remote admin over the tailnet. Remove if you administer via dom0 qvm-run only.
+add_rule ip tcp 22 ssh
+add_rule ip6 tcp 22 ssh
+
+exit 0

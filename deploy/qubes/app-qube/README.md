@@ -29,10 +29,13 @@ Ollama runs CPU-only (no GPU passthrough in a Qubes app qube); point
 
 The stack runs under the operator account's **rootless** dockerd (see the
 [Qubes README § Rootless docker](../README.md#rootless-docker-the-deployed-engine-posture)),
-which also answers reboot recovery: with `loginctl enable-linger user` the user
-manager starts the rootless daemon at boot, and `restart: unless-stopped`
-resumes the containers — no `rc.local` compose start, no manual `up -d` after a
-reboot. Verify with `docker compose ps` after the qube comes back.
+which also answers reboot recovery: `loginctl enable-linger user` — persisted by
+the `/var/lib/systemd/linger` bind-dir, without which the flag lasts exactly one
+boot — makes the user manager start the rootless daemon at boot, and
+`restart: unless-stopped` resumes the containers; no `rc.local` compose start,
+no manual `up -d` after a reboot. Verify with `docker compose ps` after the qube
+comes back, before any interactive login (a login starts the user manager and
+masks a broken linger).
 
 ## Offloading metadata classification (`CHAT_*`) to a GPU qube
 
@@ -337,9 +340,13 @@ publish it existed to narrow. What remains is small:
 Two properties do the work the old machinery did:
 
 - **The qubes input chain default-drops.** Nothing accepts `:8787` (or the
-  GPU-forwarder's `:11434`) from `eth0`/`tailscale0`, and mcp has no socket
-  there anyway — a third qube's connect attempt times out on a nonexistent
-  listener rather than being firewall-dropped.
+  GPU-forwarder's `:11434`) from `eth0`/`tailscale0` — a third qube's probe
+  times out at that drop — and mcp has no socket there anyway, so even a packet
+  the firewall let through would find nothing listening (`ss -tlnp` is the check
+  that proves the socket claim; see Verify). What changed vs the old design is
+  not that a firewall stopped mattering, but that reachability no longer depends
+  on _mutable, docker-managed_ firewall state — the static input default-drop
+  needs no re-assertion machinery.
 - **Container→host traffic arrives on `lo` under rootless docker** (slirp4netns
   delivers a container's packet to its own host's IP on loopback, which the
   stock chain accepts) — so the forwarder transports need no `custom-input`
@@ -419,5 +426,6 @@ docker compose up -d
 ss -tlnp | grep 8787                  # 127.0.0.1:8787 ONLY — no 0.0.0.0, no tailnet IP
 # from the ingress qube, a Caddy request through the ConnectTCP forwarder
 # reaches mcp; from any OTHER qube or tailnet peer, a connect to this qube's
-# :8787 times out — there is no listener to reach.
+# :8787 times out (the qubes input default-drop — the ss line above is what
+# proves no listener exists behind it).
 ```

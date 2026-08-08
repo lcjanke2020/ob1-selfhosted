@@ -11,9 +11,10 @@
 # What is deliberately ABSENT: any docker start. The app stack runs under the
 # operator account's ROOTLESS dockerd (a systemd --user unit; storage in
 # ~/.local/share/docker, which persists natively inside home — see the Qubes
-# README § Rootless docker). With `loginctl enable-linger user` the user
-# manager brings the daemon up at boot and `restart: unless-stopped` resumes
-# the containers — no root-side docker start, no compose self-heal.
+# README § Rootless docker). `loginctl enable-linger user` — persisted via the
+# /var/lib/systemd/linger bind-dir — makes the user manager bring the daemon
+# up at boot, and `restart: unless-stopped` resumes the containers: no
+# root-side docker start, no compose self-heal.
 
 LOG=/var/log/ob1-app-boot.log
 exec >>"$LOG" 2>&1

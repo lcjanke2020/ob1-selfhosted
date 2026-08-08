@@ -41,12 +41,25 @@ on disk for a future local logs store but never started. Do **not** set
 
 The stack runs under the operator account's **rootless** dockerd (see the
 [Qubes README § Rootless docker](../README.md#rootless-docker-the-deployed-engine-posture)),
-and reboot recovery is automatic: with `loginctl enable-linger user` the user
-manager starts the rootless daemon at boot and `restart: unless-stopped` resumes
-the containers; the Funnel rule persists in tailscaled's own state
-(`/var/lib/tailscale` is bind-dir'd), so it needs no re-assert either. After a
-reboot, verify rather than restart: `docker compose ps`, then the
+and reboot recovery is automatic: `loginctl enable-linger user` — persisted by
+the `/var/lib/systemd/linger` bind-dir, without which the flag lasts exactly one
+boot — makes the user manager start the rootless daemon at boot, and
+`restart: unless-stopped` resumes the containers; the Funnel rule persists in
+tailscaled's own state (`/var/lib/tailscale` is bind-dir'd), so it needs no
+re-assert either. After a reboot, verify rather than restart — and verify from
+outside before any interactive login (a login starts the user manager and masks
+a broken linger): probe the public door, then `docker compose ps` and the
 [funnel monitor](#funnel-monitor-host-side-not-compose) log.
+
+This qube's boot-time root-side work lives in the shipped
+[`rc.local`](rc.local): it starts tailscaled, re-asserts rootful docker off
+(same block and rationale as the app qube's — this is the public edge, where the
+root-equivalent `docker` group matters most), applies
+[`qubes-firewall-user-script`](qubes-firewall-user-script) via the
+[`ob1-ingress-firewall.service`](ob1-ingress-firewall.service) one-shot (the
+tailnet door's `:443` accept + optional SSH; the Funnel path itself needs no
+inbound rule — tailscaled hands decrypted requests to Caddy over loopback), and
+restages the ConnectTCP forwarder unit below.
 
 ## The ingress→app hop (qubes.ConnectTCP)
 
@@ -72,20 +85,13 @@ so an AppVM-local install vanishes on reboot):
 
 1. Stage the two files (root-owned, script `chmod +x`):
    [`ob1-mcp-forward.sh`](ob1-mcp-forward.sh) → `/rw/config/ob1-mcp-forward.sh`
-   (set `<app-qube>` to your app qube's name) and
+   (set the `APP_QUBE=` line at the top to your app qube's name) and
    [`ob1-mcp-forward.service`](ob1-mcp-forward.service) →
    `/rw/config/ob1-mcp-forward.service`.
-2. Restage from `/rw/config/rc.local` each boot (`/etc/systemd` is wiped on
-   AppVM reboot):
-
-   ```sh
-   if [ -f /rw/config/ob1-mcp-forward.service ]; then
-     cp /rw/config/ob1-mcp-forward.service /etc/systemd/system/
-     systemctl daemon-reload
-     systemctl enable --now ob1-mcp-forward.service
-   fi
-   ```
-
+2. Install the shipped [`rc.local`](rc.local) at `/rw/config/rc.local` (chmod
+   +x) — its final block restages + enables the forwarder unit each boot
+   (`/etc/systemd` is wiped on AppVM reboot), alongside this qube's other boot
+   work (rootful-off, the firewall one-shot).
 3. dom0 policy (e.g. `/etc/qubes/policy.d/30-ob1-connecttcp.policy`) — the
    destination must be **explicit** (a call naming a target does not match an
    `@default` rule), and `autostart=no` keeps a proxied request from ever
@@ -104,14 +110,35 @@ Verify: from this qube's host, `curl -s http://<this-qube-ip>:18787/health`
 should return mcp's health JSON — that one request exercises the whole chain
 (forwarder → qrexec policy → app-qube loopback publish). Then make a real
 end-to-end request through the public door. On the **app** qube, `ss -tlnp` must
-show `:8787` on `127.0.0.1` only; from any third qube, a connect to the app
-qube's `:8787` times out (no listener exists).
+show `:8787` on `127.0.0.1` only — that is the check that proves no
+network-facing listener exists. (A third qube's probe of the app qube's `:8787`
+times out, but that timeout is the qubes input default-drop doing its work, not
+proof of the missing socket — a listener behind the drop would time out
+identically. The `ss` line is the socket proof; the drop means even a probe is
+never answered.)
 
-**Rollback** (one line + one compose edit): set
-`MCP_UPSTREAM=<app-qube-tailnet-ip>:8787`, republish mcp as `0.0.0.0:8787` in
-the app-qube compose, and re-scope that wide bind (Tailscale ACL + a
-`DOCKER-USER` rule) as the pre-ConnectTCP design did. The forwarder unit and
-policy line can stay in place; they are inert while unused.
+**Rollback** (documented; not exercised live): set
+`MCP_UPSTREAM=<app-qube-tailnet-ip>:8787` here, republish mcp as `0.0.0.0:8787`
+in the app-qube compose, and scope the re-opened wide bind on the app qube:
+
+- a `custom-input` accept for the ingress peer only — under **rootless** docker
+  a published port is a plain host listener governed by the qubes input chain
+  (default-drop), so without this accept the rollback fails closed. On the app
+  qube:
+
+  ```sh
+  nft add rule ip qubes custom-input iifname "tailscale0" \
+    ip saddr <ingress-qube-tailnet-ip> tcp dport 8787 ct state new accept
+  ```
+
+  (This replaces the retired rootful design's `DOCKER-USER` rule, which cannot
+  see rootless-published traffic. One improvement over the old shape: a
+  `custom-input` rule isn't flushed by docker daemon restarts, so the "firewall
+  state must stay continuously right" weakness does not return.)
+- the Tailscale ACL grant ingress→app:8787, if it was removed after cutover.
+
+The forwarder unit and policy line can stay in place; they are inert while
+unused.
 
 ## Credentials (per-qube split)
 

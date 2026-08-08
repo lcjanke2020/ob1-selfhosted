@@ -72,9 +72,11 @@ entirely:
 
 - **mcp binds loopback only** (`127.0.0.1:8787` in
   [`app-qube/docker-compose.yml`](app-qube/docker-compose.yml)) — nothing
-  listens on the app qube's eth0 or tailnet interface, so a third qube's connect
-  attempt times out on a nonexistent socket rather than relying on a firewall
-  drop.
+  listens on the app qube's eth0 or tailnet interface (`ss -tlnp` shows the
+  loopback socket only). A third qube's probe still times out at the static
+  qubes input default-drop; the design point is that reachability no longer
+  depends on _mutable, docker-managed_ firewall state, and even a packet the
+  firewall let through would find nothing listening.
 - **A socat forwarder on the ingress qube**
   ([`ingress-qube/ob1-mcp-forward.sh`](ingress-qube/ob1-mcp-forward.sh)) binds
   that qube's own IP `:18787` and bridges each connection to
@@ -91,8 +93,11 @@ entirely:
   still authenticates.
 
 The Tailscale ACL grant and the `DOCKER-USER` machinery are retired — there is
-no wide bind left to scope. Rollback is documented and cheap: repoint
-`MCP_UPSTREAM` at a direct app-qube address and republish `0.0.0.0:8787`
+no wide bind left to scope. Rollback is documented (not yet exercised live):
+repoint `MCP_UPSTREAM` at a direct app-qube address, republish `0.0.0.0:8787`,
+and scope the re-opened bind with an ingress-only `custom-input` accept — under
+rootless docker the published port is a plain host listener governed by the
+qubes input chain, and the retired `DOCKER-USER` layer cannot see it
 ([ingress-qube README](ingress-qube/README.md#the-ingressapp-hop-qubesconnecttcp)).
 The install steps, verification, and the forwarder files live in that README;
 the same pattern documented for the GPU hop is in

@@ -25,8 +25,10 @@ applies; this page only covers what Qubes changes.
   `tailscale` installed. Keep the qube's purpose narrow — this box's only job is
   the memory stack. For the deployed
   [rootless-docker posture](#rootless-docker-the-deployed-engine-posture), the
-  template also needs `docker-ce-rootless-extras` + `slirp4netns` (and `socat`
-  for the qrexec forwarders).
+  template also needs the engine's rootless-extras package
+  (`moby-engine-rootless-extras` on Fedora's `moby-engine`;
+  `docker-ce-rootless-extras` on Docker CE) + `slirp4netns` (and `socat` for the
+  qrexec forwarders).
 - **App qube (AppVM), not StandaloneVM** — root stays on the template
   (centralized updates); everything that must survive a reboot goes through
   bind-dirs (below).
@@ -38,10 +40,11 @@ services this stack depends on keep state elsewhere — bind-dir each of these (
 `/rw/config/qubes-bind-dirs.d/50_user.conf`):
 
 ```sh
-binds+=( '/etc/ssh' )                # SSH host keys
-binds+=( '/var/lib/tailscale' )      # Tailscale node identity
-binds+=( '/var/lib/docker' )         # ROOTFUL docker only — see note
-binds+=( '/var/lib/containerd' )     # ROOTFUL docker only; easy to miss — see below
+binds+=( '/etc/ssh' )                   # SSH host keys
+binds+=( '/var/lib/tailscale' )         # Tailscale node identity
+binds+=( '/var/lib/systemd/linger' )    # rootless-docker autostart flag — see § Rootless docker
+binds+=( '/var/lib/docker' )            # ROOTFUL docker only — see note
+binds+=( '/var/lib/containerd' )        # ROOTFUL docker only; easy to miss — see below
 ```
 
 > The two docker binds apply to a **rootful** daemon. The deployed shape runs
@@ -81,24 +84,40 @@ rootful daemon runs as root and honours arbitrary bind mounts, so
 otherwise enforces a sudo password and a locked-down polkit, that one group
 membership quietly reopens the root path the lockdown closed. The deployed shape
 therefore runs every compose stack under the **operator account's rootless
-dockerd** and keeps the `docker` group empty:
+dockerd** and keeps the operator account out of the `docker` group:
 
 - **Install** (per qube, as the operator account):
-  `dockerd-rootless-setuptool.sh install` — needs `docker-ce-rootless-extras`
-  and `slirp4netns` in the template. The daemon is a `systemd --user` unit; no
-  account belongs to the `docker` group.
-- **Autostart:** `sudo loginctl enable-linger user`. The user manager starts the
-  rootless daemon at boot, and `restart: unless-stopped` resumes the containers
-  — the per-qube `rc.local` files start no docker and run no compose self-heal.
+  `dockerd-rootless-setuptool.sh install`. The tool ships in your engine's
+  rootless-extras package — `moby-engine-rootless-extras` for Fedora's own
+  `moby-engine` (this deployment's engine), or `docker-ce-rootless-extras` if
+  you run Docker CE's repository — plus `slirp4netns`, all in the template.
+  Converting a qube with a **running** rootful daemon: stop + disable it first
+  (or pass `--force`) — the setup tool refuses otherwise. The daemon is a
+  `systemd --user` unit; no account belongs to the `docker` group.
+- **Autostart:** `sudo loginctl enable-linger user`, **persisted by the
+  `/var/lib/systemd/linger` bind-dir above**. The flag file lives on the AppVM's
+  volatile root, so without that bind-dir it evaporates on the first reboot and
+  the stack silently stays down — and any interactive login starts the user
+  manager anyway, masking exactly that failure, so verify reboot recovery
+  _before_ the first login (probe from outside). With the flag persisted, the
+  user manager starts the rootless daemon at boot and `restart: unless-stopped`
+  resumes the containers — the per-qube `rc.local` files start no docker and run
+  no compose self-heal. (Equivalent alternatives: re-assert
+  `loginctl enable-linger user` from `rc.local`, or enable linger in the
+  template.)
 - **Storage:** `~/.local/share/docker`, inside home — persists natively, so the
   `/var/lib/docker` + `/var/lib/containerd` bind-dirs above aren't needed.
 - **Re-assert "rootful off" every boot.** The template still ships rootful
   docker, and `/etc` (unit enablement) + `/etc/group` (docker membership) are
   reset from the template on each AppVM boot. The shipped
-  [`app-qube/rc.local`](app-qube/rc.local) disables + masks
-  `docker`/`docker.socket`/`containerd`, empties the `docker` group, and removes
-  the dead `/var/run/docker.sock` inode a template-enabled `docker.socket`
-  re-creates before the mask lands.
+  [`app-qube/rc.local`](app-qube/rc.local) and
+  [`ingress-qube/rc.local`](ingress-qube/rc.local) disable + mask
+  `docker`/`docker.socket`/`containerd`, remove the operator account from the
+  `docker` group (the only member on a stock template), and remove the dead
+  `/var/run/docker.sock` inode a template-enabled `docker.socket` re-creates
+  before the mask lands. Disabling `docker.socket` in the template as well
+  closes the pre-`rc.local` boot window; the per-boot block then remains as
+  belt-and-suspenders.
 
 Two traps worth knowing before you convert an existing rootful deployment:
 
@@ -152,9 +171,12 @@ not need that `rc.local` copy. The app qube's shipped
 is one. Two extra Qubes-isms apply: idle app qubes get suspended
 (`Persistent=true` runs a missed calendar occurrence after wake), and user units
 only run without an open shell session if linger is on —
-`sudo loginctl enable-linger user`. If a timer stopped firing, check
-`loginctl show-user user | grep Linger` and
-`systemctl --user is-enabled <timer>` before suspecting the script.
+`sudo loginctl enable-linger user`, persisted across reboots by the
+`/var/lib/systemd/linger` bind-dir
+([§ Rootless docker](#rootless-docker-the-deployed-engine-posture) — the flag
+file lives on the volatile root, so without the bind-dir it lasts exactly one
+boot). If a timer stopped firing, check `loginctl show-user user | grep Linger`
+and `systemctl --user is-enabled <timer>` before suspecting the script.
 
 ## Networking posture
 
@@ -278,4 +300,6 @@ end state of #13. `MCP_UPSTREAM` remains the topology's one pivot point: the
 single-host install defaults it to `mcp:8787`, the split points it at the
 ConnectTCP forwarder, and the documented rollback repoints it at a direct
 app-qube address — each flip is that one line plus a Caddy reload (the rollback
-also needs the app-qube compose republished on `0.0.0.0`).
+also needs the app-qube compose republished on `0.0.0.0` **and** an
+ingress-scoped `custom-input` accept on the app qube — see the
+[ingress README](ingress-qube/README.md#the-ingressapp-hop-qubesconnecttcp)).
