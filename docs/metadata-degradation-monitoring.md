@@ -200,8 +200,10 @@ real end-to-end delivery:
    ```
 
    Any HTTP status proves DNS/TLS reachability; a timeout or DNS error does not.
-   Use the configured origin for ntfy. `DOCKER-USER` rules and the app qube's
-   Qubes firewall govern this container path, even when a host-side probe works.
+   Use the configured origin for ntfy. Container egress can be governed
+   separately from the host's (on a Qubes deployment, the qube's egress policy;
+   on a rootful-docker install, any `DOCKER-USER` rules), so a host-side probe
+   succeeding does not prove the container path works.
 3. Put one adapter's credentials and a generic label in the deployment's real
    `0600` `.env`, enable its channel, and recreate the MCP container. Existing
    queued degradation rows may cause the first alert immediately.

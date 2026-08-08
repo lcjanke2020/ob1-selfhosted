@@ -4,11 +4,12 @@
 own self-contained compose directory.** The dedicated DB qube is provisioned
 ([`db-qube/`](db-qube/)), the app→DB transport is wired (firewall-scoped tailnet
 — see below), and the public edge (Funnel + Caddy) runs in its own ingress qube
-reverse-proxying to the app qube's mcp over the tailnet via the parameterized
-`MCP_UPSTREAM` upstream. Each role now has a self-contained per-qube compose
-file rather than a `COMPOSE_FILE` override stack: [`app-qube/`](app-qube/)
-(mcp + Ollama) and [`ingress-qube/`](ingress-qube/) (Caddy + log-ingester) —
-operator recipe in the
+reverse-proxying to the app qube's loopback-only mcp over a dom0-policy-gated
+qubes.ConnectTCP channel (see
+[Implemented: ingress→app transport](#implemented-ingressapp-transport-qubesconnecttcp--no-listener)).
+Each role now has a self-contained per-qube compose file rather than a
+`COMPOSE_FILE` override stack: [`app-qube/`](app-qube/) (mcp + Ollama) and
+[`ingress-qube/`](ingress-qube/) (Caddy + log-ingester) — operator recipe in the
 [Qubes README](README.md#splitting-the-stack-across-qubes). Kept as a design doc
 because the reasoning — the threat model and the trust layers — is the
 transferable part.
@@ -50,9 +51,52 @@ one extra grant/host line each):
 
 PGDATA, `/etc/postgresql`, and `/var/lib/tailscale` are bind-dir'd into `/rw` so
 the cluster, its hardened config, and the node identity survive reboots; the
-cluster is started on boot (after `tailscale0` is up) from `rc.local`. The
-more-isolated qrexec / `qubes.ConnectTCP` transport (no listener at all) remains
-a tracked follow-up.
+cluster is started on boot (after `tailscale0` is up) from `rc.local`. For this
+app→DB hop the more-isolated qrexec / `qubes.ConnectTCP` transport (no listener
+at all) remains a tracked follow-up — the ingress→app hop has since adopted
+exactly that pattern (next section), which is also its proof of concept here.
+
+## Implemented: ingress→app transport (qubes.ConnectTCP — no listener)
+
+The ingress→app hop originally mirrored the app→DB decision: mcp published
+`0.0.0.0:8787` and three independent layers scoped the wide bind to the ingress
+qube (Tailscale ACL grant, a `DOCKER-USER` host-firewall rule on the app qube,
+and mcp's OAuth door). That design had a structural weakness the DB hop doesn't:
+the listener's safety depended on firewall state that had to be **continuously
+right** — docker recreates the `DOCKER-USER` chain on daemon restart, the rule
+had to be re-inserted by a drop-in plus a boot one-shot, and an audit couldn't
+verify the live iptables state without privileged access.
+
+The hop now rides the qrexec transport instead, which removes the listener class
+entirely:
+
+- **mcp binds loopback only** (`127.0.0.1:8787` in
+  [`app-qube/docker-compose.yml`](app-qube/docker-compose.yml)) — nothing
+  listens on the app qube's eth0 or tailnet interface, so a third qube's connect
+  attempt times out on a nonexistent socket rather than relying on a firewall
+  drop.
+- **A socat forwarder on the ingress qube**
+  ([`ingress-qube/ob1-mcp-forward.sh`](ingress-qube/ob1-mcp-forward.sh)) binds
+  that qube's own IP `:18787` and bridges each connection to
+  `qrexec-client-vm <app-qube> qubes.ConnectTCP+8787`; Caddy's `MCP_UPSTREAM`
+  targets it. (Own-IP, not a bridge gateway: under the deployed rootless docker,
+  container→own-host-IP traffic arrives on `lo` — see the
+  [Qubes README § Rootless docker](README.md#rootless-docker-the-deployed-engine-posture).)
+- **dom0 policy gates the channel** —
+  `qubes.ConnectTCP +8787 <ingress-qube> <app-qube> allow autostart=no`
+  (explicit destination; `autostart=no` so a proxied request can never boot a
+  halted app qube). This is the isolation layer: it names exactly one caller and
+  one target, and it is enforced by dom0, not by state inside either qube.
+- **mcp's OAuth door is unchanged** — every request arriving over the channel
+  still authenticates.
+
+The Tailscale ACL grant and the `DOCKER-USER` machinery are retired — there is
+no wide bind left to scope. Rollback is documented and cheap: repoint
+`MCP_UPSTREAM` at a direct app-qube address and republish `0.0.0.0:8787`
+([ingress-qube README](ingress-qube/README.md#the-ingressapp-hop-qubesconnecttcp)).
+The install steps, verification, and the forwarder files live in that README;
+the same pattern documented for the GPU hop is in
+[`gpu-offload-transport.md`](gpu-offload-transport.md).
 
 ## Problem
 
@@ -73,10 +117,10 @@ wrong tool once the point is to put a VM boundary between two of them.
 │  tailscaled (Funnel) + Caddy + log-ingester   │   no memory store; a parked
 │  IP allowlist enforced here                   │   local logs DB; two scoped
 └───────────────┬───────────────────────────────┘   obs-only paths to db qube *
-                │  MCP port only (scoped)
+                │  qubes.ConnectTCP +8787 (dom0 policy)
 ┌─ app qube ──── ▼ ──────────────────────────────┐
-│  MCP server (+ Ollama) + encrypted backup      │  reachable ONLY from the
-└───────────────┬────────────────────────────────┘  ingress qube
+│  MCP server (+ Ollama) + encrypted backup      │  no network-facing listener;
+└───────────────┬────────────────────────────────┘  reached ONLY over qrexec
                 │  Postgres port only (scoped)
 ┌─ db qube ───── ▼ ──────────────────────────────┐
 │  Postgres + pgvector, native install           │  the memory store; reached
@@ -101,10 +145,11 @@ documented future home
   override recipe once started are gone by construction
   ([#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13) resolved). The
   store itself is never on the edge; it lives in the db qube.
-- **App qube** — the MCP server (+ Ollama), from [`app-qube/`](app-qube/).
-  Reachable only from the ingress qube, only on the MCP port. As the trusted DB
-  control-plane it holds the admin + app + readonly credentials and runs the
-  encrypted off-box backup ([`app-qube/backup/`](app-qube/backup/)).
+- **App qube** — the MCP server (+ Ollama), from [`app-qube/`](app-qube/). mcp
+  binds loopback only; the ingress qube reaches it exclusively over the
+  dom0-policy-gated qubes.ConnectTCP channel. As the trusted DB control-plane it
+  holds the admin + app + readonly credentials and runs the encrypted off-box
+  backup ([`app-qube/backup/`](app-qube/backup/)).
 - **DB qube** — Postgres + pgvector, **out of docker-compose**, run natively (or
   as a single container). Reached by the app qube (the full app role) and —
   while the log-ingester lives on the edge — by the ingress qube on one
@@ -131,7 +176,11 @@ Two candidate mechanisms:
 benefit at a fraction of the qrexec complexity, composes with tag-based
 default-deny policy you likely already run, and fails debuggable. The residual
 delta — one TCP listener, locked to one peer — is acceptable for this asset
-class.
+class. (The calculus came out differently for the ingress→app hop, whose old
+wide bind needed continuously-correct docker firewall state to stay scoped; that
+hop
+[now runs option 1's qrexec pattern](#implemented-ingressapp-transport-qubesconnecttcp--no-listener),
+which also de-risks a future migration of this DB hop.)
 
 ## Decision: DB qube construction
 
@@ -217,12 +266,13 @@ shared/forwarded log path). Picking and finishing this is tracked in
   transport (full app role), and — while the log-ingester runs on the edge — the
   ingress qube reaches it on the INSERT-only observability role; nothing else
   can.
-- The ingress qube cannot reach any host other than the app qube's MCP port —
+- The ingress qube cannot reach any host other than the app qube's mcp — over
+  the dom0-policy-gated qubes.ConnectTCP channel, the only path to it —
   **plus**, while the log-ingester runs there, the INSERT-only observability
   role on the db qube's `:5432` (the documented exception above — see
   [Log-ingester placement](#log-ingester-placement-decided-for-now) /
   [#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)). Verified by
-  ACL + firewall audit, not assumption.
+  ACL + firewall + dom0-policy audit, not assumption.
 - Backup/restore works against the relocated DB.
 - The allowlist + XFF behavior re-verified under the two-hop topology.
 - Your network-topology diagram updated — an isolation model that exists only in

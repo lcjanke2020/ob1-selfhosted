@@ -5,7 +5,10 @@
 #
 #   caddy         — Reverse proxy / header-discriminated perimeter (Pattern Y).
 #                   Single :9787 listener; reverse-proxies to the app qube's mcp
-#                   over the tailnet (MCP_UPSTREAM = app-qube address:8787).
+#                   through the host-side qubes.ConnectTCP forwarder
+#                   (MCP_UPSTREAM = this qube's own IP:18787 — see
+#                   ob1-mcp-forward.sh; the app qube has no network-facing
+#                   mcp listener).
 #   log-ingester  — Tails Caddy's JSON access logs and writes funnel_access_log
 #                   rows ACROSS to the db qube (DB_HOST), as the INSERT-only
 #                   openbrain_ingester role. This is the qube's ONLY DB path and
@@ -41,10 +44,11 @@ services:
     environment:
       # Reverse-proxy upstream. MANDATORY on this qube: there is no local `mcp`
       # service to fall back to, so an unset value would make Caddy proxy to a
-      # nonexistent host and 502 every request. `:?` fails at `config` time with
-      # this message. Set it to the app qube's tailnet address:8787. Kept in
-      # .env, never the committed Caddyfile, so no tailnet address is committed.
-      MCP_UPSTREAM: ${MCP_UPSTREAM:?set MCP_UPSTREAM to the app qube tailnet address:8787 (the ingress qube proxies to the app qube's mcp)}
+      # nonexistent host and 502 every request. `:?` fails at `config` time
+      # with this message. Set it to the ConnectTCP forwarder — this qube's own
+      # IP:18787 (see .env.example + ob1-mcp-forward.sh). Kept in .env, never
+      # the committed Caddyfile, so no deployment address is committed.
+      MCP_UPSTREAM: ${MCP_UPSTREAM:?set MCP_UPSTREAM to the ConnectTCP forwarder, this qube's own IP:18787 (see .env.example)}
     # No `profiles` and no `depends_on: mcp`: on this qube Caddy is the always-on
     # entry point, and mcp is on a different qube (not a local service to gate on).
     cap_drop:

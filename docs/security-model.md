@@ -48,15 +48,17 @@ dumps can still read it.
 
 ### Network layer
 
-- On the single-host install paths every service binds `127.0.0.1` only — the
-  LAN can't reach any port directly; exposure is an explicit
-  `tailscale serve`/`funnel` act. **Split-Qubes exception:** the app qube
-  publishes `mcp` on `0.0.0.0:8787` (all host interfaces) so the ingress qube's
-  Caddy can reach it across qubes. That port is kept private not by a loopback
-  bind but by the Tailscale ACL (only the ingress qube may reach it) + the app
-  qube's `DOCKER-USER` host-firewall rule (docker DNAT bypasses the Qubes
-  `INPUT` chain) + mcp's OAuth — see the
-  [Qubes README](../deploy/qubes/README.md).
+- Every service binds `127.0.0.1` only — on the single-host install paths the
+  LAN can't reach any port directly, and exposure is an explicit
+  `tailscale serve`/`funnel` act. This now includes the split-Qubes app qube:
+  its `mcp` publishes loopback only, and the ingress qube's Caddy reaches it
+  over a dom0-policy-gated `qubes.ConnectTCP` channel (a socat forwarder on the
+  ingress qube bridges Caddy to the qrexec call). There is no network-facing mcp
+  listener to scope — an earlier revision published `0.0.0.0:8787` and scoped
+  the wide bind with a Tailscale ACL grant plus a `DOCKER-USER` host-firewall
+  rule that had to stay continuously correct; the qrexec transport removed that
+  listener class entirely. See
+  [the ingress→app hop](../deploy/qubes/ingress-qube/README.md#the-ingressapp-hop-qubesconnecttcp).
 - In Pattern B the override file **removes** mcp's host port
   (`ports: !reset null`). The raw backend is unreachable from the host, so a
   misconfigured `tailscale funnel` pointed at `:8787` fails closed instead of
@@ -323,6 +325,8 @@ security review.
 - **Edge↔store isolation (Qubes path)** — resolved by the
   [three-qube split](../deploy/qubes/three-qube-design.md): Funnel + Caddy
   (ingress qube), mcp + Ollama (app qube), and Postgres (db qube) run in
-  separate VMs over a firewall-scoped tailnet, so a compromised public edge
-  holds no memory store and no app credential. The single-host install paths
-  still co-locate these by design (one trust boundary).
+  separate VMs, so a compromised public edge holds no memory store and no app
+  credential. The ingress→app hop rides a dom0-policy-gated `qubes.ConnectTCP`
+  channel (the app qube has no network-facing listener); the app→db hop is a
+  firewall-scoped tailnet path. The single-host install paths still co-locate
+  these by design (one trust boundary).

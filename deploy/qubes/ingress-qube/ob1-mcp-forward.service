@@ -1,0 +1,17 @@
+[Unit]
+# The ingress→app mcp forwarder: qube-ip:18787 → the app qube over qubes
+# ConnectTCP (see ob1-mcp-forward.sh). Caddy's MCP_UPSTREAM targets it.
+#
+# Stash at: /rw/config/ob1-mcp-forward.service — rc.local copies it into
+# /etc/systemd/system and enables it each boot (/etc is wiped on every AppVM
+# reboot). Restart=always converges if anything it needs isn't up yet.
+Description=OB1 mcp forwarder (qube-ip:18787 -> app qube via qrexec ConnectTCP)
+After=qubes-network.service
+
+[Service]
+ExecStart=/rw/config/ob1-mcp-forward.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

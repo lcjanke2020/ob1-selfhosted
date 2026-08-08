@@ -3,7 +3,9 @@
 The **ingress** (public-edge) qube of the
 [three-qube split](../three-qube-design.md): it terminates the Tailscale Funnel
 and runs Caddy (the header-discriminated perimeter) plus the log-ingester. It
-reverse-proxies to the [app qube](../app-qube/)'s mcp over the tailnet and holds
+reverse-proxies to the [app qube](../app-qube/)'s mcp over a dom0-policy-gated
+qubes.ConnectTCP channel
+([the ingress→app hop](#the-ingressapp-hop-qubesconnecttcp) below) and holds
 **no** memory store and **no** app credential — only two observability
 credentials: the INSERT-only ingester and the SELECT-only
 [funnel monitor](#funnel-monitor-host-side-not-compose). The canonical Postgres
@@ -16,9 +18,14 @@ ingress-qube-specific overlay.
 ## Run
 
 ```sh
-cp .env.example .env && $EDITOR .env     # MCP_UPSTREAM (app qube), DB_HOST (db qube), ingester pw
+cp .env.example .env && $EDITOR .env     # MCP_UPSTREAM (ConnectTCP forwarder), DB_HOST (db qube), ingester pw
 docker compose up -d
 ```
+
+`MCP_UPSTREAM` points at the
+[ConnectTCP forwarder](#the-ingressapp-hop-qubesconnecttcp) on this qube's own
+IP (`<this-qube-ip>:18787`), not at an app-qube network address — install the
+forwarder below before expecting requests to complete.
 
 Then expose Caddy publicly (host, not compose):
 
@@ -32,11 +39,79 @@ sudo tailscale funnel --bg --https=443 http://127.0.0.1:9787   # single rule
 on disk for a future local logs store but never started. Do **not** set
 `COMPOSE_PROFILES` on this qube.
 
-The compose project is **not** auto-started on reboot. To bring it back
-automatically, add
-`docker compose -f /path/to/ingress-qube/docker-compose.yml up -d` to
-`rc.local`, or run it by hand after a reboot (and re-assert the Funnel rule
-below).
+The stack runs under the operator account's **rootless** dockerd (see the
+[Qubes README § Rootless docker](../README.md#rootless-docker-the-deployed-engine-posture)),
+and reboot recovery is automatic: with `loginctl enable-linger user` the user
+manager starts the rootless daemon at boot and `restart: unless-stopped` resumes
+the containers; the Funnel rule persists in tailscaled's own state
+(`/var/lib/tailscale` is bind-dir'd), so it needs no re-assert either. After a
+reboot, verify rather than restart: `docker compose ps`, then the
+[funnel monitor](#funnel-monitor-host-side-not-compose) log.
+
+## The ingress→app hop (qubes.ConnectTCP)
+
+Caddy does not proxy to an app-qube network address — the app qube's mcp
+publishes `127.0.0.1:8787` only and has **no network-facing listener**. Instead,
+a small host-side `socat` forwarder on this qube bridges Caddy to a qrexec
+`qubes.ConnectTCP` channel that dom0 policy gates (same pattern as the optional
+[GPU-offload transport](../gpu-offload-transport.md)):
+
+```
+caddy container ──(this qube's own IP :18787)──▶ socat  [ingress qube host]
+                        └─ qubes.ConnectTCP+8787 (qrexec) ─▶ <app-qube> 127.0.0.1:8787
+```
+
+The forwarder binds the qube's **own IP** (`qubesdb-read /qubes-ip`): under
+rootless docker the caddy container reaches its own host via slirp4netns — the
+packet arrives on `lo`, which the qubes input chain accepts, so no firewall rule
+is needed — while eth0/tailscale peers are covered by the qubes input
+default-drop (nothing accepts `:18787`).
+
+Install (the qube's **template** must have `socat`; `/usr` is template-provided,
+so an AppVM-local install vanishes on reboot):
+
+1. Stage the two files (root-owned, script `chmod +x`):
+   [`ob1-mcp-forward.sh`](ob1-mcp-forward.sh) → `/rw/config/ob1-mcp-forward.sh`
+   (set `<app-qube>` to your app qube's name) and
+   [`ob1-mcp-forward.service`](ob1-mcp-forward.service) →
+   `/rw/config/ob1-mcp-forward.service`.
+2. Restage from `/rw/config/rc.local` each boot (`/etc/systemd` is wiped on
+   AppVM reboot):
+
+   ```sh
+   if [ -f /rw/config/ob1-mcp-forward.service ]; then
+     cp /rw/config/ob1-mcp-forward.service /etc/systemd/system/
+     systemctl daemon-reload
+     systemctl enable --now ob1-mcp-forward.service
+   fi
+   ```
+
+3. dom0 policy (e.g. `/etc/qubes/policy.d/30-ob1-connecttcp.policy`) — the
+   destination must be **explicit** (a call naming a target does not match an
+   `@default` rule), and `autostart=no` keeps a proxied request from ever
+   booting a halted app qube as a side effect:
+
+   ```
+   qubes.ConnectTCP +8787 <ingress-qube> <app-qube> allow autostart=no
+   ```
+
+   Lint it after editing (`qubes-policy-lint`, or the parser one-liner in
+   [`../gpu-offload-transport.md`](../gpu-offload-transport.md#1-dom0-policy)).
+
+4. Point `MCP_UPSTREAM` at `<this-qube-ip>:18787` in `.env` and recreate Caddy.
+
+Verify: from this qube's host, `curl -s http://<this-qube-ip>:18787/health`
+should return mcp's health JSON — that one request exercises the whole chain
+(forwarder → qrexec policy → app-qube loopback publish). Then make a real
+end-to-end request through the public door. On the **app** qube, `ss -tlnp` must
+show `:8787` on `127.0.0.1` only; from any third qube, a connect to the app
+qube's `:8787` times out (no listener exists).
+
+**Rollback** (one line + one compose edit): set
+`MCP_UPSTREAM=<app-qube-tailnet-ip>:8787`, republish mcp as `0.0.0.0:8787` in
+the app-qube compose, and re-scope that wide bind (Tailscale ACL + a
+`DOCKER-USER` rule) as the pre-ConnectTCP design did. The forwarder unit and
+policy line can stay in place; they are inert while unused.
 
 ## Credentials (per-qube split)
 

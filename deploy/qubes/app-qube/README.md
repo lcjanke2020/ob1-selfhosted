@@ -19,17 +19,20 @@ docker compose up -d
 ```
 
 [`docker-compose.yml`](docker-compose.yml) is self-contained — `mcp` + `ollama`
-only, no override stack. `mcp` is published on `0.0.0.0:8787` so the ingress
-qube's Caddy can reach it across qubes (set
-`MCP_UPSTREAM=<this-qube-tailnet-ip>:8787` in the _ingress_ qube's `.env`).
+only, no override stack. `mcp` publishes on `127.0.0.1:8787` **only** — it has
+no network-facing listener. The ingress qube's Caddy reaches it over a
+dom0-policy-gated qubes.ConnectTCP channel; the forwarder, policy line, and
+verification live in the
+[ingress qube's README](../ingress-qube/README.md#the-ingressapp-hop-qubesconnecttcp).
 Ollama runs CPU-only (no GPU passthrough in a Qubes app qube); point
 `OLLAMA_URL` at an external GPU box to offload it.
 
-The compose project is **not** auto-started on reboot (`restart: unless-stopped`
-only resurrects containers while the daemon is up, not the project after an
-AppVM reboot). To bring it back automatically, add
-`docker compose -f /path/to/app-qube/docker-compose.yml up -d` to `rc.local`
-after the docker start, or run it by hand after a reboot.
+The stack runs under the operator account's **rootless** dockerd (see the
+[Qubes README § Rootless docker](../README.md#rootless-docker-the-deployed-engine-posture)),
+which also answers reboot recovery: with `loginctl enable-linger user` the user
+manager starts the rootless daemon at boot, and `restart: unless-stopped`
+resumes the containers — no `rc.local` compose start, no manual `up -d` after a
+reboot. Verify with `docker compose ps` after the qube comes back.
 
 ## Offloading metadata classification (`CHAT_*`) to a GPU qube
 
@@ -41,8 +44,8 @@ to a hosted OpenAI-compatible provider; neither needs plumbing. To instead keep
 thought content on a **GPU qube on this same Qubes host** whose model server is
 bound to loopback only (no network-facing listener — no LAN/tailnet bind, no
 sshd), see [`../gpu-offload-transport.md`](../gpu-offload-transport.md): a
-host-side `socat` forwarder + qrexec `ConnectTCP` transport, with the
-firewall/`custom-input`, persistence, and `autostart=no` safety notes. It is a
+host-side `socat` forwarder (bound to this qube's own IP) + qrexec `ConnectTCP`
+transport, with the persistence and `autostart=no` safety notes. It is a
 deliberate tradeoff, not a default — the why and the costs are covered in
 [Serving From a Qube With No Network-Facing Listener](https://github.com/lcjanke2020/qubes-os-explorations/blob/master/qrexec-connecttcp-service-qube.md).
 
@@ -317,33 +320,38 @@ journal before waiting for the next timer occurrence. When rotating
 the app compose `.env` so the unattended job does not silently retain the old
 credential.
 
-## Host firewall (scope the `0.0.0.0:8787` bind)
+## Host firewall (custom-input; no `:8787` machinery)
 
-The `0.0.0.0` bind is reachable on every interface (tailnet **and** LAN). Three
-independent layers narrow it to the ingress qube — Tailscale ACL, this host
-firewall, and mcp app auth. Install the firewall artifacts (counterpart to the
-db qube's):
+mcp publishes loopback only, so there is **no mcp listener to scope** — the
+elaborate `DOCKER-USER` machinery an earlier revision shipped (an iptables
+insert script, a `docker.service` drop-in re-applying it on daemon restarts, and
+a boot one-shot ordered after docker) is retired along with the `0.0.0.0:8787`
+publish it existed to narrow. What remains is small:
 
-| File                                                       | Install at                                                                                                                       | Purpose                                                                                                             |
-| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| [`qubes-firewall-user-script`](qubes-firewall-user-script) | `/rw/config/qubes-firewall-user-script` (chmod +x)                                                                               | `DOCKER-USER` rule: accept `:8787` only from the ingress qube's tailnet IP, drop it on every other source/interface |
-| [`docker-ob1-firewall.conf`](docker-ob1-firewall.conf)     | `/rw/config/docker-ob1-firewall.conf` (rc.local copies it to `/etc/systemd/system/docker.service.d/ob1-firewall.conf` each boot) | docker drop-in: re-runs the script `ExecStartPost` so a daemon restart can't leave `:8787` open                     |
-| [`ob1-app-firewall.service`](ob1-app-firewall.service)     | `/rw/config/ob1-app-firewall.service`                                                                                            | boot one-shot that applies the rule once `After=tailscaled` + docker                                                |
-| [`rc.local`](rc.local)                                     | `/rw/config/rc.local` (chmod +x)                                                                                                 | boot order: tailscaled → install docker drop-in → docker → firewall one-shot → backup timer                         |
+| File                                                       | Install at                                         | Purpose                                                                                     |
+| ---------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| [`qubes-firewall-user-script`](qubes-firewall-user-script) | `/rw/config/qubes-firewall-user-script` (chmod +x) | `custom-input` accepts for host services (SSH on `tailscale0`; optional Syncthing)          |
+| [`ob1-app-firewall.service`](ob1-app-firewall.service)     | `/rw/config/ob1-app-firewall.service`              | one-shot that runs the script `After=tailscaled` — the applier on this qube (see below)     |
+| [`rc.local`](rc.local)                                     | `/rw/config/rc.local` (chmod +x)                   | boot order: tailscaled → rootful-docker-off → firewall one-shot → backup timer → forwarders |
 
-The rule lives in `DOCKER-USER`, **not** the Qubes `custom-input` chain, because
-docker's DNAT bypasses the qubes `INPUT` path — a `custom-input` accept/drop
-never sees the published-port traffic. The script **inserts** (`-I`) above
-docker's seeded `RETURN` rule (an appended rule would land below it and never
-run) and rebuilds idempotently. Replace `<ingress-qube-tailnet-ip>` in the
-script with the ingress qube's address; if you later **rotate** that address,
-flush the chain and re-run
-(`sudo iptables -F DOCKER-USER && sudo
-/rw/config/qubes-firewall-user-script`)
-so the old ACCEPT doesn't linger. Two triggers keep the rule live: the boot
-one-shot applies it at startup, and the docker drop-in re-applies it on every
-daemon restart. (This layer also closes the LAN-reachable-`0.0.0.0`-bind gap —
-it drops `:8787` on all interfaces, not just `tailscale0`.)
+Two properties do the work the old machinery did:
+
+- **The qubes input chain default-drops.** Nothing accepts `:8787` (or the
+  GPU-forwarder's `:11434`) from `eth0`/`tailscale0`, and mcp has no socket
+  there anyway — a third qube's connect attempt times out on a nonexistent
+  listener rather than being firewall-dropped.
+- **Container→host traffic arrives on `lo` under rootless docker** (slirp4netns
+  delivers a container's packet to its own host's IP on loopback, which the
+  stock chain accepts) — so the forwarder transports need no `custom-input`
+  accepts either, and the old `br-*` bridge rules are gone (the compose bridge
+  now lives inside rootlesskit's netns, invisible to the host chain).
+
+One Qubes-ism to know: on an app qube that doesn't route other qubes, the
+`qubes-firewall` service's own hook never fires, so `qubes-firewall-user-script`
+would sit unexecuted. The shipped `ob1-app-firewall.service` one-shot
+(restaged + enabled from `rc.local` each boot) is what actually applies it,
+ordered after tailscaled so the `tailscale0`-scoped accepts land on the running
+interface.
 
 ## Encrypted DB backup
 
@@ -408,6 +416,8 @@ journalctl -u ob1-db-backup.service -n 50 --no-pager
 ```sh
 docker compose config --services      # exactly: mcp, ollama
 docker compose up -d
-# from the ingress qube, a Caddy request to MCP_UPSTREAM should reach mcp;
-# from any OTHER tailnet peer, :8787 should be dropped by the host firewall.
+ss -tlnp | grep 8787                  # 127.0.0.1:8787 ONLY — no 0.0.0.0, no tailnet IP
+# from the ingress qube, a Caddy request through the ConnectTCP forwarder
+# reaches mcp; from any OTHER qube or tailnet peer, a connect to this qube's
+# :8787 times out — there is no listener to reach.
 ```
