@@ -261,7 +261,10 @@ Deno.test("cursor files: JSON round-trip, legacy offset-only, and garbage fallba
 // bare IPv6 literals and relative paths, which are hostnames as far as both
 // sides are concerned.
 Deno.test("dbHostType: absolute paths are unix sockets, everything else is TCP", async () => {
-  await withIngesterEnv(async ({ dbHostType }) => {
+  // Not `async`: every assertion here is synchronous, and `require-await`
+  // rejects an async callback with no await. withIngesterEnv wants a promise,
+  // so hand it a resolved one.
+  await withIngesterEnv(({ dbHostType }) => {
     // Unix-socket DIRECTORIES (deno-postgres appends `.s.PGSQL.<port>`).
     assertEquals(dbHostType("/var/run/postgresql"), "socket");
     assertEquals(dbHostType("/tmp"), "socket");
@@ -286,6 +289,7 @@ Deno.test("dbHostType: absolute paths are unix sockets, everything else is TCP",
     // the ENTRYPOINT's `/*` glob.
     assertEquals(dbHostType("run/postgresql"), "tcp");
     assertEquals(dbHostType("./run"), "tcp");
+    return Promise.resolve();
   });
 });
 

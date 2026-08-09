@@ -260,9 +260,10 @@ stale, no-longer-written `funnel_access_log` left behind in this database,
 producing an empty report section and a pointless retention DELETE.
 
 Those two relations stay in the corpus schema deliberately, empty. Dropping them
-would diverge from [`db/02-observability.sql`](../../../db/02-observability.sql),
-which single-host installs still create, and keeping them means repointing the
-ingester back at this database is a config change rather than a migration.
+would diverge from
+[`db/02-observability.sql`](../../../db/02-observability.sql), which single-host
+installs still create, and keeping them means repointing the ingester back at
+this database is a config change rather than a migration.
 
 The job reads a dedicated environment file containing only its database
 settings. Do not point it at this directory's `.env`: exporting the full app

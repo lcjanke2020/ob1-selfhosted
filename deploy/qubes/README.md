@@ -273,12 +273,12 @@ only two observability credentials: the INSERT-only ingester and the SELECT-only
 funnel monitor. Caddy reverse-proxies to the app qube's mcp through the
 host-side ConnectTCP forwarder (`MCP_UPSTREAM=<this-qube-ip>:18787` — see
 [the ingress→app hop](ingress-qube/README.md#the-ingressapp-hop-qubesconnecttcp));
-the log-ingester writes its `funnel_access_log` rows _across_ to the db qube
-(`DB_HOST`), the one INSERT-only path this qube keeps to `:5432` (the documented
-exception — see
-[three-qube-design.md](three-qube-design.md#log-ingester-placement-decided-for-now)
+the log-ingester writes its `funnel_access_log` rows to a
+[local socket-only sink](ingress-qube/README.md#local-log-sink) on this qube, so
+it keeps **no** path to the db qube at all (see
+[three-qube-design.md](three-qube-design.md#log-ingester-placement-settled-local-sink)
 and #12), and the host-side funnel monitor reads that table back over the same
-wire. The monitor can optionally deliver privacy-safe, deduplicated Pushover
+socket. The monitor can optionally deliver privacy-safe, deduplicated Pushover
 alerts for public-door 401 bursts; provider credentials remain separate 0600
 host files (see
 [`ingress-qube/README.md`](ingress-qube/README.md#funnel-monitor-host-side-not-compose)).

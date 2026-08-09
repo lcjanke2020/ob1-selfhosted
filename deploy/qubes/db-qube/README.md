@@ -6,27 +6,27 @@ Postgres + pgvector natively, reachable over a firewall-scoped tailnet by
 exactly **one** peer: the app qube (superuser for remote admin, plus the app and
 readonly roles). The ingress qube is deliberately not a peer — it writes Funnel
 logs to a local sink of its own, so it holds no credential for and no route to
-this qube; see the [design doc](../three-qube-design.md). This directory holds the on-disk config
-that makes that qube reproducible — the counterpart to the compose files for the
-other install paths.
+this qube; see the [design doc](../three-qube-design.md). This directory holds
+the on-disk config that makes that qube reproducible — the counterpart to the
+compose files for the other install paths.
 
-These are **placeholders**, not drop-in secrets. Fill in the two addresses
-(this qube's own, and the app qube's) and adjust the Postgres major version to
-match your template before using them.
+These are **placeholders**, not drop-in secrets. Fill in the two addresses (this
+qube's own, and the app qube's) and adjust the Postgres major version to match
+your template before using them.
 
 ## What each file is, and where it goes on the DB qube
 
 Everything durable lives under `/rw` (a stock AppVM wipes `/etc/systemd/system`
 and most of `/etc` on every reboot), and is re-installed at boot by `rc.local`.
 
-| File here                        | Install at                                         | Purpose                                                                                                                             |
-| -------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `qubes-bind-dirs.d/50_user.conf` | `/rw/config/qubes-bind-dirs.d/50_user.conf`        | Persist PGDATA, the cluster config, and the Tailscale identity across reboots                                                       |
-| `qubes-firewall-user-script`     | `/rw/config/qubes-firewall-user-script` (chmod +x) | nft accept for inbound `tcp/5432` on `tailscale0` only                                                                              |
-| `ob1-db-firewall.service`        | `/rw/config/ob1-db-firewall.service`               | One-shot that re-applies the firewall rule _after_ `tailscaled` is up                                                               |
-| `rc.local`                       | `/rw/config/rc.local` (chmod +x)                   | Boot order: start tailscaled → install/enable the firewall unit → start Postgres once `tailscale0` has an IP                        |
-| `pg_hba.snippet.conf`            | append to `/etc/postgresql/<ver>/main/pg_hba.conf` | scram host lines: superuser (remote admin) + app + readonly, all from the app qube. No line for the ingress qube            |
-| `postgresql.local.conf`          | `conf.d/` drop-in or `ALTER SYSTEM`                | `listen_addresses` (loopback + tailnet IP) and `ssl = off`                                                                          |
+| File here                        | Install at                                         | Purpose                                                                                                          |
+| -------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `qubes-bind-dirs.d/50_user.conf` | `/rw/config/qubes-bind-dirs.d/50_user.conf`        | Persist PGDATA, the cluster config, and the Tailscale identity across reboots                                    |
+| `qubes-firewall-user-script`     | `/rw/config/qubes-firewall-user-script` (chmod +x) | nft accept for inbound `tcp/5432` on `tailscale0` only                                                           |
+| `ob1-db-firewall.service`        | `/rw/config/ob1-db-firewall.service`               | One-shot that re-applies the firewall rule _after_ `tailscaled` is up                                            |
+| `rc.local`                       | `/rw/config/rc.local` (chmod +x)                   | Boot order: start tailscaled → install/enable the firewall unit → start Postgres once `tailscale0` has an IP     |
+| `pg_hba.snippet.conf`            | append to `/etc/postgresql/<ver>/main/pg_hba.conf` | scram host lines: superuser (remote admin) + app + readonly, all from the app qube. No line for the ingress qube |
+| `postgresql.local.conf`          | `conf.d/` drop-in or `ALTER SYSTEM`                | `listen_addresses` (loopback + tailnet IP) and `ssl = off`                                                       |
 
 ## Placeholders to fill
 
@@ -42,9 +42,8 @@ Reachability is enforced in three independent layers, so no single
 misconfiguration exposes the database:
 
 1. **Tailscale ACL** — grants permit exactly `app-qube → db-qube:5432`; every
-   other tailnet peer, the ingress qube included, is default-denied at the
-   wire. (Configured in your tailnet admin console, not in
-   this repo.)
+   other tailnet peer, the ingress qube included, is default-denied at the wire.
+   (Configured in your tailnet admin console, not in this repo.)
 2. **Qubes nftables** — `qubes-firewall-user-script` accepts inbound `tcp/5432`
    on `tailscale0` only. The rule loads even before the interface exists
    (`iifname` matches by name, not index) and simply doesn't match traffic until
@@ -223,6 +222,7 @@ major bump deliberately rather than discovering it on a failed boot.
 
 See [`../three-qube-design.md`](../three-qube-design.md) for the full reasoning
 and the implemented three-qube split (the edge runs Caddy, the log-ingester, and
-its own local log sink, [#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13)
-and [#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12) both
-resolved — the edge is no longer a peer of this qube at all).
+its own local log sink,
+[#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13) and
+[#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12) both resolved —
+the edge is no longer a peer of this qube at all).
