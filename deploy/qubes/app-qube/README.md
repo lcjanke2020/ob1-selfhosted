@@ -247,6 +247,47 @@ to the db qube as `openbrain_app`, the existing role whose observability grants
 cover the transactional rollup and retention deletes. The internet-adjacent
 ingress qube never receives that credential.
 
+**This qube runs only the `mcp_auth_events` half.** The rollup is split by
+owning table, because the two halves no longer share a database: the Funnel
+access log is written to a local sink on the
+[ingress qube](../ingress-qube/README.md#daily-rollup-and-retention-host-side-not-compose),
+which runs [`db/summarize_funnel.sql`](../../../db/summarize_funnel.sql) there.
+Here, [`db/summarize_auth_events.sql`](../../../db/summarize_auth_events.sql)
+handles the reason-coded 401 audit that mcp writes into the corpus. Set
+`SUMMARY_SQL_FILE` accordingly — left unset it resolves to **both** shipped
+files (the single-host default), and the funnel half would then operate on the
+stale, no-longer-written `funnel_access_log` left behind in this database,
+producing an empty report section and a pointless retention DELETE.
+
+The relations themselves stay in the corpus schema deliberately. Dropping them
+would diverge from
+[`db/02-observability.sql`](../../../db/02-observability.sql), which single-host
+installs still create, and keeping them means repointing the ingester back at
+this database is a config change rather than a migration. Their ROWS are a
+one-time cutover decision, because nothing retains them anymore — the moment
+this qube's job went auth-only, the funnel half's 30-day raw and 365-day
+aggregate DELETEs stopped running against this database:
+
+- **Raw log — truncate.** Archive first if you want the history
+  (`pg_dump --data-only --table=funnel_access_log`, encrypted like the nightly
+  backup), then `TRUNCATE funnel_access_log;` **as the database superuser** —
+  the runtime `openbrain_app` role deliberately lacks TRUNCATE (measured:
+  `permission denied`), so use the same superuser-psql path as
+  [Upgrading an existing deployment](#upgrading-an-existing-deployment). Left
+  alone, request metadata (client IPs, paths, user agents) sits in the corpus
+  forever, outliving the 30-day promise the retention policy made.
+- **Aggregates — keep or truncate, but decide.** `funnel_access_summary` is
+  small, static from now on, and useful as trend history; keeping it is
+  reasonable. If you keep it, know the 365-day horizon no longer applies — the
+  rows are frozen until you delete them by hand.
+
+Verify the raw side once the cutover is done:
+`SELECT count(*) FROM
+funnel_access_log;` must return 0 — nonzero means the step
+above was skipped. The full edge-retirement pass (pg_hba lines, corpus roles,
+tailnet ACL) is
+[db-qube/README.md § Retiring the ingress qube's old access](../db-qube/README.md#retiring-the-ingress-qubes-old-access-existing-installs).
+
 The job reads a dedicated environment file containing only its database
 settings. Do not point it at this directory's `.env`: exporting the full app
 environment would needlessly expose the database administrator, OAuth,
@@ -265,7 +306,7 @@ the app qube—an AppVM-local package install disappears on reboot.
 ```sh
 mkdir -p ~/.config/systemd/user
 install -m 0755 scripts/funnel_daily_summary.sh ~/funnel_daily_summary.sh
-install -m 0644 db/summarize_funnel.sql ~/summarize_funnel.sql
+install -m 0644 db/summarize_auth_events.sql ~/summarize_auth_events.sql
 install -m 0600 deploy/qubes/app-qube/funnel-summary.env.example ~/.config/funnel-summary.env
 $EDITOR ~/.config/funnel-summary.env       # set DB_HOST + OPENBRAIN_APP_PASSWORD
 install -d -m 0700 ~/openbrain-funnel-summaries
@@ -275,17 +316,15 @@ sudo loginctl enable-linger "$USER"
 systemctl --user daemon-reload
 ```
 
-Run the service once before enabling the schedule. This is the catch-up pass: it
-builds the previous daily summaries before transactionally removing raw rows
-beyond the retention horizon. That removal is irreversible, so take a database
-snapshot first if you may need the pre-30-day raw rows. A failure before the SQL
-transaction commits leaves the raw rows intact; any failed run leaves the last
-complete Markdown artifact intact instead of replacing it with partial output.
-If a connection fails after the database commit but while the report queries are
-streaming, the database may be ahead of the artifact; the next idempotent run
-regenerates the report. A multi-day catch-up stores every day in
-`funnel_access_summary`, but publishes one Markdown artifact for the most
-recently completed day rather than recreating a historical report file per day.
+Run the service once before enabling the schedule. This is the catch-up pass:
+for this qube's auth half it removes `mcp_auth_events` rows beyond the 30-day
+horizon and prints the rolling 24h auth-failure report. That removal is
+irreversible, so take a database snapshot first if you may need the older rows.
+A failure before the SQL transaction commits leaves the raw rows intact; any
+failed run leaves the last complete Markdown artifact intact instead of
+replacing it with partial output. If a connection fails after the database
+commit but while the report queries are streaming, the database may be ahead of
+the artifact; the next idempotent run regenerates the report.
 
 ```sh
 systemctl --user start funnel-summary.service
@@ -317,11 +356,11 @@ but a persistent failure still needs a visible signal. Install a user
 journal.
 
 When updating the rollup implementation, reinstall **both** the wrapper and
-`summarize_funnel.sql`, then manually start the service once and inspect its
-journal before waiting for the next timer occurrence. When rotating
-`OPENBRAIN_APP_PASSWORD`, update the mode-0600 summary env at the same time as
-the app compose `.env` so the unattended job does not silently retain the old
-credential.
+`summarize_auth_events.sql` (this qube's half), then manually start the service
+once and inspect its journal before waiting for the next timer occurrence. When
+rotating `OPENBRAIN_APP_PASSWORD`, update the mode-0600 summary env at the same
+time as the app compose `.env` so the unattended job does not silently retain
+the old credential.
 
 ## Host firewall (custom-input; no `:8787` machinery)
 

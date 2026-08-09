@@ -2,14 +2,17 @@
 
 The **ingress** (public-edge) qube of the
 [three-qube split](../three-qube-design.md): it terminates the Tailscale Funnel
-and runs Caddy (the header-discriminated perimeter) plus the log-ingester. It
-reverse-proxies to the [app qube](../app-qube/)'s mcp over a dom0-policy-gated
-qubes.ConnectTCP channel
+and runs Caddy (the header-discriminated perimeter), the log-ingester, and a
+[local log sink](#local-log-sink). It reverse-proxies to the
+[app qube](../app-qube/)'s mcp over a dom0-policy-gated qubes.ConnectTCP channel
 ([the ingress→app hop](#the-ingressapp-hop-qubesconnecttcp) below) and holds
-**no** memory store and **no** app credential — only two observability
-credentials: the INSERT-only ingester and the SELECT-only
-[funnel monitor](#funnel-monitor-host-side-not-compose). The canonical Postgres
-is on the [db qube](../db-qube/).
+**no** memory store and **no** app credential.
+
+**This qube has no network path to the [db qube](../db-qube/) at all** — no
+address for it, no credential on it, no firewall rule toward it. Its three
+database credentials are all for the local sink, whose entire contents are
+Funnel request metadata. The canonical Postgres remains on the db qube, reached
+only by the app qube.
 
 Build this qube with the shared bind-dirs / SELinux / systemd-persistence
 mechanics from the [Qubes README](../README.md) first; this directory is the
@@ -18,9 +21,14 @@ ingress-qube-specific overlay.
 ## Run
 
 ```sh
-cp .env.example .env && $EDITOR .env     # MCP_UPSTREAM (ConnectTCP forwarder), DB_HOST (db qube), ingester pw
+install -d -m 0755 ~/ob1-log-sink/run    # the log sink's socket dir — keep the path SHORT (see below)
+cp .env.example .env && $EDITOR .env     # MCP_UPSTREAM (ConnectTCP forwarder), LOG_SINK_* + role passwords
 docker compose up -d
 ```
+
+There is no `DB_HOST` here any more: the Funnel access log is written to a
+[local sink](#local-log-sink) on this qube, so the internet-facing edge holds no
+address for — and no route to — the db qube.
 
 `MCP_UPSTREAM` points at the
 [ConnectTCP forwarder](#the-ingressapp-hop-qubesconnecttcp) on this qube's own
@@ -34,10 +42,9 @@ sudo tailscale serve  --https=443 off                          # vacate :443
 sudo tailscale funnel --bg --https=443 http://127.0.0.1:9787   # single rule
 ```
 
-[`docker-compose.yml`](docker-compose.yml) is self-contained — `caddy` +
-`log-ingester`, plus a **parked** local `postgres` (profile `logs-future`) kept
-on disk for a future local logs store but never started. Do **not** set
-`COMPOSE_PROFILES` on this qube.
+[`docker-compose.yml`](docker-compose.yml) is self-contained — `caddy`,
+`log-ingester`, and `log-sink` (this qube's own socket-only Postgres; see
+[Local log sink](#local-log-sink)).
 
 The stack runs under the operator account's **rootless** dockerd (see the
 [Qubes README § Rootless docker](../README.md#rootless-docker-the-deployed-engine-posture)),
@@ -163,43 +170,136 @@ unused.
 
 ## Credentials (per-qube split)
 
-This qube's `.env` holds **only** `OPENBRAIN_INGESTER_PASSWORD` (INSERT-only on
-`funnel_access_log`), plus `MCP_UPSTREAM` and `DB_HOST`. It carries **no**
-superuser or app password — the parked postgres references them as plain
-`${VAR}`, left unset they interpolate empty and are never used (the service
-never starts). The db qube's `pg_hba` must permit `openbrain_ingester` from
-**this** qube's tailnet IP (see
-[`../db-qube/pg_hba.snippet.conf`](../db-qube/pg_hba.snippet.conf)).
+Every credential on this qube belongs to the **local sink**. None of them
+authenticates against the db qube, and the db qube's
+[`pg_hba`](../db-qube/pg_hba.snippet.conf) deliberately carries no line for this
+qube at all.
 
-The one other DB credential on this qube is the funnel monitor's SELECT-only
-`OPENBRAIN_MONITOR_PASSWORD` — deliberately **not** in this `.env` (it never
-enters a container environment) but in a host-side
-`~/.config/funnel-monitor.env`, 0600. See
-[Funnel monitor](#funnel-monitor-host-side-not-compose) below.
+| Credential                       | Lives in                      | Role on the sink                         |
+| -------------------------------- | ----------------------------- | ---------------------------------------- |
+| `LOG_SINK_SUPERUSER_PASSWORD`    | `.env`                        | init only — creates the roles and schema |
+| `OPENBRAIN_INGESTER_PASSWORD`    | `.env`                        | INSERT on `funnel_access_log`            |
+| `OPENBRAIN_LOGS_ROLLUP_PASSWORD` | `.env` + `funnel-summary.env` | DML on the two observability tables      |
+| `OPENBRAIN_MONITOR_PASSWORD`     | `.env` + `funnel-monitor.env` | SELECT on `funnel_access_log` only       |
 
-## Why the log-ingester writes across to the db qube
+The `.env` copy of a role password is what **creates** the role at container
+init; the `~/.config/*.env` copy is what the host-side job **authenticates**
+with. They must match, which is why the monitor password now appears in both
+places (before the sink, the role was created on the db qube and this qube only
+ever held the client half).
 
-Caddy's access logs live here; the canonical Postgres lives on the db qube. For
-now the ingester writes its `funnel_access_log` rows **across** to the db qube —
-the one INSERT-only path this qube keeps to `:5432`. `funnel_access_log` is
-request metadata only (timestamp, path, status, client IP — no thought content,
-no credentials), so a popped edge writing to that one table is low-value. The
-parked local `postgres` above is the documented future home for those logs,
-which would sever this qube's last DB path (GH #12).
+Note what is _not_ here: no `POSTGRES_PASSWORD`, no `OPENBRAIN_APP_PASSWORD`,
+and no variable whose name contains `APP`. The sink's DML role is
+`openbrain_logs_rollup` precisely so that a secret on the internet-facing qube
+can never be confused with, or copy-pasted from, an app-role secret.
+
+The two host-side credentials stay out of container environments entirely, in
+0600 files (`~/.config/funnel-monitor.env`, `~/.config/funnel-summary.env`).
+
+## Local log sink
+
+Caddy's access logs live here, so their store does too. The `log-sink` service
+is this qube's own Postgres, holding `funnel_access_log` and
+`funnel_access_summary` and **nothing else** — no thoughts, no
+`mcp_auth_events`, no pgvector.
+
+Earlier revisions kept the ingester writing **across** to the db qube on
+`:5432`, documented as a deliberate scoped exception
+([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12) option 2) on the
+grounds that `funnel_access_log` is request metadata only. The exception is now
+removed rather than justified (option 3). The reason is a layering one: role
+grants are enforced **inside** Postgres, above the layer a pre-auth
+wire-protocol or SCRAM-handshake flaw would live at. While a socket on the db
+qube was reachable from the internet-facing qube, a popped edge had a path
+toward the corpus regardless of how narrow its grants were. Enforcement now sits
+below anything this qube can reach.
+
+What an attacker gains by owning this cluster is a strict subset of what owning
+the qube already gives them: Caddy's access logs are on the same disk.
+
+**Socket only, three ways.** `listen_addresses=` is empty, so Postgres opens no
+TCP socket; `network_mode: none` leaves both containers with only `lo`; and no
+port is published. The check that proves it is on the **host**:
+
+```sh
+ss -tlnp | grep 5432          # → nothing
+docker inspect ingress-qube-log-sink-1 \
+  --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}'   # → none
+```
+
+**Data posture: disposable.** 30-day raw, 365-day aggregate (the same retention
+the central store enforced), and **no backup**. Losing this cluster costs
+request metadata that was already this qube's to lose; adding the perimeter to
+the backup pipeline would create a new data path _out_ of it, which is the
+opposite of the point. Plan on rebuilding it rather than restoring it.
+
+**One consequence, stated plainly.** Funnel access logs and the thought corpus
+are now separate databases, so "which requests preceded this thought write" is
+no longer a SQL join. That query was always weak — `funnel_access_log` carries
+no thought or session id, so the correlation was timestamp-and-client-IP
+guesswork — and the auth-side audit (`mcp_auth_events`) stays next to the corpus
+where it is written. If you need the correlation, you need a log shipper from
+this qube to the db qube, which is exactly the network path this design removes.
+
+### Gotchas that cost real debugging time
+
+- **The stock postgres image trusts every local connection.** Its default
+  `pg_hba.conf` carries `local all all trust`, so _anything_ that can reach the
+  socket may connect as **any** role — including the superuser — with no
+  password. On a socket-only deployment that silently makes the INSERT-only
+  ingester grant decorative. The sink sets
+  `POSTGRES_INITDB_ARGS=--auth-local=scram-sha-256`, and `docker-entrypoint.sh`
+  exports `PGPASSWORD` during init specifically so that works. Verify it rather
+  than assuming — a wrong password must be refused:
+
+  ```sh
+  PGPASSWORD=wrong psql -h ~/ob1-log-sink/run -U openbrain_monitor -d openbrain_logs -c 'select 1'
+  # → FATAL: password authentication failed
+  ```
+
+- **Keep the socket directory path short.** A unix socket path is capped at 107
+  bytes (`sun_path`), and it is the **host** path that counts for the host-side
+  monitor and rollup. A deep directory fails at _connect_ time with
+  `Unix-domain socket path … is too long`, not at mount time.
+
+- **No `chown` is needed, and trying to clean up by hand will fail.** The
+  postgres entrypoint chowns `/var/run/postgresql` to its own user on every
+  start, which under rootless docker lands on a subuid while leaving the
+  directory `o+rx` and the socket `0777` — so your account can still connect.
+  The flip side: leftover socket files are owned by that subuid, so a plain `rm`
+  from your shell gets `Operation not permitted`. Remove them from a container
+  (`docker run --rm -v ~/ob1-log-sink/run:/x alpine rm -f /x/.s.PGSQL.5432*`) or
+  just let the next start reuse the directory.
+
+- **`docker compose up -d --build` rebuilds Caddy too**, because its `build`
+  block sets `pull: true` — a fresh base layer produces a new image, which
+  forces a recreate and briefly drops the public door. When you only mean to
+  touch the log path, name the services:
+  `docker compose up -d --build log-sink log-ingester`.
+
+- **A unix connect needs three Deno permissions, not two.** Deno describes it as
+  `unix:<path>` and requires `--allow-net` for it _in addition to_
+  `--allow-read` and `--allow-write`. Handled in
+  [`server/Dockerfile.ingester`](../../../server/Dockerfile.ingester); it
+  matters if you fork the image.
 
 ## Funnel monitor (host-side, not compose)
 
 An alert-only host script
 ([`scripts/funnel_monitor.sh`](../../../scripts/funnel_monitor.sh)) probes the
-db qube every 5 minutes as a dedicated SELECT-only role (`openbrain_monitor`,
-readable table: `funnel_access_log` only — never reason-coded auth events or
-thoughts) and appends to `~/funnel_monitor.log`: funnel request volume over the
-window (alert above `VOLUME_THRESHOLD`, default 200) and newly ingested HTTP 401
-responses at the public Funnel door (local alert at
+**local sink** every 5 minutes as a dedicated SELECT-only role
+(`openbrain_monitor`, readable table: `funnel_access_log` only — it cannot even
+read `funnel_access_summary`) and appends to `~/funnel_monitor.log`: funnel
+request volume over the window (alert above `VOLUME_THRESHOLD`, default 200) and
+newly ingested HTTP 401 responses at the public Funnel door (local alert at
 `AUTH_FAILURE_BURST_THRESHOLD`, default 5). It **fails loud**: an
-empty/non-numeric probe result — db qube unreachable, role or credential broken
-— is itself an ALERT, so the monitor can't die silently while the timer looks
+empty/non-numeric probe result — sink down, role or credential broken — is
+itself an ALERT, so the monitor can't die silently while the timer looks
 healthy.
+
+`DB_HOST` in `~/.config/funnel-monitor.env` is an absolute **path** now, not an
+address: an absolute value makes psql use a unix socket, which is the only way
+to reach the sink. No script change was needed — that is libpq's own convention.
 
 Pushover delivery is opt-in (`PUSHOVER_ENABLED=1`). A successful interval with
 at least `AUTH_FAILURE_BURST_THRESHOLD` new Funnel 401 rows (default 5) sends
@@ -227,30 +327,59 @@ application/database/client credential. (Pushover necessarily receives its own
 delivery token and user key as authentication form fields.) Pushover is
 alert-only; the script never closes Funnel or changes firewall state.
 
-**Provision the role** (once): on a fresh init, set `OPENBRAIN_MONITOR_PASSWORD`
-before `db/00-roles.sh` runs; on an existing DB, run
-[`scripts/upgrade-add-monitor-role.sh`](../../../scripts/upgrade-add-monitor-role.sh)
-(compose) or the equivalent `CREATE ROLE` by hand on the db qube (see
-[`../db-qube/README.md`](../db-qube/README.md)), then re-run
-`db/02-observability.sql` for the grants and `db/03-grants-assertion.sql` to
-verify them. The db qube's `pg_hba` must permit `openbrain_monitor` from
-**this** qube's tailnet IP
-([`../db-qube/pg_hba.snippet.conf`](../db-qube/pg_hba.snippet.conf)).
+**Provision the role**: nothing to do by hand. Set `OPENBRAIN_MONITOR_PASSWORD`
+in this qube's `.env` before the sink's first `up`, and
+[`db/log-sink/00-log-sink-roles.sh`](../../../db/log-sink/00-log-sink-roles.sh)
+creates the role with its single grant. Leave the variable unset and the sink
+creates no monitor role at all — the monitor is optional. Put the **same value**
+in `~/.config/funnel-monitor.env`, which is what the script authenticates with.
 
-**Upgrading a v3 deployment — install v4 here first, then replay the SQL.**
-`db/02-observability.sql` revokes the monitor role's obsolete `mcp_auth_events`
-access, converging this edge credential to the one-table contract. v3 probes
-that table. Replaying the SQL while v3 is still installed therefore breaks its
-second probe: the query returns `permission denied`, the probe reads as empty,
-and every subsequent run logs `monitor probe FAILED` on the timer's cadence —
-with the local auth-failure alarm effectively down for the whole gap. The
-reverse order has no such window, because v4 never reads `mcp_auth_events` and
-its `funnel_access_log` grant is unchanged, so it runs correctly against a
-not-yet-converged database. Install v4 below, then replay
-`db/02-observability.sql`, then verify with `db/03-grants-assertion.sql` —
-ideally back to back in one window. This is the general rule for host-side
-consumers in the split topology; see
-[Upgrading an existing deployment](../app-qube/README.md#upgrading-an-existing-deployment).
+To add the monitor to a sink that is already initialized, create the role by
+hand (init scripts only run on a fresh data directory) and re-run the assertion:
+
+Run from this qube's compose directory (`deploy/qubes/ingress-qube/`). The
+socket demands scram auth even from the superuser — the entrypoint unsets
+PGPASSWORD after init, and `compose exec` does not read `.env` — so the
+superuser password, database, and role are pulled from `.env` and forwarded
+explicitly. The assertion file lives in the repo, three levels up.
+
+```sh
+# Derive the configured values from .env (defaults match .env.example).
+export PGPASSWORD="$(sed -n 's/^LOG_SINK_SUPERUSER_PASSWORD=//p' .env)"
+SINK_SUPER="$(sed -n 's/^LOG_SINK_SUPERUSER=//p' .env)"; SINK_SUPER="${SINK_SUPER:-postgres}"
+SINK_DB="$(sed -n 's/^LOG_SINK_DB=//p' .env)"; SINK_DB="${SINK_DB:-openbrain_logs}"
+docker compose exec -T -e PGPASSWORD log-sink \
+  psql -U "$SINK_SUPER" -d "$SINK_DB" -v ON_ERROR_STOP=1 <<'SQL'
+  CREATE ROLE openbrain_monitor LOGIN NOSUPERUSER NOCREATEDB
+    NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'PUT-THE-PASSWORD-HERE';
+  GRANT USAGE ON SCHEMA public TO openbrain_monitor;
+  GRANT SELECT ON funnel_access_log TO openbrain_monitor;
+SQL
+# The `< file` redirection reads from the HOST, relative to this directory, so
+# point it at the repo checkout three levels up.
+docker compose exec -T -e PGPASSWORD log-sink \
+  psql -U "$SINK_SUPER" -d "$SINK_DB" -v ON_ERROR_STOP=1 \
+  -f - < ../../../db/log-sink/02-log-sink-assertion.sql   # must print "invariants OK"
+unset PGPASSWORD
+```
+
+**Repointing the monitor at a different database resets its cursor — do it
+deliberately.** The monitor tracks the highest `funnel_access_log.id` it has
+seen, in `~/.local/state/funnel-monitor/state`
+(`<last-row-id> <last-push-epoch> <pending-auth-failures>`). A new sink's
+sequence starts at 1, so a cursor carried over from another cluster is _higher_
+than anything the new one can produce. The script treats that as a restore and
+**refuses to advance**, logging
+`monitor probe FAILED (funnel row id moved
+backwards)` every interval — correct
+fail-loud behaviour, and a permanent alarm until you clear it. Zero the cursor
+once, after cutting over:
+
+```sh
+printf '0 0 0\n' > ~/.local/state/funnel-monitor/state
+systemctl --user start funnel-monitor.service
+tail -1 ~/funnel_monitor.log        # → vol=N funnel_401_rows=N, no ALERT
+```
 
 **Install on this qube** (as the regular user, from the repo checkout):
 
@@ -319,20 +448,74 @@ provider calls append only their aggregate count). Both files append
 indefinitely — at 5-minute cadence that's slow, but on a long-lived qube add a
 logrotate rule (or an occasional truncate) for the pair.
 
-Future note: if the funnel logs ever move into this qube's parked local postgres
-([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)), the volume
-query's target moves with them too; both monitor queries would then be local and
-the edge's central-DB SELECT path could be removed.
+Both of the monitor's queries are now local, against the sink — the edge's
+central-DB SELECT path is gone, which is what
+[#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12) anticipated.
+
+## Daily rollup and retention (host-side, not compose)
+
+The sink's retention is not automatic — it is enforced by the same daily job the
+central store used, now running here against the socket.
+[`db/summarize_funnel.sql`](../../../db/summarize_funnel.sql) recomputes each
+day's aggregates into `funnel_access_summary`, finalizes and deletes raw rows
+past 30 days, and drops summary rows past 365. **Without this timer the raw
+table grows without bound.**
+
+The companion half — `mcp_auth_events` retention and its report — runs on the
+[app qube](../app-qube/README.md) against the corpus, because that is where mcp
+writes it. Each qube runs the half that owns its tables; neither can see the
+other's. Single-host installs run both files in one session, which is the
+default.
+
+Install (as the regular user, from the repo checkout):
+
+```sh
+mkdir -p ~/.config/systemd/user
+install -m 0755 scripts/funnel_daily_summary.sh ~/funnel_daily_summary.sh
+install -m 0644 db/summarize_funnel.sql          ~/summarize_funnel.sql
+install -m 0600 deploy/qubes/ingress-qube/funnel-summary.env.example ~/.config/funnel-summary.env
+$EDITOR ~/.config/funnel-summary.env     # DB_HOST = the socket dir, SUMMARY_ROLE_PASSWORD
+install -d -m 0700 ~/openbrain-funnel-summaries
+install -m 0644 deploy/qubes/ingress-qube/funnel-summary.service ~/.config/systemd/user/
+install -m 0644 deploy/qubes/ingress-qube/funnel-summary.timer   ~/.config/systemd/user/
+systemctl --user daemon-reload
+```
+
+Run it once in the foreground before trusting the timer, then enable it:
+
+```sh
+FUNNEL_SUMMARY_ENV_FILE=$HOME/.config/funnel-summary.env bash ~/funnel_daily_summary.sh
+systemctl --user enable --now funnel-summary.timer
+systemctl --user list-timers funnel-summary.timer --no-pager
+```
+
+`SUMMARY_SQL_FILE` must name **only** `summarize_funnel.sql` here. Left unset it
+resolves to both shipped files, and the auth-events half would fail against a
+sink that has no `mcp_auth_events` table — correctly, but noisily, every night.
+
+Reports contain request metadata, so they land in a mode-0700 local directory.
+Replicating them off this qube is a new outbound path from the perimeter; the
+sink's disposable-data posture deliberately avoids one.
 
 ## Verify
 
 ```sh
-docker compose config --services      # exactly: caddy, log-ingester  (NOT postgres)
+docker compose config --services             # exactly: caddy, log-ingester, log-sink
 docker compose up -d
 curl -s http://127.0.0.1:9787/caddy-health   # → ok
+
+# the sink came up clean and holds only what it should
+docker compose logs log-sink | grep 'invariants OK'
+ss -tlnp | grep 5432 || echo 'no TCP listener — correct'
+
+# a request actually lands
+curl -s -o /dev/null http://127.0.0.1:9787/mcp && sleep 6
+docker compose logs --tail=3 log-ingester    # → "N/N rows inserted"
 ```
 
-The `"POSTGRES_PASSWORD" variable is not set. Defaulting to a blank string`
-warnings on `config`/`up` are **expected** — they're the unset passwords of the
-parked `logs-future` postgres, which never starts. That blankness is the point:
-it's what keeps the superuser and app credentials off this qube.
+`invariants OK` comes from
+[`db/log-sink/02-log-sink-assertion.sql`](../../../db/log-sink/02-log-sink-assertion.sql),
+which runs last during init and **fails the init** if the sink ever holds a
+third relation, a role with cluster-level privileges, an unenumerated grant, or
+a `GRANT … TO PUBLIC`. Its absence from the log is as meaningful as its
+presence.

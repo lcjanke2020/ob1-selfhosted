@@ -238,13 +238,15 @@ an external DB.)
 ### db qube — Postgres only
 
 Postgres runs natively, out of compose, in [`db-qube/`](db-qube/). The app qube
-reaches it as the full app role (and the readonly role for backups); the ingress
-qube reaches it as two scoped observability roles — the INSERT-only ingester and
-the SELECT-only funnel monitor. All are scoped by Tailscale ACL + nft
-`tailscale0:5432` + `pg_hba` scram. Its on-disk config — bind-dirs, the
-`tailscale0:5432` firewall unit, the boot ordering in `rc.local`, and the
-`pg_hba` / `listen_addresses` snippets — is provided as reproducible
-placeholders in [`db-qube/`](db-qube/) (see its [README](db-qube/README.md)).
+— its only peer — reaches it as the full app role (plus the readonly role for
+backups and the superuser for remote admin), scoped by Tailscale ACL + nft
+`tailscale0:5432` + `pg_hba` scram. The ingress qube has no path here at all:
+its Funnel logs land in a local socket-only sink on the edge itself
+([ingress-qube README § Local log sink](ingress-qube/README.md#local-log-sink)).
+Its on-disk config — bind-dirs, the `tailscale0:5432` firewall unit, the boot
+ordering in `rc.local`, and the `pg_hba` / `listen_addresses` snippets — is
+provided as reproducible placeholders in [`db-qube/`](db-qube/) (see its
+[README](db-qube/README.md)).
 
 ### app qube — mcp + Ollama
 
@@ -265,41 +267,44 @@ cp .env.example .env && $EDITOR .env     # required values + METADATA_FALLBACK_P
 docker compose up -d                     # services: mcp, ollama
 ```
 
-### ingress qube — Funnel + Caddy (+ log-ingester)
+### ingress qube — Funnel + Caddy + log-ingester + log sink
 
-The ingress qube terminates the Tailscale Funnel and runs Caddy + the
-log-ingester, with **no** memory store and **no** app credential — it carries
-only two observability credentials: the INSERT-only ingester and the SELECT-only
-funnel monitor. Caddy reverse-proxies to the app qube's mcp through the
-host-side ConnectTCP forwarder (`MCP_UPSTREAM=<this-qube-ip>:18787` — see
-[the ingress→app hop](ingress-qube/README.md#the-ingressapp-hop-qubesconnecttcp));
-the log-ingester writes its `funnel_access_log` rows _across_ to the db qube
-(`DB_HOST`), the one INSERT-only path this qube keeps to `:5432` (the documented
-exception — see
-[three-qube-design.md](three-qube-design.md#log-ingester-placement-decided-for-now)
-and #12), and the host-side funnel monitor reads that table back over the same
-wire. The monitor can optionally deliver privacy-safe, deduplicated Pushover
-alerts for public-door 401 bursts; provider credentials remain separate 0600
-host files (see
+The ingress qube terminates the Tailscale Funnel and runs Caddy, the
+log-ingester, and its own **local socket-only Postgres log sink**, with **no**
+memory store and **no** app credential. It carries only sink credentials — the
+sink superuser (init only), the INSERT-only ingester, the rollup role, and the
+optional SELECT-only monitor — and **no** path to the db qube at all. Caddy
+reverse-proxies to the app qube's mcp through the host-side ConnectTCP forwarder
+(`MCP_UPSTREAM=<this-qube-ip>:18787` — see
+[the ingress→app hop](ingress-qube/README.md#the-ingressapp-hop-qubesconnecttcp)).
+The log-ingester writes its `funnel_access_log` rows to the
+[local sink](ingress-qube/README.md#local-log-sink) over a unix socket
+(`network_mode: none`, no TCP listener), so the edge reaches no other qube's
+database (see
+[three-qube-design.md](three-qube-design.md#log-ingester-placement-settled-local-sink)
+and #12); the host-side funnel monitor and the daily rollup read that sink back
+over the same socket. The monitor can optionally deliver privacy-safe,
+deduplicated Pushover alerts for public-door 401 bursts; provider credentials
+remain separate 0600 host files (see
 [`ingress-qube/README.md`](ingress-qube/README.md#funnel-monitor-host-side-not-compose)).
-A **parked** local `postgres` is kept on disk for a future local logs store but
-never started. Full recipe in
-[`ingress-qube/README.md`](ingress-qube/README.md):
+Full recipe in [`ingress-qube/README.md`](ingress-qube/README.md):
 
 ```sh
 cd ingress-qube
-cp .env.example .env && $EDITOR .env     # MCP_UPSTREAM (ConnectTCP forwarder), DB_HOST (db qube), ingester pw
-docker compose up -d                     # services: caddy, log-ingester
+cp .env.example .env && $EDITOR .env     # MCP_UPSTREAM (ConnectTCP forwarder),
+                                         # INGESTER_DB_HOST + LOG_SINK_SOCKET_DIR (socket dir),
+                                         # LOG_SINK_SUPERUSER_PASSWORD, ingester + rollup passwords
+docker compose up -d                     # services: caddy, log-ingester, log-sink
 sudo tailscale funnel --bg --https=443 http://127.0.0.1:9787   # expose Caddy (vacate :443 first)
 ```
 
-The per-qube `ingress-qube/docker-compose.yml` defines **only** `caddy` +
-`log-ingester` (plus the parked DB) — the now-unused edge `mcp` + `ollama` that
-the old override recipe still started are simply not there, which is the clean
-end state of #13. `MCP_UPSTREAM` remains the topology's one pivot point: the
-single-host install defaults it to `mcp:8787`, the split points it at the
-ConnectTCP forwarder, and the documented rollback repoints it at a direct
-app-qube address — each flip is that one line plus a Caddy reload (the rollback
-also needs the app-qube compose republished on `0.0.0.0` **and** an
-ingress-scoped `custom-input` accept on the app qube — see the
+The per-qube `ingress-qube/docker-compose.yml` defines `caddy`, `log-ingester`,
+and `log-sink` — the now-unused edge `mcp` + `ollama` that the old override
+recipe still started are simply not there, which is the clean end state of #13.
+`MCP_UPSTREAM` remains the topology's one pivot point: the single-host install
+defaults it to `mcp:8787`, the split points it at the ConnectTCP forwarder, and
+the documented rollback repoints it at a direct app-qube address — each flip is
+that one line plus a Caddy reload (the rollback also needs the app-qube compose
+republished on `0.0.0.0` **and** an ingress-scoped `custom-input` accept on the
+app qube — see the
 [ingress README](ingress-qube/README.md#the-ingressapp-hop-qubesconnecttcp)).

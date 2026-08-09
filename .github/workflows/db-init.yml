@@ -58,12 +58,16 @@ on:
       - "server/deno.lock"
       - "deploy/compose-local/docker-compose.yml"
       - "deploy/qubes/app-qube/backup/**"
+      - "deploy/qubes/ingress-qube/docker-compose.yml"
+      - "scripts/funnel_daily_summary.sh"
       - "scripts/funnel_monitor.sh"
       - "scripts/funnel_monitor_test.sh"
-      - "scripts/funnel_daily_summary.sh"
       - "deploy/qubes/ingress-qube/funnel-monitor.env.example"
       - "deploy/qubes/ingress-qube/funnel-monitor.service"
       - "deploy/qubes/ingress-qube/funnel-monitor.timer"
+      - "deploy/qubes/ingress-qube/funnel-summary.env.example"
+      - "deploy/qubes/ingress-qube/funnel-summary.service"
+      - "deploy/qubes/ingress-qube/funnel-summary.timer"
       - "deploy/qubes/app-qube/funnel-summary.env.example"
       - "deploy/qubes/app-qube/funnel-summary.service"
       - "deploy/qubes/app-qube/funnel-summary.timer"
@@ -91,12 +95,16 @@ on:
       - "server/deno.lock"
       - "deploy/compose-local/docker-compose.yml"
       - "deploy/qubes/app-qube/backup/**"
+      - "deploy/qubes/ingress-qube/docker-compose.yml"
       - "scripts/funnel_monitor.sh"
       - "scripts/funnel_monitor_test.sh"
       - "scripts/funnel_daily_summary.sh"
       - "deploy/qubes/ingress-qube/funnel-monitor.env.example"
       - "deploy/qubes/ingress-qube/funnel-monitor.service"
       - "deploy/qubes/ingress-qube/funnel-monitor.timer"
+      - "deploy/qubes/ingress-qube/funnel-summary.env.example"
+      - "deploy/qubes/ingress-qube/funnel-summary.service"
+      - "deploy/qubes/ingress-qube/funnel-summary.timer"
       - "deploy/qubes/app-qube/funnel-summary.env.example"
       - "deploy/qubes/app-qube/funnel-summary.service"
       - "deploy/qubes/app-qube/funnel-summary.timer"
@@ -868,8 +876,235 @@ jobs:
           test "$failed_rc" -eq 1
           test "$(sha256sum "$report" | awk '{print $1}')" = "$first_hash"
           test -z "$(find "$report_dir" -maxdepth 1 -type f -name '.funnel-summary-*' -print -quit)"
-          echo "remote wrapper confined its credential, rejected mode drift, and preserved its report on failure"
+
+          # Single-host default path: SUMMARY_SQL_FILE as the two-file list,
+          # both halves in ONE psql session, one report. This is also the only
+          # place db/summarize_auth_events.sql executes in CI at all — the
+          # log-sink job is funnel-only by design, and the corpus steps above
+          # run only the funnel half.
+          cat > "$psql_shim" <<'SH'
+          #!/usr/bin/env bash
+          exec docker exec -i -e PGPASSWORD pgci psql "$@"
+          SH
+          chmod 0755 "$psql_shim"
+          both_dir="$smoke_root/reports-both"
+          install -d -m 0700 "$both_dir"
+          {
+            printf 'SUMMARY_BACKEND=postgres\n'
+            printf 'DB_HOST=127.0.0.1\n'
+            printf 'DB_PORT=5432\n'
+            printf 'POSTGRES_DB=%q\n' "$POSTGRES_DB"
+            printf 'export OPENBRAIN_APP_PASSWORD=%q\n' "$OPENBRAIN_APP_PASSWORD"
+            printf 'SUMMARY_SQL_FILE=%q\n' "$GITHUB_WORKSPACE/db/summarize_funnel.sql $GITHUB_WORKSPACE/db/summarize_auth_events.sql"
+            printf 'SUMMARY_DIR=%q\n' "$both_dir"
+            printf 'PSQL_BIN=%q\n' "$psql_shim"
+          } > "$env_file"
+          chmod 0600 "$env_file"
+          PATH="$probe_bin:$PATH" FUNNEL_SUMMARY_ENV_FILE="$env_file" \
+            scripts/funnel_daily_summary.sh
+          mapfile -t both < <(find "$both_dir" -maxdepth 1 -type f -name 'funnel-summary-*.md' -print)
+          test "${#both[@]}" -eq 1
+          grep -Fq '# Funnel observability report' "${both[0]}"
+          grep -Fq '## Rolling 24h — auth-failure reasons (mcp side)' "${both[0]}"
+          echo "remote wrapper confined its credential, rejected mode drift, and preserved its report on failure; the single-host two-file list ran both halves in one session"
 
       - name: Container logs on failure
         if: failure()
         run: docker logs pgci || true
+
+  log-sink-init:
+    name: log sink init, invariants, and rollup
+    runs-on: ubuntu-latest
+    env:
+      # The ingress qube's local Funnel-log sink is a SEPARATE cluster from the
+      # corpus: two relations, three roles, unix socket only. This job proves
+      # the three claims db/log-sink/ makes that nothing else covers.
+      POSTGRES_DB: openbrain_logs
+      POSTGRES_USER: postgres
+      # CI-only throwaway credentials for an ephemeral container — not secrets.
+      POSTGRES_PASSWORD: ci_sink_superuser_pw
+      OPENBRAIN_INGESTER_PASSWORD: ci_sink_ingester_pw
+      OPENBRAIN_LOGS_ROLLUP_PASSWORD: ci_sink_rollup_pw
+      OPENBRAIN_MONITOR_PASSWORD: ci_sink_monitor_pw
+    steps:
+      # Same fork-safe ref pattern as ci.yml.
+      - name: Checkout PR head safely
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          persist-credentials: false
+
+      - name: Ingress rollup units parse (mirror of the app-qube check)
+        run: |
+          systemd-analyze verify \
+            deploy/qubes/ingress-qube/funnel-summary.service \
+            deploy/qubes/ingress-qube/funnel-summary.timer
+          systemd-analyze calendar '*-*-* 00:40:00 UTC' >/dev/null
+
+      - name: Derive the sink image from compose (single source of truth)
+        run: |
+          # Same approach as the readonly-pg-dump job: match the pin itself, not
+          # a line offset from the service key — a comment block between the two
+          # (there is one) would break an `-A<n>` window. `-m1` avoids SIGPIPE
+          # from `head`; `|| true` lets the guard below emit a clear error.
+          img=$(grep -m1 -oE 'postgres:[A-Za-z0-9._-]+' deploy/qubes/ingress-qube/docker-compose.yml || true)
+          test -n "$img" || { echo "::error::no postgres image pin found in deploy/qubes/ingress-qube/docker-compose.yml"; exit 1; }
+          echo "PG_IMAGE=$img" >> "$GITHUB_ENV"
+          echo "Using $img (from deploy/qubes/ingress-qube/docker-compose.yml)"
+
+      - name: Start the sink exactly as the ingress qube does
+        run: |
+          set -euo pipefail
+          # Mirrors the compose service: socket-only (no published port, empty
+          # listen_addresses) and --auth-local=scram so `local all all trust`
+          # cannot make the least-privilege roles decorative.
+          docker run -d --name sinkci --network none \
+            -e POSTGRES_DB -e POSTGRES_USER -e POSTGRES_PASSWORD \
+            -e POSTGRES_INITDB_ARGS="--auth-local=scram-sha-256 --auth-host=scram-sha-256" \
+            -e POSTGRES_HOST_AUTH_METHOD=reject \
+            -e OPENBRAIN_INGESTER_PASSWORD -e OPENBRAIN_LOGS_ROLLUP_PASSWORD \
+            -e OPENBRAIN_MONITOR_PASSWORD \
+            -v "$GITHUB_WORKSPACE/db/log-sink/00-log-sink-roles.sh:/docker-entrypoint-initdb.d/00-log-sink-roles.sh:ro" \
+            -v "$GITHUB_WORKSPACE/db/log-sink/01-log-sink.sql:/docker-entrypoint-initdb.d/01-log-sink.sql:ro" \
+            -v "$GITHUB_WORKSPACE/db/log-sink/02-log-sink-assertion.sql:/docker-entrypoint-initdb.d/99-log-sink-assertion.sql:ro" \
+            "$PG_IMAGE" -c listen_addresses=
+          for i in $(seq 1 60); do
+            docker exec sinkci pg_isready -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec sinkci pg_isready -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+
+      - name: Init assertion ran and passed
+        run: |
+          set -euo pipefail
+          # Absence is as meaningful as failure: a silently-skipped assertion
+          # would let every check below pass against an unverified schema.
+          docker logs sinkci 2>&1 | grep -F 'log sink: invariants OK'
+
+      - name: Socket only — no TCP listener exists to connect to
+        run: |
+          set -euo pipefail
+          # PGPASSWORD is REQUIRED here: socket auth is scram (see the step
+          # below). Without it psql errors, `la` is empty for the wrong reason,
+          # and the emptiness check passes even against a live TCP listener —
+          # so assert the query SUCCEEDED before trusting its output.
+          la=$(docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" sinkci \
+                 psql -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+                 -Atc "select 'la=[' || current_setting('listen_addresses') || ']'")
+          echo "$la"
+          test "$la" = 'la=[]' || { echo "listen_addresses is not empty: $la" >&2; exit 1; }
+          # 5432 == 0x1538. `cmd && { exit 1; }` would abort the step under
+          # `set -e` in the PASSING case (grep exits non-zero), so branch on it.
+          if docker exec sinkci sh -c 'grep -q ":1538" /proc/net/tcp'; then
+            echo "a TCP listener on 5432 exists" >&2; exit 1
+          fi
+          echo "no TCP listener; socket only"
+
+      - name: Roles hold exactly their grants, and no more
+        run: |
+          set -euo pipefail
+          q() { docker exec -i -e PGPASSWORD="$2" sinkci psql -h /var/run/postgresql -U "$1" -d "$POSTGRES_DB" -Atc "$3"; }
+          # The ingester's real statement shape: bare INSERT, no RETURNING
+          # (RETURNING would need SELECT on id, which it deliberately lacks).
+          q openbrain_ingester "$OPENBRAIN_INGESTER_PASSWORD" \
+            "insert into funnel_access_log (ts,socket,client_ip,method,path,status,duration_ms,bytes_out,user_agent) values (now() - interval '2 hours','funnel','192.0.2.9','GET','/mcp',401,12,0,'ci'), (now() - interval '40 days','funnel','192.0.2.9','GET','/old',404,3,0,'ci');"
+          ! q openbrain_ingester "$OPENBRAIN_INGESTER_PASSWORD" "select count(*) from funnel_access_log;" 2>/dev/null \
+            || { echo "ingester can SELECT; it must be INSERT-only" >&2; exit 1; }
+          ! q openbrain_monitor "$OPENBRAIN_MONITOR_PASSWORD" "select count(*) from funnel_access_summary;" 2>/dev/null \
+            || { echo "monitor can read the summary table" >&2; exit 1; }
+          test "$(q openbrain_monitor "$OPENBRAIN_MONITOR_PASSWORD" 'select count(*) from funnel_access_log;')" = 2
+          ! q openbrain_logs_rollup "$OPENBRAIN_LOGS_ROLLUP_PASSWORD" "create table nope(x int);" 2>/dev/null \
+            || { echo "a sink role can CREATE in public" >&2; exit 1; }
+          echo "ingester INSERT-only, monitor one-table, no role may CREATE"
+
+      - name: Socket connections still require a password
+        run: |
+          set -euo pipefail
+          # The image ships `local all all trust`. If --auth-local did not take,
+          # every grant above is decorative because anything reaching the socket
+          # could just connect as the superuser.
+          ! docker exec -i -e PGPASSWORD=wrong sinkci \
+            psql -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc 'select 1' 2>/dev/null \
+            || { echo "superuser accepted a wrong password on the socket" >&2; exit 1; }
+          echo "socket auth is scram, not trust"
+
+      - name: The rollup runs against the sink (drift guard vs 02-observability.sql)
+        run: |
+          set -euo pipefail
+          # db/summarize_funnel.sql targets BOTH clusters, so a column renamed
+          # in one schema and not the other breaks here rather than in
+          # production at 00:40 UTC.
+          docker exec -i -e PGPASSWORD="$OPENBRAIN_LOGS_ROLLUP_PASSWORD" sinkci \
+            psql -h /var/run/postgresql -U openbrain_logs_rollup -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/summarize_funnel.sql > /tmp/sink-report.md
+          grep -F '# Funnel observability report' /tmp/sink-report.md
+          # The auth-events half must NOT be here: it owns a table this cluster
+          # does not have, which is why the two files are separate.
+          ! grep -qF 'auth-failure reasons' /tmp/sink-report.md \
+            || { echo "funnel half emitted the auth-events section" >&2; exit 1; }
+          # Retention finalized the 40-day-old row into the summary and deleted it.
+          q() { docker exec -i -e PGPASSWORD="$OPENBRAIN_LOGS_ROLLUP_PASSWORD" sinkci psql -h /var/run/postgresql -U openbrain_logs_rollup -d "$POSTGRES_DB" -Atc "$1"; }
+          test "$(q 'select count(*) from funnel_access_log;')" = 1
+          test "$(q 'select count(*) from funnel_access_summary;')" -ge 1
+          echo "rollup summarized, retained, and reported"
+
+      - name: Assertion still passes after the rollup, and catches drift
+        run: |
+          set -euo pipefail
+          A() { docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" sinkci psql -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f - < db/log-sink/02-log-sink-assertion.sql; }
+          S() { docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" sinkci psql -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "$1"; }
+          A | grep -F 'invariants OK'
+          # An assertion that never fires is worth nothing — prove each arm.
+          S "grant select on funnel_access_summary to openbrain_monitor;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed a widened grant" >&2; exit 1; }
+          S "revoke select on funnel_access_summary from openbrain_monitor;" >/dev/null
+          S "create table thoughts(id int);" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed a stray relation" >&2; exit 1; }
+          S "drop table thoughts;" >/dev/null
+          S "grant select on funnel_access_log to public;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed a GRANT to PUBLIC" >&2; exit 1; }
+          S "revoke select on funnel_access_log from public;" >/dev/null
+          S "create role intruder login;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed a stray role" >&2; exit 1; }
+          S "drop role intruder;" >/dev/null
+          S "grant pg_read_all_data to openbrain_ingester;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed an inherited (membership) privilege" >&2; exit 1; }
+          S "revoke pg_read_all_data from openbrain_ingester;" >/dev/null
+          S "grant insert on funnel_access_log to openbrain_ingester with grant option;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed WITH GRANT OPTION" >&2; exit 1; }
+          S "revoke grant option for insert on funnel_access_log from openbrain_ingester;" >/dev/null
+          S "grant select on funnel_access_log to pg_monitor;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed a grant to a foreign grantee" >&2; exit 1; }
+          S "revoke select on funnel_access_log from pg_monitor;" >/dev/null
+          S "grant create on database $POSTGRES_DB to openbrain_monitor;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed database CREATE" >&2; exit 1; }
+          S "revoke create on database $POSTGRES_DB from openbrain_monitor;" >/dev/null
+          S "create function public.ci_probe() returns bigint language sql security definer as 'select count(*) from funnel_access_log';" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed a SECURITY DEFINER routine" >&2; exit 1; }
+          S "drop function public.ci_probe();" >/dev/null
+          S "create schema ci_extra authorization openbrain_ingester;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed a stray schema" >&2; exit 1; }
+          S "drop schema ci_extra;" >/dev/null
+          S "create function pg_catalog.ci_leak() returns bigint language sql security definer as 'select count(*) from funnel_access_log';" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed a pg_catalog definer function" >&2; exit 1; }
+          S "drop function pg_catalog.ci_leak();" >/dev/null
+          S "create function information_schema.ci_leak() returns int language sql as 'select 1';" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed an information_schema routine" >&2; exit 1; }
+          S "drop function information_schema.ci_leak();" >/dev/null
+          S "create view information_schema.ci_leak_view as select 1 as x;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed an information_schema view" >&2; exit 1; }
+          S "drop view information_schema.ci_leak_view;" >/dev/null
+          # In-place catalog changes that KEEP the object's low OID (CREATE OR
+          # REPLACE / ALTER), which the age test cannot see.
+          S "alter function information_schema._pg_expandarray(anyarray) security definer;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed an existing routine flipped to SECURITY DEFINER" >&2; exit 1; }
+          S "alter function information_schema._pg_expandarray(anyarray) security invoker;" >/dev/null
+          S "create or replace view information_schema.information_schema_catalog_name as select (select count(*) from funnel_access_log)::text::information_schema.sql_identifier as catalog_name;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed a catalog view repointed at the sink tables" >&2; exit 1; }
+          S "create or replace view information_schema.information_schema_catalog_name as select current_database()::information_schema.sql_identifier as catalog_name;" >/dev/null
+          A | grep -F 'invariants OK'
+          echo "assertion catches widened grants, grant options, memberships, foreign grantees, database CREATE, stray relations, stray roles, stray schemas, stray routines (incl. system-schema definer functions and views), in-place SECURITY DEFINER flips, catalog views repointed at the sink tables, and PUBLIC"
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs sinkci || true
