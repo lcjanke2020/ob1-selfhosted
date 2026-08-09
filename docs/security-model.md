@@ -59,12 +59,15 @@ dumps can still read it.
   host-firewall rule that had to stay continuously correct; the qrexec transport
   removed that listener class entirely. See
   [the ingress→app hop](../deploy/qubes/ingress-qube/README.md#the-ingressapp-hop-qubesconnecttcp).
-  The split topology keeps two deliberate **non-loopback listeners**, neither an
-  OB1 container service, each documented where it lives: the host-side qrexec
-  forwarders bind their qube's own IP (reachable only from that qube's own
-  workloads — the qubes input chain default-drops eth0/tailnet sources), and the
-  db qube's Postgres listens on its tailnet address behind the three-layer ACL +
-  nftables + `pg_hba` scoping.
+  The db qube's Postgres rides the same pattern: it binds **loopback only**,
+  and the app qube reaches it through a host-side forwarder over a second
+  dom0-policy-gated `qubes.ConnectTCP` channel
+  ([the app→db hop](../deploy/qubes/app-qube/README.md#the-appdb-hop-qubesconnecttcp))
+  — the tailnet listener and its three-layer ACL + nftables + `pg_hba`-source
+  scoping are retired. The only deliberate **non-loopback listeners** left in
+  the split topology are the host-side qrexec forwarders themselves, which
+  bind their qube's own IP (reachable only from that qube's own workloads —
+  the qubes input chain default-drops eth0/tailnet sources).
 - In Pattern B the override file **removes** mcp's host port
   (`ports: !reset null`). The raw backend is unreachable from the host, so a
   misconfigured `tailscale funnel` pointed at `:8787` fails closed instead of
@@ -157,7 +160,7 @@ Six roles, least privilege, with drift detection:
 
 | Role                    | Privileges                                                                                                                                                                                                                                                                                                                                                                                       | Used by                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `postgres`              | superuser                                                                                                                                                                                                                                                                                                                                                                                        | init + DB admin (role provisioning / migrations) — never the app runtime. In the three-qube split it's reachable from the app qube's IP only for remote admin — a deliberate trade-off (a compromised app qube then has full DB admin, including an app→db OS pivot via `COPY … TO/FROM PROGRAM`); see [db-qube/README.md](../deploy/qubes/db-qube/README.md) and [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15) |
+| `postgres`              | superuser                                                                                                                                                                                                                                                                                                                                                                                        | init + DB admin (role provisioning / migrations) — never the app runtime. In the three-qube split it's reachable only through the app qube's dom0-gated ConnectTCP channel for remote admin — a deliberate trade-off (a compromised app qube then has full DB admin, including an app→db OS pivot via `COPY … TO/FROM PROGRAM`); see [db-qube/README.md](../deploy/qubes/db-qube/README.md) and [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15) |
 | `openbrain_app`         | SELECT/INSERT/UPDATE on `thoughts` (+ scoped observability/sessions grants); SELECT/INSERT-only on metadata-degradation history, SELECT/INSERT/DELETE on its pending-delivery outbox, SELECT/UPDATE on its singleton delivery ledger, and SELECT of only the four native-token verification fields; **no thought/history DELETE or token mutation**, no schema-wide DML, and no role memberships | MCP server, daily summary, metadata notification worker                                                                                                                                                                                                                                                                                                                                                                          |
 | `openbrain_ingester`    | INSERT-only on `funnel_access_log`                                                                                                                                                                                                                                                                                                                                                               | log-ingester sidecar — it parses attacker-influenced log lines, so its blast radius is one table. In the three-qube split this role lives on the ingress qube's **local log sink**, not the corpus (see below)                                                                                                                                                                                                                   |
 | `openbrain_monitor`     | SELECT on `funnel_access_log` only                                                                                                                                                                                                                                                                                                                                                               | host-side funnel monitor ([`scripts/funnel_monitor.sh`](../scripts/funnel_monitor.sh)) — its credential sits on the internet-adjacent edge, so it reads public-door request metadata but can never reach a thought or reason-coded auth event. Optional, like the ingester; likewise on the sink in the split                                                                                                                    |
@@ -351,6 +354,7 @@ security review.
   (ingress qube), mcp + Ollama (app qube), and Postgres (db qube) run in
   separate VMs, so a compromised public edge holds no memory store and no app
   credential. The ingress→app hop rides a dom0-policy-gated `qubes.ConnectTCP`
-  channel (the app qube has no network-facing listener); the app→db hop is a
-  firewall-scoped tailnet path. The single-host install paths still co-locate
-  these by design (one trust boundary).
+  channel (the app qube has no network-facing listener); the app→db hop rides
+  a second such channel (the db qube's Postgres binds loopback only — no
+  tailnet listener). The single-host install paths still co-locate these by
+  design (one trust boundary).

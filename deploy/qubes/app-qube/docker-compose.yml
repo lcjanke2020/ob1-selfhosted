@@ -9,7 +9,9 @@
 #             dom0-policy-gated qubes.ConnectTCP channel, not a network
 #             listener (see the note on the `ports` key below).
 #             Connects to the canonical Postgres on the dedicated DB qube
-#             (DB_HOST in .env), writing thoughts as the openbrain_app role.
+#             through the host-side ob1-db-forward ConnectTCP forwarder
+#             (DB_HOST in .env = this qube's own IP), writing thoughts as
+#             the openbrain_app role.
 #   ollama  — Embeddings, CPU-only (a Qubes app qube has no GPU passthrough).
 #             Point OLLAMA_URL at an external GPU box to offload it.
 #
@@ -61,11 +63,12 @@ services:
     # error line and `restart: unless-stopped` retries until it is back
     # (see the boot probe wired in server/db.ts).
     environment:
-      # The canonical Postgres lives on the dedicated DB qube. DB_HOST is
+      # The canonical Postgres lives on the dedicated DB qube, reached through
+      # the host-side ConnectTCP forwarder on this qube's own IP. DB_HOST is
       # MANDATORY here (no `postgres` service to fall back to): `:?` makes
       # compose fail at `config` time with this message rather than failing
       # only at connect time against a nonexistent host.
-      DB_HOST: ${DB_HOST:?set DB_HOST to the db qube tailnet address (the three-qube split has no local postgres)}
+      DB_HOST: ${DB_HOST:?set DB_HOST to this qube's own IP — the ob1-db-forward ConnectTCP forwarder (the three-qube split has no local postgres)}
       DB_PORT: ${DB_PORT:-5432}
       DB_NAME: ${POSTGRES_DB:-openbrain}
       DB_USER: openbrain_app

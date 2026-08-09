@@ -24,8 +24,11 @@ no network-facing listener. The ingress qube's Caddy reaches it over a
 dom0-policy-gated qubes.ConnectTCP channel; the forwarder, policy line, and
 verification live in the
 [ingress qube's README](../ingress-qube/README.md#the-ingressapp-hop-qubesconnecttcp).
-Ollama runs CPU-only (no GPU passthrough in a Qubes app qube); point
-`OLLAMA_URL` at an external GPU box to offload it.
+The canonical Postgres is on the db qube, reached through this qube's **own**
+ConnectTCP forwarder (`DB_HOST` = this qube's own IP) — install
+[the app→db hop](#the-appdb-hop-qubesconnecttcp) below before expecting `mcp`
+to come up healthy. Ollama runs CPU-only (no GPU passthrough in a Qubes app
+qube); point `OLLAMA_URL` at an external GPU box to offload it.
 
 The stack runs under the operator account's **rootless** dockerd (see the
 [Qubes README § Rootless docker](../README.md#rootless-docker-the-deployed-engine-posture)),
@@ -36,6 +39,68 @@ boot — makes the user manager start the rootless daemon at boot, and
 no manual `up -d` after a reboot. Verify with `docker compose ps` after the qube
 comes back, before any interactive login (a login starts the user manager and
 masks a broken linger).
+
+## The app→db hop (qubes.ConnectTCP)
+
+Every DB client on this qube — mcp, the encrypted backup, the auth-events
+rollup, admin psql — reaches the canonical Postgres through a small host-side
+`socat` forwarder rather than a db-qube network address: the db qube's cluster
+binds **loopback only** and has no network-facing listener at all (same
+pattern as the ingress→app hop, one hop further down):
+
+```
+mcp container ──(this qube's own IP :5432)──▶ socat  [app qube host]
+                     └─ qubes.ConnectTCP+5432 (qrexec) ─▶ <db-qube> 127.0.0.1:5432
+```
+
+The forwarder binds the qube's **own IP** (`qubesdb-read /qubes-ip`): under
+rootless docker the mcp container reaches its own host via slirp4netns — the
+packet arrives on `lo`, which the qubes input chain accepts, so no firewall
+rule is needed — while eth0/tailscale peers are covered by the qubes input
+default-drop (nothing accepts `:5432`). Host-side clients (backup, rollup,
+psql) target the same address, so one `DB_HOST` value serves everything.
+
+Install (the qube's **template** must have `socat`; `/usr` is
+template-provided, so an AppVM-local install vanishes on reboot):
+
+1. dom0 policy (validate with `qubes-policy-lint`; explicit destination, not
+   `@default` — both gotchas in
+   [`../gpu-offload-transport.md`](../gpu-offload-transport.md)):
+
+   ```
+   qubes.ConnectTCP +5432 <app-qube> <db-qube> allow autostart=no
+   ```
+
+   `autostart=no` matches this repo's other ConnectTCP rules: a stray
+   connection must never boot a halted db qube as a side effect — start it
+   deliberately. (The trade-off is real on this hop: with the flag, recovery
+   from a down db qube is a manual `qvm-start`; without it, the first
+   connection self-heals by booting the qube. Pick one knowingly.)
+
+2. Stage [`ob1-db-forward.sh`](ob1-db-forward.sh) (chmod +x; edit its
+   `DB_QUBE` name to match the policy line's destination) and
+   [`ob1-db-forward.service`](ob1-db-forward.service) under `/rw/config/`;
+   the shipped [`rc.local`](rc.local) restages + enables the unit each boot.
+   For the current boot, also install + `systemctl enable --now` it by hand.
+
+3. Set `DB_HOST=<this-qube-ip>` in `.env` — and in **every other** `DB_HOST`
+   carrier: the backup job's env file and `~/.config/funnel-summary.env`. A
+   stale copy pointing at the old db-qube address fails only when that
+   listener goes away, on the consumer's own timer cadence.
+
+The db-qube side needs no transport install — `qubes.ConnectTCP` is a stock
+qrexec service that connects to `127.0.0.1:5432` on the target; its `pg_hba`
+must carry the loopback scram lines
+([`../db-qube/pg_hba.snippet.conf`](../db-qube/pg_hba.snippet.conf)).
+Migrating a live install off the old firewall-scoped tailnet listener is a
+phased checklist:
+[`../db-qube/README.md` § Migrating an existing install to ConnectTCP](../db-qube/README.md#migrating-an-existing-install-to-connecttcp).
+
+Verify from this qube's host: `pg_isready -h <this-qube-ip> -p 5432` answers
+"accepting connections" (that traverses socat → qrexec → the db qube's
+loopback), and an authenticated
+`psql -h <this-qube-ip> -U openbrain_app -d openbrain -c 'select 1;'`
+completes.
 
 ## Offloading metadata classification (`CHAT_*`) to a GPU qube
 
@@ -64,9 +129,11 @@ line `[metadata] fallback policy: ...` reports the intended value.
 
 This qube holds the **admin/superuser** `POSTGRES_PASSWORD` (the trusted
 compartment holds it, never the internet-adjacent ingress qube) and uses it to
-**administer the db qube remotely** over the tailnet — role provisioning +
-schema/migrations. The db qube's `pg_hba` grants the superuser a host line from
-**this qube's IP only** — a deliberate trade-off (a compromised app qube then
+**administer the db qube remotely** through the same
+[ConnectTCP channel](#the-appdb-hop-qubesconnecttcp) every other DB client
+here uses — role provisioning + schema/migrations. The db qube's `pg_hba`
+grants the superuser a **loopback** host line, reachable only through the
+channel dom0 policy grants to this qube — a deliberate trade-off (a compromised app qube then
 has full DB admin — including `COPY … TO/FROM PROGRAM`, i.e. an app→db OS pivot
 — not just the app role; accepted for now since this compartment runs the memory
 application and the db qube is highly contained (the runtime app role itself is
@@ -114,8 +181,9 @@ Apply them by hand, in order, during an operator window.
 The per-migration recipes under [`docs/`](../../../docs/) assume the single-box
 compose install and `docker compose exec -T postgres`. **In this split topology
 that command has nothing to exec into** — Postgres is not in the app compose
-project. Run the same files from this qube's repository checkout, over the
-tailnet, as the database superuser:
+project. Run the same files from this qube's repository checkout, through this
+qube's [ConnectTCP forwarder](#the-appdb-hop-qubesconnecttcp) (`DB_HOST`), as
+the database superuser:
 
 ```sh
 (
@@ -243,9 +311,11 @@ year, but those policies are active only when
 [`scripts/funnel_daily_summary.sh`](../../../scripts/funnel_daily_summary.sh)
 runs. In this split topology Postgres is not in the app compose project, so the
 shipped job uses the wrapper's explicit `postgres` backend: host `psql` connects
-to the db qube as `openbrain_app`, the existing role whose observability grants
-cover the transactional rollup and retention deletes. The internet-adjacent
-ingress qube never receives that credential.
+to the db qube through the
+[ConnectTCP forwarder](#the-appdb-hop-qubesconnecttcp) (`DB_HOST` = this
+qube's own IP) as `openbrain_app`, the existing role whose observability
+grants cover the transactional rollup and retention deletes. The
+internet-adjacent ingress qube never receives that credential.
 
 **This qube runs only the `mcp_auth_events` half.** The rollup is split by
 owning table, because the two halves no longer share a database: the Funnel
@@ -379,7 +449,7 @@ publish it existed to narrow. What remains is small:
 Two properties do the work the old machinery did:
 
 - **The qubes input chain default-drops.** Nothing accepts `:8787` (or the
-  GPU-forwarder's `:11434`) from `eth0`/`tailscale0` — a third qube's probe
+  forwarders' `:5432`/`:11434`) from `eth0`/`tailscale0` — a third qube's probe
   times out at that drop — and mcp has no socket there anyway, so even a packet
   the firewall let through would find nothing listening (`ss -tlnp` is the check
   that proves the socket claim; see Verify). What changed vs the old design is
@@ -463,8 +533,10 @@ journalctl -u ob1-db-backup.service -n 50 --no-pager
 docker compose config --services      # exactly: mcp, ollama
 docker compose up -d
 ss -tlnp | grep 8787                  # 127.0.0.1:8787 ONLY — no 0.0.0.0, no tailnet IP
+ss -tlnp | grep 5432                  # <this-qube-ip>:5432 — the db forwarder (socat), nothing else
+pg_isready -h <this-qube-ip> -p 5432  # "accepting connections" — via qrexec to the db qube
 # from the ingress qube, a Caddy request through the ConnectTCP forwarder
 # reaches mcp; from any OTHER qube or tailnet peer, a connect to this qube's
-# :8787 times out (the qubes input default-drop — the ss line above is what
-# proves no listener exists behind it).
+# :8787 or :5432 times out (the qubes input default-drop — the ss lines above
+# are what prove no wider listener exists behind it).
 ```

@@ -8,8 +8,10 @@
 #
 # This is the compose-side of pulling Postgres out (see three-qube-design.md and
 # issue #4): the `postgres` service is removed from the running stack and the mcp
-# server + log-ingester are pointed at an external Postgres reached over a
-# firewall-scoped tailnet link (default-deny except the app qube).
+# server + log-ingester are pointed at an external Postgres — in the deployed
+# Qubes shape, the db qube reached through the app qube's own ConnectTCP
+# forwarder (no listener on the db qube); on other setups, any reachable
+# Postgres address.
 #
 # What it does:
 #   1. Parks the bundled `postgres` service under a profile that is never
@@ -26,7 +28,10 @@
 #
 # Usage (with the Pattern B + Funnel stack):
 #   In .env:
-#     DB_HOST=<db-qube-tailnet-ip>           # the DB qube's tailnet address
+#     DB_HOST=<external-postgres-address>    # e.g. the app qube's own IP when
+#                                            # the DB qube is reached via the
+#                                            # ConnectTCP forwarder (see
+#                                            # app-qube/README.md § The app→db hop)
 #     COMPOSE_FILE=../compose-local/docker-compose.yml:../compose-tailnet/docker-compose.pattern-b.yml:docker-compose.external-db.yml:docker-compose.cpu-ollama.yml
 #     COMPOSE_PROFILES=pattern-b
 #   then: docker compose up -d

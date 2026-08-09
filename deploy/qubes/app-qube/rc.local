@@ -57,6 +57,19 @@ if [ -d /rw/config/openbrain-units ]; then
 	systemctl enable --now ob1-db-backup.timer 2>/dev/null
 fi
 
+# --- db forwarder (app→db Postgres over qubes.ConnectTCP) ---
+# Restage + enable the qube-IP socat forwarder every DB client on this qube
+# targets (DB_HOST): mcp, the encrypted backup, the rollup, admin psql. The
+# db qube has no network-facing Postgres listener — this channel is the only
+# path. Guarded like the GPU block so a checkout that hasn't staged the files
+# yet still boots; unlike that one, this transport is NOT optional in the
+# three-qube split — a missing unit means every DB client fails.
+if [ -f /rw/config/ob1-db-forward.service ]; then
+	cp /rw/config/ob1-db-forward.service /etc/systemd/system/
+	systemctl daemon-reload
+	systemctl enable --now ob1-db-forward.service
+fi
+
 # --- GPU-offload forwarder (optional; see ../gpu-offload-transport.md) ---
 # Restage + enable the qube-IP socat forwarder that bridges the mcp container
 # to a GPU qube over qubes.ConnectTCP. Guarded: absent files = transport not
