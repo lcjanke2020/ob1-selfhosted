@@ -140,9 +140,9 @@ wrong tool once the point is to put a VM boundary between two of them.
   It holds **no** memory store and **no** app credential, and **no path to the
   db qube**: every credential it carries belongs to the local sink, whose two
   relations hold Funnel request metadata and nothing else. The unused edge `mcp`
-  - `ollama` the old override recipe once started are gone by construction
-    ([#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13) resolved).
-    The memory store is never on the edge; it lives in the db qube.
+  and `ollama` services the old override recipe once started are gone by
+  construction ([#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13)
+  resolved). The memory store is never on the edge; it lives in the db qube.
 - **App qube** — the MCP server (+ Ollama), from [`app-qube/`](app-qube/). mcp
   binds loopback only; the ingress qube reaches it exclusively over the
   dom0-policy-gated qubes.ConnectTCP channel. As the trusted DB control-plane it
@@ -279,8 +279,10 @@ Caddy's access logs to cross qubes. This resolves
   since the log sink moved local
   ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12) option 3). The
   former INSERT-only carve-out to the db qube's `:5432` is gone: roles dropped,
-  `pg_hba` lines removed, no address left in the edge's config. Verified by ACL
-  - firewall + dom0-policy audit, not assumption.
+  `pg_hba` lines removed, no address left in the edge's config. Verified by ACL,
+  firewall, and dom0-policy audit — not assumption. Existing installs reproduce
+  exactly that end-state with the retirement checklist in
+  [db-qube/README.md](db-qube/README.md#retiring-the-ingress-qubes-old-access-existing-installs).
 - Backup/restore works against the relocated DB.
 - The allowlist + XFF behavior re-verified under the two-hop topology.
 - Your network-topology diagram updated — an isolation model that exists only in

@@ -67,9 +67,10 @@ what backs it up.
   ([`security-model.md` § Container layer](security-model.md#container-layer))
   is the only intra-host boundary.
 - **Qubes three-qube split** — the same doors, plus VM boundaries: ingress, app,
-  and db each in their own qube. The paths to the db qube (app→db, plus the
-  edge's two scoped observability paths) are enforced at three independent
-  layers — Tailscale ACL, Qubes nftables, `pg_hba.conf` per-role-per-IP; the
+  and db each in their own qube. The single path to the db qube (app→db) is
+  enforced at three independent layers — Tailscale ACL, Qubes nftables,
+  `pg_hba.conf` per-role-per-IP; the edge has NO path to the db qube at all, its
+  Funnel logs landing in a local socket-only sink on the ingress qube; the
   ingress→app hop rides a dom0-policy-gated `qubes.ConnectTCP` channel — mcp
   binds loopback only (no network listener at all), dom0 policy names the one
   permitted caller, and the OAuth door authenticates what arrives. Detail:

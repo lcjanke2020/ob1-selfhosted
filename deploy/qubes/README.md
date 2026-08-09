@@ -238,13 +238,15 @@ an external DB.)
 ### db qube — Postgres only
 
 Postgres runs natively, out of compose, in [`db-qube/`](db-qube/). The app qube
-reaches it as the full app role (and the readonly role for backups); the ingress
-qube reaches it as two scoped observability roles — the INSERT-only ingester and
-the SELECT-only funnel monitor. All are scoped by Tailscale ACL + nft
-`tailscale0:5432` + `pg_hba` scram. Its on-disk config — bind-dirs, the
-`tailscale0:5432` firewall unit, the boot ordering in `rc.local`, and the
-`pg_hba` / `listen_addresses` snippets — is provided as reproducible
-placeholders in [`db-qube/`](db-qube/) (see its [README](db-qube/README.md)).
+— its only peer — reaches it as the full app role (plus the readonly role for
+backups and the superuser for remote admin), scoped by Tailscale ACL + nft
+`tailscale0:5432` + `pg_hba` scram. The ingress qube has no path here at all:
+its Funnel logs land in a local socket-only sink on the edge itself
+([ingress-qube README § Local log sink](ingress-qube/README.md#local-log-sink)).
+Its on-disk config — bind-dirs, the `tailscale0:5432` firewall unit, the boot
+ordering in `rc.local`, and the `pg_hba` / `listen_addresses` snippets — is
+provided as reproducible placeholders in [`db-qube/`](db-qube/) (see its
+[README](db-qube/README.md)).
 
 ### app qube — mcp + Ollama
 

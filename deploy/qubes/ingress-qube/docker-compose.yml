@@ -112,8 +112,12 @@ services:
     # server/Dockerfile.ingester's --allow-net note.
     network_mode: none
     # The database is now a sibling container, so a health gate is meaningful
-    # (it was absent when Postgres lived on another qube). Without it the
-    # ingester's eager pool races init and restart-loops through it.
+    # (it was absent when Postgres lived on another qube). It NARROWS the
+    # first-`up` race rather than closing it: pg_isready does not authenticate,
+    # and the entrypoint's init-phase temp server answers on the same socket,
+    # so the gate can release the ingester before the roles exist — it then
+    # auth-fails and restart-loops briefly until init finishes, self-healing.
+    # Steady-state startup ordering is what the gate actually buys.
     depends_on:
       log-sink:
         condition: service_healthy

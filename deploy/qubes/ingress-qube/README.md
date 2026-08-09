@@ -338,14 +338,22 @@ To add the monitor to a sink that is already initialized, create the role by
 hand (init scripts only run on a fresh data directory) and re-run the assertion:
 
 ```sh
-docker compose exec -T log-sink psql -U postgres -d openbrain_logs -v ON_ERROR_STOP=1 <<'SQL'
+# The socket demands scram auth even from the superuser — the entrypoint
+# unsets PGPASSWORD after init, and `compose exec` does not read .env — so
+# forward the password explicitly. Run from this qube's compose directory;
+# `-U` must match LOG_SINK_SUPERUSER if you changed it from the default.
+export PGPASSWORD="$(sed -n 's/^LOG_SINK_SUPERUSER_PASSWORD=//p' .env)"
+docker compose exec -T -e PGPASSWORD log-sink \
+  psql -U postgres -d openbrain_logs -v ON_ERROR_STOP=1 <<'SQL'
   CREATE ROLE openbrain_monitor LOGIN NOSUPERUSER NOCREATEDB
     NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'PUT-THE-PASSWORD-HERE';
   GRANT USAGE ON SCHEMA public TO openbrain_monitor;
   GRANT SELECT ON funnel_access_log TO openbrain_monitor;
 SQL
-docker compose exec -T log-sink psql -U postgres -d openbrain_logs -v ON_ERROR_STOP=1 \
+docker compose exec -T -e PGPASSWORD log-sink \
+  psql -U postgres -d openbrain_logs -v ON_ERROR_STOP=1 \
   -f - < db/log-sink/02-log-sink-assertion.sql      # must print "invariants OK"
+unset PGPASSWORD
 ```
 
 **Repointing the monitor at a different database resets its cursor — do it

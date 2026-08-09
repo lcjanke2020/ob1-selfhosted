@@ -64,10 +64,14 @@ USER deno
 #              different path is rejected — so the socket branch grants exactly
 #              one socket file and NO TCP host whatsoever, which is strictly
 #              tighter than the TCP branch it replaces.
-#              Both DB_HOST spellings are covered: `unix:$H` for a DB_HOST that
-#              is already the socket file, and `unix:$H/.s.PGSQL.$DB_PORT` for
-#              the directory form (what deno-postgres opens after appending the
-#              socket name itself — see #openSocketConnection in the driver).
+#              DB_HOST itself should be the socket DIRECTORY — the contract
+#              dbHostType() in log_ingester.ts documents, and the shape every
+#              env example ships. The grant still lists both spellings
+#              because the driver stats the path and branches
+#              (#openSocketConnection): a directory gets `.s.PGSQL.$DB_PORT`
+#              appended, while a path that stats as a FILE is connected to
+#              as-is — the grant tracks the driver's reach, not just the
+#              documented convention.
 #              The compose service additionally runs `network_mode: none`, so
 #              the container has no network stack to reach even if this grant
 #              were wider.

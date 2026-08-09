@@ -259,11 +259,31 @@ files (the single-host default), and the funnel half would then operate on the
 stale, no-longer-written `funnel_access_log` left behind in this database,
 producing an empty report section and a pointless retention DELETE.
 
-Those two relations stay in the corpus schema deliberately, empty. Dropping them
+The relations themselves stay in the corpus schema deliberately. Dropping them
 would diverge from
 [`db/02-observability.sql`](../../../db/02-observability.sql), which single-host
 installs still create, and keeping them means repointing the ingester back at
-this database is a config change rather than a migration.
+this database is a config change rather than a migration. Their ROWS are a
+one-time cutover decision, because nothing retains them anymore — the moment
+this qube's job went auth-only, the funnel half's 30-day raw and 365-day
+aggregate DELETEs stopped running against this database:
+
+- **Raw log — truncate.** Archive first if you want the history
+  (`pg_dump --data-only --table=funnel_access_log`, encrypted like the nightly
+  backup), then `TRUNCATE funnel_access_log;`. Left alone, request metadata
+  (client IPs, paths, user agents) sits in the corpus forever, outliving the
+  30-day promise the retention policy made.
+- **Aggregates — keep or truncate, but decide.** `funnel_access_summary` is
+  small, static from now on, and useful as trend history; keeping it is
+  reasonable. If you keep it, know the 365-day horizon no longer applies — the
+  rows are frozen until you delete them by hand.
+
+Verify the raw side once the cutover is done:
+`SELECT count(*) FROM
+funnel_access_log;` must return 0 — nonzero means the step
+above was skipped. The full edge-retirement pass (pg_hba lines, corpus roles,
+tailnet ACL) is
+[db-qube/README.md § Retiring the ingress qube's old access](../db-qube/README.md#retiring-the-ingress-qubes-old-access-existing-installs).
 
 The job reads a dedicated environment file containing only its database
 settings. Do not point it at this directory's `.env`: exporting the full app
@@ -293,17 +313,15 @@ sudo loginctl enable-linger "$USER"
 systemctl --user daemon-reload
 ```
 
-Run the service once before enabling the schedule. This is the catch-up pass: it
-builds the previous daily summaries before transactionally removing raw rows
-beyond the retention horizon. That removal is irreversible, so take a database
-snapshot first if you may need the pre-30-day raw rows. A failure before the SQL
-transaction commits leaves the raw rows intact; any failed run leaves the last
-complete Markdown artifact intact instead of replacing it with partial output.
-If a connection fails after the database commit but while the report queries are
-streaming, the database may be ahead of the artifact; the next idempotent run
-regenerates the report. A multi-day catch-up stores every day in
-`funnel_access_summary`, but publishes one Markdown artifact for the most
-recently completed day rather than recreating a historical report file per day.
+Run the service once before enabling the schedule. This is the catch-up pass:
+for this qube's auth half it removes `mcp_auth_events` rows beyond the 30-day
+horizon and prints the rolling 24h auth-failure report. That removal is
+irreversible, so take a database snapshot first if you may need the older rows.
+A failure before the SQL transaction commits leaves the raw rows intact; any
+failed run leaves the last complete Markdown artifact intact instead of
+replacing it with partial output. If a connection fails after the database
+commit but while the report queries are streaming, the database may be ahead of
+the artifact; the next idempotent run regenerates the report.
 
 ```sh
 systemctl --user start funnel-summary.service
@@ -335,11 +353,11 @@ but a persistent failure still needs a visible signal. Install a user
 journal.
 
 When updating the rollup implementation, reinstall **both** the wrapper and
-`summarize_funnel.sql`, then manually start the service once and inspect its
-journal before waiting for the next timer occurrence. When rotating
-`OPENBRAIN_APP_PASSWORD`, update the mode-0600 summary env at the same time as
-the app compose `.env` so the unattended job does not silently retain the old
-credential.
+`summarize_auth_events.sql` (this qube's half), then manually start the service
+once and inspect its journal before waiting for the next timer occurrence. When
+rotating `OPENBRAIN_APP_PASSWORD`, update the mode-0600 summary env at the same
+time as the app compose `.env` so the unattended job does not silently retain
+the old credential.
 
 ## Host firewall (custom-input; no `:8787` machinery)
 

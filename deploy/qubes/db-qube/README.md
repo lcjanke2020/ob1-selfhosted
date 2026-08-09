@@ -19,14 +19,14 @@ your template before using them.
 Everything durable lives under `/rw` (a stock AppVM wipes `/etc/systemd/system`
 and most of `/etc` on every reboot), and is re-installed at boot by `rc.local`.
 
-| File here                        | Install at                                         | Purpose                                                                                                          |
-| -------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `qubes-bind-dirs.d/50_user.conf` | `/rw/config/qubes-bind-dirs.d/50_user.conf`        | Persist PGDATA, the cluster config, and the Tailscale identity across reboots                                    |
-| `qubes-firewall-user-script`     | `/rw/config/qubes-firewall-user-script` (chmod +x) | nft accept for inbound `tcp/5432` on `tailscale0` only                                                           |
-| `ob1-db-firewall.service`        | `/rw/config/ob1-db-firewall.service`               | One-shot that re-applies the firewall rule _after_ `tailscaled` is up                                            |
-| `rc.local`                       | `/rw/config/rc.local` (chmod +x)                   | Boot order: start tailscaled → install/enable the firewall unit → start Postgres once `tailscale0` has an IP     |
-| `pg_hba.snippet.conf`            | append to `/etc/postgresql/<ver>/main/pg_hba.conf` | scram host lines: superuser (remote admin) + app + readonly, all from the app qube. No line for the ingress qube |
-| `postgresql.local.conf`          | `conf.d/` drop-in or `ALTER SYSTEM`                | `listen_addresses` (loopback + tailnet IP) and `ssl = off`                                                       |
+| File here                        | Install at                                         | Purpose                                                                                                                                                                                                                                                                                   |
+| -------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `qubes-bind-dirs.d/50_user.conf` | `/rw/config/qubes-bind-dirs.d/50_user.conf`        | Persist PGDATA, the cluster config, and the Tailscale identity across reboots                                                                                                                                                                                                             |
+| `qubes-firewall-user-script`     | `/rw/config/qubes-firewall-user-script` (chmod +x) | nft accept for inbound `tcp/5432` on `tailscale0` only                                                                                                                                                                                                                                    |
+| `ob1-db-firewall.service`        | `/rw/config/ob1-db-firewall.service`               | One-shot that re-applies the firewall rule _after_ `tailscaled` is up                                                                                                                                                                                                                     |
+| `rc.local`                       | `/rw/config/rc.local` (chmod +x)                   | Boot order: start tailscaled → install/enable the firewall unit → start Postgres once `tailscale0` has an IP                                                                                                                                                                              |
+| `pg_hba.snippet.conf`            | append to `/etc/postgresql/<ver>/main/pg_hba.conf` | scram host lines: superuser (remote admin) + app + readonly, all from the app qube. No line for the ingress qube — existing installs must also REMOVE the retired ingress lines, see [§ Retiring the ingress qube's old access](#retiring-the-ingress-qubes-old-access-existing-installs) |
+| `postgresql.local.conf`          | `conf.d/` drop-in or `ALTER SYSTEM`                | `listen_addresses` (loopback + tailnet IP) and `ssl = off`                                                                                                                                                                                                                                |
 
 ## Placeholders to fill
 
@@ -202,6 +202,45 @@ probe requires this schema, but the Qubes app remains OAuth-only: it does not
 enable native token verification, and the dedicated administrator role can stay
 `NOLOGIN`. See
 [Native access tokens](../../../docs/native-access-tokens.md#existing-database-upgrade).
+
+## Retiring the ingress qube's old access (existing installs)
+
+A deployment that predates the ingress qube's local log sink
+([ingress-qube/README.md § Local log sink](../ingress-qube/README.md#local-log-sink))
+still carries live corpus access for the retired edge roles, and appending the
+current `pg_hba.snippet.conf` cannot remove lines already present in the
+installed file. Retirement is an explicit one-time pass — run it after the
+ingress qube has cut over to its sink, from this qube's console (dom0 `qvm-run`)
+or the app qube's superuser psql:
+
+1. **Remove the two retired host lines** — `openbrain_ingester` and
+   `openbrain_monitor` from the ingress qube's IP — from the installed
+   `/etc/postgresql/<ver>/main/pg_hba.conf`. Keep a dated backup, then reload (a
+   reload suffices for pg_hba):
+   `sudo -u postgres psql -Atc 'select pg_reload_conf();'`
+2. **Verify negatively** — the file still parses and no effective rule names
+   either role:
+   `sudo -u postgres psql -Atc "select count(*) from pg_hba_file_rules where error is not null or user_name::text ~ 'openbrain_(ingester|monitor)';"`
+   must print `0`.
+3. **Drop the corpus-side roles** —
+   `DROP ROLE openbrain_ingester; DROP ROLE
+   openbrain_monitor;`. They own
+   nothing, their grants die with them, and
+   [`db/03-grants-assertion.sql`](../../../db/03-grants-assertion.sql) treats
+   both as optional, so it still passes.
+4. **Remove the tailnet ACL grant** for ingress→db:5432 — capture the ACL as
+   actually deployed first (from the admin console, not a possibly-stale local
+   copy) — and drop the ingress qube from any per-peer nft scoping you added.
+5. **Never reuse the old passwords.** The sink reuses the role NAMES by design;
+   give it fresh values in the ingress qube's `.env`, so a credential that left
+   the edge before the cutover no longer opens anything.
+6. **Prove the negative from the ingress qube** — a TCP attempt at
+   `<db-qube-tailnet-ip>:5432` must now die at the wire (ACL/firewall timeout),
+   not at authentication.
+7. **Decide the legacy rows' fate** — nothing writes to or retention-prunes the
+   corpus's `funnel_access_log`/`funnel_access_summary` anymore; see the cutover
+   note in [app-qube/README.md](../app-qube/README.md) for the archive/truncate
+   step and its verification.
 
 ## Template note
 
