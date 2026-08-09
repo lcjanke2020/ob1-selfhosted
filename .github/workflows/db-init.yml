@@ -1085,8 +1085,17 @@ jobs:
           S "create schema ci_extra authorization openbrain_ingester;" >/dev/null
           ! A 2>/dev/null || { echo "assertion missed a stray schema" >&2; exit 1; }
           S "drop schema ci_extra;" >/dev/null
+          S "create function pg_catalog.ci_leak() returns bigint language sql security definer as 'select count(*) from funnel_access_log';" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed a pg_catalog definer function" >&2; exit 1; }
+          S "drop function pg_catalog.ci_leak();" >/dev/null
+          S "create function information_schema.ci_leak() returns int language sql as 'select 1';" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed an information_schema routine" >&2; exit 1; }
+          S "drop function information_schema.ci_leak();" >/dev/null
+          S "create view information_schema.ci_leak_view as select 1 as x;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed an information_schema view" >&2; exit 1; }
+          S "drop view information_schema.ci_leak_view;" >/dev/null
           A | grep -F 'invariants OK'
-          echo "assertion catches widened grants, grant options, memberships, foreign grantees, database CREATE, stray relations, stray roles, stray schemas, stray routines, and PUBLIC"
+          echo "assertion catches widened grants, grant options, memberships, foreign grantees, database CREATE, stray relations, stray roles, stray schemas, stray routines (incl. system-schema definer functions and views), and PUBLIC"
 
       - name: Container logs on failure
         if: failure()

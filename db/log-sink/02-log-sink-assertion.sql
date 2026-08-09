@@ -13,8 +13,9 @@
 -- direct-ACL comparison cannot see: effective privileges arriving via role
 -- membership, memberships themselves, ownership, default ACLs, grants
 -- parked on a grantee outside the enumerated set, stray schemas, and stray
--- routines (EXECUTE defaults to PUBLIC, and SECURITY DEFINER runs as its
--- owner — so a routine is a data path that needs no table grant at all).
+-- routines or relations — including ones planted in the system schemas
+-- (EXECUTE defaults to PUBLIC, and SECURITY DEFINER runs as its owner — so a
+-- routine is a data path that needs no table grant at all).
 --
 -- Deliberately NOT asserted: PostgreSQL's stock PUBLIC defaults — database
 -- CONNECT/TEMP, USAGE on schema public, EXECUTE on built-in functions. None
@@ -432,8 +433,21 @@ $$ LANGUAGE plpgsql;
 -- can call it a read path despite holding no table grant. This sink defines
 -- ZERO routines, so the closure is total: none may exist. (DO blocks are
 -- anonymous — running this file stores nothing in pg_proc.)
+--
+-- The system schemas cannot be excluded by NAME: `allow_system_table_mods` is
+-- off, but that still lets the bootstrap superuser CREATE FUNCTION into
+-- pg_catalog or information_schema, and a view into information_schema — each
+-- a definer/EXECUTE-to-PUBLIC route the name-based exclusions above would wave
+-- through. The discriminator is object age: every catalog object initdb ships
+-- has an OID below FirstNormalObjectId (16384); anything at or above it was
+-- created after initdb. This sink installs no extension, so in a system schema
+-- that can only be user drift. (Pinning via pg_depend.deptype='p' is NOT
+-- usable here — information_schema's ~3000 routines are unpinned, so it
+-- false-positives wholesale; the OID threshold flags exactly the post-initdb
+-- objects.)
 DO $$
 DECLARE
+  first_normal_oid CONSTANT oid := 16384;   -- FirstNormalObjectId (access/transam.h)
   offender text;
 BEGIN
   SELECT string_agg(nspname, ', ' ORDER BY nspname) INTO offender
@@ -456,17 +470,37 @@ BEGIN
       offender;
   END IF;
 
+  -- No routine anywhere: none in a user schema (the sink defines none), and
+  -- none post-initdb in a system schema (the pg_catalog/information_schema
+  -- definer-function route). oid < 16384 leaves the stock catalog untouched.
   SELECT string_agg(n.nspname || '.' || p.proname, ', '
                     ORDER BY n.nspname, p.proname) INTO offender
   FROM pg_proc p
   JOIN pg_namespace n ON n.oid = p.pronamespace
-  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema');
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+     OR p.oid >= first_normal_oid;
   IF offender IS NOT NULL THEN
     RAISE EXCEPTION
       'log sink: unexpected routine(s) %; this sink defines no functions or procedures at all',
       offender;
   END IF;
+
+  -- No user-created relation in a system schema (section 2 already pins the
+  -- non-system relation set to exactly the two tables). Catches the
+  -- information_schema view/table variant of the same drift.
+  SELECT string_agg(n.nspname || '.' || c.relname, ', '
+                    ORDER BY n.nspname, c.relname) INTO offender
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname IN ('pg_catalog', 'information_schema')
+    AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+    AND c.oid >= first_normal_oid;
+  IF offender IS NOT NULL THEN
+    RAISE EXCEPTION
+      'log sink: user-created relation(s) % in a system schema; the catalog must stay stock',
+      offender;
+  END IF;
 END;
 $$ LANGUAGE plpgsql;
 
-\echo 'log sink: invariants OK (2 relations, 1 schema, 0 routines, closed role set, exactly-enumerated direct and effective grants)'
+\echo 'log sink: invariants OK (2 relations, 1 schema, 0 routines, stock catalog, closed role set, exactly-enumerated direct and effective grants)'
