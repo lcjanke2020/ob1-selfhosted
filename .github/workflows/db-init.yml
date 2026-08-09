@@ -62,10 +62,12 @@ on:
       - "scripts/funnel_daily_summary.sh"
       - "scripts/funnel_monitor.sh"
       - "scripts/funnel_monitor_test.sh"
-      - "scripts/funnel_daily_summary.sh"
       - "deploy/qubes/ingress-qube/funnel-monitor.env.example"
       - "deploy/qubes/ingress-qube/funnel-monitor.service"
       - "deploy/qubes/ingress-qube/funnel-monitor.timer"
+      - "deploy/qubes/ingress-qube/funnel-summary.env.example"
+      - "deploy/qubes/ingress-qube/funnel-summary.service"
+      - "deploy/qubes/ingress-qube/funnel-summary.timer"
       - "deploy/qubes/app-qube/funnel-summary.env.example"
       - "deploy/qubes/app-qube/funnel-summary.service"
       - "deploy/qubes/app-qube/funnel-summary.timer"
@@ -93,12 +95,16 @@ on:
       - "server/deno.lock"
       - "deploy/compose-local/docker-compose.yml"
       - "deploy/qubes/app-qube/backup/**"
+      - "deploy/qubes/ingress-qube/docker-compose.yml"
       - "scripts/funnel_monitor.sh"
       - "scripts/funnel_monitor_test.sh"
       - "scripts/funnel_daily_summary.sh"
       - "deploy/qubes/ingress-qube/funnel-monitor.env.example"
       - "deploy/qubes/ingress-qube/funnel-monitor.service"
       - "deploy/qubes/ingress-qube/funnel-monitor.timer"
+      - "deploy/qubes/ingress-qube/funnel-summary.env.example"
+      - "deploy/qubes/ingress-qube/funnel-summary.service"
+      - "deploy/qubes/ingress-qube/funnel-summary.timer"
       - "deploy/qubes/app-qube/funnel-summary.env.example"
       - "deploy/qubes/app-qube/funnel-summary.service"
       - "deploy/qubes/app-qube/funnel-summary.timer"
@@ -870,7 +876,37 @@ jobs:
           test "$failed_rc" -eq 1
           test "$(sha256sum "$report" | awk '{print $1}')" = "$first_hash"
           test -z "$(find "$report_dir" -maxdepth 1 -type f -name '.funnel-summary-*' -print -quit)"
-          echo "remote wrapper confined its credential, rejected mode drift, and preserved its report on failure"
+
+          # Single-host default path: SUMMARY_SQL_FILE as the two-file list,
+          # both halves in ONE psql session, one report. This is also the only
+          # place db/summarize_auth_events.sql executes in CI at all — the
+          # log-sink job is funnel-only by design, and the corpus steps above
+          # run only the funnel half.
+          cat > "$psql_shim" <<'SH'
+          #!/usr/bin/env bash
+          exec docker exec -i -e PGPASSWORD pgci psql "$@"
+          SH
+          chmod 0755 "$psql_shim"
+          both_dir="$smoke_root/reports-both"
+          install -d -m 0700 "$both_dir"
+          {
+            printf 'SUMMARY_BACKEND=postgres\n'
+            printf 'DB_HOST=127.0.0.1\n'
+            printf 'DB_PORT=5432\n'
+            printf 'POSTGRES_DB=%q\n' "$POSTGRES_DB"
+            printf 'export OPENBRAIN_APP_PASSWORD=%q\n' "$OPENBRAIN_APP_PASSWORD"
+            printf 'SUMMARY_SQL_FILE=%q\n' "$GITHUB_WORKSPACE/db/summarize_funnel.sql $GITHUB_WORKSPACE/db/summarize_auth_events.sql"
+            printf 'SUMMARY_DIR=%q\n' "$both_dir"
+            printf 'PSQL_BIN=%q\n' "$psql_shim"
+          } > "$env_file"
+          chmod 0600 "$env_file"
+          PATH="$probe_bin:$PATH" FUNNEL_SUMMARY_ENV_FILE="$env_file" \
+            scripts/funnel_daily_summary.sh
+          mapfile -t both < <(find "$both_dir" -maxdepth 1 -type f -name 'funnel-summary-*.md' -print)
+          test "${#both[@]}" -eq 1
+          grep -Fq '# Funnel observability report' "${both[0]}"
+          grep -Fq '## Rolling 24h — auth-failure reasons (mcp side)' "${both[0]}"
+          echo "remote wrapper confined its credential, rejected mode drift, and preserved its report on failure; the single-host two-file list ran both halves in one session"
 
       - name: Container logs on failure
         if: failure()
@@ -897,6 +933,13 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
           persist-credentials: false
+
+      - name: Ingress rollup units parse (mirror of the app-qube check)
+        run: |
+          systemd-analyze verify \
+            deploy/qubes/ingress-qube/funnel-summary.service \
+            deploy/qubes/ingress-qube/funnel-summary.timer
+          systemd-analyze calendar '*-*-* 00:40:00 UTC' >/dev/null
 
       - name: Derive the sink image from compose (single source of truth)
         run: |
@@ -1021,8 +1064,23 @@ jobs:
           S "grant select on funnel_access_log to public;" >/dev/null
           ! A 2>/dev/null || { echo "assertion missed a GRANT to PUBLIC" >&2; exit 1; }
           S "revoke select on funnel_access_log from public;" >/dev/null
+          S "create role intruder login;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed a stray role" >&2; exit 1; }
+          S "drop role intruder;" >/dev/null
+          S "grant pg_read_all_data to openbrain_ingester;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed an inherited (membership) privilege" >&2; exit 1; }
+          S "revoke pg_read_all_data from openbrain_ingester;" >/dev/null
+          S "grant insert on funnel_access_log to openbrain_ingester with grant option;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed WITH GRANT OPTION" >&2; exit 1; }
+          S "revoke grant option for insert on funnel_access_log from openbrain_ingester;" >/dev/null
+          S "grant select on funnel_access_log to pg_monitor;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed a grant to a foreign grantee" >&2; exit 1; }
+          S "revoke select on funnel_access_log from pg_monitor;" >/dev/null
+          S "grant create on database $POSTGRES_DB to openbrain_monitor;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed database CREATE" >&2; exit 1; }
+          S "revoke create on database $POSTGRES_DB from openbrain_monitor;" >/dev/null
           A | grep -F 'invariants OK'
-          echo "assertion catches widened grants, stray relations, and PUBLIC"
+          echo "assertion catches widened grants, grant options, memberships, foreign grantees, database CREATE, stray relations, stray roles, and PUBLIC"
 
       - name: Container logs on failure
         if: failure()

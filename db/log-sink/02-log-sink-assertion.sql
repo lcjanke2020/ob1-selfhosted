@@ -3,8 +3,22 @@
 -- Run last during init (the entrypoint sees it as 99-…), and re-run by hand
 -- after any change to 01-log-sink.sql. Counterpart to
 -- db/03-grants-assertion.sql on the corpus, but the claim here is stronger
--- and simpler to state: this cluster contains TWO relations and THREE roles,
--- and every one of those roles holds an exactly-enumerated privilege set.
+-- and simpler to state: this cluster contains TWO relations and THREE roles;
+-- every table, sequence, and column privilege those roles hold is exactly
+-- enumerated, grant options included (section 3), none of them holds a
+-- cluster-level privilege (section 1), none has a CREATE route into schema
+-- public or into this database (section 4), and the role set itself is
+-- closed — nothing exists beyond the bootstrap superuser and the three
+-- enumerated roles (section 5). Sections 6-8 close the indirect routes the
+-- direct-ACL comparison cannot see: effective privileges arriving via role
+-- membership, memberships themselves, ownership, default ACLs, and grants
+-- parked on a grantee outside the enumerated set.
+--
+-- Deliberately NOT asserted: PostgreSQL's stock PUBLIC defaults — database
+-- CONNECT/TEMP, USAGE on schema public, EXECUTE on built-in functions. None
+-- of those reaches the two relations (section 3 pins their ACLs exactly);
+-- asserting them away would mean fighting harmless defaults on every major
+-- version instead of guarding the promise that matters.
 --
 -- Why assert at all on a cluster whose contents are disposable: the sink sits
 -- on the internet-facing qube. Its value is not the data — it is the promise
@@ -91,6 +105,11 @@ $$ LANGUAGE plpgsql;
 -- knows is covered — including TRUNCATE, REFERENCES, TRIGGER, PG17's MAINTAIN
 -- and whatever a future major adds — without this file naming them.
 --
+-- A grant held WITH GRANT OPTION renders as `PRIV*`: the expected sets below
+-- contain no `*`, so a grantable privilege fails the comparison even when the
+-- privilege itself is enumerated — the sink's roles must not be able to
+-- forward their access.
+--
 -- Grants to PUBLIC (grantee OID 0) are folded into every role's actual set:
 -- PUBLIC never appears in pg_auth_members but reaches all three roles, so a
 -- `GRANT ... TO PUBLIC` would otherwise slip past a per-role comparison.
@@ -135,7 +154,9 @@ BEGIN
         AND a.attacl IS NOT NULL
     ),
     mine AS (
-      SELECT DISTINCT relname, privilege_type
+      SELECT DISTINCT relname,
+             privilege_type
+               || CASE WHEN is_grantable THEN '*' ELSE '' END AS privilege_type
       FROM acl
       WHERE grantee = 0                                  -- PUBLIC reaches everyone
          OR grantee = (SELECT oid FROM pg_roles WHERE rolname = r.rolname)
@@ -189,7 +210,212 @@ BEGIN
     RAISE EXCEPTION
       'log sink: PUBLIC may CREATE in schema public; every role on this cluster inherits that';
   END IF;
+
+  -- Same question one level up: CREATE on the DATABASE would let a role mint
+  -- a fresh schema and put relations outside the public-schema checks above.
+  -- The stock database default (acldefault when datacl is NULL) gives PUBLIC
+  -- CONNECT and TEMP but never CREATE, so both probes pass an untouched init.
+  SELECT string_agg(rolname, ', ' ORDER BY rolname) INTO offender
+  FROM pg_roles
+  WHERE rolname IN ('openbrain_ingester', 'openbrain_logs_rollup', 'openbrain_monitor')
+    AND has_database_privilege(rolname, current_database(), 'CREATE');
+
+  IF offender IS NOT NULL THEN
+    RAISE EXCEPTION
+      'log sink: role(s) % may CREATE schemas in this database', offender;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM (SELECT (aclexplode(coalesce(datacl, acldefault('d', datdba)))).*
+          FROM pg_database WHERE datname = current_database()) a
+    WHERE a.grantee = 0 AND a.privilege_type = 'CREATE'
+  ) THEN
+    RAISE EXCEPTION
+      'log sink: PUBLIC may CREATE schemas in this database';
+  END IF;
 END;
 $$ LANGUAGE plpgsql;
 
-\echo 'log sink: invariants OK (2 relations, roles hold exactly their enumerated grants)'
+-- ---------- 5. The role set itself is closed ------------------------------
+-- Sections 1 and 3 reason about roles they can NAME: 1 scans 'openbrain%',
+-- 3 compares the three enumerated. A role outside both patterns — created by
+-- the init-only superuser, or by drift nobody noticed — would pass every
+-- check above while falsifying the header's "THREE roles". Two closures fix
+-- that: exactly one superuser (the bootstrap role init connects as), and no
+-- role at all beyond that superuser, the three enumerated, and PostgreSQL's
+-- predefined pg_* roles (the pg_ prefix is reserved by the server — even a
+-- superuser cannot CREATE ROLE under it, so the exclusion is not a loophole).
+--
+-- The monitor role is OPTIONAL (00-log-sink-roles.sh creates it only when
+-- OPENBRAIN_MONITOR_PASSWORD is set): this check permits its absence and
+-- forbids additions, matching that contract.
+DO $$
+DECLARE
+  supers   int;
+  offender text;
+BEGIN
+  SELECT count(*) INTO supers FROM pg_roles WHERE rolsuper;
+  IF supers <> 1 THEN
+    RAISE EXCEPTION
+      'log sink: expected exactly one superuser (the bootstrap role), found %',
+      supers;
+  END IF;
+
+  SELECT string_agg(rolname, ', ' ORDER BY rolname) INTO offender
+  FROM pg_roles
+  WHERE rolname NOT LIKE 'pg\_%'
+    AND NOT rolsuper
+    AND rolname NOT IN
+      ('openbrain_ingester', 'openbrain_logs_rollup', 'openbrain_monitor');
+
+  IF offender IS NOT NULL THEN
+    RAISE EXCEPTION
+      'log sink: unexpected role(s) %; this cluster holds the bootstrap superuser and the enumerated sink roles only',
+      offender;
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ---------- 6. Effective privileges, not just direct grants ---------------
+-- Section 3 compares what is WRITTEN in the ACLs; this section compares what
+-- each role can actually DO. has_table_privilege resolves every route the
+-- server knows — direct grants, role membership (a `GRANT pg_read_all_data TO
+-- openbrain_ingester` shows up here while leaving relacl untouched), and
+-- PUBLIC — so a privilege arriving by any path breaks the comparison.
+--
+-- Unlike section 3 this names today's privilege types; that is acceptable for
+-- a second net (section 3 stays name-free and catches new types), and the
+-- expected sets are deliberately the same enumeration as section 3: with no
+-- memberships (section 7) and no PUBLIC grants (section 3), effective must
+-- equal direct.
+DO $$
+DECLARE
+  r        record;
+  actual   text;
+BEGIN
+  FOR r IN
+    SELECT rolname,
+           CASE rolname
+             WHEN 'openbrain_ingester' THEN
+               'funnel_access_log=INSERT|funnel_access_log_id_seq=USAGE'
+             WHEN 'openbrain_logs_rollup' THEN
+               'funnel_access_log=DELETE,SELECT|funnel_access_summary=DELETE,INSERT,SELECT,UPDATE'
+             WHEN 'openbrain_monitor' THEN
+               'funnel_access_log=SELECT'
+           END AS want
+    FROM pg_roles
+    WHERE rolname IN ('openbrain_ingester', 'openbrain_logs_rollup', 'openbrain_monitor')
+    ORDER BY rolname
+  LOOP
+    WITH effective AS (
+      SELECT t.relname, p.priv
+      FROM (VALUES ('funnel_access_log'), ('funnel_access_summary')) t(relname)
+      CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE',
+                              'TRUNCATE','REFERENCES','TRIGGER','MAINTAIN']) p(priv)
+      WHERE has_table_privilege(r.rolname, 'public.' || t.relname, p.priv)
+      UNION ALL
+      SELECT 'funnel_access_log_id_seq', p.priv
+      FROM unnest(ARRAY['USAGE','SELECT','UPDATE']) p(priv)
+      WHERE has_sequence_privilege(r.rolname, 'public.funnel_access_log_id_seq', p.priv)
+    )
+    SELECT string_agg(relname || '=' || privs, '|' ORDER BY relname) INTO actual
+    FROM (
+      SELECT relname, string_agg(priv, ',' ORDER BY priv) AS privs
+      FROM effective GROUP BY relname
+    ) g;
+
+    IF actual IS DISTINCT FROM r.want THEN
+      RAISE EXCEPTION
+        'log sink: role % EFFECTIVE privileges drifted (membership or PUBLIC route?); expected (%), found (%)',
+        r.rolname, coalesce(r.want, '<none>'), coalesce(actual, '<none>');
+    END IF;
+  END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ---------- 7. No role memberships at all ---------------------------------
+-- Membership is how a "least-privilege" role quietly inherits someone else's
+-- reach (and how section 3's per-role ACL comparison gets bypassed). The
+-- predefined pg_* roles ship with memberships among THEMSELVES (pg_monitor
+-- contains pg_read_all_stats, etc.) — those are the server's own and
+-- permitted; any membership row touching a non-pg_* role on either side is
+-- not.
+DO $$
+DECLARE
+  offender text;
+BEGIN
+  SELECT string_agg(m.roleid::regrole::text || ' -> ' || m.member::regrole::text,
+                    ', ') INTO offender
+  FROM pg_auth_members m
+  WHERE m.roleid::regrole::text NOT LIKE 'pg\_%'
+     OR m.member::regrole::text NOT LIKE 'pg\_%';
+
+  IF offender IS NOT NULL THEN
+    RAISE EXCEPTION
+      'log sink: unexpected role membership(s) [%]; sink roles must not inherit or confer anything',
+      offender;
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ---------- 8. Nothing else holds or forwards access -----------------------
+-- Three small closures behind sections 3 and 5:
+--   ownership   — only the bootstrap superuser may own relations (an owner
+--                 bypasses grants entirely);
+--   default ACLs — ALTER DEFAULT PRIVILEGES would grant on FUTURE objects,
+--                 invisible to every present-tense check above;
+--   foreign grantees — a grant parked on a grantee outside the enumerated
+--                 set (with section 5, that can only be a predefined pg_*
+--                 role) is unreachable by section 3's per-role comparison.
+DO $$
+DECLARE
+  offender text;
+BEGIN
+  SELECT string_agg(DISTINCT c.relname, ', ') INTO offender
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  JOIN pg_roles o ON o.oid = c.relowner
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+    AND n.nspname NOT LIKE 'pg_toast%'
+    AND NOT o.rolsuper;
+  IF offender IS NOT NULL THEN
+    RAISE EXCEPTION
+      'log sink: relation(s) % owned by a non-superuser; only the bootstrap role may own objects',
+      offender;
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM pg_default_acl) THEN
+    RAISE EXCEPTION
+      'log sink: pg_default_acl is not empty; a default privilege would grant on future objects';
+  END IF;
+
+  SELECT string_agg(DISTINCT a.grantee::regrole::text, ', ') INTO offender
+  FROM (
+    SELECT (aclexplode(c.relacl)).grantee
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND n.nspname NOT LIKE 'pg_toast%' AND c.relacl IS NOT NULL
+    UNION ALL
+    SELECT (aclexplode(a.attacl)).grantee
+    FROM pg_attribute a
+    JOIN pg_class c ON c.oid = a.attrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND n.nspname NOT LIKE 'pg_toast%' AND a.attacl IS NOT NULL
+  ) a
+  WHERE a.grantee <> 0                                   -- PUBLIC: section 3 folds it
+    AND a.grantee NOT IN (
+      SELECT oid FROM pg_roles
+      WHERE rolsuper                                     -- the owner's own entry
+         OR rolname IN ('openbrain_ingester', 'openbrain_logs_rollup', 'openbrain_monitor'));
+  IF offender IS NOT NULL THEN
+    RAISE EXCEPTION
+      'log sink: grant(s) held by unexpected grantee(s) %; only the enumerated roles may appear in an ACL',
+      offender;
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+\echo 'log sink: invariants OK (2 relations, closed role set, exactly-enumerated direct and effective grants)'
