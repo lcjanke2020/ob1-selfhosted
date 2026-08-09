@@ -68,7 +68,7 @@ umask 077
 # Preserve an inherited value for configuration precedence, but strip its
 # export attribute before stat or any other child process can inherit it. The
 # check is repeated after sourcing in case a hand-written env file uses export.
-export -n OPENBRAIN_APP_PASSWORD 2>/dev/null || true
+export -n OPENBRAIN_APP_PASSWORD SUMMARY_ROLE_PASSWORD 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
