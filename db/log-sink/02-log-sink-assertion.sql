@@ -9,10 +9,12 @@
 -- cluster-level privilege (section 1), none has a CREATE route into schema
 -- public or into this database (section 4), and the role set itself is
 -- closed — nothing exists beyond the bootstrap superuser and the three
--- enumerated roles (section 5). Sections 6-8 close the indirect routes the
+-- enumerated roles (section 5). Sections 6-9 close the indirect routes the
 -- direct-ACL comparison cannot see: effective privileges arriving via role
--- membership, memberships themselves, ownership, default ACLs, and grants
--- parked on a grantee outside the enumerated set.
+-- membership, memberships themselves, ownership, default ACLs, grants
+-- parked on a grantee outside the enumerated set, stray schemas, and stray
+-- routines (EXECUTE defaults to PUBLIC, and SECURITY DEFINER runs as its
+-- owner — so a routine is a data path that needs no table grant at all).
 --
 -- Deliberately NOT asserted: PostgreSQL's stock PUBLIC defaults — database
 -- CONNECT/TEMP, USAGE on schema public, EXECUTE on built-in functions. None
@@ -418,4 +420,53 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-\echo 'log sink: invariants OK (2 relations, closed role set, exactly-enumerated direct and effective grants)'
+-- ---------- 9. The schema and routine sets are closed ----------------------
+-- Section 2's census walks RELATIONS in non-system schemas; these close what
+-- it cannot see. A stray SCHEMA — above all one AUTHORIZED to a sink role —
+-- is a workshop where that role may CREATE at will, outside section 4's
+-- public/database CREATE probes, so no schema beyond `public` may exist and
+-- `public` must keep its stock PG15+ owner (pg_database_owner). A stray
+-- ROUTINE is worse: PostgreSQL grants EXECUTE to PUBLIC on new functions by
+-- default, and a SECURITY DEFINER body runs with its OWNER's authority — a
+-- superuser-owned helper selecting funnel_access_log hands every role that
+-- can call it a read path despite holding no table grant. This sink defines
+-- ZERO routines, so the closure is total: none may exist. (DO blocks are
+-- anonymous — running this file stores nothing in pg_proc.)
+DO $$
+DECLARE
+  offender text;
+BEGIN
+  SELECT string_agg(nspname, ', ' ORDER BY nspname) INTO offender
+  FROM pg_namespace
+  WHERE nspname NOT LIKE 'pg\_%'
+    AND nspname NOT IN ('information_schema', 'public');
+  IF offender IS NOT NULL THEN
+    RAISE EXCEPTION
+      'log sink: unexpected schema(s) %; this cluster holds schema public and nothing else',
+      offender;
+  END IF;
+
+  SELECT r.rolname INTO offender
+  FROM pg_namespace n
+  JOIN pg_roles r ON r.oid = n.nspowner
+  WHERE n.nspname = 'public' AND r.rolname <> 'pg_database_owner';
+  IF offender IS NOT NULL THEN
+    RAISE EXCEPTION
+      'log sink: schema public is owned by % instead of pg_database_owner',
+      offender;
+  END IF;
+
+  SELECT string_agg(n.nspname || '.' || p.proname, ', '
+                    ORDER BY n.nspname, p.proname) INTO offender
+  FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema');
+  IF offender IS NOT NULL THEN
+    RAISE EXCEPTION
+      'log sink: unexpected routine(s) %; this sink defines no functions or procedures at all',
+      offender;
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+\echo 'log sink: invariants OK (2 relations, 1 schema, 0 routines, closed role set, exactly-enumerated direct and effective grants)'

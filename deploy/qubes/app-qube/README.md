@@ -270,9 +270,12 @@ aggregate DELETEs stopped running against this database:
 
 - **Raw log — truncate.** Archive first if you want the history
   (`pg_dump --data-only --table=funnel_access_log`, encrypted like the nightly
-  backup), then `TRUNCATE funnel_access_log;`. Left alone, request metadata
-  (client IPs, paths, user agents) sits in the corpus forever, outliving the
-  30-day promise the retention policy made.
+  backup), then `TRUNCATE funnel_access_log;` **as the database superuser** —
+  the runtime `openbrain_app` role deliberately lacks TRUNCATE (measured:
+  `permission denied`), so use the same superuser-psql path as
+  [Upgrading an existing deployment](#upgrading-an-existing-deployment). Left
+  alone, request metadata (client IPs, paths, user agents) sits in the corpus
+  forever, outliving the 30-day promise the retention policy made.
 - **Aggregates — keep or truncate, but decide.** `funnel_access_summary` is
   small, static from now on, and useful as trend history; keeping it is
   reasonable. If you keep it, know the 365-day horizon no longer applies — the

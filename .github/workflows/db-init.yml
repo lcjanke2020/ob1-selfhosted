@@ -1079,8 +1079,14 @@ jobs:
           S "grant create on database $POSTGRES_DB to openbrain_monitor;" >/dev/null
           ! A 2>/dev/null || { echo "assertion missed database CREATE" >&2; exit 1; }
           S "revoke create on database $POSTGRES_DB from openbrain_monitor;" >/dev/null
+          S "create function public.ci_probe() returns bigint language sql security definer as 'select count(*) from funnel_access_log';" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed a SECURITY DEFINER routine" >&2; exit 1; }
+          S "drop function public.ci_probe();" >/dev/null
+          S "create schema ci_extra authorization openbrain_ingester;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed a stray schema" >&2; exit 1; }
+          S "drop schema ci_extra;" >/dev/null
           A | grep -F 'invariants OK'
-          echo "assertion catches widened grants, grant options, memberships, foreign grantees, database CREATE, stray relations, stray roles, and PUBLIC"
+          echo "assertion catches widened grants, grant options, memberships, foreign grantees, database CREATE, stray relations, stray roles, stray schemas, stray routines, and PUBLIC"
 
       - name: Container logs on failure
         if: failure()

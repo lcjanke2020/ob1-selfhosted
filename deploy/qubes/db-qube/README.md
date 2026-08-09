@@ -222,12 +222,26 @@ or the app qube's superuser psql:
    either role:
    `sudo -u postgres psql -Atc "select count(*) from pg_hba_file_rules where error is not null or user_name::text ~ 'openbrain_(ingester|monitor)';"`
    must print `0`.
-3. **Drop the corpus-side roles** —
-   `DROP ROLE openbrain_ingester; DROP ROLE
-   openbrain_monitor;`. They own
-   nothing, their grants die with them, and
+3. **Drop the corpus-side roles**, connected to the `openbrain` database — not
+   the `postgres` maintenance DB, because `DROP OWNED BY` only acts in the
+   database it runs in. Postgres does not let grants "die with" a role:
+   privileges granted TO a role are recorded as dependencies that BLOCK a bare
+   `DROP ROLE` (`privileges for table funnel_access_log`), so the revoke pass
+   comes first, and each step fails loudly:
+   1. Confirm neither role OWNS anything (`DROP OWNED BY` would drop it, not
+      just revoke):
+      `SELECT c.relname FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner WHERE r.rolname IN ('openbrain_ingester', 'openbrain_monitor');`
+      must return zero rows.
+   2. `DROP OWNED BY openbrain_ingester; DROP ROLE openbrain_ingester;` then
+      `DROP OWNED BY openbrain_monitor; DROP ROLE openbrain_monitor;`. (The
+      monitor role is optional — if it was never provisioned, its pair errors
+      with "role does not exist" and can be skipped.)
+   3. Confirm both are gone:
+      `SELECT count(*) FROM pg_roles WHERE rolname IN ('openbrain_ingester', 'openbrain_monitor');`
+      must print `0`.
+
    [`db/03-grants-assertion.sql`](../../../db/03-grants-assertion.sql) treats
-   both as optional, so it still passes.
+   both roles as optional, so it still passes afterwards.
 4. **Remove the tailnet ACL grant** for ingress→db:5432 — capture the ACL as
    actually deployed first (from the admin console, not a possibly-stale local
    copy) — and drop the ingress qube from any per-peer nft scoping you added.
