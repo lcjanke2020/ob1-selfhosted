@@ -233,51 +233,61 @@ This re-validation is the reason _not_ to rush the split right before you depend
 on the endpoint: it touches the edge auth path, which deserves an unhurried test
 pass.
 
-## Log-ingester placement (decided for now)
+## Log-ingester placement (settled: local sink)
 
 The Pattern B **log-ingester** tails Caddy's access-log files and writes
-`funnel_access_log` rows to Postgres. Caddy lives on the ingress qube; Postgres
-lives on the db qube — so wherever the ingester runs, it bridges to one of them.
-It runs on the **ingress** qube, next to Caddy, which means the ingress qube
-keeps exactly **one** path to the db qube: the INSERT-only observability role on
-`:5432`, locked to the db qube by ACL + host firewall + `pg_hba`. (The ingress
-qube's compose sets the log-ingester's `DB_HOST` to the db qube, so it writes
-_across_ to the db qube — not to a co-resident local Postgres.) This is a
-deliberate, scoped exception to the "ingress reaches only the app qube" target
-below — not an oversight. `funnel_access_log` is request metadata only
-(timestamp, path, status, client IP; no thought content, no credentials), so a
-popped ingress writing to that one table is low-value.
+`funnel_access_log` rows to Postgres. Caddy lives on the ingress qube, so the
+ingester does too. The question was where its *database* lives.
 
-The **chosen future end state** keeps the ingester on the ingress qube but
-points it at a perimeter logs-only Postgres _local_ to that qube (loopback-only)
-— the `postgres` service already shipped **parked** under the `logs-future`
-profile in [`ingress-qube/docker-compose.yml`](ingress-qube/docker-compose.yml).
-Activating it severs the ingress→db path entirely, at the cost of fragmenting
-logs across two databases (acceptable: edge access logs and the thought store
-are different concerns). The alternative — moving the ingester to the app qube —
-was rejected because it needs Caddy's access logs to cross qubes (a
-shared/forwarded log path). Picking and finishing this is tracked in
-[#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12).
+It used to write **across** to the db qube, which left the ingress qube exactly
+one path to `:5432` — the INSERT-only observability role, locked down by ACL +
+host firewall + `pg_hba`. That was a deliberate, scoped exception, argued from
+the low value of the data: `funnel_access_log` is request metadata only, so a
+popped edge writing to that one table gains little.
+
+**That argument was about the wrong layer.** Role grants are enforced *inside*
+Postgres — above where a pre-auth wire-protocol or SCRAM-handshake flaw would
+live. The narrowness of the grant bounds what a *well-behaved* client can do; it
+does nothing about a client that never reaches the grant check. As long as the
+internet-facing qube could open a socket to the corpus, it had a path toward it.
+
+The ingester now writes to a **local sink on the ingress qube**: a Postgres
+holding `funnel_access_log` and `funnel_access_summary` and nothing else,
+reachable only over a unix socket (`listen_addresses=` empty,
+`network_mode: none`, no published port). The ingress qube keeps **no** address
+for, credential on, or firewall rule toward the db qube; the db qube's `pg_hba`
+carries no line for it. Enforcement moved from a grant inside the database to
+the absence of a route to it. See
+[`ingress-qube/README.md` § Local log sink](ingress-qube/README.md#local-log-sink).
+
+The cost is real and accepted: logs are fragmented across two databases, so
+correlating a Funnel request with a thought write is no longer a SQL join. It
+was always weak — `funnel_access_log` carries no thought or session id — and the
+auth-side audit (`mcp_auth_events`) stays with the corpus. The daily rollup
+splits along the same seam: each qube runs the half that owns its tables. The
+rejected alternative, moving the ingester to the app qube, would have needed
+Caddy's access logs to cross qubes. This resolves
+[#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12) as option 3.
 
 ## Acceptance criteria
 
 - Funnel + Caddy run in a dedicated ingress qube with no memory store and no app
   state — **achieved**:
   [`ingress-qube/docker-compose.yml`](ingress-qube/docker-compose.yml) defines
-  only Caddy + the log-ingester (no running Postgres; the unused edge
+  Caddy, the log-ingester, and the local log sink (the unused edge
   `mcp`/`ollama` are gone,
-  [#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13)).
+  [#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13)). The sink is a
+  request-metadata store, not a memory store: two observability relations,
+  enforced by an init-time assertion.
 - MCP + Postgres in separate qubes; the app qube reaches the DB on the chosen
-  transport (full app role), and — while the log-ingester runs on the edge — the
-  ingress qube reaches it on the INSERT-only observability role; nothing else
-  can.
-- The ingress qube cannot reach any host other than the app qube's mcp — over
-  the dom0-policy-gated qubes.ConnectTCP channel, the only path to it —
-  **plus**, while the log-ingester runs there, the INSERT-only observability
-  role on the db qube's `:5432` (the documented exception above — see
-  [Log-ingester placement](#log-ingester-placement-decided-for-now) /
-  [#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)). Verified by
-  ACL + firewall + dom0-policy audit, not assumption.
+  transport (full app role), and **nothing else reaches it at all**.
+- The ingress qube cannot reach any host other than the app qube's mcp, over the
+  dom0-policy-gated qubes.ConnectTCP channel — **achieved without exception**
+  since the log sink moved local
+  ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12) option 3). The
+  former INSERT-only carve-out to the db qube's `:5432` is gone: roles dropped,
+  `pg_hba` lines removed, no address left in the edge's config. Verified by ACL
+  + firewall + dom0-policy audit, not assumption.
 - Backup/restore works against the relocated DB.
 - The allowlist + XFF behavior re-verified under the two-hop topology.
 - Your network-topology diagram updated — an isolation model that exists only in

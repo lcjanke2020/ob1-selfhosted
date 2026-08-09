@@ -247,6 +247,23 @@ to the db qube as `openbrain_app`, the existing role whose observability grants
 cover the transactional rollup and retention deletes. The internet-adjacent
 ingress qube never receives that credential.
 
+**This qube runs only the `mcp_auth_events` half.** The rollup is split by
+owning table, because the two halves no longer share a database: the Funnel
+access log is written to a local sink on the
+[ingress qube](../ingress-qube/README.md#daily-rollup-and-retention-host-side-not-compose),
+which runs [`db/summarize_funnel.sql`](../../../db/summarize_funnel.sql) there.
+Here, [`db/summarize_auth_events.sql`](../../../db/summarize_auth_events.sql)
+handles the reason-coded 401 audit that mcp writes into the corpus. Set
+`SUMMARY_SQL_FILE` accordingly — left unset it resolves to **both** shipped
+files (the single-host default), and the funnel half would then operate on the
+stale, no-longer-written `funnel_access_log` left behind in this database,
+producing an empty report section and a pointless retention DELETE.
+
+Those two relations stay in the corpus schema deliberately, empty. Dropping them
+would diverge from [`db/02-observability.sql`](../../../db/02-observability.sql),
+which single-host installs still create, and keeping them means repointing the
+ingester back at this database is a config change rather than a migration.
+
 The job reads a dedicated environment file containing only its database
 settings. Do not point it at this directory's `.env`: exporting the full app
 environment would needlessly expose the database administrator, OAuth,
@@ -265,7 +282,7 @@ the app qube—an AppVM-local package install disappears on reboot.
 ```sh
 mkdir -p ~/.config/systemd/user
 install -m 0755 scripts/funnel_daily_summary.sh ~/funnel_daily_summary.sh
-install -m 0644 db/summarize_funnel.sql ~/summarize_funnel.sql
+install -m 0644 db/summarize_auth_events.sql ~/summarize_auth_events.sql
 install -m 0600 deploy/qubes/app-qube/funnel-summary.env.example ~/.config/funnel-summary.env
 $EDITOR ~/.config/funnel-summary.env       # set DB_HOST + OPENBRAIN_APP_PASSWORD
 install -d -m 0700 ~/openbrain-funnel-summaries
