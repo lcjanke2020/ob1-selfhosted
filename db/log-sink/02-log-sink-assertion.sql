@@ -13,9 +13,11 @@
 -- direct-ACL comparison cannot see: effective privileges arriving via role
 -- membership, memberships themselves, ownership, default ACLs, grants
 -- parked on a grantee outside the enumerated set, stray schemas, and stray
--- routines or relations — including ones planted in the system schemas
--- (EXECUTE defaults to PUBLIC, and SECURITY DEFINER runs as its owner — so a
--- routine is a data path that needs no table grant at all).
+-- routines or relations — including ones planted in the system schemas, and
+-- the two in-place catalog changes that preserve an object's OID (a routine
+-- flipped to SECURITY DEFINER, a view repointed at the sink tables). EXECUTE
+-- defaults to PUBLIC and a definer body runs as its owner, so a routine or
+-- view is a data path that needs no table grant at all.
 --
 -- Deliberately NOT asserted: PostgreSQL's stock PUBLIC defaults — database
 -- CONNECT/TEMP, USAGE on schema public, EXECUTE on built-in functions. None
@@ -441,10 +443,20 @@ $$ LANGUAGE plpgsql;
 -- through. The discriminator is object age: every catalog object initdb ships
 -- has an OID below FirstNormalObjectId (16384); anything at or above it was
 -- created after initdb. This sink installs no extension, so in a system schema
--- that can only be user drift. (Pinning via pg_depend.deptype='p' is NOT
--- usable here — information_schema's ~3000 routines are unpinned, so it
--- false-positives wholesale; the OID threshold flags exactly the post-initdb
--- objects.)
+-- that can only be user drift. (The OID threshold is in fact how PostgreSQL
+-- ITSELF distinguishes built-ins: modern versions carry NO pin rows in
+-- pg_depend at all — `deptype='p'` returns zero cluster-wide on stock
+-- postgres:17 — so a "reject anything unpinned" check would flag every
+-- catalog object. The OID line flags exactly the post-initdb objects and
+-- nothing stock.)
+--
+-- The OID test detects objects CREATED after initdb; it cannot see an
+-- existing low-OID catalog object changed IN PLACE, because CREATE OR REPLACE
+-- and ALTER preserve the OID. This sink is disposable, so a byte-for-byte
+-- catalog integrity baseline would be out of proportion — but the two in-place
+-- changes that would actually hand a sink role access it lacks are closed
+-- directly and OID-independently below (a routine flipped to SECURITY DEFINER,
+-- and a view repointed at the sink tables).
 DO $$
 DECLARE
   first_normal_oid CONSTANT oid := 16384;   -- FirstNormalObjectId (access/transam.h)
@@ -487,7 +499,7 @@ BEGIN
 
   -- No user-created relation in a system schema (section 2 already pins the
   -- non-system relation set to exactly the two tables). Catches the
-  -- information_schema view/table variant of the same drift.
+  -- information_schema view/table variant of the NEW-object drift.
   SELECT string_agg(n.nspname || '.' || c.relname, ', '
                     ORDER BY n.nspname, c.relname) INTO offender
   FROM pg_class c
@@ -500,7 +512,46 @@ BEGIN
       'log sink: user-created relation(s) % in a system schema; the catalog must stay stock',
       offender;
   END IF;
+
+  -- IN-PLACE catalog changes the OID test cannot see (CREATE OR REPLACE /
+  -- ALTER keep the OID). A routine flipped to SECURITY DEFINER runs with its
+  -- superuser owner's rights, so a low-OID catalog function repurposed to read
+  -- the sink tables would leak them to any caller with EXECUTE (PUBLIC by
+  -- default). Stock PostgreSQL ships ZERO SECURITY DEFINER routines, so any is
+  -- drift — this holds regardless of OID or create-vs-replace.
+  SELECT string_agg(n.nspname || '.' || p.proname, ', '
+                    ORDER BY n.nspname, p.proname) INTO offender
+  FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+  WHERE p.prosecdef;
+  IF offender IS NOT NULL THEN
+    RAISE EXCEPTION
+      'log sink: SECURITY DEFINER routine(s) %; a definer body runs with its owner''s rights and this sink defines none',
+      offender;
+  END IF;
+
+  -- The other in-place route: a view (any schema, so any low-OID
+  -- information_schema view repointed by CREATE OR REPLACE VIEW) reads the
+  -- underlying tables with the VIEW OWNER's rights — superuser, for a catalog
+  -- view — for every grantee. Nothing but the enumerated roles may reach the
+  -- sink tables, so no view or matview may depend on them at all. Section 2
+  -- already forbids views in the non-system schema; this also covers the
+  -- catalog ones the relation check treats as stock by OID.
+  SELECT string_agg(DISTINCT v.relname, ', ' ORDER BY v.relname) INTO offender
+  FROM pg_depend d
+  JOIN pg_rewrite rw ON rw.oid = d.objid
+  JOIN pg_class v ON v.oid = rw.ev_class
+  JOIN pg_class t ON t.oid = d.refobjid
+  WHERE d.refclassid = 'pg_class'::regclass
+    AND t.relname IN ('funnel_access_log', 'funnel_access_summary')
+    AND v.relkind IN ('v', 'm')
+    AND v.oid <> t.oid;
+  IF offender IS NOT NULL THEN
+    RAISE EXCEPTION
+      'log sink: view(s) % read the sink tables; only the enumerated roles may reach them',
+      offender;
+  END IF;
 END;
 $$ LANGUAGE plpgsql;
 
-\echo 'log sink: invariants OK (2 relations, 1 schema, 0 routines, stock catalog, closed role set, exactly-enumerated direct and effective grants)'
+\echo 'log sink: invariants OK (2 relations, 1 schema, 0 routines, no SECURITY DEFINER or table-facing view, closed role set, exactly-enumerated direct and effective grants)'

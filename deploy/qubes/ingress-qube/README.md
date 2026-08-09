@@ -337,22 +337,29 @@ in `~/.config/funnel-monitor.env`, which is what the script authenticates with.
 To add the monitor to a sink that is already initialized, create the role by
 hand (init scripts only run on a fresh data directory) and re-run the assertion:
 
+Run from this qube's compose directory (`deploy/qubes/ingress-qube/`). The
+socket demands scram auth even from the superuser — the entrypoint unsets
+PGPASSWORD after init, and `compose exec` does not read `.env` — so the
+superuser password, database, and role are pulled from `.env` and forwarded
+explicitly. The assertion file lives in the repo, three levels up.
+
 ```sh
-# The socket demands scram auth even from the superuser — the entrypoint
-# unsets PGPASSWORD after init, and `compose exec` does not read .env — so
-# forward the password explicitly. Run from this qube's compose directory;
-# `-U` must match LOG_SINK_SUPERUSER if you changed it from the default.
+# Derive the configured values from .env (defaults match .env.example).
 export PGPASSWORD="$(sed -n 's/^LOG_SINK_SUPERUSER_PASSWORD=//p' .env)"
+SINK_SUPER="$(sed -n 's/^LOG_SINK_SUPERUSER=//p' .env)"; SINK_SUPER="${SINK_SUPER:-postgres}"
+SINK_DB="$(sed -n 's/^LOG_SINK_DB=//p' .env)"; SINK_DB="${SINK_DB:-openbrain_logs}"
 docker compose exec -T -e PGPASSWORD log-sink \
-  psql -U postgres -d openbrain_logs -v ON_ERROR_STOP=1 <<'SQL'
+  psql -U "$SINK_SUPER" -d "$SINK_DB" -v ON_ERROR_STOP=1 <<'SQL'
   CREATE ROLE openbrain_monitor LOGIN NOSUPERUSER NOCREATEDB
     NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'PUT-THE-PASSWORD-HERE';
   GRANT USAGE ON SCHEMA public TO openbrain_monitor;
   GRANT SELECT ON funnel_access_log TO openbrain_monitor;
 SQL
+# The `< file` redirection reads from the HOST, relative to this directory, so
+# point it at the repo checkout three levels up.
 docker compose exec -T -e PGPASSWORD log-sink \
-  psql -U postgres -d openbrain_logs -v ON_ERROR_STOP=1 \
-  -f - < db/log-sink/02-log-sink-assertion.sql      # must print "invariants OK"
+  psql -U "$SINK_SUPER" -d "$SINK_DB" -v ON_ERROR_STOP=1 \
+  -f - < ../../../db/log-sink/02-log-sink-assertion.sql   # must print "invariants OK"
 unset PGPASSWORD
 ```
 

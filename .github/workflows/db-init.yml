@@ -1094,8 +1094,16 @@ jobs:
           S "create view information_schema.ci_leak_view as select 1 as x;" >/dev/null
           ! A 2>/dev/null || { echo "assertion missed an information_schema view" >&2; exit 1; }
           S "drop view information_schema.ci_leak_view;" >/dev/null
+          # In-place catalog changes that KEEP the object's low OID (CREATE OR
+          # REPLACE / ALTER), which the age test cannot see.
+          S "alter function information_schema._pg_expandarray(anyarray) security definer;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed an existing routine flipped to SECURITY DEFINER" >&2; exit 1; }
+          S "alter function information_schema._pg_expandarray(anyarray) security invoker;" >/dev/null
+          S "create or replace view information_schema.information_schema_catalog_name as select (select count(*) from funnel_access_log)::text::information_schema.sql_identifier as catalog_name;" >/dev/null
+          ! A 2>/dev/null || { echo "assertion missed a catalog view repointed at the sink tables" >&2; exit 1; }
+          S "create or replace view information_schema.information_schema_catalog_name as select current_database()::information_schema.sql_identifier as catalog_name;" >/dev/null
           A | grep -F 'invariants OK'
-          echo "assertion catches widened grants, grant options, memberships, foreign grantees, database CREATE, stray relations, stray roles, stray schemas, stray routines (incl. system-schema definer functions and views), and PUBLIC"
+          echo "assertion catches widened grants, grant options, memberships, foreign grantees, database CREATE, stray relations, stray roles, stray schemas, stray routines (incl. system-schema definer functions and views), in-place SECURITY DEFINER flips, catalog views repointed at the sink tables, and PUBLIC"
 
       - name: Container logs on failure
         if: failure()
