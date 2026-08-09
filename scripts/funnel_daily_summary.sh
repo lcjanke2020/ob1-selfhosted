@@ -19,7 +19,12 @@
 #   FUNNEL_SUMMARY_ENV_FILE [~/.config/funnel-summary.env, loaded when present]
 #   SUMMARY_BACKEND  [compose] (`compose` | `postgres`)
 #   SUMMARY_DIR       [~/openbrain-funnel-summaries]
-#   SUMMARY_SQL_FILE  [repo db/summarize_funnel.sql, or adjacent installed copy]
+#   SUMMARY_SQL_FILE  [repo db/summarize_funnel.sql + db/summarize_auth_events.sql,
+#                      or adjacent installed copies] — a whitespace-separated
+#                      LIST, concatenated in order into one psql session. A
+#                      split deployment sets it to its own half; see below.
+#   SUMMARY_ROLE      [openbrain_app] — the role the rollup connects as
+#   SUMMARY_ROLE_PASSWORD [$OPENBRAIN_APP_PASSWORD] — that role's password
 # Except for selecting FUNNEL_SUMMARY_ENV_FILE itself, values sourced from that
 # file take precedence over inherited environment values.
 #
@@ -28,12 +33,25 @@
 #   COMPOSE_PROJECT_NAME [optional, standard Compose project-name override]
 #
 # postgres backend:
-#   DB_HOST            [required]
+#   DB_HOST            [required] — a hostname/IP for TCP, or an absolute path
+#                      for a unix-socket directory (the ingress qube's local
+#                      log sink, which has no TCP listener)
 #   DB_PORT            [5432]
 #   POSTGRES_DB        [openbrain]
-#   OPENBRAIN_APP_PASSWORD [required]
+#   SUMMARY_ROLE_PASSWORD [required; defaults to OPENBRAIN_APP_PASSWORD]
 #   PGCONNECT_TIMEOUT  [10]
 #   PSQL_BIN           [psql; test/package override only]
+#
+# Three deployments, three configurations:
+#   single-host compose — defaults throughout: both SQL files, openbrain_app,
+#                         one database holding every observability table.
+#   split app qube      — SUMMARY_SQL_FILE=…/summarize_auth_events.sql against
+#                         the canonical corpus on the db qube. mcp writes
+#                         mcp_auth_events there; the funnel half does not
+#                         belong to this qube any more.
+#   split ingress qube  — SUMMARY_SQL_FILE=…/summarize_funnel.sql,
+#                         SUMMARY_ROLE=openbrain_logs_rollup, and a DB_HOST
+#                         that is a socket path into the local log sink.
 #
 # Idempotent: re-running on the same day atomically replaces that day's .md
 # file and re-runs the daily summary INSERT ... ON CONFLICT in postgres. A
@@ -93,26 +111,71 @@ fi
 # The credential remains a shell variable for the direct backend, but must not
 # be inherited under its original name by mktemp, tee, docker, or the psql
 # client. The psql invocation below exports only command-scoped PGPASSWORD.
-export -n OPENBRAIN_APP_PASSWORD 2>/dev/null || true
+export -n OPENBRAIN_APP_PASSWORD SUMMARY_ROLE_PASSWORD 2>/dev/null || true
 
 SUMMARY_BACKEND="${SUMMARY_BACKEND:-compose}"
 SUMMARY_DIR="${SUMMARY_DIR:-$HOME/openbrain-funnel-summaries}"
 
-# A repo checkout keeps the SQL one directory above scripts/. The app-qube
-# install copies the script and SQL side-by-side in $HOME so the timer does not
-# depend on a checkout path. An explicit override wins over both layouts.
+# Which role runs the rollup, and its password. Both default to the historical
+# openbrain_app pair, so an existing env file needs no edit.
+#
+# They are separate knobs because the ingress qube's local log sink is a
+# DIFFERENT cluster with a different least-privilege role
+# (`openbrain_logs_rollup`, DML on two observability tables and nothing else).
+# Naming that role openbrain_app would have avoided this code — and put a
+# variable literally called OPENBRAIN_APP_PASSWORD, holding an unrelated
+# secret, on the internet-facing qube. Two roles that mean different things
+# get two names.
+SUMMARY_ROLE="${SUMMARY_ROLE:-openbrain_app}"
+SUMMARY_ROLE_PASSWORD="${SUMMARY_ROLE_PASSWORD:-${OPENBRAIN_APP_PASSWORD:-}}"
+
+# The observability rollup is split by owning table — summarize_funnel.sql
+# (funnel_access_log + funnel_access_summary) and summarize_auth_events.sql
+# (mcp_auth_events) — because the split topology no longer keeps both in one
+# database. SUMMARY_SQL_FILE is therefore a LIST: whitespace-separated paths,
+# concatenated in order into ONE psql session so the pair still yields a single
+# report. A single path is a one-element list, so existing overrides keep
+# working unchanged.
+#
+# Word-splitting the value is deliberate (hence the disabled shellcheck): the
+# list separator IS whitespace, and a path containing whitespace is not
+# supported — a constraint the missing/unreadable check below reports plainly
+# rather than silently mangling.
+#
+# Defaults resolve BOTH files, which is right for a single-host install where
+# one database holds every observability table. A split deployment sets the
+# variable to just its own half: the ingress qube's local log sink gets
+# summarize_funnel.sql, the app qube's canonical corpus gets
+# summarize_auth_events.sql. A repo checkout keeps the SQL one directory above
+# scripts/; the per-qube installs copy script and SQL side-by-side in $HOME so
+# the timer does not depend on a checkout path.
 if [[ -n "${SUMMARY_SQL_FILE:-}" ]]; then
-  SQL_FILE="$SUMMARY_SQL_FILE"
+  # shellcheck disable=SC2206
+  SQL_FILES=( ${SUMMARY_SQL_FILE} )
 elif [[ -r "$SCRIPT_DIR/../db/summarize_funnel.sql" ]]; then
-  SQL_FILE="$SCRIPT_DIR/../db/summarize_funnel.sql"
+  SQL_FILES=(
+    "$SCRIPT_DIR/../db/summarize_funnel.sql"
+    "$SCRIPT_DIR/../db/summarize_auth_events.sql"
+  )
 else
-  SQL_FILE="$SCRIPT_DIR/summarize_funnel.sql"
+  SQL_FILES=(
+    "$SCRIPT_DIR/summarize_funnel.sql"
+    "$SCRIPT_DIR/summarize_auth_events.sql"
+  )
 fi
 
-if [[ ! -r "$SQL_FILE" ]]; then
-  echo "[funnel_daily_summary] summary SQL is missing/unreadable: $SQL_FILE" >&2
+if (( ${#SQL_FILES[@]} == 0 )); then
+  echo "[funnel_daily_summary] SUMMARY_SQL_FILE is set but lists no paths" >&2
   exit 2
 fi
+
+for sql in "${SQL_FILES[@]}"; do
+  if [[ ! -r "$sql" ]]; then
+    echo "[funnel_daily_summary] summary SQL is missing/unreadable: $sql" >&2
+    exit 2
+  fi
+done
+unset sql
 
 if [[ ! -d "$SUMMARY_DIR" ]]; then
   echo "[funnel_daily_summary] SUMMARY_DIR=$SUMMARY_DIR does not exist; creating" >&2
@@ -163,13 +226,13 @@ run_summary() {
         return 1
       fi
 
-      docker compose exec -T postgres \
-        psql -X -v ON_ERROR_STOP=1 -U openbrain_app \
-        -d "${POSTGRES_DB:-openbrain}" -f - < "$SQL_FILE" || return 1
+      cat -- "${SQL_FILES[@]}" | docker compose exec -T postgres \
+        psql -X -v ON_ERROR_STOP=1 -U "$SUMMARY_ROLE" \
+        -d "${POSTGRES_DB:-openbrain}" -f - || return 1
       ;;
 
     postgres)
-      for required in DB_HOST OPENBRAIN_APP_PASSWORD; do
+      for required in DB_HOST SUMMARY_ROLE_PASSWORD; do
         if [[ -z "${!required:-}" ]]; then
           echo "[funnel_daily_summary] $required is required for SUMMARY_BACKEND=postgres" >&2
           return 2
@@ -185,12 +248,20 @@ run_summary() {
       # -X ignores a user .psqlrc that could change report formatting; -w
       # forbids an unattended password prompt. The source variable remains
       # unexported; only command-scoped PGPASSWORD reaches this client.
+      #
+      # DB_HOST is passed through verbatim, so an absolute path selects a unix
+      # socket DIRECTORY instead of a TCP host — libpq's own convention, no
+      # special case needed here. That is how the ingress qube's local log
+      # sink is reached: no TCP listener exists to point a hostname at.
+      # PGCONNECT_TIMEOUT is harmless on that path (it bounds a handshake
+      # that is already local).
+      cat -- "${SQL_FILES[@]}" | \
       PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-10}" \
-      PGPASSWORD="$OPENBRAIN_APP_PASSWORD" \
+      PGPASSWORD="$SUMMARY_ROLE_PASSWORD" \
         "$psql_bin" -X -w \
         -h "$DB_HOST" -p "${DB_PORT:-5432}" \
-        -U openbrain_app -d "${POSTGRES_DB:-openbrain}" \
-        -v ON_ERROR_STOP=1 -f - < "$SQL_FILE" || return 1
+        -U "$SUMMARY_ROLE" -d "${POSTGRES_DB:-openbrain}" \
+        -v ON_ERROR_STOP=1 -f - || return 1
       ;;
 
     *)
@@ -204,16 +275,19 @@ run_summary() {
 # DB-side failure surfaces on stderr and as a non-zero psql exit; stdout is
 # both written to the report and retained in the journald/cron trace by tee.
 #
-# Both backends connect as openbrain_app (least privilege; DML on the
-# observability tables, no thought deletion). The compose backend uses
-# container-local socket trust and passes no password across `docker exec`;
-# the split backend sends the app-role password from the narrow job env to
-# host psql for the tailnet-restricted TCP connection. Neither path needs the
-# database superuser.
+# Both backends connect as $SUMMARY_ROLE — openbrain_app by default (least
+# privilege; DML on the observability tables, no thought deletion), or
+# openbrain_logs_rollup on the ingress qube's local log sink. The compose
+# backend uses container-local socket trust and passes no password across
+# `docker exec`; the postgres backend sends the role's password from the
+# narrow job env to host psql, over a tailnet-restricted TCP connection or a
+# local unix socket depending on DB_HOST. Neither path needs the database
+# superuser.
 #
-# The summary SQL is purely INSERT/DELETE/SELECT, no schema mods, and all
-# of those operations are covered by openbrain_app's grants in
-# 02-observability.sql.
+# The summary SQL is purely INSERT/DELETE/SELECT, no schema mods, and all of
+# those operations are covered by openbrain_app's grants in
+# 02-observability.sql (and, on the sink, by openbrain_logs_rollup's in
+# db/log-sink/01-log-sink.sql).
 TMP_FILE="$(mktemp "$SUMMARY_DIR/.funnel-summary-$DATESTAMP.XXXXXX")"
 trap 'rm -f -- "$TMP_FILE"' EXIT
 

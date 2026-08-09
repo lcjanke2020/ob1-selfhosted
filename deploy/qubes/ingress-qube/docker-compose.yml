@@ -10,28 +10,37 @@
 #                   ob1-mcp-forward.sh; the app qube has no network-facing
 #                   mcp listener).
 #   log-ingester  — Tails Caddy's JSON access logs and writes funnel_access_log
-#                   rows ACROSS to the db qube (DB_HOST), as the INSERT-only
-#                   openbrain_ingester role. This is the qube's ONLY DB path and
-#                   its only DB credential.
-#   postgres      — PARKED (profile `logs-future`, never activated). Kept on disk
-#                   for a FUTURE local logs store; not started today. See note.
+#                   rows to the LOCAL log sink over a unix socket, as the
+#                   INSERT-only openbrain_ingester role.
+#   log-sink      — This qube's own Postgres, holding the two Funnel-access
+#                   relations and nothing else. Unix socket only: no published
+#                   port, `network_mode: none`, `listen_addresses=` empty.
 #
 # What this qube does NOT run: mcp and ollama. They live on the app qube; this
 # file simply doesn't define them, so the internet-adjacent edge never carries
 # the app-role DB credential. (This is the clean end state of GH #13.)
 #
-# Credentials: this qube holds ONLY the INSERT-only ingester credential
-# (OPENBRAIN_INGESTER_PASSWORD). It must NOT carry the superuser
-# (POSTGRES_PASSWORD) or app (OPENBRAIN_APP_PASSWORD) password — those live on
-# the app qube. The parked postgres references them as plain ${VAR}; left unset
-# in this qube's .env they interpolate to empty and, since the service never
-# starts, are never used.
+# NO NETWORK PATH TO THE CORPUS. Earlier revisions kept exactly one: the
+# ingester's INSERT-only connection ACROSS to the db qube on :5432, documented
+# as a deliberate scoped exception (GH #12 option 2). The sink is option 3, and
+# it removes the exception rather than justifying it — role grants are enforced
+# INSIDE Postgres, above the layer a pre-auth wire-protocol or SCRAM-handshake
+# flaw would live at, so while a socket was reachable from here a popped edge
+# had a path toward the corpus regardless of how narrow its grants were.
+# Enforcement now sits in dom0/qrexec policy, below anything this qube can
+# reach.
+#
+# Credentials: this qube holds the INSERT-only ingester credential, the sink's
+# init-only superuser, and the rollup role — all three for a LOCAL cluster
+# whose entire contents are request metadata. It carries no credential of any
+# kind for the corpus. Note the deliberate absence of anything named
+# OPENBRAIN_APP_PASSWORD: the sink's rollup role is openbrain_logs_rollup
+# precisely so no secret on this qube shares a name with an app-role secret.
 #
 # Run (from this directory, after copying .env.example to .env):
 #   docker compose up -d
-# Do NOT set COMPOSE_PROFILES on this qube — `logs-future` must stay inactive.
-# Confirm the parked DB is excluded:  docker compose config --services
-#   → must list exactly: caddy, log-ingester  (NOT postgres)
+# Confirm all three services are present:  docker compose config --services
+#   → must list exactly: caddy, log-ingester, log-sink
 
 services:
   caddy:
@@ -78,7 +87,10 @@ services:
       retries: 3
       start_period: 5s
 
-  # Caddy access-log ingester → writes funnel_access_log rows to the db qube.
+  # Caddy access-log ingester → writes funnel_access_log rows to the LOCAL
+  # log sink over a unix socket. It used to write ACROSS to the db qube on
+  # :5432; removing that was the point of the change (this qube now has no
+  # network path to the corpus at all).
   log-ingester:
     build:
       context: ../../../server
@@ -92,14 +104,31 @@ services:
       - /tmp:size=16M,mode=1777
     security_opt:
       - no-new-privileges:true
-    # No `depends_on`: Postgres is on the db qube, not in this compose project.
+    # Only `lo`. The ingester's sole outbound need was the database, and that
+    # is now a socket — so the process that parses attacker-controlled Caddy
+    # JSON has no network stack to pivot through at all. Its Deno --allow-net
+    # is itself narrowed to a single `unix:` socket path on this branch (no TCP
+    # host); this is the second, coarser layer under it. See
+    # server/Dockerfile.ingester's --allow-net note.
+    network_mode: none
+    # The database is now a sibling container, so a health gate is meaningful
+    # (it was absent when Postgres lived on another qube). Without it the
+    # ingester's eager pool races init and restart-loops through it.
+    depends_on:
+      log-sink:
+        condition: service_healthy
     environment:
-      # MANDATORY: the ingester writes ACROSS to the db qube. `:?` fails at
-      # config time rather than connecting to a nonexistent local `postgres`.
-      DB_HOST: ${DB_HOST:?set DB_HOST to the db qube tailnet address (the ingester writes funnel_access_log across to the db qube)}
+      # An ABSOLUTE PATH selects a unix socket directory instead of a TCP host
+      # — dbHostType() in server/log_ingester.ts routes the driver to
+      # `transport: "unix"`, and Dockerfile.ingester's ENTRYPOINT derives the
+      # matching Deno permissions from the same leading-slash rule. This is the
+      # CONTAINER-side path, so it is fixed; the host side is
+      # LOG_SINK_SOCKET_DIR. `:?` keeps a blank value a config-time error.
+      DB_HOST: ${INGESTER_DB_HOST:?set INGESTER_DB_HOST to /var/run/postgresql (the local log sink socket dir)}
       DB_PORT: ${DB_PORT:-5432}
-      DB_NAME: ${POSTGRES_DB:-openbrain}
-      # INSERT-only observability role — the only DB credential this qube holds.
+      DB_NAME: ${LOG_SINK_DB:-openbrain_logs}
+      # INSERT-only observability role — still the only DB credential in this
+      # qube's compose env, now for a local cluster rather than a remote one.
       # `:?` (not plain ${VAR}) so a blank value after `cp .env.example .env`
       # fails at `docker compose config` time, not as a runtime DB-auth error.
       DB_USER: openbrain_ingester
@@ -111,56 +140,113 @@ services:
       # on-disk audit evidence; cursors in a separate writable volume.
       - caddy_logs:/var/log/caddy:ro
       - caddy_cursors:/var/lib/ingester/cursors
+      # The sink's socket directory, shared with log-sink. RW because
+      # connecting to a unix socket needs write access to the socket file.
+      # `:z` (shared) for SELinux — the same label as the sink's mount.
+      - ${LOG_SINK_SOCKET_DIR:?set LOG_SINK_SOCKET_DIR to a SHORT host path, e.g. /home/user/ob1-log-sink/run}:/var/run/postgresql:z
 
-  # PARKED — kept on disk for a FUTURE local logs store, never started today.
+  # Local Funnel-log sink — this qube's own Postgres, reachable ONLY over a
+  # unix socket. It replaces the INSERT path that used to cross to the db qube,
+  # which is what lets this qube hold no network route to the corpus at all.
   #
-  # `profiles: [logs-future]` is a profile the deploy never activates, so a bare
-  # `docker compose up` excludes it (same mechanism as external-db.yml's
-  # `bundled-db-disabled`). To one day move log storage local to this qube,
-  # activate the profile, point the log-ingester's DB_HOST at 127.0.0.1, and
-  # provision the roles/schema here.
+  # NO `ports:` and NO network. `network_mode: none` gives the container just
+  # `lo`, and `-c listen_addresses=` (empty) means Postgres opens no TCP socket
+  # even there — so there is nothing to publish, nothing to firewall, and
+  # nothing for a popped edge process to connect to except the socket below,
+  # which still demands scram. Verify with `ss -tlnp` on the host (no 5432) and
+  # `docker inspect` (networks: none).
   #
-  # Its passwords are referenced as PLAIN ${VAR} (NOT `:?`): a parked service is
-  # still interpolated at `config` time, so `:?` would error even though the
-  # service never starts. Left unset in this qube's .env they resolve empty and
-  # are never used — which is exactly what keeps this qube free of the superuser
-  # and app credentials.
-  postgres:
+  # Contents: `funnel_access_log` + `funnel_access_summary` and nothing else —
+  # see db/log-sink/01-log-sink.sql, whose companion assertion FAILS INIT if a
+  # third relation or an unenumerated grant ever appears. No `thoughts`, no
+  # `mcp_auth_events`, no pgvector; plain postgres keeps that extension's
+  # supply chain off the internet-facing qube.
+  #
+  # The data is explicitly DISPOSABLE — 30-day raw, 365-day aggregate, no
+  # backup. Losing it costs request metadata that was already this qube's to
+  # lose; adding the perimeter to the backup pipeline would create a new data
+  # path OUT of it, which is the opposite of the point.
+  log-sink:
     # Image-only pin: bumping it also requires updating KNOWN_NON_DENO_IMAGES
-    # in server/scripts/check_allow_env.ts (the allow-env drift gate) and the
-    # same pin in deploy/compose-local/docker-compose.yml.
-    image: pgvector/pgvector:0.8.6-pg16
+    # in server/scripts/check_allow_env.ts (the allow-env drift gate).
+    image: postgres:17-alpine
     restart: unless-stopped
-    profiles:
-      - logs-future
+    # Only `lo`. Belt to `listen_addresses=`'s braces: even a future edit that
+    # re-enabled a TCP listener would have nothing to listen on.
+    network_mode: none
     security_opt:
       - no-new-privileges:true
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-openbrain}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      OPENBRAIN_APP_PASSWORD: ${OPENBRAIN_APP_PASSWORD}
-      OPENBRAIN_READONLY_PASSWORD: ${OPENBRAIN_READONLY_PASSWORD}
-      OPENBRAIN_INGESTER_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD:-}
+      POSTGRES_DB: ${LOG_SINK_DB:-openbrain_logs}
+      POSTGRES_USER: ${LOG_SINK_SUPERUSER:-postgres}
+      # Init-only credential. `:?` so a blank value fails at `docker compose
+      # config` time — with local scram (below) a passwordless superuser can no
+      # longer connect at all, so an empty value here bricks init rather than
+      # silently opening a door.
+      POSTGRES_PASSWORD: ${LOG_SINK_SUPERUSER_PASSWORD:?set LOG_SINK_SUPERUSER_PASSWORD (the log sink's init-only superuser)}
+      # THE non-obvious one. The image's stock pg_hba is `local all all trust`,
+      # which would let anything able to reach the socket connect as ANY role
+      # — including the superuser — with no password, making the INSERT-only
+      # ingester grant below purely decorative. --auth-local=scram-sha-256
+      # makes initdb write a pg_hba that authenticates socket connections too.
+      # docker-entrypoint.sh exports PGPASSWORD during the init phase
+      # specifically so this works (see its comment at the temp-server start).
+      POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256
+      # There is no TCP listener, so `host` lines are unreachable by
+      # construction; `reject` states the intent and fails closed if a future
+      # edit ever re-opens one.
+      POSTGRES_HOST_AUTH_METHOD: reject
+      OPENBRAIN_INGESTER_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD:?set OPENBRAIN_INGESTER_PASSWORD (the log-ingester INSERT-only role)}
+      OPENBRAIN_LOGS_ROLLUP_PASSWORD: ${OPENBRAIN_LOGS_ROLLUP_PASSWORD:?set OPENBRAIN_LOGS_ROLLUP_PASSWORD (the daily summary + retention role)}
+      # Optional, like the monitor itself: unset means no monitor role and no
+      # monitor grant. Plain ${VAR} (not `:?`) so a sink without the host-side
+      # funnel monitor still comes up.
+      OPENBRAIN_MONITOR_PASSWORD: ${OPENBRAIN_MONITOR_PASSWORD:-}
+    # Socket only: an empty listen_addresses is a valid Postgres setting and
+    # opens no TCP socket. (The init-phase temp server is socket-only
+    # regardless — docker_temp_server_start appends its own
+    # `-c listen_addresses=''` — so this flag governs the FINAL server, the one
+    # that outlives init.)
+    #
+    # The entrypoint is spelled out rather than inherited because
+    # scripts/check_allow_env.ts refuses to audit a `command` override on an
+    # image whose launcher defaults it cannot resolve. These two lines are the
+    # image's own ENTRYPOINT/CMD (["docker-entrypoint.sh"] / ["postgres"]) with
+    # the flag appended, so declaring them changes nothing but makes the
+    # effective launcher checkable.
+    entrypoint: ["docker-entrypoint.sh"]
+    command: ["postgres", "-c", "listen_addresses="]
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ../../../db/00-roles.sh:/docker-entrypoint-initdb.d/00-roles.sh:ro
-      - ../../../db/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-      - ../../../db/02-observability.sql:/docker-entrypoint-initdb.d/02-observability.sql:ro
-      - ../../../db/04-sessions.sql:/docker-entrypoint-initdb.d/04-sessions.sql:ro
-      - ../../../db/05-hybrid-search.sql:/docker-entrypoint-initdb.d/05-hybrid-search.sql:ro
-      - ../../../db/06-spaces.sql:/docker-entrypoint-initdb.d/06-spaces.sql:ro
-      - ../../../db/07-metadata-degradation.sql:/docker-entrypoint-initdb.d/07-metadata-degradation.sql:ro
-      - ../../../db/08-access-tokens.sql:/docker-entrypoint-initdb.d/08-access-tokens.sql:ro
-      # Run the catalog assertion after every schema migration while keeping
-      # its stable operator-facing source path.
-      - ../../../db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro
-    ports:
-      - "127.0.0.1:5432:5432"
+      - log_sink_data:/var/lib/postgresql/data
+      # THE transport. A host directory, not a named volume, because the
+      # host-side funnel monitor and daily rollup connect through it as well —
+      # `psql -h <dir>` is libpq's own socket convention, so neither script
+      # needs a special case. Ownership sorts itself out: the entrypoint chowns
+      # this directory to the container's postgres user on every start
+      # (docker-entrypoint.sh's `find /var/run/postgresql \! -user postgres`),
+      # which under rootless docker lands on a subuid while leaving the
+      # directory o+rx and the socket 0777 — so the host account can still
+      # connect, and scram still decides who it is.
+      #
+      # `:z` relabels for SELinux (Fedora/Qubes hosts); shared, not private,
+      # because the log-ingester mounts the same directory.
+      #
+      # KEEP THE PATH SHORT. A unix socket path is capped at 107 bytes
+      # (sun_path), and it is the HOST path that counts for host-side clients.
+      # A deep directory produces `Unix-domain socket path ... is too long`
+      # at connect time, not at mount time.
+      - ${LOG_SINK_SOCKET_DIR:?set LOG_SINK_SOCKET_DIR to a SHORT host path, e.g. /home/user/ob1-log-sink/run}:/var/run/postgresql:z
+      - ../../../db/log-sink/00-log-sink-roles.sh:/docker-entrypoint-initdb.d/00-log-sink-roles.sh:ro
+      - ../../../db/log-sink/01-log-sink.sql:/docker-entrypoint-initdb.d/01-log-sink.sql:ro
+      # Runs last so the invariants are checked against the finished schema,
+      # while keeping its stable operator-facing source path.
+      - ../../../db/log-sink/02-log-sink-assertion.sql:/docker-entrypoint-initdb.d/99-log-sink-assertion.sql:ro
     healthcheck:
+      # -h is required: with no TCP listener, pg_isready's default host would
+      # have nothing to probe.
       test: [
         "CMD-SHELL",
-        "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-openbrain}",
+        "pg_isready -h /var/run/postgresql -U ${LOG_SINK_SUPERUSER:-postgres} -d ${LOG_SINK_DB:-openbrain_logs}",
       ]
       interval: 10s
       timeout: 5s
@@ -169,6 +255,4 @@ services:
 volumes:
   caddy_logs:
   caddy_cursors:
-  # Declared for the parked postgres; unused until the logs-future profile is
-  # activated.
-  postgres_data:
+  log_sink_data:

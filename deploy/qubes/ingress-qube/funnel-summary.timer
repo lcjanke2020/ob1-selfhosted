@@ -1,0 +1,19 @@
+# systemd USER unit — install at ~/.config/systemd/user/funnel-summary.timer on
+# the INGRESS qube. User lingering is required to run without an open login
+# session — the same linger this qube already needs for its rootless dockerd,
+# so if the sink is running the timer will fire.
+[Unit]
+Description=Run Open Brain Funnel summary daily (local log sink)
+
+[Timer]
+# UTC matches the SQL's day boundaries and leaves the prior day complete.
+# Offset from the app qube's 00:30 occurrence so the two halves' reports carry
+# distinguishable timestamps and a shared-host review reads in order.
+OnCalendar=*-*-* 00:40:00 UTC
+AccuracySec=1min
+# Qubes may suspend an idle app qube. Run one missed occurrence after wake so a
+# suspended night does not become an unbounded retention gap.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
