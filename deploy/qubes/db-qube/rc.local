@@ -30,24 +30,30 @@ echo "=== rc.local $(date -Is) ==="
 systemctl start tailscaled
 
 # --- Start Postgres (loopback-only listener; no interface wait) ---
-# Capture and propagate the exit status: this is the single explicit start
-# path, and a trailing echo would otherwise reset $? to 0 and mask a failed
-# start behind a successful-looking boot. Exit 2 = "already running" — the
-# cluster is UP but something started it first (start.conf left at `auto`
-# instead of `manual`, or a manual operator start): report it truthfully as
-# running, but flag the double-start-path drift instead of crying DOWN.
+# This is the single explicit start path, and its exit status is rc.local's:
+# a failed start must fail the boot visibly. Detecting "already running"
+# needs care in THIS context: as root under systemd, Debian's pg_ctlcluster
+# redirects `start` to `systemctl start postgresql@17-main` and returns ITS
+# status — an already-active unit start is idempotent exit 0 (no exit 2 to
+# catch), and a postmaster started outside the unit makes the redirected
+# start FAIL while the cluster is genuinely up. So: detect already-running
+# with a status preflight (`pg_ctlcluster status` is not redirected), and
+# after a failed start re-check actual state before declaring the cluster
+# down — DOWN must mean confirmed-stopped, or the ERROR path stops meaning
+# anything.
+if pg_ctlcluster 17 main status >/dev/null 2>&1; then
+	echo "WARNING: cluster was ALREADY RUNNING before rc.local's start — started outside this script; check /etc/postgresql/17/main/start.conf is 'manual' (README: Disable the cluster's boot auto-start)"
+	exit 0
+fi
 pg_ctlcluster 17 main start
 rc=$?
-case "$rc" in
-0)
+if [ "$rc" -eq 0 ]; then
 	echo "pg_ctlcluster exit=0 (cluster started)"
-	;;
-2)
-	echo "WARNING: cluster was ALREADY RUNNING (pg_ctlcluster exit=2) — started outside rc.local; check /etc/postgresql/17/main/start.conf is 'manual' (README: Disable the cluster's boot auto-start)"
-	rc=0
-	;;
-*)
-	echo "ERROR: pg_ctlcluster 17 main start failed (exit=$rc) — the cluster is DOWN"
-	;;
-esac
+	exit 0
+fi
+if pg_ctlcluster 17 main status >/dev/null 2>&1; then
+	echo "WARNING: start returned exit=$rc but the cluster IS running — a racing start path won; check /etc/postgresql/17/main/start.conf is 'manual' (README: Disable the cluster's boot auto-start)"
+	exit 0
+fi
+echo "ERROR: pg_ctlcluster 17 main start failed (exit=$rc) — the cluster is DOWN (confirmed stopped)"
 exit "$rc"

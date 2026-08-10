@@ -115,10 +115,13 @@ that could not yet bind the tailnet IP — is gone with the loopback-only bind;
 what it preserves now is **one** explicit, logged start branch instead of two
 racing ones. If you prefer the stock auto-start, set `start.conf` back to `auto`
 and delete the `rc.local` start block — pick one, not both. Left at `auto` by
-accident, the stock service wins the race and `rc.local`'s start returns
-"already running" (`pg_ctlcluster` exit 2) — `rc.local` reports that accurately
-as a running cluster with a pointer to this section, not as a failure, so the
-boot stays honest either way.
+accident, the stock service wins the race — `rc.local` detects that with a
+status preflight and logs a WARNING pointing here, exit 0, because the cluster
+is genuinely up. (A preflight, not an exit-code check, deliberately: as root
+under systemd, `pg_ctlcluster start` is redirected to `systemctl` and does not
+reliably report "already running" as exit 2, while `pg_ctlcluster status` is not
+redirected. A start that fails is likewise re-checked against actual cluster
+state before the boot declares it DOWN.)
 
 ## First boot / provisioning
 
