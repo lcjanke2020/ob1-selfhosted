@@ -37,33 +37,35 @@ ingress→app hop proved first (next section). The ingress qube is not a peer �
 see [Log-ingester placement](#log-ingester-placement-settled-local-sink).
 
 - **Postgres binds loopback only** (`listen_addresses = 'localhost'`,
-  [`db-qube/postgresql.local.conf`](db-qube/postgresql.local.conf)) —
-  `ss -ntlp` on the db qube shows `127.0.0.1`/`::1` sockets only. The tailnet
-  bind, the `tailscale0:5432` nft accept and its post-tailscaled one-shot
-  unit, and the Tailscale ACL grant that scoped the old listener are all
-  retired — there is no listener left to scope.
+  [`db-qube/postgresql.local.conf`](db-qube/postgresql.local.conf)) — `ss -ntlp`
+  on the db qube shows `127.0.0.1`/`::1` sockets only. The tailnet bind, the
+  `tailscale0:5432` nft accept and its post-tailscaled one-shot unit, and the
+  Tailscale ACL grant that scoped the old listener are all retired — there is no
+  listener left to scope.
 - **A socat forwarder on the app qube**
-  ([`app-qube/ob1-db-forward.sh`](app-qube/ob1-db-forward.sh)) binds that
-  qube's own IP `:5432` and bridges each connection to
-  `qrexec-client-vm <db-qube> qubes.ConnectTCP+5432`; every DB client on the
-  app qube — mcp, the encrypted backup, the auth-events rollup, admin psql —
-  targets it via `DB_HOST`.
+  ([`app-qube/ob1-db-forward.sh`](app-qube/ob1-db-forward.sh)) binds that qube's
+  own IP `:5432` and bridges each connection to
+  `qrexec-client-vm <db-qube> qubes.ConnectTCP+5432`; every DB client on the app
+  qube — mcp, the encrypted backup, the auth-events rollup, admin psql — targets
+  it via `DB_HOST`.
 - **dom0 policy gates the channel** —
   `qubes.ConnectTCP +5432 <app-qube> <db-qube> allow autostart=no` (explicit
-  destination; `autostart=no` so a stray connection can never boot a halted
-  db qube). Per-source enforcement lives here: only the app qube can open the
+  destination; `autostart=no` so a stray connection can never boot a halted db
+  qube). Per-source enforcement lives here: only the app qube can open the
   channel, and the ingress qube deliberately has no rule.
 - **pg_hba + scram stay as the inner gate** — the loopback lines keep the
   role/database scoping
-  ([`db-qube/pg_hba.snippet.conf`](db-qube/pg_hba.snippet.conf)). What pg_hba
-  loses is per-source-IP scoping (every caller now arrives as `127.0.0.1`);
-  that moved down to the dom0 policy layer, which is enforced per source
-  qube — a stronger identity than an IP.
+  ([`db-qube/pg_hba.snippet.conf`](db-qube/pg_hba.snippet.conf); the stock broad
+  `host all all` loopback lines must be removed — first match wins, and the
+  snippet header carries the removal plus a prove-by-attempt probe). What pg_hba
+  loses is per-source-IP scoping (every caller now arrives as `127.0.0.1`); that
+  moved down to the dom0 policy layer, which is enforced per source qube — a
+  stronger identity than an IP.
 
 PGDATA, `/etc/postgresql`, and `/var/lib/tailscale` are bind-dir'd into `/rw` so
 the cluster, its hardened config, and the node identity survive reboots;
-`rc.local` starts the cluster at boot with no interface wait (the tailscale
-node is kept, with zero inbound grants). Existing installs migrate with
+`rc.local` starts the cluster at boot with no interface wait (the tailscale node
+is kept, with zero inbound grants). Existing installs migrate with
 [db-qube/README.md § Migrating an existing install to ConnectTCP](db-qube/README.md#migrating-an-existing-install-to-connecttcp);
 the closing negative test — a connect attempt to the old tailnet address must
 die at the wire, verified by attempt — is the acceptance gate
@@ -165,11 +167,11 @@ wrong tool once the point is to put a VM boundary between two of them.
   dom0-policy-gated qubes.ConnectTCP channel. As the trusted DB control-plane it
   holds the admin + app + readonly credentials and runs the encrypted off-box
   backup ([`app-qube/backup/`](app-qube/backup/)).
-- **DB qube** — Postgres + pgvector, **out of docker-compose**, run natively
-  (or as a single container), bound to loopback only. Reached by the app qube
-  alone (the full app role, plus readonly for backups and the superuser for
-  remote admin) over the dom0-gated qubes.ConnectTCP channel; no other qube
-  can even open the channel, and there is no network listener to route to.
+- **DB qube** — Postgres + pgvector, **out of docker-compose**, run natively (or
+  as a single container), bound to loopback only. Reached by the app qube alone
+  (the full app role, plus readonly for backups and the superuser for remote
+  admin) over the dom0-gated qubes.ConnectTCP channel; no other qube can even
+  open the channel, and there is no network listener to route to.
 
 The minimum viable step, if the full split slips: get Postgres out of the
 Funnel-exposed qube. Edge compromise ≠ memory-store compromise is most of the
@@ -192,24 +194,24 @@ isolation benefit at a fraction of the qrexec complexity, composed with
 tag-based default-deny policy already in place, and failed debuggable. The
 residual delta — one TCP listener, locked to one peer — was judged acceptable
 for this asset class at the time. (The calculus came out differently for the
-ingress→app hop, whose old wide bind needed continuously-correct docker
-firewall state to stay scoped; that hop
+ingress→app hop, whose old wide bind needed continuously-correct docker firewall
+state to stay scoped; that hop
 [adopted option 1's qrexec pattern first](#implemented-ingressapp-transport-qubesconnecttcp--no-listener).)
 
-**Superseded — upgrade executed.** The DB hop now runs option 1's qrexec
-pattern too
+**Superseded — upgrade executed.** The DB hop now runs option 1's qrexec pattern
+too
 ([Implemented: app→DB transport](#implemented-appdb-transport-qubesconnecttcp--no-listener)).
 Two things changed the calculus. The ingress→app hop had proven the pattern in
-production, paying "least standard to debug under time pressure" down to a
-known quantity. And the log-sink work sharpened the layer argument: an ACL
-grant scopes the wire, but a pg_hba source line — like a role grant — is
-enforced *inside* Postgres, above where a pre-auth wire-protocol or
-SCRAM-handshake flaw would live; as long as any peer could open a socket to
-the cluster, it had a path toward the corpus that no scoping narrowness could
-close. Removing the listener moves enforcement into dom0, below anything a
-compromised peer can reach. The firewall-scoped shape remains a reasonable
-intermediate step for deployments that don't want the qrexec plumbing; this
-repo's Qubes posture has moved past it.
+production, paying "least standard to debug under time pressure" down to a known
+quantity. And the log-sink work sharpened the layer argument: an ACL grant
+scopes the wire, but a pg_hba source line — like a role grant — is enforced
+_inside_ Postgres, above where a pre-auth wire-protocol or SCRAM-handshake flaw
+would live; as long as any peer could open a socket to the cluster, it had a
+path toward the corpus that no scoping narrowness could close. Removing the
+listener moves enforcement into dom0, below anything a compromised peer can
+reach. The firewall-scoped shape remains a reasonable intermediate step for
+deployments that don't want the qrexec plumbing; this repo's Qubes posture has
+moved past it.
 
 ## Decision: DB qube construction
 
@@ -305,8 +307,8 @@ Caddy's access logs to cross qubes. This resolves
   enforced by an init-time assertion.
 - MCP + Postgres in separate qubes; the app qube reaches the DB over the
   dom0-gated qubes.ConnectTCP channel (full app role), and **nothing else
-  reaches it at all** — the db qube has no network listener, verified by
-  attempt (a connect to its old address dies at the wire), not by inspection.
+  reaches it at all** — the db qube has no network listener, verified by attempt
+  (a connect to its old address dies at the wire), not by inspection.
 - The ingress qube cannot reach any host other than the app qube's mcp, over the
   dom0-policy-gated qubes.ConnectTCP channel — **achieved without exception**
   since the log sink moved local

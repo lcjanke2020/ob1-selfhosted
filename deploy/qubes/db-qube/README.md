@@ -3,36 +3,36 @@
 The [three-qube design](../three-qube-design.md) pulls Postgres out of compose
 into a dedicated **database qube**: a minimal Debian-templated AppVM running
 Postgres + pgvector natively, **bound to loopback only** — no network-facing
-listener at all — and reachable by exactly **one** peer: the app qube
-(superuser for remote admin, plus the app and readonly roles), over a
-dom0-policy-gated qubes.ConnectTCP channel
+listener at all — and reachable by exactly **one** peer: the app qube (superuser
+for remote admin, plus the app and readonly roles), over a dom0-policy-gated
+qubes.ConnectTCP channel
 ([app-qube README § The app→db hop](../app-qube/README.md#the-appdb-hop-qubesconnecttcp)).
-The ingress qube is deliberately not a peer — no qrexec rule, no credential —
-it writes Funnel logs to a local sink of its own; see the
+The ingress qube is deliberately not a peer — no qrexec rule, no credential — it
+writes Funnel logs to a local sink of its own; see the
 [design doc](../three-qube-design.md). This directory holds the on-disk config
-that makes that qube reproducible — the counterpart to the compose files for
-the other install paths.
+that makes that qube reproducible — the counterpart to the compose files for the
+other install paths.
 
 These are **placeholders**, not drop-in secrets. Adjust the Postgres major
-version to match your template before using them (the old address
-placeholders are gone: nothing here needs a tailnet or peer IP any more).
+version to match your template before using them (the old address placeholders
+are gone: nothing here needs a tailnet or peer IP any more).
 
 ## What each file is, and where it goes on the DB qube
 
 Everything durable lives under `/rw` (a stock AppVM wipes `/etc/systemd/system`
 and most of `/etc` on every reboot), and is re-installed at boot by `rc.local`.
 
-| File here                        | Install at                                         | Purpose                                                                                                                                                                                                                                                                                                                             |
-| -------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `qubes-bind-dirs.d/50_user.conf` | `/rw/config/qubes-bind-dirs.d/50_user.conf`        | Persist PGDATA, the cluster config, and the Tailscale identity across reboots                                                                                                                                                                                                                                                       |
-| `rc.local`                       | `/rw/config/rc.local` (chmod +x)                   | Boot: start tailscaled (optional — node kept with zero inbound grants) → start Postgres (no interface wait; the cluster binds loopback only)                                                                                                                                                                                        |
+| File here                        | Install at                                         | Purpose                                                                                                                                                                                                                                                                                                                                  |
+| -------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `qubes-bind-dirs.d/50_user.conf` | `/rw/config/qubes-bind-dirs.d/50_user.conf`        | Persist PGDATA, the cluster config, and the Tailscale identity across reboots                                                                                                                                                                                                                                                            |
+| `rc.local`                       | `/rw/config/rc.local` (chmod +x)                   | Boot: start tailscaled (optional — node kept with zero inbound grants) → start Postgres (no interface wait; the cluster binds loopback only)                                                                                                                                                                                             |
 | `pg_hba.snippet.conf`            | append to `/etc/postgresql/<ver>/main/pg_hba.conf` | scram **loopback** lines: superuser (remote admin) + app + readonly — every remote caller arrives on loopback via ConnectTCP. No line for the ingress qube — existing installs must also REMOVE the retired ingress and tailnet lines, see [§ Migrating an existing install to ConnectTCP](#migrating-an-existing-install-to-connecttcp) |
-| `postgresql.local.conf`          | `conf.d/` drop-in or `ALTER SYSTEM`                | `listen_addresses = 'localhost'` and `ssl = off`                                                                                                                                                                                                                                                                                    |
+| `postgresql.local.conf`          | `conf.d/` drop-in or `ALTER SYSTEM`                | `listen_addresses = 'localhost'` and `ssl = off`                                                                                                                                                                                                                                                                                         |
 
 The `qubes-firewall-user-script` (the `tailscale0:5432` accept) and
-`ob1-db-firewall.service` (its post-tailscaled applier) that earlier versions
-of this directory shipped are **gone**: with a loopback-only cluster there is
-no inbound rule to apply. Existing installs remove them in the
+`ob1-db-firewall.service` (its post-tailscaled applier) that earlier versions of
+this directory shipped are **gone**: with a loopback-only cluster there is no
+inbound rule to apply. Existing installs remove them in the
 [migration pass](#migrating-an-existing-install-to-connecttcp).
 
 ## Placeholders to fill
@@ -44,39 +44,41 @@ no inbound rule to apply. Existing installs remove them in the
 Reachability is enforced in independent layers, so no single misconfiguration
 exposes the database:
 
-1. **No listener** — `listen_addresses = 'localhost'`: the cluster has no
-   socket on any network interface. There is nothing for a tailnet or LAN peer
-   to connect to, whatever the firewall or ACL state — `ss -ntlp` showing only
+1. **No listener** — `listen_addresses = 'localhost'`: the cluster has no socket
+   on any network interface. There is nothing for a tailnet or LAN peer to
+   connect to, whatever the firewall or ACL state — `ss -ntlp` showing only
    `127.0.0.1`/`::1` on `:5432` is the check.
 2. **dom0 qrexec policy** — the only remote path in is
-   `qubes.ConnectTCP +5432 <app-qube> <db-qube> allow autostart=no`, enforced
-   by dom0 per **source qube**. Only the app qube can open the channel; the
-   ingress qube deliberately has no rule. This layer replaces the old
-   Tailscale-ACL + nftables source scoping — it is enforced below anything a
-   compromised peer qube can reach.
+   `qubes.ConnectTCP +5432 <app-qube> <db-qube> allow autostart=no`, enforced by
+   dom0 per **source qube**. Only the app qube can open the channel; the ingress
+   qube deliberately has no rule. This layer replaces the old Tailscale-ACL +
+   nftables source scoping — it is enforced below anything a compromised peer
+   qube can reach.
 3. **`pg_hba.conf`** — `scram-sha-256` on the loopback lines: the app and
-   readonly roles scoped to the `openbrain` database, and the **superuser**
-   (for remote DB admin — see the trade-off note below). pg_hba can no longer
-   tell callers apart by source (everything arrives as loopback); it keeps the
-   role/database scoping and the password gate.
+   readonly roles scoped to the `openbrain` database, and the **superuser** (for
+   remote DB admin — see the trade-off note below). pg_hba can no longer tell
+   callers apart by source (everything arrives as loopback); it keeps the
+   role/database scoping and the password gate — **provided the stock broad
+   `host all all` loopback lines are removed**: first match wins, and left in
+   place they shadow the scoped lines entirely (the snippet's header and the
+   migration checklist both carry the removal + the prove-by-attempt probe).
 
 **Superuser remote-admin trade-off.** The superuser (`postgres`) is reachable
 through the **app qube's ConnectTCP channel only**, so role provisioning +
 schema migrations can be driven from the app qube (in addition to running them
 locally on this qube). This is **more than a data-access delta**: a reachable
-superuser can `COPY … TO/FROM PROGRAM` (run commands **as the `postgres` OS
-user on this qube**), `DROP`/alter structures, and read password hashes from
-`pg_authid` — so a compromised app qube could **pivot into this qube's OS**,
-the very VM boundary the three-qube split exists to enforce. Accepted for now
-because (a) the app compartment legitimately runs the memory service (though
-its runtime role remains constrained by memory-space RLS), and (b) this db
-qube is deliberately contained — a minimal template, no sshd, no network
-listener, nothing of value beyond the store it already holds. Hardening to a
-non-superuser migration role — which closes the _pivot_, not just the data
-delta — is tracked in
-[#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15). To revert to
-local-only admin, drop the `postgres` loopback lines from
-`pg_hba.snippet.conf` (the `local … peer` socket path remains).
+superuser can `COPY … TO/FROM PROGRAM` (run commands **as the `postgres` OS user
+on this qube**), `DROP`/alter structures, and read password hashes from
+`pg_authid` — so a compromised app qube could **pivot into this qube's OS**, the
+very VM boundary the three-qube split exists to enforce. Accepted for now
+because (a) the app compartment legitimately runs the memory service (though its
+runtime role remains constrained by memory-space RLS), and (b) this db qube is
+deliberately contained — a minimal template, no sshd, no network listener,
+nothing of value beyond the store it already holds. Hardening to a non-superuser
+migration role — which closes the _pivot_, not just the data delta — is tracked
+in [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15). To revert to
+local-only admin, drop the `postgres` loopback lines from `pg_hba.snippet.conf`
+(the `local … peer` socket path remains).
 
 No `tcp/22` is opened: there is no sshd on the DB qube. OS-level administration
 is done from dom0 with `qvm-run`; DB-level administration is done either there
@@ -85,10 +87,10 @@ channel (the superuser remote-admin lines above).
 
 ## Boot ordering
 
-There is no ordering constraint left: the cluster binds loopback only, so it
-no longer waits on `tailscale0`. `rc.local` starts `tailscaled` (the node is
-kept on the tailnet with zero inbound grants; drop that block if you retire
-the node) and then starts the cluster unconditionally. Boot output (and the
+There is no ordering constraint left: the cluster binds loopback only, so it no
+longer waits on `tailscale0`. `rc.local` starts `tailscaled` (the node is kept
+on the tailnet with zero inbound grants; drop that block if you retire the node)
+and then starts the cluster unconditionally. Boot output (and the
 `pg_ctlcluster` exit status) lands in `/var/log/ob1-db-boot.log`.
 
 ### The cluster's boot auto-start (kept off)
@@ -97,10 +99,10 @@ the node) and then starts the cluster unconditionally. Boot output (and the
 `/etc/postgresql` bind-dir). The original reason — losing the race against a
 boot-time auto-start that would fail to bind the not-yet-existing tailnet IP —
 is gone with the loopback-only bind, and Debian's stock auto-start would now
-work. Keeping `manual` + the `rc.local` start preserves **one** explicit,
-logged start path instead of two racing ones; if you prefer the stock
-auto-start, set `start.conf` back to `auto` and delete the `rc.local` start
-block — pick one, not both.
+work. Keeping `manual` + the `rc.local` start preserves **one** explicit, logged
+start path instead of two racing ones; if you prefer the stock auto-start, set
+`start.conf` back to `auto` and delete the `rc.local` start block — pick one,
+not both.
 
 ## First boot / provisioning
 
@@ -139,16 +141,18 @@ read-only completed-catalog check, not the third schema migration. Run it last
 during native provisioning, and rerun it after every later schema migration so
 new relations are covered by the monitor allowlist invariant.
 
-Apply `pg_hba.snippet.conf` and `postgresql.local.conf` after the roles exist,
-then reload/restart so the network listener and host lines take effect.
+Apply `pg_hba.snippet.conf` and `postgresql.local.conf` after the roles exist —
+including the snippet header's removal of the stock broad loopback lines (first
+match wins) — then reload/restart so the loopback-only bind and the scoped host
+lines take effect, and run the snippet's prove-by-attempt probe.
 
 Once the superuser loopback line is in place (and the app qube's forwarder +
 dom0 policy are installed —
 [app-qube README § The app→db hop](../app-qube/README.md#the-appdb-hop-qubesconnecttcp)),
 you can also run this provisioning (and later migrations) **remotely from the
 app qube** through the ConnectTCP channel instead of on this qube — e.g.
-`PGPASSWORD=… psql -h <app-qube-ip> -U postgres -d postgres` (the app qube's
-own IP, where the forwarder listens) — which is the point of the superuser
+`PGPASSWORD=… psql -h <app-qube-ip> -U postgres -d postgres` (the app qube's own
+IP, where the forwarder listens) — which is the point of the superuser
 remote-admin lines above.
 
 Filtered provenance search requires pgvector `0.8.0` or newer. Before updating
@@ -198,13 +202,13 @@ enable native token verification, and the dedicated administrator role can stay
 `NOLOGIN`. See
 [Native access tokens](../../../docs/native-access-tokens.md#existing-database-upgrade).
 
-## Migrating an existing install to ConnectTCP (existing installs)
+## Migrating an existing install to ConnectTCP
 
-A deployment built from the earlier version of this directory has Postgres
-bound to `localhost,<tailnet-ip>` behind the three-layer ACL + nftables +
+A deployment built from the earlier version of this directory has Postgres bound
+to `localhost,<tailnet-ip>` behind the three-layer ACL + nftables +
 `pg_hba`-source scoping. The cutover to the loopback-only ConnectTCP shape is
-two phases — **build the new path first, tear the old one down second** — so
-the tailnet path stays live as a fallback until the new one is verified.
+two phases — **build the new path first, tear the old one down second** — so the
+tailnet path stays live as a fallback until the new one is verified.
 
 **Phase 1 — bring up the ConnectTCP path (old path still live):**
 
@@ -215,49 +219,57 @@ the tailnet path stays live as a fallback until the new one is verified.
    `@default` (see [`../gpu-offload-transport.md`](../gpu-offload-transport.md)
    for both gotchas).
 2. **This qube — pg_hba**: append the loopback lines from
-   [`pg_hba.snippet.conf`](pg_hba.snippet.conf) (keep the old tailnet lines
-   for now), reload
-   (`sudo -u postgres psql -Atc 'select pg_reload_conf();'`), and confirm
-   `select count(*) from pg_hba_file_rules where error is not null;` prints
-   `0`.
+   [`pg_hba.snippet.conf`](pg_hba.snippet.conf) and **remove the stock broad
+   loopback lines** (`host all all 127.0.0.1/32` + `host all all ::1/128`) —
+   first match wins, and left in place they shadow the appended role/database
+   scoping entirely (keep the old tailnet `/32` lines for now). Reload
+   (`sudo -u postgres psql -Atc 'select pg_reload_conf();'`), confirm
+   `select count(*) from pg_hba_file_rules where error is not null;` prints `0`,
+   and prove the effective **ordering** by attempt — the syntax check cannot see
+   shadowing: on this qube, `psql -h 127.0.0.1 -U openbrain_app -d postgres`
+   must FAIL with "no pg_hba.conf entry" while the same command with
+   `-d openbrain` authenticates.
 3. **App qube — forwarder**: install
    [`../app-qube/ob1-db-forward.sh`](../app-qube/ob1-db-forward.sh) +
-   [`.service`](../app-qube/ob1-db-forward.service) under `/rw/config/` with
-   the rc.local restage block, enable it, and verify
-   `pg_isready -h <app-qube-ip> -p 5432` answers "accepting connections" —
-   that exercises the full forwarder → qrexec → loopback chain.
+   [`.service`](../app-qube/ob1-db-forward.service) under `/rw/config/` with the
+   rc.local restage block, enable it, and verify
+   `pg_isready -h <app-qube-ip> -p 5432` answers "accepting connections" — that
+   exercises the full forwarder → qrexec → loopback chain.
 4. **App qube — repoint every DB client**: set `DB_HOST=<app-qube-ip>` in the
-   compose `.env` and recreate `mcp`, and update **every other file that
-   carries a `DB_HOST`** — the backup job's env and the rollup's
-   `~/.config/funnel-summary.env` are the easy ones to miss; a stale copy
-   keeps working over the tailnet until phase 2 silently breaks it. Then
-   verify end to end: a capture (pgvector write), a hybrid-search read, and a
-   manual backup run.
+   compose `.env` and recreate `mcp`, and update **every other file that carries
+   a `DB_HOST`** — the backup job's env and the rollup's
+   `~/.config/funnel-summary.env` are the easy ones to miss; a stale copy keeps
+   working over the tailnet until phase 2 silently breaks it. Then verify end to
+   end: a capture (pgvector write), a hybrid-search read, and a manual backup
+   run.
 
 **Phase 2 — retire the tailnet path (only after phase 1 verifies):**
 
 5. **Capture your tailnet ACL as deployed** (from the admin console, not a
    possibly-stale local copy) somewhere durable **before removing anything** —
-   post-teardown rollback means editing Tailscale policy, and reconstructing
-   it from memory during an outage is the failure mode.
+   post-teardown rollback means editing Tailscale policy, and reconstructing it
+   from memory during an outage is the failure mode.
 6. **This qube**: set `listen_addresses = 'localhost'` (via `ALTER SYSTEM` or
    the `conf.d` drop-in — match how you set it originally); remove the three
-   app-qube tailnet `/32` lines from `pg_hba.conf` (dated backup first);
-   delete the live `tailscale0:5432` nft accepts (both `ip` and `ip6` — find
-   handles with `nft -a list chain ip qubes custom-input`); remove the accept
-   from `/rw/config/qubes-firewall-user-script` and retire
+   app-qube tailnet `/32` lines from `pg_hba.conf` (dated backup first); delete
+   the live `tailscale0:5432` nft accepts in **both families** — find the
+   handles with `nft -a list chain ip qubes custom-input` **and**
+   `nft -a list chain ip6 qubes custom-input`, then
+   `nft delete rule <family> qubes custom-input handle <n>` for each; remove the
+   accept from `/rw/config/qubes-firewall-user-script` and retire
    `ob1-db-firewall.service`; replace `rc.local` with the current shipped
-   version (no interface wait). Restart the cluster and confirm `ss -ntlp`
-   shows loopback-only `:5432`.
+   version (no interface wait). Restart the cluster and confirm `ss -ntlp` shows
+   loopback-only `:5432`.
 7. **Reboot this qube once** and re-verify: cluster online, loopback-only
-   listeners, no `:5432` accept in `nft list chain ip qubes custom-input`,
-   and the app's clients reconnect cleanly (pooled connections die with the
-   reboot; the pool rebuilds on first use).
+   listeners, no `:5432` accept in `nft list chain ip qubes custom-input` **or**
+   `nft list chain ip6 qubes custom-input`, and the app's clients reconnect
+   cleanly (pooled connections die with the reboot; the pool rebuilds on first
+   use).
 8. **Remove the tailnet ACL grant** for app→db:5432 in the admin console (and
    any leftover ingress→db grant the
    [retirement pass below](#retiring-the-ingress-qubes-old-access-existing-installs)
    didn't get to).
-9. **Prove the negative by attempt, not inspection** — from the app qube *and*
+9. **Prove the negative by attempt, not inspection** — from the app qube _and_
    the ingress qube, a TCP connect to `<db-qube-tailnet-ip>:5432` must now die
    at the wire (timeout, not an auth error), while the app's ConnectTCP path
    keeps working. This closes

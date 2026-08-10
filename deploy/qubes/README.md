@@ -218,8 +218,8 @@ everything else worked as on a plain Linux host.
 A single qube running edge + app + database means a compromise of the public
 edge is a compromise of the memory store. The deployed Qubes shape therefore
 puts those three roles in three qubes, each reachable only by the previous one
-over a dom0-policy-gated qubes.ConnectTCP channel — neither mcp nor Postgres
-has a network-facing listener. The full threat model, the trust layers, and the
+over a dom0-policy-gated qubes.ConnectTCP channel — neither mcp nor Postgres has
+a network-facing listener. The full threat model, the trust layers, and the
 reboot-persistence requirements are in
 [`three-qube-design.md`](three-qube-design.md); this section is the operator
 recipe. Build each qube with the bind-dirs / SELinux / persistence mechanics
@@ -239,14 +239,14 @@ an external DB.)
 ### db qube — Postgres only
 
 Postgres runs natively, out of compose, in [`db-qube/`](db-qube/), binding
-**loopback only** — the qube has no network-facing listener at all. The app
-qube — its only peer — reaches it as the full app role (plus the readonly role
-for backups and the superuser for remote admin) over a dom0-policy-gated
+**loopback only** — the qube has no network-facing listener at all. The app qube
+— its only peer — reaches it as the full app role (plus the readonly role for
+backups and the superuser for remote admin) over a dom0-policy-gated
 qubes.ConnectTCP channel
 ([app-qube README § The app→db hop](app-qube/README.md#the-appdb-hop-qubesconnecttcp)),
-with `pg_hba` scram on the loopback lines. The ingress qube has no path here
-at all — no qrexec rule, no credential: its Funnel logs land in a local
-socket-only sink on the edge itself
+with `pg_hba` scram on the loopback lines. The ingress qube has no path here at
+all — no qrexec rule, no credential: its Funnel logs land in a local socket-only
+sink on the edge itself
 ([ingress-qube README § Local log sink](ingress-qube/README.md#local-log-sink)).
 Its on-disk config — bind-dirs, `rc.local`, and the `pg_hba` /
 `listen_addresses` snippets — is provided as reproducible placeholders in

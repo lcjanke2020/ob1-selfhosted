@@ -71,8 +71,8 @@ what backs it up.
   `qubes.ConnectTCP` channels: the app qube's mcp and the db qube's Postgres
   each bind **loopback only** (no network listener at all), dom0 policy names
   the one permitted caller per channel, and the inner gate — mcp's OAuth door,
-  Postgres's scram — authenticates what arrives. The edge has NO path to the
-  db qube at all (no qrexec rule, no credential), its Funnel logs landing in a
+  Postgres's scram — authenticates what arrives. The edge has NO path to the db
+  qube at all (no qrexec rule, no credential), its Funnel logs landing in a
   local socket-only sink on the ingress qube. Detail:
   [`three-qube-design.md`](../deploy/qubes/three-qube-design.md#implemented-appdb-transport-qubesconnecttcp--no-listener).
 
@@ -165,9 +165,9 @@ configuration this project is built not to foreclose. The full comparison table
   authorization identity; author/agent/repo/branch values are validated caller
   assertions. One deduplicated row is not a contributor history.
   ([`security-model.md` § Known limitations](security-model.md#known-limitations))
-- **The superuser is reachable from the app qube** (over its ConnectTCP
-  channel) for remote DB admin — a deliberate trade-off giving a compromised
-  app qube full DB admin, including an app→db OS pivot. Tracked in
+- **The superuser is reachable from the app qube** (over its ConnectTCP channel)
+  for remote DB admin — a deliberate trade-off giving a compromised app qube
+  full DB admin, including an app→db OS pivot. Tracked in
   [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15); the
   migrator-role scope-down is the planned structural fix.
   ([`security-model.md` § Database layer](security-model.md#database-layer))

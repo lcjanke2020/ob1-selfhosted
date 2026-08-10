@@ -6,7 +6,8 @@
 # /etc/systemd/system is wiped on every AppVM reboot, so units that must persist
 # are stashed under /rw/config and (re)installed + enabled here at each boot.
 # Boot order: tailscaled → re-assert rootful docker OFF → custom-input firewall
-# one-shot → encrypted-backup timer → GPU-offload forwarder (optional).
+# one-shot → encrypted-backup timer → db forwarder (required) → GPU-offload
+# forwarder (optional).
 #
 # What is deliberately ABSENT: any docker start. The app stack runs under the
 # operator account's ROOTLESS dockerd (a systemd --user unit; storage in
@@ -61,13 +62,20 @@ fi
 # Restage + enable the qube-IP socat forwarder every DB client on this qube
 # targets (DB_HOST): mcp, the encrypted backup, the rollup, admin psql. The
 # db qube has no network-facing Postgres listener — this channel is the only
-# path. Guarded like the GPU block so a checkout that hasn't staged the files
-# yet still boots; unlike that one, this transport is NOT optional in the
-# three-qube split — a missing unit means every DB client fails.
-if [ -f /rw/config/ob1-db-forward.service ]; then
+# path, so unlike the optional GPU block below a half-staged install is a
+# hard failure: every DB client on this qube is down. Guard on BOTH artifacts
+# (a unit whose ExecStart script is missing or non-executable would just
+# crash-loop under Restart=always, hiding the root cause) and shout to the
+# boot log naming the missing piece; the failure propagates through
+# rc.local's exit status at the bottom of this file.
+if [ -f /rw/config/ob1-db-forward.service ] && [ -x /rw/config/ob1-db-forward.sh ]; then
 	cp /rw/config/ob1-db-forward.service /etc/systemd/system/
 	systemctl daemon-reload
 	systemctl enable --now ob1-db-forward.service
+else
+	[ -f /rw/config/ob1-db-forward.service ] || echo "ERROR: /rw/config/ob1-db-forward.service missing — db forwarder NOT staged; every DB client on this qube is down"
+	[ -x /rw/config/ob1-db-forward.sh ] || echo "ERROR: /rw/config/ob1-db-forward.sh missing or not executable — db forwarder NOT started; every DB client on this qube is down"
+	BOOT_FAIL=1
 fi
 
 # --- GPU-offload forwarder (optional; see ../gpu-offload-transport.md) ---
@@ -79,3 +87,8 @@ if [ -f /rw/config/ob1-ollama-forward.service ]; then
 	systemctl daemon-reload
 	systemctl enable --now ob1-ollama-forward.service
 fi
+
+# Propagate a required-transport staging failure (the db-forwarder guard
+# above) so the boot log's ERROR lines are backed by a non-zero rc.local
+# exit — a healthy-looking boot must not mask a down DB path.
+exit "${BOOT_FAIL:-0}"

@@ -30,5 +30,14 @@ echo "=== rc.local $(date -Is) ==="
 systemctl start tailscaled
 
 # --- Start Postgres (loopback-only listener; no interface wait) ---
+# Capture and propagate the exit status: this is the single explicit start
+# path, and a trailing echo would otherwise reset $? to 0 and mask a failed
+# start behind a successful-looking boot.
 pg_ctlcluster 17 main start
-echo "pg_ctlcluster exit=$?"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+	echo "ERROR: pg_ctlcluster 17 main start failed (exit=$rc) — the cluster is DOWN"
+else
+	echo "pg_ctlcluster exit=0"
+fi
+exit "$rc"
