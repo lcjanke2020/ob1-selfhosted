@@ -93,7 +93,10 @@ try {
   }
 
   // ---- 1. Fire every shape the middleware emits (auth.ts success branches
-  // and unauthorized()), in a fixed order the ordered SELECT can assert on.
+  // and unauthorized()). Landing order is NOT emission order: the emitter is
+  // fire-and-forget over a size-2 pool, so two in-flight inserts can race
+  // for their BIGSERIAL ids — the mapping assertion below is therefore
+  // order-independent (canonical sort on both sides).
   logAuthSuccess({
     door: "tailnet",
     middleware: "require_auth",
@@ -150,7 +153,13 @@ try {
   );
   assertEquals(getAuditMetricsForTests().droppedTotal, 0);
 
-  // ---- 2. Exact record→row mapping, per shape.
+  // ---- 2. Exact record→row mapping, per shape (order-independent — see
+  // the pool-race note above; every row is unique, so a canonical sort
+  // makes the comparison exact without depending on insert interleaving).
+  const canonical = (rowSet: AuditRow[]): AuditRow[] =>
+    [...rowSet].sort((a, b) =>
+      JSON.stringify(a).localeCompare(JSON.stringify(b))
+    );
   const expected: AuditRow[] = [
     {
       outcome: "allowed",
@@ -213,7 +222,7 @@ try {
       path: "/",
     },
   ];
-  assertEquals(rows, expected);
+  assertEquals(canonical(rows), canonical(expected));
 
   // ---- 3. Row-shape constraints refuse malformed inserts, as the app role
   // (so the negative also proves the constraint is not bypassable by the
