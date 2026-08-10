@@ -137,16 +137,34 @@ dumps can still read it.
   Operator-facing messages are collapsed to a single "unauthorized" — the
   granular reason goes to the audit table, not to the caller, closing a
   credential-status side-channel.
-- **Both auth outcomes are audited, not just rejections.** Every successful
-  authentication writes one `mcp_auth_events` row (fire-and-forget, so Postgres
-  latency never extends a response) recording the verified identity (`subject`
-  for OAuth, `token_label` for native tokens), the door, the path, and the
-  client IP — so "who accessed this server in the last N days" is answerable
-  from local data alone rather than from the IdP's logs. Denied rows keep a
-  30-day horizon (matched to the raw access log); allowed rows keep 365 days,
-  because the admission record is the one an incident review needs months later.
-  Only server-verified identity lands in the table — never as-presented
-  credentials or header values.
+- **Both auth outcomes are audited, not just rejections.** Each successful
+  authentication writes one `mcp_auth_events` row recording the verified
+  identity (`subject` for OAuth, `token_label` for native tokens), the door, the
+  path, and the client IP — so "who accessed this server in the last N days" is
+  answerable from local data rather than from the IdP's logs. The write is
+  deliberately **best-effort telemetry, not a durable ledger**: fire-and-forget
+  (Postgres latency never extends a response, and audit unavailability never
+  denies service), with a shared in-flight cap that drops events under sustained
+  database distress. That trade-off is bounded three ways: a boot-time schema
+  probe refuses to start against a pre-audit table shape (a missed migration is
+  a loud refusal, never a silent drop), dropped events are counted and surfaced
+  as rate-limited console warnings (an audit gap is itself in evidence), and
+  reaching the drop path at all requires database distress rather than
+  attacker-controllable request volume. The inverse design — blocking each
+  request on a durable audit write — would hand the audit path a
+  denial-of-service lever over the whole server.
+- **Audit retention keys on verified identity.** Rows naming a real,
+  tenant-minted identity keep 365 days: every allowed row, plus
+  `subject_not_allowed` denials (which verified identity knocked and was refused
+  — the question an incident review asks months later). Anonymous denials
+  (scanner noise, credential fumbles) keep 30 days, matched to the raw access
+  log so a 401 and the request that produced it age out together. The long
+  horizon is size-bounded by construction: those rows require a Bearer the
+  tenant actually minted, so growth tracks legitimate use — a stolen credential
+  inflating it is loud in the very table it inflates (and in the edge burst
+  alerts), and the horizon is a one-line operator lever in
+  `db/summarize_auth_events.sql`. Only server-verified identity lands in the
+  table — never as-presented credentials or header values.
 - Captured content is hard-capped (100,000 UTF-8 bytes) on both
   `capture_thought` and `session_capture`; the REST gateway enforces the
   identical cap via the same shared schema module, plus a 1 MiB request-body

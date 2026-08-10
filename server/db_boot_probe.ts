@@ -88,6 +88,7 @@ export async function probeDbAtBoot(
         boolean,
         boolean,
         boolean,
+        boolean,
       ]>(
         `SELECT
            to_regclass('public.idx_thoughts_content_tsv') IS NOT NULL,
@@ -254,7 +255,20 @@ export async function probeDbAtBoot(
              ) IS NOT NULL
              AND to_regprocedure(
                'native_auth.revoke_access_token(text)'
-             ) IS NOT NULL`,
+             ) IS NOT NULL,
+           to_regclass('public.mcp_auth_events') IS NOT NULL
+             AND (
+               SELECT count(*) = 4 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'mcp_auth_events'
+                 AND column_name = ANY (ARRAY[
+                   'outcome', 'door', 'subject', 'token_label'
+                 ])
+             )
+             AND EXISTS (
+               SELECT 1 FROM pg_constraint
+               WHERE conrelid = to_regclass('public.mcp_auth_events')
+                 AND conname = 'mcp_auth_events_outcome_shape_check'
+             )`,
       );
       const [
         hasFtsIndex,
@@ -267,7 +281,9 @@ export async function probeDbAtBoot(
         hasRlsEnforcement,
         hasMetadataDegradationSchema,
         hasNativeAccessTokenSchema,
+        hasAuthAuditSchema,
       ] = schema.rows[0] ?? [
+        false,
         false,
         false,
         false,
@@ -325,6 +341,20 @@ export async function probeDbAtBoot(
           `[db] Postgres at ${target} is missing native access-token schema. ` +
             `Apply db/08-access-tokens.sql as the database owner, then run ` +
             `db/03-grants-assertion.sql before starting this server version.`,
+        );
+      }
+      // Required regardless of OBS_AUTH_EVENTS_ENABLED — like the native-token
+      // schema above (mandatory even with the feature off), the audit table's
+      // converged shape is a schema contract of this server version, not a
+      // feature flag. Without this gate, a missed migration leaves the server
+      // healthy while every audit INSERT fails inside the fire-and-forget
+      // emitter — the one failure mode that loses the audit silently.
+      if (!hasAuthAuditSchema) {
+        throw new RequiredSchemaError(
+          `[db] Postgres at ${target} is missing the allowed+denied auth-audit ` +
+            `shape on mcp_auth_events (outcome/door/subject/token_label + the ` +
+            `row-shape constraint). Re-apply db/02-observability.sql (idempotent; ` +
+            `it converges the table in place) before starting this server version.`,
         );
       }
       // Only reference the ledger after to_regclass proved it exists. Putting

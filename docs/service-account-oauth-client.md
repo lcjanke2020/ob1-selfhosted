@@ -105,12 +105,23 @@ route, because the public Funnel branch will correctly reject it at Caddy with
    the documented path. Record the tenant token endpoint, client ID, and client
    secret in the automation's secret store. Do not copy them into this
    repository or command arguments.
-5. Run the browserless smoke test below with `OAUTH_AUDIENCE` set. Auth0 uses
-   `client_secret_post` for the documented request, which is the helper's
-   default.
-6. If the helper reports `signed gty=client-credentials present`, no subject
-   entry is needed. If it reports no signed `gty` (including the Auth0 RFC 9068
-   profile), perform the one-time verified-subject mapping procedure below.
+5. **Enroll the subject before expecting a successful smoke** — admission is
+   fail-closed, so a brand-new client's first MCP attempt returns 401 no matter
+   how valid its token is. Run the smoke once with
+   `OAUTH_SMOKE_PRINT_SUBJECT=true` and `OAUTH_AUDIENCE` set (Auth0 uses
+   `client_secret_post`, the helper's default): the helper prints the token's
+   subject _before_ the MCP attempt precisely so this bootstrap run yields the
+   value even though it ends in 401. Add that exact subject to
+   `OAUTH_ALLOWED_SUBJECTS` and restart the server. (The refused attempt is also
+   recorded server-side in `mcp_auth_events` with `reason='subject_not_allowed'`
+   and the verified subject — the audit row is the server-verified cross-check
+   for the locally decoded print.)
+6. Run the smoke again; it should now report success. If it reports
+   `signed gty=client-credentials present`, no _attribution_ entry is needed —
+   the signed claim removes only the `OAUTH_SERVICE_ACCOUNT_SUBJECTS`
+   requirement, never the `OAUTH_ALLOWED_SUBJECTS` admission requirement. If it
+   reports no signed `gty` (including the Auth0 RFC 9068 profile), also perform
+   the one-time subject-mapping procedure below.
 
 Auth0's
 [Machine-to-Machine application guide](https://auth0.com/docs/get-started/auth0-overview/create-applications/machine-to-machine-apps)
@@ -153,11 +164,15 @@ token endpoint, client authentication method, required audience/resource
 parameter, scopes, and JWT signing profile from its documentation.
 
 Auth0 RFC 9068 tokens and most non-Auth0 tokens will not contain `gty`. Run the
-smoke once with `OAUTH_SMOKE_PRINT_SUBJECT=true`, copy only the reported
-verified subject into `OAUTH_SERVICE_ACCOUNT_SUBJECTS` on the server, recreate
-the MCP container, and run the smoke again. Never infer the subject from a
-dashboard label: use the exact value in the token that Open Brain successfully
-verified.
+smoke once with `OAUTH_SMOKE_PRINT_SUBJECT=true` — the subject is printed before
+the MCP attempt, so this works on a not-yet-admitted client whose run ends in
+401 — and copy only the reported subject into **both** `OAUTH_ALLOWED_SUBJECTS`
+(admission) and `OAUTH_SERVICE_ACCOUNT_SUBJECTS` (attribution) on the server,
+recreate the MCP container, and run the smoke again. Never infer the subject
+from a dashboard label: use the exact value from the token the client actually
+minted (the helper's locally decoded print), and cross-check it against the
+server-verified copy on the `subject_not_allowed` audit row from the bootstrap
+attempt.
 
 RFC 9068 recommends that a client-credentials JWT `sub` identify the client
 application; it also requires a `client_id` claim for that JWT profile. Open
@@ -249,17 +264,17 @@ which occur before Open Brain receives a Bearer token.
 
 ## Failure modes
 
-| Symptom                                                        | Likely cause and response                                                                                                                                                                                                  |
-| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Token endpoint returns `invalid_client`                        | Wrong secret, wrong client-auth method, disabled application, or a rotated credential. Confirm provider configuration; do not paste the secret into logs.                                                                  |
-| Helper refuses a token or MCP redirect                         | Use the final token and MCP endpoint URLs. Redirects are intentionally disabled so a 307/308 cannot replay a client secret or bearer token.                                                                                |
-| Token endpoint rejects audience or scope                       | The API was not authorized for the M2M application, the audience differs byte-for-byte, or the authorization-server policy does not grant the requested scope.                                                             |
-| Helper reports an opaque/malformed token                       | The provider did not issue the RS256 JWT access-token profile Open Brain accepts. Configure a custom authorization server/API that emits JWTs; introspection is not supported.                                             |
-| MCP returns 401                                                | Check `iss`, `aud`, `exp`, `sub`, RS256, the configured JWKS URI, and clock skew. Open Brain deliberately returns the same public message for every validation failure; use the reason-coded auth audit and provider logs. |
-| MCP returns 403 before the helper reaches auth                 | The request used the public Funnel path from outside the Anthropic allowlist. Route the scheduled agent over the tailnet.                                                                                                  |
-| Authentication works but writes show `door=funnel`             | The issuer supplied no signed `gty=client-credentials`; add the exact verified `sub` to `OAUTH_SERVICE_ACCOUNT_SUBJECTS` and recreate the MCP service.                                                                     |
-| The agent cannot see old personal rows after client recreation | Its verified `sub` changed. That isolation is intentional; restore the original client identity or migrate ownership through a reviewed administrative procedure.                                                          |
-| Server fails its JWKS boot probe                               | The issuer/JWKS URL is wrong, unreachable, non-HTTPS, or not serving a JSON `keys` array. Fix it before retrying tokens.                                                                                                   |
+| Symptom                                                        | Likely cause and response                                                                                                                                                                                                                                                                                                                                                                                          |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Token endpoint returns `invalid_client`                        | Wrong secret, wrong client-auth method, disabled application, or a rotated credential. Confirm provider configuration; do not paste the secret into logs.                                                                                                                                                                                                                                                          |
+| Helper refuses a token or MCP redirect                         | Use the final token and MCP endpoint URLs. Redirects are intentionally disabled so a 307/308 cannot replay a client secret or bearer token.                                                                                                                                                                                                                                                                        |
+| Token endpoint rejects audience or scope                       | The API was not authorized for the M2M application, the audience differs byte-for-byte, or the authorization-server policy does not grant the requested scope.                                                                                                                                                                                                                                                     |
+| Helper reports an opaque/malformed token                       | The provider did not issue the RS256 JWT access-token profile Open Brain accepts. Configure a custom authorization server/API that emits JWTs; introspection is not supported.                                                                                                                                                                                                                                     |
+| MCP returns 401                                                | First suspect on a valid tenant token: the subject is not in `OAUTH_ALLOWED_SUBJECTS` (fail-closed admission) — the audit row will read `subject_not_allowed` with the verified subject. Otherwise check `iss`, `aud`, `exp`, `sub`, RS256, the configured JWKS URI, and clock skew. Open Brain deliberately returns the same public message for every failure; use the reason-coded auth audit and provider logs. |
+| MCP returns 403 before the helper reaches auth                 | The request used the public Funnel path from outside the Anthropic allowlist. Route the scheduled agent over the tailnet.                                                                                                                                                                                                                                                                                          |
+| Authentication works but writes show `door=funnel`             | The issuer supplied no signed `gty=client-credentials`; add the exact verified `sub` to `OAUTH_SERVICE_ACCOUNT_SUBJECTS` and recreate the MCP service.                                                                                                                                                                                                                                                             |
+| The agent cannot see old personal rows after client recreation | Its verified `sub` changed. That isolation is intentional; restore the original client identity or migrate ownership through a reviewed administrative procedure.                                                                                                                                                                                                                                                  |
+| Server fails its JWKS boot probe                               | The issuer/JWKS URL is wrong, unreachable, non-HTTPS, or not serving a JSON `keys` array. Fix it before retrying tokens.                                                                                                                                                                                                                                                                                           |
 
 ## Rotation and revocation
 
@@ -270,8 +285,11 @@ the old secret. Existing access JWTs remain usable until expiration because Open
 Brain validates them locally and does not introspect or revoke them. Choose an
 access-token lifetime that bounds that residual window.
 
-Deleting and recreating an application may change its `sub`. For a generic
-issuer, update `OAUTH_SERVICE_ACCOUNT_SUBJECTS` only after a successful verified
-smoke. For Auth0's default token profile, the signed `gty` signal remains
-automatic; the RFC 9068 profile still needs the exact mapped subject. Either
-way, a changed `sub` creates a new personal-memory principal.
+Deleting and recreating an application may change its `sub` — and a changed
+`sub` is unadmitted until enrolled, so re-run the bootstrap:
+`OAUTH_SMOKE_PRINT_SUBJECT=true` smoke (expect 401), add the new subject to
+`OAUTH_ALLOWED_SUBJECTS` (and remove the retired one), restart, smoke again. For
+a generic issuer, update `OAUTH_SERVICE_ACCOUNT_SUBJECTS` to the new subject in
+the same edit. For Auth0's default token profile, the signed `gty` signal
+remains automatic; the RFC 9068 profile still needs the exact mapped subject.
+Either way, a changed `sub` creates a new personal-memory principal.

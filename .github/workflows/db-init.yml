@@ -46,6 +46,8 @@ on:
       - "server/access_tokens.ts"
       - "server/auth_context.ts"
       - "server/access_tokens_db_smoke.ts"
+      - "server/auth_audit_db_smoke.ts"
+      - "server/auth_audit.ts"
       - "server/session_search_db_smoke.ts"
       - "server/scoped_db.ts"
       - "server/scope_contract.ts"
@@ -83,6 +85,8 @@ on:
       - "server/access_tokens.ts"
       - "server/auth_context.ts"
       - "server/access_tokens_db_smoke.ts"
+      - "server/auth_audit_db_smoke.ts"
+      - "server/auth_audit.ts"
       - "server/session_search_db_smoke.ts"
       - "server/scoped_db.ts"
       - "server/scope_contract.ts"
@@ -401,6 +405,21 @@ jobs:
             --allow-net=127.0.0.1:55439 \
             server/metadata_notifications_db_smoke.ts
           echo "metadata preview upgrade, audit/outbox, immutable-history, shape, and ledger checks passed"
+
+      - name: Smoke test — auth audit emitter records both outcomes end-to-end
+        run: |
+          # Reapply the observability migration first to pin its documented
+          # in-place convergence on a live database, then drive the REAL
+          # auth_audit.ts emitter as openbrain_app through every row shape
+          # the middleware emits (all unit tests run it disabled), and pin
+          # the row-shape constraints via the malformed inserts.
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/02-observability.sql >/dev/null
+          deno run --config server/deno.json --frozen \
+            --allow-env \
+            --allow-net=127.0.0.1:55439 \
+            server/auth_audit_db_smoke.ts
 
       - name: Smoke test — spaces isolate every audience and pooled reuse
         run: |

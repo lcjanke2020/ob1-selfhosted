@@ -94,11 +94,15 @@ CREATE INDEX IF NOT EXISTS idx_funnel_access_log_client_ip ON funnel_access_log 
 -- signature/issuer/audience checks, or a verified native-token label) —
 -- never as-presented request text.
 --
--- Retention (db/summarize_auth_events.sql): denied rows 30 days (matched
--- to funnel_access_log so a 401 and the request that produced it age out
--- together); allowed rows 365 days — the admission record is the one an
--- incident review needs months later, and its volume is bounded by
--- legitimate use, not by internet scanner noise.
+-- Retention (db/summarize_auth_events.sql) keys on whether the row names a
+-- verified identity: denied rows 30 days (matched to funnel_access_log so a
+-- 401 and the request that produced it age out together) — EXCEPT
+-- 'subject_not_allowed' denials, which join the allowed rows on a 365-day
+-- horizon. Both long-horizon classes require a tenant-minted Bearer, so
+-- their volume is bounded by legitimate use (or a compromised credential —
+-- itself visible here), not by internet scanner noise, and both are what an
+-- incident review needs months later: who was admitted, and which real
+-- identity knocked and was refused.
 CREATE TABLE IF NOT EXISTS mcp_auth_events (
   id             BIGSERIAL PRIMARY KEY,
   ts             TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -114,7 +118,11 @@ CREATE TABLE IF NOT EXISTS mcp_auth_events (
   -- store the code form so a future copy-edit to operator-facing text
   -- doesn't break historical analysis.
   reason         TEXT,
-  -- Which middleware emitted: 'require_auth' or 'require_brain_key'.
+  -- Which middleware emitted. Only 'require_auth' is emitted today (the
+  -- historical 'require_brain_key' middleware was retired when the static
+  -- key became one of requireAuth's doors); the column stays so a future
+  -- second middleware has a home. Mirrors AuthMiddleware in
+  -- server/auth_audit.ts.
   middleware     TEXT NOT NULL,
   -- Allowed rows: which credential class admitted the request —
   -- 'funnel' (OAuth user Bearer) | 'service' (OAuth client-credentials

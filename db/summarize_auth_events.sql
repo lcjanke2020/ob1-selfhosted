@@ -14,11 +14,16 @@
 -- Single-host installs run both files in one session (the default resolution
 -- of SUMMARY_SQL_FILE in scripts/funnel_daily_summary.sh).
 --
--- There is no aggregate table here on purpose. `mcp_auth_events` is small and
--- low-cardinality (a handful of reason codes), so the 30-day raw window is
--- itself the useful record; adding a year-long rollup would buy a trend line
--- nobody has asked for at the cost of another relation in the monitor
--- allowlist that db/03-grants-assertion.sql has to reason about.
+-- There is no aggregate table here on purpose. The denied side is
+-- low-cardinality reason codes on a short window; the allowed side and the
+-- identity-carrying `subject_not_allowed` denials are the long-horizon
+-- record, and the RAW rows are the record — an identity-level "who accessed /
+-- who knocked" question is exactly what an aggregate would destroy. Volume
+-- on the long horizon is bounded by tenant-minted tokens (legitimate use
+-- plus at worst a compromised credential — itself visible in this table),
+-- not by internet scanner noise. A rollup would buy nothing but another
+-- relation in the monitor allowlist that db/03-grants-assertion.sql has to
+-- reason about.
 --
 -- Manual invocation, single-host compose (from deploy/compose-tailnet,
 -- invoked the way you start the stack there — the exec has to resolve the
@@ -32,17 +37,23 @@
 
 \set ON_ERROR_STOP on
 
--- ---------- 1. Retention: per-outcome horizons ----------------------------
--- Denied rows: 30 days, matched to `funnel_access_log`'s horizon so the two
--- observability records age out together — a 401 in the audit and the
--- request that produced it in the access log disappear on the same day,
--- which keeps "correlate these two by timestamp" honest right up to the
--- edge of the window.
+-- ---------- 1. Retention: identity-keyed horizons -------------------------
+-- Short horizon (30 days): denied rows EXCEPT `subject_not_allowed` —
+-- scanner noise and credential fumbles, matched to `funnel_access_log`'s
+-- horizon so the two observability records age out together: a 401 in the
+-- audit and the request that produced it in the access log disappear on the
+-- same day, which keeps "correlate these two by timestamp" honest right up
+-- to the edge of the window.
 --
--- Allowed rows: 365 days. The admission record is the one an incident
--- review needs months later ("who accessed this server while X was true"),
--- and unlike the denied side its volume is bounded by legitimate use, not
--- internet scanner noise. Matches the funnel summary's one-year horizon.
+-- Long horizon (365 days): allowed rows AND `subject_not_allowed` denials —
+-- every row that names a verified identity. The admission record is the one
+-- an incident review needs months later ("who accessed this server while X
+-- was true"), and a `subject_not_allowed` row is its exact complement
+-- ("which real, tenant-minted identity knocked and was refused" — e.g. did
+-- a compromised account knock before it was ever allowlisted). Neither can
+-- be produced by an unauthenticated scanner: both require a Bearer that
+-- passed signature/issuer/audience/exp against the tenant, so volume is
+-- bounded the same way. Matches the funnel summary's one-year horizon.
 --
 -- Interval-granular (not day-granular like the funnel half): there is no
 -- summary table whose day buckets this has to line up with, so the simpler
@@ -51,11 +62,16 @@
 -- Two independent single statements, no explicit transaction block: psql
 -- autocommits each, and a failure between them leaves both horizons
 -- individually consistent (the next run converges whichever half lagged).
+-- The two WHERE clauses partition the table: every row is denied or
+-- allowed, and denied rows split on the one identity-carrying reason.
 DELETE FROM mcp_auth_events
-WHERE outcome = 'denied' AND ts < now() - interval '30 days';
+WHERE outcome = 'denied'
+  AND reason IS DISTINCT FROM 'subject_not_allowed'
+  AND ts < now() - interval '30 days';
 
 DELETE FROM mcp_auth_events
-WHERE outcome = 'allowed' AND ts < now() - interval '365 days';
+WHERE (outcome = 'allowed' OR reason = 'subject_not_allowed')
+  AND ts < now() - interval '365 days';
 
 -- ---------- 2. Markdown report (stdout) ----------------------------------
 -- The wrapper captures this output in its configured summary directory.

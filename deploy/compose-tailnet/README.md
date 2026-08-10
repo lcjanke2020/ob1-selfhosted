@@ -194,10 +194,14 @@ stack measures it instead of guessing.
 - **`funnel_access_log`** — the log-ingester sidecar inserts one structured row
   per request (timestamp, socket, client IP, method, path, status, latency,
   size, truncated UA, host, protocol).
-- **`mcp_auth_events`** — one row per 401 the MCP server returns, with a stable
-  `reason` code (`invalid_brain_key`, `token_validation_failed`,
-  `invalid_credentials`, `missing_credentials`) — the only way to tell
-  "legitimate client, wrong credentials" from "blind scanner".
+- **`mcp_auth_events`** — one row per auth decision the MCP server makes. Denied
+  rows carry a stable `reason` code (`invalid_brain_key`,
+  `token_validation_failed`, `subject_not_allowed`, `invalid_credentials`,
+  `missing_credentials`) — the only way to tell "legitimate client, wrong
+  credentials" from "blind scanner". Allowed rows carry the verified identity
+  (`subject` / `token_label`), door, and path — the local answer to "who
+  accessed this server", kept 365 days (as are `subject_not_allowed` denials,
+  the identity-carrying refusals; anonymous denials keep 30).
 - **`funnel_access_summary`** — daily rollup: requests, unique IPs, p50/p95
   latency, top paths and user agents per `(day, socket, status_class)`, retained
   365 days.
@@ -253,8 +257,15 @@ GROUP BY ip, status, path ORDER BY hits DESC LIMIT 20;
 -- Why are we returning 401s today?
 SELECT reason, middleware, COUNT(*) AS n
 FROM mcp_auth_events
-WHERE ts > (now() AT TIME ZONE 'UTC')::date
+WHERE outcome = 'denied' AND ts > (now() AT TIME ZONE 'UTC')::date
 GROUP BY reason, middleware ORDER BY n DESC;
+
+-- Who was admitted today, through which door?
+SELECT door, COALESCE(subject, token_label, '(static shared key)') AS identity,
+       COUNT(*) AS n
+FROM mcp_auth_events
+WHERE outcome = 'allowed' AND ts > (now() AT TIME ZONE 'UTC')::date
+GROUP BY door, identity ORDER BY n DESC;
 ```
 
 ## Upgrading an existing deployment
@@ -309,6 +320,13 @@ docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
 docker compose build mcp && docker compose up -d
 ```
+
+Upgrading to **1.20.0+**: `02-observability.sql` in the block above now also
+converges `mcp_auth_events` to the allowed+denied audit shape in place (the new
+server's boot probe refuses the old denied-only shape, so don't skip it), and
+the OAuth door additionally requires `OAUTH_ALLOWED_SUBJECTS` in `.env`
+**before** the `up -d` — it fails closed, so rolling without it rejects every
+Bearer token. See §"OAuth provider setup" above.
 
 `05-hybrid-search.sql` backfills a stored text-search column under an
 access-exclusive lock that is held through both regular GIN index builds until

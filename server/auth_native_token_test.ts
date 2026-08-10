@@ -17,6 +17,7 @@ const ENV_KEYS = [
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
   "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
+  "OAUTH_ALLOWED_SUBJECTS",
   "OBS_AUTH_EVENTS_ENABLED",
   "METADATA_FALLBACK_POLICY",
 ];
@@ -33,6 +34,7 @@ Deno.test("requireAuth accepts native tokens and observes revocation on the next
   Deno.env.delete("AUTH0_JWKS_URI");
   Deno.env.delete("AUTH0_AUDIENCE");
   Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
+  Deno.env.delete("OAUTH_ALLOWED_SUBJECTS");
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
   Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 

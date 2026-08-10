@@ -335,11 +335,12 @@ access log is written to a local sink on the
 [ingress qube](../ingress-qube/README.md#daily-rollup-and-retention-host-side-not-compose),
 which runs [`db/summarize_funnel.sql`](../../../db/summarize_funnel.sql) there.
 Here, [`db/summarize_auth_events.sql`](../../../db/summarize_auth_events.sql)
-handles the reason-coded 401 audit that mcp writes into the corpus. Set
-`SUMMARY_SQL_FILE` accordingly — left unset it resolves to **both** shipped
-files (the single-host default), and the funnel half would then operate on the
-stale, no-longer-written `funnel_access_log` left behind in this database,
-producing an empty report section and a pointless retention DELETE.
+handles the auth-decision audit mcp writes into the corpus — reason-coded
+denials plus the per-request admission rows (1.20.0+). Set `SUMMARY_SQL_FILE`
+accordingly — left unset it resolves to **both** shipped files (the single-host
+default), and the funnel half would then operate on the stale, no-longer-written
+`funnel_access_log` left behind in this database, producing an empty report
+section and a pointless retention DELETE.
 
 The relations themselves stay in the corpus schema deliberately. Dropping them
 would diverge from
