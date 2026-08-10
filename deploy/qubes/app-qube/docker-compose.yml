@@ -128,8 +128,19 @@ services:
       AUTH0_ISSUER: ${AUTH0_ISSUER:?set AUTH0_ISSUER (Qubes deployment is OAuth-only)}
       AUTH0_JWKS_URI: ${AUTH0_JWKS_URI:?set AUTH0_JWKS_URI (Qubes deployment is OAuth-only)}
       AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:?set AUTH0_AUDIENCE (Qubes deployment is OAuth-only)}
+      # REQUIRED in practice on this OAuth-only deployment: the in-app
+      # authorization allowlist of exact JWT `sub` claims. FAIL-CLOSED —
+      # left empty, the server boots but rejects EVERY Bearer token, so an
+      # empty value here is a deliberate lockout, not a permissive default.
+      # Compose deliberately does not `:?`-require it: the fail-closed
+      # runtime posture (plus the boot-log warning) is the contract, and a
+      # hard compose failure would block an operator intentionally sealing
+      # the door during an incident.
+      OAUTH_ALLOWED_SUBJECTS: ${OAUTH_ALLOWED_SUBJECTS:-}
       # Optional exact JWT subjects for non-Auth0 service-account attribution.
       # Auth0 client-credentials tokens are recognized from their signed gty.
+      # Attribution only — a machine subject must ALSO be present in
+      # OAUTH_ALLOWED_SUBJECTS above to be admitted.
       OAUTH_SERVICE_ACCOUNT_SUBJECTS: ${OAUTH_SERVICE_ACCOUNT_SUBJECTS:-}
       JWKS_FETCH_TIMEOUT_MS: ${JWKS_FETCH_TIMEOUT_MS:-10000}
       OBS_AUTH_EVENTS_ENABLED: ${OBS_AUTH_EVENTS_ENABLED:-true}

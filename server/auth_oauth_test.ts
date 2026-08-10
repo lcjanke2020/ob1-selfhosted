@@ -46,6 +46,7 @@ const ENV_KEYS = [
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
   "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
+  "OAUTH_ALLOWED_SUBJECTS",
   // see auth_brainkey_test.ts for why this is here.
   "OBS_AUTH_EVENTS_ENABLED",
   "METADATA_FALLBACK_POLICY",
@@ -146,6 +147,11 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
   Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
   Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
   Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
+  // Authorization allowlist (fail-closed): every subject this file mints —
+  // including the deliberately-broken tokens ("user-no-exp", "user"), so
+  // their 401s stay attributable to the exact claim defect under test
+  // rather than to the allowlist.
+  Deno.env.set("OAUTH_ALLOWED_SUBJECTS", "user-under-test,user-no-exp,user");
   // disable audit emission; the audit module reads this at load.
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
   Deno.env.set("METADATA_FALLBACK_POLICY", "off");

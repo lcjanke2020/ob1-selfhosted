@@ -111,6 +111,19 @@ dumps can still read it.
   profile)—or an exact operator-configured subject for Auth0's RFC 9068 profile
   or another issuer—select the `service` provenance label. That mapping changes
   neither authentication nor authorization.
+- **Authorization is in-app, not delegated to the tenant.** After every
+  cryptographic check passes, the verified `sub` must appear on the
+  `OAUTH_ALLOWED_SUBJECTS` allowlist or the request is rejected — with the same
+  uniform 401 as any other failure externally, and reason `subject_not_allowed`
+  plus the verified subject on the audit row internally. The list fails
+  **closed**: with the OAuth door enabled and the list unset or empty, every
+  Bearer is rejected (the boot log warns loudly). This exists because "the
+  tenant minted this token" and "the operator admits this account" are different
+  questions: an IdP-side misconfiguration — an accidentally-enabled social
+  connection, an unintended signup flow — mints perfectly valid tokens for
+  accounts the operator never meant to admit, and tenant configuration must not
+  be the only gate. The `OAUTH_SERVICE_ACCOUNT_SUBJECTS` attribution list never
+  grants access; a machine subject must also be allowlisted.
 - A boot-time JWKS reachability probe (with an explicit wall-clock timeout that
   also caps every later refresh) surfaces a typo'd JWKS URI at startup rather
   than at the first attacker request.
@@ -124,6 +137,16 @@ dumps can still read it.
   Operator-facing messages are collapsed to a single "unauthorized" — the
   granular reason goes to the audit table, not to the caller, closing a
   credential-status side-channel.
+- **Both auth outcomes are audited, not just rejections.** Every successful
+  authentication writes one `mcp_auth_events` row (fire-and-forget, so Postgres
+  latency never extends a response) recording the verified identity (`subject`
+  for OAuth, `token_label` for native tokens), the door, the path, and the
+  client IP — so "who accessed this server in the last N days" is answerable
+  from local data alone rather than from the IdP's logs. Denied rows keep a
+  30-day horizon (matched to the raw access log); allowed rows keep 365 days,
+  because the admission record is the one an incident review needs months later.
+  Only server-verified identity lands in the table — never as-presented
+  credentials or header values.
 - Captured content is hard-capped (100,000 UTF-8 bytes) on both
   `capture_thought` and `session_capture`; the REST gateway enforces the
   identical cap via the same shared schema module, plus a 1 MiB request-body

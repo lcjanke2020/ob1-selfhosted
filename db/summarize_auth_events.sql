@@ -1,8 +1,10 @@
 -- Daily retention + report — the MCP AUTH EVENTS half.
 --
--- Owns exactly one relation: `mcp_auth_events`, the reason-coded 401 audit
--- written by the MCP server (server/auth.ts). Companion to
--- db/summarize_funnel.sql, which owns `funnel_access_log` and
+-- Owns exactly one relation: `mcp_auth_events`, the auth-decision audit
+-- written by the MCP server (server/auth_audit.ts) — reason-coded 401s
+-- (outcome='denied') AND one row per authenticated request
+-- (outcome='allowed', with the verified subject / token label and door).
+-- Companion to db/summarize_funnel.sql, which owns `funnel_access_log` and
 -- `funnel_access_summary`; see that file's header for why the two halves are
 -- separate files.
 --
@@ -30,21 +32,30 @@
 
 \set ON_ERROR_STOP on
 
--- ---------- 1. Retention: drop rows past the 30-day horizon --------------
--- Matched to `funnel_access_log`'s horizon so the two observability records
--- age out together — a 401 in the audit and the request that produced it in
--- the access log disappear on the same day, which keeps "correlate these two
--- by timestamp" honest right up to the edge of the window.
+-- ---------- 1. Retention: per-outcome horizons ----------------------------
+-- Denied rows: 30 days, matched to `funnel_access_log`'s horizon so the two
+-- observability records age out together — a 401 in the audit and the
+-- request that produced it in the access log disappear on the same day,
+-- which keeps "correlate these two by timestamp" honest right up to the
+-- edge of the window.
+--
+-- Allowed rows: 365 days. The admission record is the one an incident
+-- review needs months later ("who accessed this server while X was true"),
+-- and unlike the denied side its volume is bounded by legitimate use, not
+-- internet scanner noise. Matches the funnel summary's one-year horizon.
 --
 -- Interval-granular (not day-granular like the funnel half): there is no
 -- summary table whose day buckets this has to line up with, so the simpler
 -- rolling boundary is the right one.
 --
--- Single statement, so no explicit transaction block: psql autocommits it,
--- and there is no second statement whose failure could leave this one
--- half-applied.
+-- Two independent single statements, no explicit transaction block: psql
+-- autocommits each, and a failure between them leaves both horizons
+-- individually consistent (the next run converges whichever half lagged).
 DELETE FROM mcp_auth_events
-WHERE ts < now() - interval '30 days';
+WHERE outcome = 'denied' AND ts < now() - interval '30 days';
+
+DELETE FROM mcp_auth_events
+WHERE outcome = 'allowed' AND ts < now() - interval '365 days';
 
 -- ---------- 2. Markdown report (stdout) ----------------------------------
 -- The wrapper captures this output in its configured summary directory.
@@ -66,6 +77,27 @@ SELECT
   COUNT(*) AS count,
   COUNT(DISTINCT client_ip) AS unique_ips
 FROM mcp_auth_events
-WHERE ts > now() - interval '24 hours'
+WHERE outcome = 'denied' AND ts > now() - interval '24 hours'
 GROUP BY middleware, reason
 ORDER BY count DESC;
+
+-- The success-side mirror: who was admitted, through which door, at what
+-- volume. `identity` collapses the two attribution columns (an OAuth row
+-- carries subject, a native-token row carries token_label, the static key
+-- carries neither) so one line per admitted identity per door reads off
+-- directly. This is the daily answer to "who accessed this server" — the
+-- question the denied-only audit could never answer.
+\echo ''
+\echo '## Rolling 24h — admitted identities (mcp side)'
+\echo ''
+SELECT
+  door,
+  COALESCE(subject, token_label, '(static shared key)') AS identity,
+  COUNT(*) AS requests,
+  COUNT(DISTINCT client_ip) AS unique_ips,
+  MIN(ts) AS first_seen,
+  MAX(ts) AS last_seen
+FROM mcp_auth_events
+WHERE outcome = 'allowed' AND ts > now() - interval '24 hours'
+GROUP BY door, COALESCE(subject, token_label, '(static shared key)')
+ORDER BY requests DESC;

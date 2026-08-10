@@ -265,7 +265,11 @@ export function createMcpServer(
     // provenance label while retaining the verified JWT subject as principal.
     // 1.19.0: native rotatable access tokens add hash-only per-client
     // credentials while preserving the existing transport and tool contract.
-    version: "1.19.0",
+    // 1.20.0: OAUTH_ALLOWED_SUBJECTS makes OAuth authorization an in-app,
+    // fail-closed subject allowlist (empty list admits nobody), and every
+    // auth decision — admissions included — lands in mcp_auth_events with
+    // the verified identity, door, and path.
+    version: "1.20.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names

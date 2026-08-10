@@ -75,6 +75,14 @@ the documented RS256 JWT profile can be used. Auth0 M2M, Okta API Services, the
 generic subject mapping, and a browserless verification command are covered in
 [OAuth service accounts](../../docs/service-account-oauth-client.md).
 
+> **`OAUTH_ALLOWED_SUBJECTS` is required in practice whenever the OAuth door is
+> on.** Verification proves a token came from your tenant; this comma-separated
+> allowlist of exact `sub` claims says which accounts you actually admit, so an
+> IdP-side misconfiguration (an accidentally-open social connection, an
+> unintended signup flow) cannot equal access. It fails CLOSED: left unset,
+> every Bearer token is rejected and the boot log warns. Machine subjects need
+> listing here too — the service-account mapping above is attribution only.
+
 ### Start the stack
 
 Copy your filled-in `.env` into this directory (including the required

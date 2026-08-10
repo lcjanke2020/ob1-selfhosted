@@ -51,6 +51,13 @@ subjects, and subjects longer than 1,024 characters fail at boot. The setting
 requires the OAuth door. It changes attribution only: listing a subject does not
 make an invalid token valid and does not broaden its memory scope.
 
+> **Attribution is not authorization.** Every OAuth subject — machine subjects
+> included — must ALSO appear in `OAUTH_ALLOWED_SUBJECTS`, the fail-closed
+> in-app allowlist that decides which verified subjects are admitted at all (see
+> [security-model.md](security-model.md#application-layer)). A service subject
+> listed here but missing there is denied, and the boot log warns about that
+> mismatch.
+
 The verified service `sub` is also its personal-memory principal. Use a
 different provider application for each agent or automation boundary rather than
 sharing one M2M client. That gives each agent stable ownership of its own
@@ -198,7 +205,7 @@ the Auth0 RFC 9068 or generic-issuer discovery run, then unset it.
 A successful Auth0 run ends like this, without disclosing the credential:
 
 ```text
-OK: browserless client_credentials authenticated to open-brain-homelab 1.19.0
+OK: browserless client_credentials authenticated to open-brain-homelab 1.20.0
 Attribution signal: signed gty=client-credentials present; expected server label is service.
 ```
 

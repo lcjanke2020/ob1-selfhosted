@@ -170,6 +170,16 @@ for what the schema contains, and
 [Upgrading an existing deployment](#upgrading-an-existing-deployment) for how to
 apply it in this topology.
 
+Server 1.20.0 requires a re-apply of `db/02-observability.sql` (it now converges
+`mcp_auth_events` in place to the allowed+denied audit shape) AND
+`OAUTH_ALLOWED_SUBJECTS` in this qube's `.env` **before the container roll**:
+the allowlist fails closed, so rolling the container without it leaves the
+OAuth-only deployment rejecting every Bearer — a deliberate lockout posture,
+loudly warned in the boot log, but not what an upgrade intends. Set it to the
+exact `sub` claim(s) to admit (Auth0 dashboard → User Management → Users →
+user_id), then roll, then verify a live client and check `mcp_auth_events` for
+the new `outcome='allowed'` rows.
+
 ## Upgrading an existing deployment
 
 `db/*.sql` are `docker-entrypoint-initdb.d` scripts: PostgreSQL runs them only
@@ -253,20 +263,23 @@ AppVM-local install disappears on reboot.
 
 ### Which migration each server version requires
 
-Rows start at 1.7.0. `db/01-schema.sql`, `db/02-observability.sql`, and
-`db/04-sessions.sql` have no upgrade row of their own; a database predating any
-of them needs it applied first, in that order. `db/03-grants-assertion.sql` is
-deliberately not third — it is a read-only check of the completed catalog, so it
-runs after every pending row below and fails by design if run before the
-relations it asserts on exist. The db qube records the same canonical order
+Rows start at 1.7.0. `db/01-schema.sql` and `db/04-sessions.sql` have no upgrade
+row of their own; a database predating either needs it applied first, in that
+order (`db/02-observability.sql` gained an upgrade row at 1.20.0 — older
+databases still apply it in its numbered position first).
+`db/03-grants-assertion.sql` is deliberately not third — it is a read-only check
+of the completed catalog, so it runs after every pending row below and fails by
+design if run before the relations it asserts on exist. The db qube records the
+same canonical order
 ([First boot / provisioning](../db-qube/README.md#first-boot--provisioning)).
 
-| Server | Migration                        | Additional requirement                                        |
-| ------ | -------------------------------- | ------------------------------------------------------------- |
-| 1.7.0  | `db/05-hybrid-search.sql`        | pgvector 0.8.0+ (filtered iterative scans)                    |
-| 1.9.0  | `db/06-spaces.sql`               | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner   |
-| 1.16.0 | `db/07-metadata-degradation.sql` | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env` |
-| 1.19.0 | `db/08-access-tokens.sql`        | —                                                             |
+| Server | Migration                                                                  | Additional requirement                                                         |
+| ------ | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| 1.7.0  | `db/05-hybrid-search.sql`                                                  | pgvector 0.8.0+ (filtered iterative scans)                                     |
+| 1.9.0  | `db/06-spaces.sql`                                                         | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner                    |
+| 1.16.0 | `db/07-metadata-degradation.sql`                                           | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env`                  |
+| 1.19.0 | `db/08-access-tokens.sql`                                                  | —                                                                              |
+| 1.20.0 | `db/02-observability.sql` (re-apply; converges `mcp_auth_events` in place) | `OAUTH_ALLOWED_SUBJECTS` in `.env` **before** the container roll — fail-closed |
 
 Migration 08 is required by 1.19.0 **even when native tokens are disabled**.
 `ENABLE_NATIVE_TOKENS` gates the credential door, not the schema: the server's

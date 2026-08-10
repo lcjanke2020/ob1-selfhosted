@@ -27,6 +27,7 @@ const ENV_KEYS = [
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
   "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
+  "OAUTH_ALLOWED_SUBJECTS",
   "OBS_AUTH_EVENTS_ENABLED",
   "METADATA_FALLBACK_POLICY",
   "JWKS_FETCH_TIMEOUT_MS",
@@ -105,6 +106,10 @@ Deno.test("browserless client_credentials authenticates through MCP and REST ser
     Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
     Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
     Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
+    // Authorization allowlist (fail-closed): admit the machine subject this
+    // integration mints. Note attribution (service-door classification via
+    // gty) and authorization (this list) are deliberately separate gates.
+    Deno.env.set("OAUTH_ALLOWED_SUBJECTS", SUBJECT);
     Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
     Deno.env.set("METADATA_FALLBACK_POLICY", "off");
     Deno.env.set("JWKS_FETCH_TIMEOUT_MS", "2000");
@@ -184,7 +189,7 @@ Deno.test("browserless client_credentials authenticates through MCP and REST ser
     assertEquals(output.code, 0, stderr);
     assertStringIncludes(
       stdout,
-      "OK: browserless client_credentials authenticated to open-brain-homelab 1.19.0",
+      "OK: browserless client_credentials authenticated to open-brain-homelab 1.20.0",
     );
     assertStringIncludes(stdout, "signed gty=client-credentials present");
     for (const sensitive of [CLIENT_SECRET, accessToken, SUBJECT]) {
