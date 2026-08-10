@@ -69,20 +69,26 @@ systemctl enable --now ob1-app-firewall.service
 # shouts to the boot log and propagates through rc.local's exit status at
 # the bottom of this file.
 if [ -f /rw/config/ob1-db-forward.service ] && [ -x /rw/config/ob1-db-forward.sh ]; then
-	# The listener probe is address-exact: match the qube-IP bind the forwarder
-	# actually makes (same source of truth the forwarder script uses), not a
-	# bare :5432 — a stray loopback listener (e.g. a leftover local postgres
-	# publish on 127.0.0.1:5432) must not satisfy the gate while DB_HOST has
-	# nothing serving it. A failed/empty qubesdb-read fails the chain loudly.
+	# The listener probe is address-exact AND owner-exact: match the qube-IP
+	# bind the forwarder actually makes (same source of truth the forwarder
+	# script uses), and require the socket to be held by THIS unit's MainPID.
+	# Address alone is not enough twice over: a stray loopback listener (e.g.
+	# a leftover local postgres publish on 127.0.0.1:5432) must not satisfy
+	# the gate, and neither must the exact qube-IP:5432 socket when another
+	# process owns it — that is the EADDRINUSE case, where a squatter keeps
+	# the address while this unit's socat crash-loops behind it. A
+	# failed/empty qubesdb-read fails the chain loudly.
+	fwd_ok=""
 	if BIND_IP="$(qubesdb-read /qubes-ip)" && [ -n "$BIND_IP" ] \
 		&& cp /rw/config/ob1-db-forward.service /etc/systemd/system/ \
 		&& systemctl daemon-reload \
 		&& systemctl enable --now ob1-db-forward.service; then
-		fwd_ok=""
 		i=0
 		while [ "$i" -lt 10 ]; do
 			systemctl is-active --quiet ob1-db-forward.service || break
-			if ss -tln | grep -qF "${BIND_IP}:5432 "; then
+			MAIN_PID="$(systemctl show --property MainPID --value ob1-db-forward.service)"
+			if [ -n "$MAIN_PID" ] && [ "$MAIN_PID" != "0" ] \
+				&& ss -ltnp | grep -F "${BIND_IP}:5432 " | grep -qF "pid=${MAIN_PID},"; then
 				fwd_ok=1
 				break
 			fi
@@ -90,7 +96,7 @@ if [ -f /rw/config/ob1-db-forward.service ] && [ -x /rw/config/ob1-db-forward.sh
 			sleep 1
 		done
 		if [ -z "$fwd_ok" ]; then
-			echo "ERROR: ob1-db-forward.service is not serving ${BIND_IP}:5432 after start — every DB client on this qube is down (diagnose: systemctl status ob1-db-forward.service)"
+			echo "ERROR: ob1-db-forward.service does not own a ${BIND_IP}:5432 listener after start — every DB client on this qube is down (diagnose: systemctl status ob1-db-forward.service; ss -ltnp | grep 5432)"
 			BOOT_FAIL=1
 		fi
 	else
@@ -110,7 +116,17 @@ fi
 if [ -d /rw/config/openbrain-units ]; then
 	cp /rw/config/openbrain-units/*.service /rw/config/openbrain-units/*.timer /etc/systemd/system/ 2>/dev/null
 	systemctl daemon-reload
-	systemctl enable --now ob1-db-backup.timer 2>/dev/null
+	# Enable the timer ONLY on a boot whose db forwarder passed its readiness
+	# gate above: Persistent=true queues any missed occurrence the moment the
+	# timer is enabled, and a catch-up dispatched against a known-dead DB_HOST
+	# fails once with no retry — the day's backup is burned. Skipped instead,
+	# the occurrence stays owed and fires when the operator fixes the
+	# forwarder and enables the timer (or reboots into a healthy gate).
+	if [ -n "${fwd_ok:-}" ]; then
+		systemctl enable --now ob1-db-backup.timer 2>/dev/null
+	else
+		echo "WARNING: db forwarder not ready — ob1-db-backup.timer NOT enabled this boot; fix the forwarder, then run 'systemctl enable --now ob1-db-backup.timer' (or reboot)"
+	fi
 fi
 
 # --- GPU-offload forwarder (optional; see ../gpu-offload-transport.md) ---

@@ -41,7 +41,11 @@
 #
 # The app role (openbrain_app) and the log-ingester role (openbrain_ingester)
 # must exist on the external DB with the passwords in .env, and the external
-# Postgres must permit the app qube's IP (pg_hba scram). See deploy/qubes/README.md.
+# Postgres must permit the deployment's ACTUAL connection source in pg_hba
+# (scram): on the ConnectTCP-forwarder path Postgres sees loopback, so it needs
+# the 127.0.0.1/::1 lines from db-qube/pg_hba.snippet.conf (with the stock
+# broad loopback lines removed — see its header); a directly reachable external
+# Postgres instead scopes to this qube's source IP. See deploy/qubes/README.md.
 
 services:
   # Never started: assigned a profile that the deploy never activates. The base
@@ -62,7 +66,7 @@ services:
       # Fail-fast: with the bundled `postgres` parked, an unset DB_HOST would
       # default to the now-nonexistent `postgres` name and fail only at connect
       # time. `:?` makes compose error at config time with this message instead.
-      DB_HOST: ${DB_HOST:?set DB_HOST to the external Postgres address (e.g. the DB qube) when layering the external-db override}
+      DB_HOST: ${DB_HOST:?set DB_HOST to the external Postgres address (Qubes split: this qube own-IP ConnectTCP db forwarder) when layering the external-db override}
 
   # Optional one-shot local native-token lifecycle tool. Keep its profile from
   # the base file, but point it at the same external database without reviving
@@ -70,7 +74,7 @@ services:
   token-admin:
     depends_on: !reset null
     environment:
-      DB_HOST: ${DB_HOST:?set DB_HOST to the external Postgres address (e.g. the DB qube) when layering the external-db override}
+      DB_HOST: ${DB_HOST:?set DB_HOST to the external Postgres address (Qubes split: this qube own-IP ConnectTCP db forwarder) when layering the external-db override}
 
   # Gated behind `pattern-b` (where the service is actually defined) so loading
   # this override WITHOUT docker-compose.pattern-b.yml doesn't leave a bodyless
@@ -80,4 +84,4 @@ services:
       - pattern-b
     depends_on: !reset null
     environment:
-      DB_HOST: ${DB_HOST:?set DB_HOST to the external Postgres address (e.g. the DB qube) when layering the external-db override}
+      DB_HOST: ${DB_HOST:?set DB_HOST to the external Postgres address (Qubes split: this qube own-IP ConnectTCP db forwarder) when layering the external-db override}
