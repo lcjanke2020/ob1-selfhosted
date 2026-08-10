@@ -204,20 +204,21 @@ if (ENABLE_OAUTH) {
         "exact `sub` claim(s) you intend to admit.",
     );
   } else {
-    const unadmitted = [...OAUTH_SERVICE_ACCOUNT_SUBJECTS].filter(
-      (sub) => !OAUTH_ALLOWED_SUBJECTS.has(sub),
-    ).length;
-    console.log(
-      `[auth] OAuth subject allowlist active (${OAUTH_ALLOWED_SUBJECTS.size} ` +
-        "subject(s) admitted).",
-    );
-    if (unadmitted > 0) {
+    // Log no subject values AND no counts: CodeQL's clear-text-logging
+    // taint tracking flags any expression derived from these sets reaching
+    // console output, and a fixed string is the stronger form of the
+    // "boot logs are not an identity inventory" rule anyway. The sets feed
+    // only the branch conditions here.
+    const hasUnadmittedServiceSubject = [...OAUTH_SERVICE_ACCOUNT_SUBJECTS]
+      .some((sub) => !OAUTH_ALLOWED_SUBJECTS.has(sub));
+    console.log("[auth] OAuth subject allowlist active.");
+    if (hasUnadmittedServiceSubject) {
       // OAUTH_SERVICE_ACCOUNT_SUBJECTS is attribution-only and never grants
       // access — a machine subject listed there but absent from the
       // allowlist will be denied. Almost always an upgrade oversight.
       console.warn(
-        `[auth] ${unadmitted} OAUTH_SERVICE_ACCOUNT_SUBJECTS entr(y/ies) are ` +
-          "NOT in OAUTH_ALLOWED_SUBJECTS and will be denied — that list is " +
+        "[auth] at least one OAUTH_SERVICE_ACCOUNT_SUBJECTS entry is NOT in " +
+          "OAUTH_ALLOWED_SUBJECTS and will be denied — that list is " +
           "attribution-only. Add the machine subject(s) to " +
           "OAUTH_ALLOWED_SUBJECTS if those clients should authenticate.",
       );
