@@ -65,13 +65,20 @@ fi
 # path, so unlike the optional GPU block below a half-staged install is a
 # hard failure: every DB client on this qube is down. Guard on BOTH artifacts
 # (a unit whose ExecStart script is missing or non-executable would just
-# crash-loop under Restart=always, hiding the root cause) and shout to the
-# boot log naming the missing piece; the failure propagates through
-# rc.local's exit status at the bottom of this file.
+# crash-loop under Restart=always, hiding the root cause), guard every
+# install/enable step, and confirm the unit actually came up — then shout to
+# the boot log on any failure; it propagates through rc.local's exit status
+# at the bottom of this file.
 if [ -f /rw/config/ob1-db-forward.service ] && [ -x /rw/config/ob1-db-forward.sh ]; then
-	cp /rw/config/ob1-db-forward.service /etc/systemd/system/
-	systemctl daemon-reload
-	systemctl enable --now ob1-db-forward.service
+	if cp /rw/config/ob1-db-forward.service /etc/systemd/system/ \
+		&& systemctl daemon-reload \
+		&& systemctl enable --now ob1-db-forward.service \
+		&& systemctl is-active --quiet ob1-db-forward.service; then
+		: # staged, enabled, and running
+	else
+		echo "ERROR: ob1-db-forward.service failed to install/enable/start — every DB client on this qube is down (diagnose: systemctl status ob1-db-forward.service)"
+		BOOT_FAIL=1
+	fi
 else
 	[ -f /rw/config/ob1-db-forward.service ] || echo "ERROR: /rw/config/ob1-db-forward.service missing — db forwarder NOT staged; every DB client on this qube is down"
 	[ -x /rw/config/ob1-db-forward.sh ] || echo "ERROR: /rw/config/ob1-db-forward.sh missing or not executable — db forwarder NOT started; every DB client on this qube is down"
