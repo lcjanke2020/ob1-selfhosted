@@ -6,8 +6,8 @@
 # /etc/systemd/system is wiped on every AppVM reboot, so units that must persist
 # are stashed under /rw/config and (re)installed + enabled here at each boot.
 # Boot order: tailscaled → re-assert rootful docker OFF → custom-input firewall
-# one-shot → encrypted-backup timer → db forwarder (required) → GPU-offload
-# forwarder (optional).
+# one-shot → db forwarder (required, readiness-gated — must precede the backup
+# timer) → encrypted-backup timer → GPU-offload forwarder (optional).
 #
 # What is deliberately ABSENT: any docker start. The app stack runs under the
 # operator account's ROOTLESS dockerd (a systemd --user unit; storage in
@@ -48,6 +48,55 @@ cp /rw/config/ob1-app-firewall.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now ob1-app-firewall.service
 
+# --- db forwarder (app→db Postgres over qubes.ConnectTCP) ---
+# Restage + enable the qube-IP socat forwarder every DB client on this qube
+# targets (DB_HOST): mcp, the encrypted backup, the rollup, admin psql. The
+# db qube has no network-facing Postgres listener — this channel is the only
+# path, so unlike the optional GPU block below a half-staged install is a
+# hard failure: every DB client on this qube is down. This block runs BEFORE
+# the backup timer below: the timer's Persistent=true can queue a missed
+# occurrence the moment it is enabled, and that catch-up run must find the
+# forwarder already serving. Guard on BOTH artifacts (a unit whose ExecStart
+# script is missing or non-executable would just crash-loop under
+# Restart=always, hiding the root cause) and on every install/enable step,
+# then gate on READINESS, not on a point-in-time state probe: Type=simple
+# means `enable --now` returns at fork, before socat has even exec'd — an
+# instantly-crashing ExecStart is still `active` when checked immediately
+# (measured: an ExecStart=/bin/false unit passed an immediate is-active 8/8
+# times). Poll up to 10 s for the real signal — the :5432 listener — bailing
+# early the moment the unit leaves `active` (a crash-looper spends its time
+# in `activating (auto-restart)`, where is-active is nonzero). Any failure
+# shouts to the boot log and propagates through rc.local's exit status at
+# the bottom of this file.
+if [ -f /rw/config/ob1-db-forward.service ] && [ -x /rw/config/ob1-db-forward.sh ]; then
+	if cp /rw/config/ob1-db-forward.service /etc/systemd/system/ \
+		&& systemctl daemon-reload \
+		&& systemctl enable --now ob1-db-forward.service; then
+		fwd_ok=""
+		i=0
+		while [ "$i" -lt 10 ]; do
+			systemctl is-active --quiet ob1-db-forward.service || break
+			if ss -tln | grep -q ':5432 '; then
+				fwd_ok=1
+				break
+			fi
+			i=$((i + 1))
+			sleep 1
+		done
+		if [ -z "$fwd_ok" ]; then
+			echo "ERROR: ob1-db-forward.service is not serving :5432 after start — every DB client on this qube is down (diagnose: systemctl status ob1-db-forward.service)"
+			BOOT_FAIL=1
+		fi
+	else
+		echo "ERROR: ob1-db-forward.service failed to install/enable — every DB client on this qube is down (diagnose: systemctl status ob1-db-forward.service)"
+		BOOT_FAIL=1
+	fi
+else
+	[ -f /rw/config/ob1-db-forward.service ] || echo "ERROR: /rw/config/ob1-db-forward.service missing — db forwarder NOT staged; every DB client on this qube is down"
+	[ -x /rw/config/ob1-db-forward.sh ] || echo "ERROR: /rw/config/ob1-db-forward.sh missing or not executable — db forwarder NOT started; every DB client on this qube is down"
+	BOOT_FAIL=1
+fi
+
 # --- Encrypted DB backup timer ---
 # Units stashed under /rw/config/openbrain-units/ (the .service + .timer from
 # backup/). Re-install + enable each boot since /etc is wiped. Guarded so a
@@ -56,33 +105,6 @@ if [ -d /rw/config/openbrain-units ]; then
 	cp /rw/config/openbrain-units/*.service /rw/config/openbrain-units/*.timer /etc/systemd/system/ 2>/dev/null
 	systemctl daemon-reload
 	systemctl enable --now ob1-db-backup.timer 2>/dev/null
-fi
-
-# --- db forwarder (app→db Postgres over qubes.ConnectTCP) ---
-# Restage + enable the qube-IP socat forwarder every DB client on this qube
-# targets (DB_HOST): mcp, the encrypted backup, the rollup, admin psql. The
-# db qube has no network-facing Postgres listener — this channel is the only
-# path, so unlike the optional GPU block below a half-staged install is a
-# hard failure: every DB client on this qube is down. Guard on BOTH artifacts
-# (a unit whose ExecStart script is missing or non-executable would just
-# crash-loop under Restart=always, hiding the root cause), guard every
-# install/enable step, and confirm the unit actually came up — then shout to
-# the boot log on any failure; it propagates through rc.local's exit status
-# at the bottom of this file.
-if [ -f /rw/config/ob1-db-forward.service ] && [ -x /rw/config/ob1-db-forward.sh ]; then
-	if cp /rw/config/ob1-db-forward.service /etc/systemd/system/ \
-		&& systemctl daemon-reload \
-		&& systemctl enable --now ob1-db-forward.service \
-		&& systemctl is-active --quiet ob1-db-forward.service; then
-		: # staged, enabled, and running
-	else
-		echo "ERROR: ob1-db-forward.service failed to install/enable/start — every DB client on this qube is down (diagnose: systemctl status ob1-db-forward.service)"
-		BOOT_FAIL=1
-	fi
-else
-	[ -f /rw/config/ob1-db-forward.service ] || echo "ERROR: /rw/config/ob1-db-forward.service missing — db forwarder NOT staged; every DB client on this qube is down"
-	[ -x /rw/config/ob1-db-forward.sh ] || echo "ERROR: /rw/config/ob1-db-forward.sh missing or not executable — db forwarder NOT started; every DB client on this qube is down"
-	BOOT_FAIL=1
 fi
 
 # --- GPU-offload forwarder (optional; see ../gpu-offload-transport.md) ---
