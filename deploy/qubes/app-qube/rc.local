@@ -69,14 +69,20 @@ systemctl enable --now ob1-app-firewall.service
 # shouts to the boot log and propagates through rc.local's exit status at
 # the bottom of this file.
 if [ -f /rw/config/ob1-db-forward.service ] && [ -x /rw/config/ob1-db-forward.sh ]; then
-	if cp /rw/config/ob1-db-forward.service /etc/systemd/system/ \
+	# The listener probe is address-exact: match the qube-IP bind the forwarder
+	# actually makes (same source of truth the forwarder script uses), not a
+	# bare :5432 — a stray loopback listener (e.g. a leftover local postgres
+	# publish on 127.0.0.1:5432) must not satisfy the gate while DB_HOST has
+	# nothing serving it. A failed/empty qubesdb-read fails the chain loudly.
+	if BIND_IP="$(qubesdb-read /qubes-ip)" && [ -n "$BIND_IP" ] \
+		&& cp /rw/config/ob1-db-forward.service /etc/systemd/system/ \
 		&& systemctl daemon-reload \
 		&& systemctl enable --now ob1-db-forward.service; then
 		fwd_ok=""
 		i=0
 		while [ "$i" -lt 10 ]; do
 			systemctl is-active --quiet ob1-db-forward.service || break
-			if ss -tln | grep -q ':5432 '; then
+			if ss -tln | grep -qF "${BIND_IP}:5432 "; then
 				fwd_ok=1
 				break
 			fi
@@ -84,11 +90,11 @@ if [ -f /rw/config/ob1-db-forward.service ] && [ -x /rw/config/ob1-db-forward.sh
 			sleep 1
 		done
 		if [ -z "$fwd_ok" ]; then
-			echo "ERROR: ob1-db-forward.service is not serving :5432 after start — every DB client on this qube is down (diagnose: systemctl status ob1-db-forward.service)"
+			echo "ERROR: ob1-db-forward.service is not serving ${BIND_IP}:5432 after start — every DB client on this qube is down (diagnose: systemctl status ob1-db-forward.service)"
 			BOOT_FAIL=1
 		fi
 	else
-		echo "ERROR: ob1-db-forward.service failed to install/enable — every DB client on this qube is down (diagnose: systemctl status ob1-db-forward.service)"
+		echo "ERROR: ob1-db-forward.service failed to stage/enable (or the qube IP could not be read) — every DB client on this qube is down (diagnose: systemctl status ob1-db-forward.service)"
 		BOOT_FAIL=1
 	fi
 else

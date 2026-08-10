@@ -89,6 +89,7 @@ flowchart TB
         TS["tailscaled<br/>Funnel :443 — TLS terminates here"]
         CA["Caddy :9787<br/>funnel-header split · Anthropic IP allowlist<br/>(Funnel requests only)"]
         LI["log-ingester"]
+        SK["log sink<br/>socket-only Postgres (funnel logs)"]
         TS --> CA
         CA -. "JSON access logs<br/>(credential-redacted)" .-> LI
     end
@@ -105,9 +106,9 @@ flowchart TB
 
     CL -- "HTTPS :443 via Funnel relay" --> TS
     CD -. "WireGuard (tailnet)" .-> TS
-    CA -- "MCP port only, scoped tailnet<br/>Bearer JWT forwarded" --> MCP
-    MCP -- "openbrain_app role:<br/>SELECT / INSERT / UPDATE —<br/>no DELETE on thoughts" --> PG
-    LI -. "openbrain_ingester role:<br/>INSERT-only, one table (funnel_access_log)" .-> PG
+    CA -- "qubes.ConnectTCP (dom0-gated)<br/>Bearer JWT forwarded" --> MCP
+    MCP -- "qubes.ConnectTCP (dom0-gated)<br/>openbrain_app role:<br/>SELECT / INSERT / UPDATE —<br/>no DELETE on thoughts" --> PG
+    LI -. "openbrain_ingester role:<br/>INSERT-only, unix socket<br/>(funnel_access_log)" .-> SK
 
     style ING fill:#d777571a,stroke:#d77757
     style APP fill:#3cc8781a,stroke:#3cc878
@@ -117,9 +118,11 @@ flowchart TB
 In text: clients reach tailscaled's single Funnel listener on the ingress qube;
 Caddy applies the funnel-header split (Pattern Y — tailnet clients hit the same
 listener) and the Anthropic IP allowlist, then proxies to the MCP server on the
-app qube, which embeds via Ollama and reads/writes Postgres on the db qube; the
-edge's log-ingester writes access-log rows to the db qube on an INSERT-only
-role. Design reasoning and the enforcement layers behind each arrow:
+app qube over a dom0-gated `qubes.ConnectTCP` channel; the MCP server embeds via
+Ollama and reads/writes Postgres on the db qube over a second such channel; the
+edge's log-ingester writes access-log rows to a local socket-only sink on the
+ingress qube itself — it holds no credential for, and no route to, the db qube.
+Design reasoning and the enforcement layers behind each arrow:
 [`three-qube-design.md`](deploy/qubes/three-qube-design.md). Request-level
 detail — both auth branches, step by step — is in
 [Request flow in detail](#request-flow-in-detail) below.
