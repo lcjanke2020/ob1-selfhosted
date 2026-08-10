@@ -3,55 +3,57 @@
 #
 # Install at: /rw/config/rc.local   (chmod +x)
 #
-# /etc/systemd/system is wiped on every AppVM reboot, so units that must persist
-# are stashed under /rw/config and (re)installed + enabled here at each boot.
-# Ordering matters: bring tailscale0 up, re-apply the firewall rule on it, then
-# start Postgres once the interface has an IP (so the cluster binds the tailnet
-# address without a race).
+# Since the ConnectTCP cutover the cluster binds loopback only, so the old
+# ordering constraint — wait for tailscale0 before starting Postgres — is
+# gone, and with it the post-tailscale firewall one-shot (there is no network
+# listener left to accept). What remains: start tailscaled (the node stays on
+# the tailnet with ZERO inbound grants — drop this block if you retire the
+# node entirely), then start the cluster.
 #
-# This manual start only wins that race if Debian's boot-time auto-start is OFF.
-# Set /etc/postgresql/17/main/start.conf to `manual` (persisted by the
-# /etc/postgresql bind-dir) — otherwise postgresql@17-main.service auto-starts
-# the cluster before tailscale0 exists, fails to bind the tailnet IP, and can
-# leave a stale postmaster.pid that this start then contends with. See the
-# README "Disable the cluster's boot auto-start" section.
+# The manual start below assumes Debian's boot-time auto-start is OFF
+# (/etc/postgresql/17/main/start.conf = `manual`, persisted by the
+# /etc/postgresql bind-dir — see the README). With a loopback-only bind the
+# stock auto-start would also work now; keeping the manual path preserves one
+# explicit, logged start branch instead of two racing ones.
 
-# All boot output goes to one per-boot log (ephemeral; /var/log is not bind-dir'd
-# — fine for a boot probe). This replaces the old `2>/dev/null` that hid exactly
-# the failures worth seeing.
+# All boot output goes to one per-boot log (ephemeral; /var/log is not
+# bind-dir'd — fine for a boot probe).
 LOG=/var/log/ob1-db-boot.log
 exec >>"$LOG" 2>&1
 echo "=== rc.local $(date -Is) ==="
 
-# --- Tailscale ---
-# The shared template keeps tailscaled DISABLED on purpose: when enabled in the
-# template it broke the template's apt updates-proxy (tailscale0 is IPv6-only at
-# that stage -> EAI_ADDRFAMILY). The AppVM starts it explicitly here instead;
-# ob1-db-firewall.service also Wants=tailscaled.
+# --- Tailscale (optional — node kept with zero inbound grants) ---
+# The shared template keeps tailscaled DISABLED on purpose: when enabled in
+# the template it broke the template's apt updates-proxy (tailscale0 is
+# IPv6-only at that stage -> EAI_ADDRFAMILY). The AppVM starts it explicitly
+# here instead.
 systemctl start tailscaled
 
-# --- OB1 DB qube: post-tailscale firewall rules (tcp/5432 on tailscale0) ---
-# The unit's ExecStartPre waits for tailscale0 to appear before applying the rule.
-# --no-block so rc.local doesn't stall on that (up to 60s) wait — the rule apply
-# is independent of the Postgres start below, which does its own interface wait.
-cp /rw/config/ob1-db-firewall.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable ob1-db-firewall.service
-systemctl start --no-block ob1-db-firewall.service
-
-# --- OB1 DB qube: start Postgres after tailscale0 has an IP (binds the tailnet IP) ---
-# Backgrounded so rc.local returns promptly; the wait is an explicit
-# success/failure branch so a Tailscale startup/auth failure is logged loudly
-# instead of leaving the DB quietly down.
-( i=0
-  while [ "$i" -lt 60 ]; do
-    ip -4 addr show tailscale0 2>/dev/null | grep -q 'inet ' && break
-    i=$((i + 1)); sleep 1
-  done
-  if ip -4 addr show tailscale0 2>/dev/null | grep -q 'inet '; then
-    echo "tailscale0 has an IPv4 address; starting cluster"
-    pg_ctlcluster 17 main start
-    echo "pg_ctlcluster exit=$?"
-  else
-    echo "ERROR: tailscale0 never got an IPv4 address after 60s — NOT starting Postgres" >&2
-  fi ) &
+# --- Start Postgres (loopback-only listener; no interface wait) ---
+# This is the single explicit start path, and its exit status is rc.local's:
+# a failed start must fail the boot visibly. Detecting "already running"
+# needs care in THIS context: as root under systemd, Debian's pg_ctlcluster
+# redirects `start` to `systemctl start postgresql@17-main` and returns ITS
+# status — an already-active unit start is idempotent exit 0 (no exit 2 to
+# catch), and a postmaster started outside the unit makes the redirected
+# start FAIL while the cluster is genuinely up. So: detect already-running
+# with a status preflight (`pg_ctlcluster status` is not redirected), and
+# after a failed start re-check actual state before declaring the cluster
+# down — DOWN must mean confirmed-stopped, or the ERROR path stops meaning
+# anything.
+if pg_ctlcluster 17 main status >/dev/null 2>&1; then
+	echo "WARNING: cluster was ALREADY RUNNING before rc.local's start — started outside this script; check /etc/postgresql/17/main/start.conf is 'manual' (README: Disable the cluster's boot auto-start)"
+	exit 0
+fi
+pg_ctlcluster 17 main start
+rc=$?
+if [ "$rc" -eq 0 ]; then
+	echo "pg_ctlcluster exit=0 (cluster started)"
+	exit 0
+fi
+if pg_ctlcluster 17 main status >/dev/null 2>&1; then
+	echo "WARNING: start returned exit=$rc but the cluster IS running — a racing start path won; check /etc/postgresql/17/main/start.conf is 'manual' (README: Disable the cluster's boot auto-start)"
+	exit 0
+fi
+echo "ERROR: pg_ctlcluster 17 main start failed (exit=$rc) — the cluster is DOWN (confirmed stopped)"
+exit "$rc"

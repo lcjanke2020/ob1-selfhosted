@@ -5,7 +5,12 @@
 # (journal mail, ntfy, etc.) and uncomment the OnFailure line below, or rely on
 # your monitoring scraping `systemctl --failed`.
 Description=OB1 encrypted off-box DB backup
-After=network-online.target tailscaled.service
+# ob1-db-forward.service: pg_dump reaches the db qube through the app qube's
+# ConnectTCP forwarder — order after it so a Persistent=true catch-up run
+# queued at boot cannot dial DB_HOST before anything listens there. Ordering
+# only (no Wants=): on an install without the split transport the unit simply
+# doesn't exist and the dependency is inert.
+After=network-online.target tailscaled.service ob1-db-forward.service
 Wants=network-online.target
 # OnFailure=notify-failure@%n.service
 

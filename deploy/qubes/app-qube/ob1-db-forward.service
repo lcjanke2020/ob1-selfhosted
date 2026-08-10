@@ -1,0 +1,17 @@
+[Unit]
+# The app→db Postgres forwarder: qube-ip:5432 → the db qube over qubes
+# ConnectTCP (see ob1-db-forward.sh). DB_HOST in this qube's .env targets it.
+#
+# Stash at: /rw/config/ob1-db-forward.service — rc.local copies it into
+# /etc/systemd/system and enables it each boot (/etc is wiped on every AppVM
+# reboot). Restart=always converges if anything it needs isn't up yet.
+Description=OB1 db forwarder (qube-ip:5432 -> db qube via qrexec ConnectTCP)
+After=qubes-network.service
+
+[Service]
+ExecStart=/rw/config/ob1-db-forward.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

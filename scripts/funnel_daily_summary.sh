@@ -280,9 +280,9 @@ run_summary() {
 # openbrain_logs_rollup on the ingress qube's local log sink. The compose
 # backend uses container-local socket trust and passes no password across
 # `docker exec`; the postgres backend sends the role's password from the
-# narrow job env to host psql, over a tailnet-restricted TCP connection or a
-# local unix socket depending on DB_HOST. Neither path needs the database
-# superuser.
+# narrow job env to host psql, over TCP (in the Qubes split, the app qube's
+# own-IP ConnectTCP forwarder) or a local unix socket depending on DB_HOST.
+# Neither path needs the database superuser.
 #
 # The summary SQL is purely INSERT/DELETE/SELECT, no schema mods, and all of
 # those operations are covered by openbrain_app's grants in

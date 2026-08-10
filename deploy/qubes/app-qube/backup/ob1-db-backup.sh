@@ -25,7 +25,7 @@ ENV_FILE="${BACKUP_ENV_FILE:-/rw/config/openbrain-units/backup.env}"
 set -a; . "$ENV_FILE"; set +a   # DB_HOST DB_PORT POSTGRES_DB READONLY_ROLE READONLY_PASSWORD PUBKEY OUT_DIR RETAIN_DAYS LABEL_RETAIN_DAYS
 BACKUP_LABEL="$BACKUP_LABEL_ARG"
 
-: "${DB_HOST:?set DB_HOST in $ENV_FILE (the db qube tailnet address)}"
+: "${DB_HOST:?set DB_HOST in $ENV_FILE (the app qube own-IP ConnectTCP db forwarder)}"
 : "${DB_PORT:=5432}"
 : "${POSTGRES_DB:?set POSTGRES_DB in $ENV_FILE}"
 : "${READONLY_ROLE:?set READONLY_ROLE in $ENV_FILE (e.g. openbrain_readonly)}"
