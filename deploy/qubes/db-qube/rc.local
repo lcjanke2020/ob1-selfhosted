@@ -32,12 +32,22 @@ systemctl start tailscaled
 # --- Start Postgres (loopback-only listener; no interface wait) ---
 # Capture and propagate the exit status: this is the single explicit start
 # path, and a trailing echo would otherwise reset $? to 0 and mask a failed
-# start behind a successful-looking boot.
+# start behind a successful-looking boot. Exit 2 = "already running" — the
+# cluster is UP but something started it first (start.conf left at `auto`
+# instead of `manual`, or a manual operator start): report it truthfully as
+# running, but flag the double-start-path drift instead of crying DOWN.
 pg_ctlcluster 17 main start
 rc=$?
-if [ "$rc" -ne 0 ]; then
+case "$rc" in
+0)
+	echo "pg_ctlcluster exit=0 (cluster started)"
+	;;
+2)
+	echo "WARNING: cluster was ALREADY RUNNING (pg_ctlcluster exit=2) — started outside rc.local; check /etc/postgresql/17/main/start.conf is 'manual' (README: Disable the cluster's boot auto-start)"
+	rc=0
+	;;
+*)
 	echo "ERROR: pg_ctlcluster 17 main start failed (exit=$rc) — the cluster is DOWN"
-else
-	echo "pg_ctlcluster exit=0"
-fi
+	;;
+esac
 exit "$rc"

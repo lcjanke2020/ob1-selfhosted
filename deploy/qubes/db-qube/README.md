@@ -93,16 +93,32 @@ on the tailnet with zero inbound grants; drop that block if you retire the node)
 and then starts the cluster unconditionally. Boot output (and the
 `pg_ctlcluster` exit status) lands in `/var/log/ob1-db-boot.log`.
 
-### The cluster's boot auto-start (kept off)
+### Disable the cluster's boot auto-start (required)
 
-`/etc/postgresql/17/main/start.conf` stays at `manual` (persisted by the
-`/etc/postgresql` bind-dir). The original reason — losing the race against a
-boot-time auto-start that would fail to bind the not-yet-existing tailnet IP —
-is gone with the loopback-only bind, and Debian's stock auto-start would now
-work. Keeping `manual` + the `rc.local` start preserves **one** explicit, logged
-start path instead of two racing ones; if you prefer the stock auto-start, set
-`start.conf` back to `auto` and delete the `rc.local` start block — pick one,
-not both.
+Debian creates new clusters with `start.conf = auto`, and this runbook's
+`rc.local` is the single intended start path — so set the cluster to `manual`
+once, before the first boot with this `rc.local` in place:
+
+```
+# /etc/postgresql/17/main/start.conf
+manual
+```
+
+`manual` still allows `pg_ctlcluster 17 main start` (what `rc.local` runs); it
+only suppresses the boot auto-start. The file lives under `/etc/postgresql`, so
+the bind-dir persists it across reboots; when changing it on a live system, also
+run `systemctl daemon-reload` so postgresql-common's systemd generator re-reads
+it for the next boot.
+
+The original reason for the manual path — losing the race against an auto-start
+that could not yet bind the tailnet IP — is gone with the loopback-only bind;
+what it preserves now is **one** explicit, logged start branch instead of two
+racing ones. If you prefer the stock auto-start, set `start.conf` back to `auto`
+and delete the `rc.local` start block — pick one, not both. Left at `auto` by
+accident, the stock service wins the race and `rc.local`'s start returns
+"already running" (`pg_ctlcluster` exit 2) — `rc.local` reports that accurately
+as a running cluster with a pointer to this section, not as a failure, so the
+boot stays honest either way.
 
 ## First boot / provisioning
 
