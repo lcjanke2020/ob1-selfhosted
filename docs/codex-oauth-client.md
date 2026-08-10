@@ -347,10 +347,11 @@ silently renews, confirm a **`sertft`** event (successful exchange of Refresh
 Token for Access Token; see Auth0's
 [log-event codes](https://auth0.com/docs/deploy-monitor/logs/log-event-type-codes))
 for this client in **Monitoring → Logs**. That event plus a successful lookup
-with no browser reauthorization is the proof. `mcp_auth_events` records auth
-_failures_, not successful validations, so an empty failure log is not the
-refresh signal. Restore the normal access-token lifetime after any shortened
-test.
+with no browser reauthorization is the proof. `mcp_auth_events` records every
+auth decision — including successful validations, as `outcome='allowed'` rows —
+but a successful row alone does not distinguish a silent refresh from a reused
+still-valid token, so it is corroboration, not the refresh signal. Restore the
+normal access-token lifetime after any shortened test.
 
 > Don't use `codex mcp logout` to test renewal — logout clears the stored
 > credentials and tests _reauthorization_, not refresh. And never print or

@@ -147,24 +147,30 @@ dumps can still read it.
   denies service), with a shared in-flight cap that drops events under sustained
   database distress. That trade-off is bounded three ways: a boot-time schema
   probe refuses to start against a pre-audit table shape (a missed migration is
-  a loud refusal, never a silent drop), dropped events are counted and surfaced
-  as rate-limited console warnings (an audit gap is itself in evidence), and
-  reaching the drop path at all requires database distress rather than
-  attacker-controllable request volume. The inverse design — blocking each
-  request on a durable audit write — would hand the audit path a
-  denial-of-service lever over the whole server.
+  a loud refusal, never a silent drop); dropped events are counted and surfaced
+  as rate-limited console warnings (an audit gap is itself in evidence); and the
+  drop path is reached only when inserts back up past the in-flight cap —
+  sustained database distress, or request volume outrunning the audit queue (the
+  cap exists precisely because a sustained 401 flood is attacker-reachable; what
+  such a flood costs is audit rows about itself, not admission records for other
+  identities' well-spaced requests, and the drop counter still records that it
+  happened). The inverse design — blocking each request on a durable audit write
+  — would hand the audit path a denial-of-service lever over the whole server;
+  the opt-in fail-closed mode is tracked separately (GH #88).
 - **Audit retention keys on verified identity.** Rows naming a real,
   tenant-minted identity keep 365 days: every allowed row, plus
   `subject_not_allowed` denials (which verified identity knocked and was refused
   — the question an incident review asks months later). Anonymous denials
   (scanner noise, credential fumbles) keep 30 days, matched to the raw access
   log so a 401 and the request that produced it age out together. The long
-  horizon is size-bounded by construction: those rows require a Bearer the
-  tenant actually minted, so growth tracks legitimate use — a stolen credential
-  inflating it is loud in the very table it inflates (and in the edge burst
-  alerts), and the horizon is a one-line operator lever in
-  `db/summarize_auth_events.sql`. Only server-verified identity lands in the
-  table — never as-presented credentials or header values.
+  horizon is identity- and time-bounded, not size-bounded: those rows require a
+  Bearer the tenant actually minted — which bounds **who** can grow the table,
+  not how many rows a single credential can generate — so growth tracks
+  legitimate use, an accepted storage trade-off. A stolen credential inflating
+  it is loud in the very table it inflates (and in the edge burst alerts), and
+  the horizon is a one-line operator lever in `db/summarize_auth_events.sql`.
+  Only server-verified identity lands in the table — never as-presented
+  credentials or header values.
 - Captured content is hard-capped (100,000 UTF-8 bytes) on both
   `capture_thought` and `session_capture`; the REST gateway enforces the
   identical cap via the same shared schema module, plus a 1 MiB request-body
@@ -294,13 +300,17 @@ security review.
   warnings otherwise serialize the full request header map (incl. a Bearer) to
   `docker logs`; the ingester additionally keeps only UA + Host from headers and
   strips query strings.
-- Every 401 inserts a reason-coded row into `mcp_auth_events` (fire-and-forget,
-  with an in-flight cap so a 401 flood can't queue unbounded memory).
+- Every auth decision inserts a row into `mcp_auth_events` — reason-coded
+  denials AND per-request admissions with the verified identity
+  (fire-and-forget, with an in-flight cap so a 401 flood can't queue unbounded
+  memory; best-effort semantics above).
 - Successful writes carry the server-owned credential label and verified
   subject, distinguishing `service` machine identities from `funnel` user
-  identities. Successful reads have no application-level identity audit in this
-  release; Caddy retains request metadata only. Failed tokens are not classified
-  as machine or user because their unverified claims are attacker-controlled.
+  identities. Reads are covered at request-level granularity by the
+  `mcp_auth_events` admission row (who authenticated, to which path, when);
+  there is no per-tool or per-row read audit in this release — Caddy retains
+  request metadata only. Failed tokens are not classified as machine or user
+  because their unverified claims are attacker-controlled.
 - Every degraded classification appends history plus a transactional outbox row
   in the thought transaction. The optional Pushover/ntfy worker consumes only
   committed queue rows and selects finite codes and counts—never thought

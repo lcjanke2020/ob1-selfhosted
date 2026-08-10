@@ -15,6 +15,7 @@ import { asPool, FakePool, makeDeps } from "./api_test_support.ts";
 const CLIENT_ID = "headless-test-client";
 const CLIENT_SECRET = "headless-test-secret";
 const SUBJECT = "headless-test-client@clients";
+const OUTSIDER_SUBJECT = "headless-unadmitted@clients";
 const ISSUER = "https://headless-issuer.invalid/";
 const AUDIENCE = "https://brain.invalid/mcp";
 const JWKS_URL = "https://headless-issuer.invalid/.well-known/jwks.json";
@@ -162,49 +163,108 @@ Deno.test("browserless client_credentials authenticates through MCP and REST ser
       return transport.handleRequest(c);
     });
 
-    const command = new Deno.Command("deno", {
-      args: [
-        "run",
-        "--allow-env=OAUTH_TOKEN_URL,OAUTH_CLIENT_ID,OAUTH_CLIENT_SECRET,OAUTH_AUDIENCE,OAUTH_SCOPE,OAUTH_CLIENT_AUTH_METHOD,OPENBRAIN_MCP_URL,OAUTH_SMOKE_TIMEOUT_MS,OAUTH_SMOKE_PRINT_SUBJECT",
-        "--allow-net=127.0.0.1",
-        "--allow-read=../scripts/verify-service-account.ts",
-        "../scripts/verify-service-account.ts",
-      ],
-      cwd: import.meta.dirname!,
-      clearEnv: true,
-      env: {
-        OAUTH_TOKEN_URL: `${origin}/oauth/token`,
-        OAUTH_CLIENT_ID: CLIENT_ID,
-        OAUTH_CLIENT_SECRET: CLIENT_SECRET,
-        OAUTH_AUDIENCE: AUDIENCE,
-        OAUTH_CLIENT_AUTH_METHOD: "client_secret_post",
-        OPENBRAIN_MCP_URL: `${origin}/mcp`,
-      },
-      stdout: "piped",
-      stderr: "piped",
-    });
-    const output = await command.output();
-    const stdout = new TextDecoder().decode(output.stdout);
-    const stderr = new TextDecoder().decode(output.stderr);
-    assertEquals(output.code, 0, stderr);
+    const runHelper = async (extraEnv: Record<string, string>) => {
+      const command = new Deno.Command("deno", {
+        args: [
+          "run",
+          "--allow-env=OAUTH_TOKEN_URL,OAUTH_CLIENT_ID,OAUTH_CLIENT_SECRET,OAUTH_AUDIENCE,OAUTH_SCOPE,OAUTH_CLIENT_AUTH_METHOD,OPENBRAIN_MCP_URL,OAUTH_SMOKE_TIMEOUT_MS,OAUTH_SMOKE_PRINT_SUBJECT",
+          "--allow-net=127.0.0.1",
+          "--allow-read=../scripts/verify-service-account.ts",
+          "../scripts/verify-service-account.ts",
+        ],
+        cwd: import.meta.dirname!,
+        clearEnv: true,
+        env: {
+          OAUTH_TOKEN_URL: `${origin}/oauth/token`,
+          OAUTH_CLIENT_ID: CLIENT_ID,
+          OAUTH_CLIENT_SECRET: CLIENT_SECRET,
+          OAUTH_AUDIENCE: AUDIENCE,
+          OAUTH_CLIENT_AUTH_METHOD: "client_secret_post",
+          OPENBRAIN_MCP_URL: `${origin}/mcp`,
+          ...extraEnv,
+        },
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const output = await command.output();
+      return {
+        code: output.code,
+        stdout: new TextDecoder().decode(output.stdout),
+        stderr: new TextDecoder().decode(output.stderr),
+      };
+    };
+
+    const success = await runHelper({});
+    assertEquals(success.code, 0, success.stderr);
     assertStringIncludes(
-      stdout,
+      success.stdout,
       "OK: browserless client_credentials authenticated to open-brain-homelab 1.20.0",
     );
-    assertStringIncludes(stdout, "signed gty=client-credentials present");
+    assertStringIncludes(
+      success.stdout,
+      "signed gty=client-credentials present",
+    );
     for (const sensitive of [CLIENT_SECRET, accessToken, SUBJECT]) {
-      assertEquals(stdout.includes(sensitive), false);
-      assertEquals(stderr.includes(sensitive), false);
+      assertEquals(success.stdout.includes(sensitive), false);
+      assertEquals(success.stderr.includes(sensitive), false);
     }
     assertEquals(tokenRequests, 1);
     assertEquals(mcpRequests, 1);
+
+    // ---- Bootstrap-401 path: a valid tenant token whose subject is NOT in
+    // OAUTH_ALLOWED_SUBJECTS. This is the enrollment loop the helper's
+    // pre-flight subject print exists for: the run must FAIL (fail-closed
+    // admission), yet with the opt-in flag it must still emit the locally
+    // decoded subject the operator needs to enroll — and without the flag
+    // it must not leak the subject anywhere.
+    const admittedToken = accessToken;
+    const outsiderToken = await new SignJWT({
+      sub: OUTSIDER_SUBJECT,
+      gty: "client-credentials",
+    })
+      .setProtectedHeader({ alg: "RS256", kid: "headless-test-key" })
+      .setIssuer(ISSUER)
+      .setAudience(AUDIENCE)
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(privateKey as CryptoKey);
+    accessToken = outsiderToken;
+
+    const bootstrap = await runHelper({ OAUTH_SMOKE_PRINT_SUBJECT: "true" });
+    assertEquals(bootstrap.code === 0, false, "unadmitted subject must fail");
+    assertStringIncludes(
+      bootstrap.stdout,
+      `Token subject (locally decoded): ${OUTSIDER_SUBJECT}`,
+    );
+    assertStringIncludes(bootstrap.stderr, "HTTP 401");
+    assertStringIncludes(bootstrap.stderr, "OAUTH_ALLOWED_SUBJECTS");
+    // The hint must hedge: this 401 could equally be a token-validation
+    // failure, so it names both audit outcomes rather than asserting the
+    // subject_not_allowed row exists.
+    assertStringIncludes(bootstrap.stderr, "subject_not_allowed");
+    assertStringIncludes(bootstrap.stderr, "token_validation_failed");
+    for (const sensitive of [CLIENT_SECRET, outsiderToken]) {
+      assertEquals(bootstrap.stdout.includes(sensitive), false);
+      assertEquals(bootstrap.stderr.includes(sensitive), false);
+    }
+
+    const silentFailure = await runHelper({});
+    assertEquals(silentFailure.code === 0, false);
+    // Without the opt-in flag the subject appears nowhere; the hint still
+    // tells the operator which flag yields it.
+    assertEquals(silentFailure.stdout.includes(OUTSIDER_SUBJECT), false);
+    assertEquals(silentFailure.stderr.includes(OUTSIDER_SUBJECT), false);
+    assertStringIncludes(
+      silentFailure.stderr,
+      "OAUTH_SMOKE_PRINT_SUBJECT=true",
+    );
 
     // Drive a real REST handler far enough to turn the middleware-populated
     // service context into a service-layer argument. This pins api.ts's
     // defensive gate instead of proving only the middleware classifier.
     const api = createApiRouter(pool, makeDeps());
     const restResponse = await api.request("/thoughts/stats", {
-      headers: { authorization: `Bearer ${accessToken}` },
+      headers: { authorization: `Bearer ${admittedToken}` },
     });
     assertEquals(restResponse.status, 200);
     assertEquals((await restResponse.json()).count, 0);

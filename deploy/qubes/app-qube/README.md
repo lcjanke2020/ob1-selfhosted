@@ -400,14 +400,17 @@ systemctl --user daemon-reload
 ```
 
 Run the service once before enabling the schedule. This is the catch-up pass:
-for this qube's auth half it removes `mcp_auth_events` rows beyond the 30-day
-horizon and prints the rolling 24h auth-failure report. That removal is
-irreversible, so take a database snapshot first if you may need the older rows.
-A failure before the SQL transaction commits leaves the raw rows intact; any
-failed run leaves the last complete Markdown artifact intact instead of
-replacing it with partial output. If a connection fails after the database
-commit but while the report queries are streaming, the database may be ahead of
-the artifact; the next idempotent run regenerates the report.
+for this qube's auth half it enforces `mcp_auth_events`' per-class horizons — 30
+days for anonymous denials, 365 for admission rows and `subject_not_allowed`
+denials (the identity-carrying classes) — and prints the rolling 24h
+auth-failure and admitted-identities reports. The removals are irreversible, so
+take a database snapshot first if you may need the older rows. The two retention
+DELETEs autocommit independently (no shared transaction): a failure between them
+leaves each class individually consistent, and the next idempotent run converges
+whichever half lagged; any failed run leaves the last complete Markdown artifact
+intact instead of replacing it with partial output. If a connection fails after
+the database commit but while the report queries are streaming, the database may
+be ahead of the artifact; the next idempotent run regenerates the report.
 
 ```sh
 systemctl --user start funnel-summary.service

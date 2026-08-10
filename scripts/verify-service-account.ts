@@ -341,12 +341,14 @@ async function main(): Promise<void> {
   const initializeBody = await responseText(initializeResponse);
   if (!initializeResponse.ok) {
     const enrollmentHint = initializeResponse.status === 401
-      ? " A 401 with a valid tenant token usually means this subject is not " +
-        "in the server's OAUTH_ALLOWED_SUBJECTS (fail-closed admission " +
-        "gate). Re-run with OAUTH_SMOKE_PRINT_SUBJECT=true to print the " +
-        "subject, enroll it, restart the server, and retry; the refusal is " +
-        "also recorded server-side in mcp_auth_events " +
-        "(reason subject_not_allowed) with the verified subject."
+      ? " One common cause: this subject is not in the server's " +
+        "OAUTH_ALLOWED_SUBJECTS (fail-closed admission gate) — re-run with " +
+        "OAUTH_SMOKE_PRINT_SUBJECT=true to print the subject, enroll it, " +
+        "restart the server, and retry. If the allowlist is the cause, the " +
+        "refusal is recorded server-side in mcp_auth_events with " +
+        "reason subject_not_allowed and the verified subject; other 401 " +
+        "causes (wrong issuer/audience, expired or malformed token) land " +
+        "there as token_validation_failed instead."
       : "";
     throw new Error(
       `MCP initialize returned HTTP ${initializeResponse.status}.` +

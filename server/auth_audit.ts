@@ -4,8 +4,10 @@
 // error branches and `logAuthSuccess()` from each authenticated branch, so
 // `mcp_auth_events` records who is turned away AND who is let in (the
 // success side is what makes "who accessed this server in the last N days"
-// answerable from local data alone — previously only rejections left a
-// trace). Calls are fire-and-forget (queueMicrotask + a
+// answerable from local data — previously only rejections left a trace.
+// Best-effort: under backpressure or DB distress events are dropped, counted,
+// and warned, so treat the table as telemetry with drop evidence, not a
+// gap-free ledger). Calls are fire-and-forget (queueMicrotask + a
 // promise we don't await) so neither the 401 nor the authenticated
 // response waits on Postgres — downtime there can't extend request latency.
 //

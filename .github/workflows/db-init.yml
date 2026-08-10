@@ -47,6 +47,8 @@ on:
       - "server/auth_context.ts"
       - "server/access_tokens_db_smoke.ts"
       - "server/auth_audit_db_smoke.ts"
+      - "server/auth_audit_upgrade_db_smoke.ts"
+      - "server/db_boot_probe.ts"
       - "server/auth_audit.ts"
       - "server/session_search_db_smoke.ts"
       - "server/scoped_db.ts"
@@ -86,6 +88,8 @@ on:
       - "server/auth_context.ts"
       - "server/access_tokens_db_smoke.ts"
       - "server/auth_audit_db_smoke.ts"
+      - "server/auth_audit_upgrade_db_smoke.ts"
+      - "server/db_boot_probe.ts"
       - "server/auth_audit.ts"
       - "server/session_search_db_smoke.ts"
       - "server/scoped_db.ts"
@@ -420,6 +424,29 @@ jobs:
             --allow-env \
             --allow-net=127.0.0.1:55439 \
             server/auth_audit_db_smoke.ts
+
+      - name: "Smoke test — pre-1.20 audit shape: refusal, migration, acceptance"
+        run: |
+          # The emitter smoke above proves fresh-install + idempotent replay;
+          # this one pins the load-bearing LEGACY convergence a real pre-1.20
+          # deployment goes through. It clones the initialized database
+          # (TEMPLATE, so every other schema contract is present), downgrades
+          # mcp_auth_events to the denied-only shape with legacy rows, and
+          # runs the full operator sequence: the REAL boot probe refuses with
+          # migration guidance -> db/02 converges the clone in place -> the
+          # probe accepts, the legacy rows survive backfilled as denied with
+          # reasons preserved, and the app role lands an allowed row.
+          UPGRADE_SMOKE_PHASE=refuse deno run --config server/deno.json --frozen \
+            --allow-env \
+            --allow-net=127.0.0.1:55439 \
+            server/auth_audit_upgrade_db_smoke.ts
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d openbrain_upgrade \
+            -v ON_ERROR_STOP=1 < db/02-observability.sql >/dev/null
+          UPGRADE_SMOKE_PHASE=accept deno run --config server/deno.json --frozen \
+            --allow-env \
+            --allow-net=127.0.0.1:55439 \
+            server/auth_audit_upgrade_db_smoke.ts
 
       - name: Smoke test — spaces isolate every audience and pooled reuse
         run: |
