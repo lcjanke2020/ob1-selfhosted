@@ -31,6 +31,12 @@ credential store.
 > clients). Kimi Code speaks standard OAuth 2.1 + PKCE + RFC 7591 DCR, so other
 > OIDC providers almost certainly work — we just don't run them.
 
+> **Tenant membership control comes first.** Same as the Codex doc: decide who
+> may enroll in the tenant _before_ wiring up any client — the traps (an open
+> social connection has **no** sign-up toggle; the Domain-Level promotion this
+> doc's DCR window requires **persists** after DCR is disabled) are in
+> [auth0-setup-dangers.md](auth0-setup-dangers.md).
+
 > **Never put access tokens, refresh tokens, authorization codes, client
 > secrets, or the contents of the credential store into git, issue comments,
 > shell transcripts, or test artifacts.**

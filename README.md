@@ -34,6 +34,10 @@ laptop" to "compartmentalized Qubes OS deployment with a hardened public edge":
 >   You'll register one API whose identifier must equal your public MCP URL
 >   byte-for-byte (it's immutable — pick the hostname first) and one
 >   confidential application whose client id + secret you paste into claude.ai.
+>   **Before creating the tenant, read
+>   [Auth0 setup dangers](docs/auth0-setup-dangers.md)** — the dashboard never
+>   asks the setup's most important question (who may become a user), and its
+>   defaults answer it wrong.
 >
 > The Funnel overlay also needs **Docker Compose v2.20+** (the `!reset` YAML
 > tag); the Qubes path additionally assumes a working **Qubes OS** machine with

@@ -75,6 +75,16 @@ the documented RS256 JWT profile can be used. Auth0 M2M, Okta API Services, the
 generic subject mapping, and a browserless verification command are covered in
 [OAuth service accounts](../../docs/service-account-oauth-client.md).
 
+> **Decide tenant membership control before the Funnel goes public.** Whoever
+> can become a user of your tenant can request tokens for this API. For every
+> login connection you enable: a Database connection needs **"Disable Sign
+> Ups"** turned on (it ships off — sign-ups allowed); a Social connection has
+> **no sign-up toggle at all** — everyone with that IdP's account already holds
+> a credential your tenant will accept, so leave it disabled unless an Action
+> deliberately restricts who may log in. The full trap catalog, the four-check
+> audit, and the Management API verification commands are in
+> [Auth0 setup dangers](../../docs/auth0-setup-dangers.md).
+
 > **`OAUTH_ALLOWED_SUBJECTS` is required in practice whenever the OAuth door is
 > on.** Verification proves a token came from your tenant; this comma-separated
 > allowlist of exact `sub` claims says which accounts you actually admit, so an

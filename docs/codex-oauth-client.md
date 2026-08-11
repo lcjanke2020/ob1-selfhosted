@@ -10,6 +10,13 @@ the other client we run: a **local [Codex](https://developers.openai.com/codex/)
 CLI** wired up as an OAuth-only client, using a **public PKCE client with no
 secret**.
 
+> **Tenant membership control comes first.** Whoever can become a user of your
+> tenant can request tokens for its APIs — decide who may enroll _before_ wiring
+> up any client, and verify it with the Management API rather than the
+> dashboard. The traps (an open social connection has **no** sign-up toggle;
+> Domain-Level promotion outlives the DCR window that required it) are in
+> [auth0-setup-dangers.md](auth0-setup-dangers.md).
+
 The procedure below registers a local Codex process as an OpenBrain client over
 OAuth. It deliberately configures **no** `x-brain-key`, **no** bearer-token
 environment variable, and **no** client secret — initial authorization,
@@ -110,8 +117,11 @@ Create an Auth0 **Application** with:
 - Type **Native**, Token Endpoint Authentication Method **None**, **no client
   secret**.
 - Grants: **Authorization Code + PKCE** and **Refresh Token**.
-- The intended Database / Social / Enterprise login connection enabled **for
-  this application only**.
+- The intended login connection enabled **for this application only** — with its
+  membership control decided first: "Disable Sign Ups" on for a Database
+  connection, an Action restricting who may log in for a Social one (which has
+  no sign-up toggle at all). See
+  [auth0-setup-dangers.md](auth0-setup-dangers.md).
 
 Create a separate application for Codex rather than repurposing a Claude
 custom-connector application: the latter is normally a confidential Regular Web
