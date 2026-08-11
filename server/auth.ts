@@ -545,9 +545,11 @@ export function createRequireAuth(
       c.set("sub", null);
       c.set("tokenLabel", null);
       // Success-side audit — the row that makes admissions (not just
-      // rejections) reconstructable from local data. Emitted before next()
-      // so the admission is recorded even if the downstream handler throws;
-      // fire-and-forget, so response latency is unaffected. subject and
+      // rejections) reconstructable from local data. ENQUEUED before next()
+      // so the attempt is captured even if the downstream handler throws;
+      // delivery is best-effort (fire-and-forget through the shared capped
+      // queue in auth_audit.ts — under backpressure the event can drop,
+      // counted + warned), and response latency is unaffected. subject and
       // tokenLabel are both null here: the static shared key carries no
       // per-holder identity (the row's door value is the identity floor).
       logAuthSuccess({

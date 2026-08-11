@@ -194,14 +194,16 @@ stack measures it instead of guessing.
 - **`funnel_access_log`** — the log-ingester sidecar inserts one structured row
   per request (timestamp, socket, client IP, method, path, status, latency,
   size, truncated UA, host, protocol).
-- **`mcp_auth_events`** — one row per auth decision the MCP server makes. Denied
-  rows carry a stable `reason` code (`invalid_brain_key`,
-  `token_validation_failed`, `subject_not_allowed`, `invalid_credentials`,
-  `missing_credentials`) — the only way to tell "legitimate client, wrong
-  credentials" from "blind scanner". Allowed rows carry the verified identity
-  (`subject` / `token_label`), door, and path — the local answer to "who
-  accessed this server", kept 365 days (as are `subject_not_allowed` denials,
-  the identity-carrying refusals; anonymous denials keep 30).
+- **`mcp_auth_events`** — one row per auth decision the MCP server makes,
+  enqueued best-effort (under backpressure either outcome can drop — counted and
+  warned; see the security model's audit contract). Denied rows carry a stable
+  `reason` code (`invalid_brain_key`, `token_validation_failed`,
+  `subject_not_allowed`, `invalid_credentials`, `missing_credentials`) — the
+  only way to tell "legitimate client, wrong credentials" from "blind scanner".
+  Allowed rows carry the verified identity (`subject` / `token_label`), door,
+  and path — the local answer to "who accessed this server", kept 365 days (as
+  are `subject_not_allowed` denials, the identity-carrying refusals; anonymous
+  denials keep 30).
 - **`funnel_access_summary`** — daily rollup: requests, unique IPs, p50/p95
   latency, top paths and user agents per `(day, socket, status_class)`, retained
   365 days.

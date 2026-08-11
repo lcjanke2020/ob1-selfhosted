@@ -137,26 +137,28 @@ dumps can still read it.
   Operator-facing messages are collapsed to a single "unauthorized" — the
   granular reason goes to the audit table, not to the caller, closing a
   credential-status side-channel.
-- **Both auth outcomes are audited, not just rejections.** Each successful
-  authentication writes one `mcp_auth_events` row recording the verified
+- **Both auth outcomes are audited, not just rejections.** Each auth decision
+  enqueues one `mcp_auth_events` row recording, for admissions, the verified
   identity (`subject` for OAuth, `token_label` for native tokens), the door, the
   path, and the client IP — so "who accessed this server in the last N days" is
-  answerable from local data rather than from the IdP's logs. The write is
-  deliberately **best-effort telemetry, not a durable ledger**: fire-and-forget
-  (Postgres latency never extends a response, and audit unavailability never
-  denies service), with a shared in-flight cap that drops events under sustained
-  database distress. That trade-off is bounded three ways: a boot-time schema
+  answerable from local data rather than from the IdP's logs, up to the queue
+  semantics that follow. The write is deliberately **best-effort telemetry
+  through one shared queue, not a durable ledger**: fire-and-forget (Postgres
+  latency never extends a response, and audit unavailability never denies
+  service), with a single in-flight cap shared by BOTH outcomes. When inserts
+  back up past that cap — sustained database distress, or request volume
+  outrunning the queue (a sustained 401 flood is attacker-reachable and can
+  saturate it) — events are dropped **regardless of outcome or identity**: a
+  flood of denials can shed admission rows for unrelated identities arriving in
+  the same window. The drop counter and its rate-limited warning evidence that a
+  gap exists and how many events it swallowed; they cannot reconstruct which
+  events — or whose — are missing. Two bounds remain hard: a boot-time schema
   probe refuses to start against a pre-audit table shape (a missed migration is
-  a loud refusal, never a silent drop); dropped events are counted and surfaced
-  as rate-limited console warnings (an audit gap is itself in evidence); and the
-  drop path is reached only when inserts back up past the in-flight cap —
-  sustained database distress, or request volume outrunning the audit queue (the
-  cap exists precisely because a sustained 401 flood is attacker-reachable; what
-  such a flood costs is audit rows about itself, not admission records for other
-  identities' well-spaced requests, and the drop counter still records that it
-  happened). The inverse design — blocking each request on a durable audit write
-  — would hand the audit path a denial-of-service lever over the whole server;
-  the opt-in fail-closed mode is tracked separately (GH #88).
+  a loud refusal, never a silent drop), and the gap is always self-announcing
+  (counted + warned). The inverse design — blocking each request on a durable
+  audit write — would hand the audit path a denial-of-service lever over the
+  whole server; the opt-in fail-closed mode, and any per-outcome quota or
+  reservation scheme, are tracked separately (GH #88).
 - **Audit retention keys on verified identity.** Rows naming a real,
   tenant-minted identity keep 365 days: every allowed row, plus
   `subject_not_allowed` denials (which verified identity knocked and was refused

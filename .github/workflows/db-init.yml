@@ -48,6 +48,8 @@ on:
       - "server/access_tokens_db_smoke.ts"
       - "server/auth_audit_db_smoke.ts"
       - "server/auth_audit_upgrade_db_smoke.ts"
+      - "server/auth_middleware_audit_db_smoke.ts"
+      - "server/auth.ts"
       - "server/db_boot_probe.ts"
       - "server/auth_audit.ts"
       - "server/session_search_db_smoke.ts"
@@ -89,6 +91,8 @@ on:
       - "server/access_tokens_db_smoke.ts"
       - "server/auth_audit_db_smoke.ts"
       - "server/auth_audit_upgrade_db_smoke.ts"
+      - "server/auth_middleware_audit_db_smoke.ts"
+      - "server/auth.ts"
       - "server/db_boot_probe.ts"
       - "server/auth_audit.ts"
       - "server/session_search_db_smoke.ts"
@@ -447,6 +451,20 @@ jobs:
             --allow-env \
             --allow-net=127.0.0.1:55439 \
             server/auth_audit_upgrade_db_smoke.ts
+
+      - name: "Smoke test — middleware-to-audit seam lands the exact rows"
+        run: |
+          # Round-3 mutation testing showed the auth.ts -> auth_audit.ts
+          # wiring could regress silently (emitter calls removed or reason
+          # codes swapped) while every unit test stays green, because the
+          # middleware suites run with auditing disabled. This drives the
+          # REAL requireAuth over real RS256 tokens against the live database
+          # and asserts the exact rows per credential scenario, including
+          # subject_not_allowed precedence over the dual-credential collapse.
+          deno run --config server/deno.json --frozen \
+            --allow-env \
+            --allow-net=127.0.0.1:55439 \
+            server/auth_middleware_audit_db_smoke.ts
 
       - name: Smoke test — spaces isolate every audience and pooled reuse
         run: |

@@ -73,19 +73,23 @@ CREATE INDEX IF NOT EXISTS idx_funnel_access_log_client_ip ON funnel_access_log 
 
 -- ---------- MCP auth events (denied AND allowed) --------------------------
 -- The MCP server (server/auth_audit.ts, called from `requireAuth` in
--- server/auth.ts) writes one row here for every auth decision:
+-- server/auth.ts) enqueues one row here per auth decision, through a shared
+-- best-effort queue (fire-and-forget, single in-flight cap covering both
+-- outcomes: under backpressure events of EITHER outcome can drop — counted
+-- and warned, so a gap is self-announcing, but not reconstructable):
 --
---   outcome = 'denied'  → every 401 the middleware returns. The only way
+--   outcome = 'denied'  → the 401s the middleware returns. The only way
 --                         to distinguish *why* a request failed auth —
 --                         Caddy only sees the 401 status, not the reason.
---   outcome = 'allowed' → every successfully authenticated request:
---                         which verified identity (subject / token label),
---                         through which door, to which path. This is the
---                         success-side audit that makes "who accessed this
---                         server in the last N days" answerable from local
---                         data alone — without it, an admitted intruder is
---                         invisible in the deployment's own records and the
---                         answer depends on the identity provider's logs.
+--   outcome = 'allowed' → authenticated requests: which verified identity
+--                         (subject / token label), through which door, to
+--                         which path. This is the success-side audit that
+--                         makes "who accessed this server in the last N
+--                         days" answerable from local data (up to the
+--                         best-effort queue semantics above) — without it,
+--                         an admitted intruder is invisible in the
+--                         deployment's own records and the answer depends
+--                         on the identity provider's logs.
 --
 -- Sensitive-data discipline: NO header values, NO token contents, NO
 -- request body. The `reason` field is one of a small finite set the
@@ -98,11 +102,12 @@ CREATE INDEX IF NOT EXISTS idx_funnel_access_log_client_ip ON funnel_access_log 
 -- verified identity: denied rows 30 days (matched to funnel_access_log so a
 -- 401 and the request that produced it age out together) — EXCEPT
 -- 'subject_not_allowed' denials, which join the allowed rows on a 365-day
--- horizon. Both long-horizon classes require a tenant-minted Bearer, so
--- their volume is bounded by legitimate use (or a compromised credential —
--- itself visible here), not by internet scanner noise, and both are what an
--- incident review needs months later: who was admitted, and which real
--- identity knocked and was refused.
+-- horizon. Both long-horizon classes require a tenant-minted Bearer: that
+-- bounds WHO can generate them (identity- and time-bounded — not row-count-
+-- bounded; a single credential can generate arbitrarily many, which is an
+-- accepted storage trade-off with the horizon as the operator lever), and
+-- both are what an incident review needs months later: who was admitted,
+-- and which real identity knocked and was refused.
 CREATE TABLE IF NOT EXISTS mcp_auth_events (
   id             BIGSERIAL PRIMARY KEY,
   ts             TIMESTAMPTZ NOT NULL DEFAULT now(),

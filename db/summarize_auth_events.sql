@@ -1,10 +1,12 @@
 -- Daily retention + report — the MCP AUTH EVENTS half.
 --
--- Owns exactly one relation: `mcp_auth_events`, the auth-decision audit
--- written by the MCP server (server/auth_audit.ts) — reason-coded 401s
--- (outcome='denied') AND one row per authenticated request
+-- Owns exactly one relation: `mcp_auth_events`, the auth-decision audit the
+-- MCP server (server/auth_audit.ts) enqueues best-effort — reason-coded 401s
+-- (outcome='denied') AND per-authenticated-request admission rows
 -- (outcome='allowed', with the verified subject / token label and door).
--- Companion to db/summarize_funnel.sql, which owns `funnel_access_log` and
+-- Best-effort means gaps are possible under backpressure (either outcome;
+-- counted + warned by the server when they happen). Companion to
+-- db/summarize_funnel.sql, which owns `funnel_access_log` and
 -- `funnel_access_summary`; see that file's header for why the two halves are
 -- separate files.
 --
@@ -17,13 +19,13 @@
 -- There is no aggregate table here on purpose. The denied side is
 -- low-cardinality reason codes on a short window; the allowed side and the
 -- identity-carrying `subject_not_allowed` denials are the long-horizon
--- record, and the RAW rows are the record — an identity-level "who accessed /
--- who knocked" question is exactly what an aggregate would destroy. Volume
--- on the long horizon is bounded by tenant-minted tokens (legitimate use
--- plus at worst a compromised credential — itself visible in this table),
--- not by internet scanner noise. A rollup would buy nothing but another
--- relation in the monitor allowlist that db/03-grants-assertion.sql has to
--- reason about.
+-- record, and the RAW rows are that record — an identity-level "who accessed
+-- / who knocked" question is exactly what an aggregate would destroy.
+-- Generating a long-horizon row requires a tenant-minted Bearer, which
+-- bounds who can write them (not how many rows one credential can produce —
+-- the horizon below is the operator's size lever). A rollup would buy
+-- nothing but another relation in the monitor allowlist that
+-- db/03-grants-assertion.sql has to reason about.
 --
 -- Manual invocation, single-host compose (from deploy/compose-tailnet,
 -- invoked the way you start the stack there — the exec has to resolve the
@@ -52,8 +54,10 @@
 -- ("which real, tenant-minted identity knocked and was refused" — e.g. did
 -- a compromised account knock before it was ever allowlisted). Neither can
 -- be produced by an unauthenticated scanner: both require a Bearer that
--- passed signature/issuer/audience/exp against the tenant, so volume is
--- bounded the same way. Matches the funnel summary's one-year horizon.
+-- passed signature/issuer/audience/exp against the tenant — bounding who
+-- can produce them, though not how many rows one credential can produce
+-- (this horizon is the size lever). Matches the funnel summary's one-year
+-- horizon.
 --
 -- Interval-granular (not day-granular like the funnel half): there is no
 -- summary table whose day buckets this has to line up with, so the simpler

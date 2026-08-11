@@ -112,9 +112,10 @@ route, because the public Funnel branch will correctly reject it at Caddy with
    `client_secret_post`, the helper's default): the helper prints the token's
    subject _before_ the MCP attempt precisely so this bootstrap run yields the
    value even though it ends in 401. Add that exact subject to
-   `OAUTH_ALLOWED_SUBJECTS` and restart the server. (The refused attempt is also
-   recorded server-side in `mcp_auth_events` with `reason='subject_not_allowed'`
-   and the verified subject — the audit row is the server-verified cross-check
+   `OAUTH_ALLOWED_SUBJECTS` and restart the server. (The refused attempt is
+   normally also recorded server-side in `mcp_auth_events` with
+   `reason='subject_not_allowed'` and the verified subject — audit writes are
+   best-effort, so when the row is present it is the server-verified cross-check
    for the locally decoded print.)
 6. Run the smoke again; it should now report success. If it reports
    `signed gty=client-credentials present`, no _attribution_ entry is needed —
@@ -170,9 +171,9 @@ the MCP attempt, so this works on a not-yet-admitted client whose run ends in
 (admission) and `OAUTH_SERVICE_ACCOUNT_SUBJECTS` (attribution) on the server,
 recreate the MCP container, and run the smoke again. Never infer the subject
 from a dashboard label: use the exact value from the token the client actually
-minted (the helper's locally decoded print), and cross-check it against the
-server-verified copy on the `subject_not_allowed` audit row from the bootstrap
-attempt.
+minted (the helper's locally decoded print), and — when the best-effort audit
+recorded the bootstrap attempt — cross-check it against the server-verified copy
+on that `subject_not_allowed` row.
 
 RFC 9068 recommends that a client-credentials JWT `sub` identify the client
 application; it also requires a `client_id` claim for that JWT profile. Open
