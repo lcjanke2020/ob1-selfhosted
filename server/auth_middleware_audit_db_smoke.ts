@@ -8,8 +8,11 @@
 // with which fields, under which reason-code precedence) had no executable
 // coverage: removing a logAuthSuccess call or mis-mapping a reason code kept
 // the whole suite green (round-3 review proved it by mutation). This smoke
-// closes that seam: it runs the REAL `requireAuth` middleware over real
-// RS256 tokens against the real database and asserts the exact rows.
+// closes that seam: it runs the REAL middleware (createRequireAuth, wired
+// with a native-token verifier exactly like index.ts) over real RS256
+// tokens against the real database and asserts the exact rows — covering
+// ALL FOUR identity-bearing success branches (OAuth user, OAuth service,
+// native token, static key) plus the denial shapes.
 
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { Hono } from "hono";
@@ -28,8 +31,11 @@ const ISSUER = "https://smoke.invalid/";
 const AUDIENCE = "https://smoke.invalid:8443/mcp";
 const JWKS_URL = "https://smoke.invalid/.well-known/jwks.json";
 const ADMITTED = "auth0|middleware-smoke-admitted";
+const ADMITTED_MACHINE = "middleware-smoke-machine@clients";
 const OUTSIDER = "auth0|middleware-smoke-refused";
 const BRAIN_KEY = "k".repeat(64);
+const NATIVE_SECRET = "native-middleware-smoke-secret";
+const NATIVE_LABEL = "middleware-smoke-native";
 
 // The emitter and config read env at module load — set everything BEFORE the
 // dynamic import of auth.ts (which loads config.ts + auth_audit.ts and runs
@@ -42,11 +48,11 @@ Deno.env.set("DB_PASSWORD", appPassword);
 Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "true");
 Deno.env.set("MCP_ACCESS_KEY", BRAIN_KEY);
 Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-Deno.env.set("ENABLE_NATIVE_TOKENS", "false");
+Deno.env.set("ENABLE_NATIVE_TOKENS", "true");
 Deno.env.set("AUTH0_ISSUER", ISSUER);
 Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
 Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
-Deno.env.set("OAUTH_ALLOWED_SUBJECTS", ADMITTED);
+Deno.env.set("OAUTH_ALLOWED_SUBJECTS", `${ADMITTED},${ADMITTED_MACHINE}`);
 Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
 Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 Deno.env.set("JWKS_FETCH_TIMEOUT_MS", "2000");
@@ -78,16 +84,26 @@ globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
   return origFetch(input, init);
 }) as typeof fetch;
 
-const { requireAuth } = await import("./auth.ts");
+const { createRequireAuth } = await import("./auth.ts");
 const { shutdownAuthAuditForTests } = await import("./auth_audit.ts");
+
+// Production shape: index.ts passes a native-token verifier into
+// createRequireAuth. The fake resolves exactly one secret to a label so the
+// native branch's audit wiring is exercised end-to-end.
+const requireAuth = createRequireAuth((token: string) =>
+  Promise.resolve(token === NATIVE_SECRET ? { label: NATIVE_LABEL } : null)
+);
 
 const app = new Hono();
 app.use("*", requireAuth);
 app.get("/mcp", (c) => c.json({ ok: true }));
 app.get("/", (c) => c.json({ ok: true }));
 
-async function signToken(sub: string): Promise<string> {
-  return await new SignJWT({ sub })
+async function signToken(
+  sub: string,
+  extraClaims: Record<string, unknown> = {},
+): Promise<string> {
+  return await new SignJWT({ sub, ...extraClaims })
     .setProtectedHeader({ alg: "RS256", kid: "smoke-key-1" })
     .setIssuer(ISSUER)
     .setAudience(AUDIENCE)
@@ -227,7 +243,43 @@ try {
     assertEquals(rows[0].token_label, null);
   }
 
-  // ---- 6. No credentials → 401, missing_credentials row.
+  // ---- 6. OAuth service admission: an allowlisted machine subject with the
+  // signed gty claim must land door='service' — pinning that the audit row
+  // records the CLASSIFIED door, not a hardcoded one.
+  {
+    const res = await app.request("/mcp", {
+      headers: {
+        "authorization": `Bearer ${await signToken(ADMITTED_MACHINE, {
+          gty: "client-credentials",
+        })}`,
+      },
+    });
+    assertEquals(res.status, 200);
+    const rows = await drainRows(1);
+    assertEquals(rows.length, 1);
+    assertEquals(rows[0].outcome, "allowed");
+    assertEquals(rows[0].door, "service");
+    assertEquals(rows[0].subject, ADMITTED_MACHINE);
+    assertEquals(rows[0].token_label, null);
+  }
+
+  // ---- 7. Native-token admission: the rotatable-token branch must land its
+  // own allowed row with the verified label (subject stays null — labels are
+  // attribution, not OAuth subjects).
+  {
+    const res = await app.request("/mcp", {
+      headers: { "x-brain-key": NATIVE_SECRET },
+    });
+    assertEquals(res.status, 200);
+    const rows = await drainRows(1);
+    assertEquals(rows.length, 1);
+    assertEquals(rows[0].outcome, "allowed");
+    assertEquals(rows[0].door, "tailnet");
+    assertEquals(rows[0].subject, null);
+    assertEquals(rows[0].token_label, NATIVE_LABEL);
+  }
+
+  // ---- 8. No credentials → 401, missing_credentials row.
   {
     const res = await app.request("/mcp");
     assertEquals(res.status, 401);
@@ -240,8 +292,9 @@ try {
   }
 
   console.log(
-    "middleware audit smoke: real requireAuth landed the exact allowed/" +
-      "denied rows for all six credential scenarios, including " +
+    "middleware audit smoke: real middleware landed the exact allowed/" +
+      "denied rows for all eight credential scenarios — OAuth user, OAuth " +
+      "service, native token, static key, and the denial shapes incl. " +
       "subject_not_allowed precedence over the dual-credential collapse",
   );
 } finally {

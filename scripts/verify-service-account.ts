@@ -345,10 +345,11 @@ async function main(): Promise<void> {
         "OAUTH_ALLOWED_SUBJECTS (fail-closed admission gate) — re-run with " +
         "OAUTH_SMOKE_PRINT_SUBJECT=true to print the subject, enroll it, " +
         "restart the server, and retry. If the allowlist is the cause, the " +
-        "refusal is recorded server-side in mcp_auth_events with " +
-        "reason subject_not_allowed and the verified subject; other 401 " +
-        "causes (wrong issuer/audience, expired or malformed token) land " +
-        "there as token_validation_failed instead."
+        "refusal is normally recorded server-side (best-effort) in " +
+        "mcp_auth_events with reason subject_not_allowed and the verified " +
+        "subject; other 401 causes (wrong issuer/audience, expired or " +
+        "malformed token) normally land there as token_validation_failed " +
+        "instead."
       : "";
     throw new Error(
       `MCP initialize returned HTTP ${initializeResponse.status}.` +

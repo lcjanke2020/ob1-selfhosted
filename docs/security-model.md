@@ -302,17 +302,19 @@ security review.
   warnings otherwise serialize the full request header map (incl. a Bearer) to
   `docker logs`; the ingester additionally keeps only UA + Host from headers and
   strips query strings.
-- Every auth decision inserts a row into `mcp_auth_events` — reason-coded
+- Each auth decision enqueues a row into `mcp_auth_events` — reason-coded
   denials AND per-request admissions with the verified identity
   (fire-and-forget, with an in-flight cap so a 401 flood can't queue unbounded
-  memory; best-effort semantics above).
+  memory; best-effort semantics above — either outcome can drop under
+  saturation).
 - Successful writes carry the server-owned credential label and verified
   subject, distinguishing `service` machine identities from `funnel` user
-  identities. Reads are covered at request-level granularity by the
-  `mcp_auth_events` admission row (who authenticated, to which path, when);
-  there is no per-tool or per-row read audit in this release — Caddy retains
-  request metadata only. Failed tokens are not classified as machine or user
-  because their unverified claims are attacker-controlled.
+  identities. Reads are covered at request-level granularity by the best-effort
+  `mcp_auth_events` admission row (who authenticated, to which path, when —
+  delivery gaps possible and self-announcing); there is no per-tool or per-row
+  read audit in this release — Caddy retains request metadata only. Failed
+  tokens are not classified as machine or user because their unverified claims
+  are attacker-controlled.
 - Every degraded classification appends history plus a transactional outbox row
   in the thought transaction. The optional Pushover/ntfy worker consumes only
   committed queue rows and selects finite codes and counts—never thought
