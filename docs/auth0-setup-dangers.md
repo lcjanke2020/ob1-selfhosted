@@ -56,7 +56,10 @@ Containment, in the order that matters:
   audit — corroborated it: no trace of third-party access. The tenant's own logs
   had long expired (see retention, below), which is why the user list and the
   server-side data had to carry the proof.
-- **Delete the connection** the same day it was found.
+- **Delete the connection** the same day it was found — at which point the
+  export became the only record of enrollment through it that was guaranteed to
+  survive (deletion can destroy a connection's user records; see Verification
+  below).
 - **Close the honest gap.** At the time, the server audited only _rejected_
   requests — nothing recorded who was successfully admitted, so "nobody got in"
   rested on the tenant's user list and short-retention IdP logs rather than on
@@ -73,11 +76,11 @@ An Auth0 **connection** is a source of users. The types differ in the one
 dimension that matters here — how a stranger becomes a user — and the dashboard
 presents them as interchangeable checkboxes:
 
-| Connection type              | How a stranger becomes a user                              | The membership control                                                                                                                                                               |
-| ---------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Database**                 | Self sign-up on your hosted login page                     | The **"Disable Sign Ups"** toggle — **off by default**, i.e. sign-ups are _allowed_ until you turn it off                                                                            |
-| **Social** (Google, GitHub…) | **They already are one.** They bring their own IdP account | **No sign-up toggle exists** — there is no sign-up step to disable. Only an Action/Rule filtering `sub`/email/domain restricts who may log in, or don't enable the connection at all |
-| **Enterprise**               | Membership in your organization's IdP                      | Your IdP's own membership administration                                                                                                                                             |
+| Connection type              | How a stranger becomes a user                              | The membership control                                                                                                                                                                                         |
+| ---------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Database**                 | Self sign-up on your hosted login page                     | The **"Disable Sign Ups"** toggle — **off by default**, i.e. sign-ups are _allowed_ until you turn it off                                                                                                      |
+| **Social** (Google, GitHub…) | **They already are one.** They bring their own IdP account | **No sign-up toggle exists** — there is no sign-up step to disable. Only an Action filtering `sub`/email/domain restricts who may log in (legacy Rules are end-of-life), or don't enable the connection at all |
+| **Enterprise**               | Membership in your organization's IdP                      | Your IdP's own membership administration                                                                                                                                                                       |
 
 The social row is the trap, and it deserves to be stated twice:
 
@@ -100,10 +103,16 @@ section, which are the ones you can keep as evidence.
    enabled-connection × application pair is a login path. Connections you don't
    recognize or don't need: disable or delete (export first — see below).
 2. **For each Database connection: is "Disable Sign Ups" on?** If not, your
-   hosted login page has a working sign-up form for the world.
+   hosted login page has a working sign-up form for the world. If the tenant
+   uses **Auth0 Organizations**, check each organization too: Organization
+   Signup takes priority over the connection's own signup configuration, so an
+   organization can re-open the self-registration this toggle appears to close.
 3. **For each Social connection: is there an Action restricting who may log
    in?** If not, **the internet can log in** — every holder of that IdP's
-   accounts is one consent screen away from a user record in your tenant.
+   accounts is one consent screen away from a user record in your tenant. Know
+   the Action's limit, too: it denies the login and token issuance, but the
+   first authentication can still create the user profile before the Action's
+   verdict — see the next section for what a user record does and doesn't prove.
 4. **Is any connection promoted to Domain Level?** Domain-Level promotion
    exposes the connection to third-party applications — our own DCR fallback
    docs require it temporarily and warn that it persists
@@ -133,20 +142,32 @@ The client-specific procedures live in
 ## Verification, not assertion
 
 The dashboard shows you configuration; it does not show you history, and its log
-views expire quickly. Two Management API calls give you evidence instead. Mint a
+views expire quickly. The Management API gives you evidence instead. Mint a
 short-lived Management API token (Dashboard → Applications → APIs → Auth0
 Management API → API Explorer, or a dedicated M2M application) with `read:users`
 and `read:logs`, then:
 
 ```bash
-# Every user that ever enrolled through a given connection — the durable
-# artifact (user records persist; logs expire). Swap the connection name
-# to audit each enabled connection in turn.
+# Quick audit: who enrolled through a given connection? Paginated (100 per
+# page, user search is capped at 1,000 results and eventually consistent) —
+# enough to spot strangers on a small tenant, NOT a complete export.
 curl -s -H "Authorization: Bearer $MGMT_TOKEN" \
   "https://$TENANT/api/v2/users?search_engine=v3&include_fields=true&fields=user_id,email,identities,created_at,last_login,logins_count&q=identities.connection%3A%22google-oauth2%22"
 
-# Recent authentication events for that connection. Success Signup is
-# type "ss", Success Login is "s".
+# The durable artifact: a bulk user-export job — complete, not capped, when
+# "limit" is omitted. Add "connection_id" (a con_... id) to scope it to one
+# connection, or omit it to export every user in the tenant. Poll the
+# returned job id until "completed", download the file at its "location" —
+# and only then delete anything.
+curl -s -X POST -H "Authorization: Bearer $MGMT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"format": "json", "fields": [{"name": "user_id"}, {"name": "email"}, {"name": "identities"}, {"name": "created_at"}, {"name": "last_login"}, {"name": "logins_count"}]}' \
+  "https://$TENANT/api/v2/jobs/users-exports"
+curl -s -H "Authorization: Bearer $MGMT_TOKEN" \
+  "https://$TENANT/api/v2/jobs/$JOB_ID"
+
+# Recent authentication events for a connection. Success Signup is type
+# "ss", Success Login is "s".
 curl -s -H "Authorization: Bearer $MGMT_TOKEN" \
   "https://$TENANT/api/v2/logs?per_page=100&q=connection%3A%22google-oauth2%22"
 ```
@@ -156,15 +177,20 @@ Read the results with these three facts in hand:
 - **Log retention is short and plan-tiered:** 1 day on the free tier, 5–10 days
   on paid tiers, 30 on Enterprise. **Absence of log entries proves nothing**
   about any period before that horizon.
-- **The Users list is the durable artifact.** A user record is created on first
-  successful login and persists indefinitely — it survives log expiration, and
-  in our incident it was checkable well after the exposure window. An empty
-  result for a connection is real evidence; an empty _log_ is not.
-- **Export before you delete.** Auth0's current Management API documentation
-  says deleting a connection removes the login path but not the user records.
-  Don't bet your incident evidence on that staying true, or on remembering it
-  correctly under pressure: exporting the user list first costs one command and
-  makes the question moot.
+- **A user record proves an enrollment, not an admission — and lives only as
+  long as its connection.** The record is created on the first authentication
+  through the connection; Auth0 documents that this can happen even when a
+  Post-Login Action then denies the login, so a stranger's record proves an
+  attempt reached your tenant, while the Action's verdict lives only in the
+  short-retention logs (or in your app's own audit — below). An empty users
+  result for a still-existing connection is real evidence; an empty _log_ is
+  not.
+- **Export before you delete — deletion destroys the evidence.** Auth0's support
+  guidance is that deleting a connection **deletes the users under it** (a batch
+  job, irreversible), even though the endpoint description mentions only the
+  login path. Whichever behavior your tenant exhibits, the conclusion is the
+  same: run the export job, confirm it completed and the file is saved somewhere
+  durable, and only then delete.
 
 ## What OpenBrain checks (and what your app must)
 
@@ -173,11 +199,13 @@ As of server 1.20.0, `verifyBearer` checks, in order — and nothing else:
 1. **Signature** against the issuer's JWKS (pinned `AUTH0_JWKS_URI`, RS256
    only);
 2. **Issuer** (`iss`) equals the configured `AUTH0_ISSUER`;
-3. **Audience** (`aud`) equals the configured `AUTH0_AUDIENCE`;
+3. **Audience** — the configured `AUTH0_AUDIENCE` must be among the token's
+   `aud` values (an `aud` claim may be a string or an array; the check is
+   membership, not string equality);
 4. **Expiry** — `exp` must be present and valid (RFC 7519 makes it optional; the
    resource server must demand it);
-5. **Subject** — `sub` must be present and a bounded, control-character-free
-   string;
+5. **Subject** — `sub` must be present and a bounded string free of ASCII
+   control characters;
 6. **Authorization** — the verified `sub` must appear on the
    `OAUTH_ALLOWED_SUBJECTS` allowlist. This list **fails closed**: with the
    OAuth door enabled and the list unset or empty, every Bearer token is
@@ -185,12 +213,14 @@ As of server 1.20.0, `verifyBearer` checks, in order — and nothing else:
    here instead of equaling full access.
 
 Every rejection — including an allowlist miss — returns the same uniform 401,
-and every decision (admitted or refused) is recorded in the `mcp_auth_events`
-audit table; allowlist refusals keep the verified subject so you can see which
-real identity knocked. "Who accessed this server in the last year" is now a
-local SQL query with 365-day retention, not a race against the IdP's log expiry.
-(The audit write is best-effort telemetry, not a durable ledger — the contract
-and its limits are stated plainly in [security-model.md](security-model.md).)
+and every decision (admitted or refused) **enqueues** an audit row for the
+`mcp_auth_events` table; allowlist refusals carry the verified subject so you
+can see which real identity knocked. The write is best-effort telemetry, not a
+durable ledger — under saturation either outcome can drop, counted and warned;
+the full contract is stated plainly in [security-model.md](security-model.md) —
+but when the rows are present, "who accessed this server in the last year" is a
+local SQL query with 365-day retention instead of a race against the IdP's log
+expiry.
 
 Before 1.20.0, the list stopped at item 5 — which is the point of this doc:
 
