@@ -613,6 +613,99 @@ jobs:
           }
           echo "hybrid semantics passed; vector, FTS, and literal legs selected their indexes"
 
+      - name: Smoke test — late in-horizon funnel rows recompute their event day
+        run: |
+          # Ordinary late-arrival path: summarize an event day while it is
+          # still inside the 30-day raw-retention horizon, insert another row
+          # for that already-summarized day, then prove the next run recomputes
+          # the day from all retained raw evidence. Raw rows must remain until
+          # finalization, and repeated runs must not double-count.
+          event_ts="(((now() AT TIME ZONE 'UTC')::date - 2) + time '12:00') AT TIME ZONE 'UTC'"
+
+          docker exec -e PGPASSWORD="$OPENBRAIN_INGESTER_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_ingester -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c \
+            "INSERT INTO funnel_access_log
+               (ts, socket, client_ip, method, path, status, duration_ms, bytes_out, user_agent)
+             VALUES
+               ($event_ts, 'funnel', '203.0.113.17'::inet,
+                'GET', '/late/first', 401, 11, 101, 'late-window-first')"
+
+          docker exec -i -e PGPASSWORD="$OPENBRAIN_APP_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_app -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/summarize_funnel.sql >/dev/null
+
+          first=$(docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT
+               (SELECT COUNT(*) FROM funnel_access_log
+                 WHERE user_agent LIKE 'late-window-%'),
+               (SELECT COUNT(*) FROM funnel_access_summary
+                 WHERE day = (now() AT TIME ZONE 'UTC')::date - 2
+                   AND socket = 'funnel' AND status_class = '4xx'),
+               COALESCE((SELECT request_count FROM funnel_access_summary
+                 WHERE day = (now() AT TIME ZONE 'UTC')::date - 2
+                   AND socket = 'funnel' AND status_class = '4xx'), 0)")
+          test "$first" = "1|1|1" || {
+            echo "::error::first in-horizon rollup drifted (raw|rows|count=$first, want 1|1|1)"
+            exit 1
+          }
+
+          # These rows arrive after their event day already has a summary. The
+          # next run must replace that summary from the complete retained raw
+          # set, not leave the day stale or add onto the old aggregate. One
+          # repeats the original IP so request_count and unique_ips diverge.
+          docker exec -e PGPASSWORD="$OPENBRAIN_INGESTER_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_ingester -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c \
+            "INSERT INTO funnel_access_log
+               (ts, socket, client_ip, method, path, status, duration_ms, bytes_out, user_agent)
+             VALUES
+               ($event_ts, 'funnel', '203.0.113.18'::inet,
+                'GET', '/late/second', 401, 13, 103, 'late-window-second'),
+               ($event_ts, 'funnel', '203.0.113.17'::inet,
+                'GET', '/late/third', 401, 15, 105, 'late-window-third')"
+
+          docker exec -i -e PGPASSWORD="$OPENBRAIN_APP_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_app -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/summarize_funnel.sql >/dev/null
+
+          second=$(docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT
+               (SELECT COUNT(*) FROM funnel_access_log
+                 WHERE user_agent LIKE 'late-window-%'),
+               (SELECT COUNT(*) FROM funnel_access_summary
+                 WHERE day = (now() AT TIME ZONE 'UTC')::date - 2
+                   AND socket = 'funnel' AND status_class = '4xx'),
+               COALESCE((SELECT request_count FROM funnel_access_summary
+                 WHERE day = (now() AT TIME ZONE 'UTC')::date - 2
+                   AND socket = 'funnel' AND status_class = '4xx'), 0),
+               COALESCE((SELECT unique_ips FROM funnel_access_summary
+                 WHERE day = (now() AT TIME ZONE 'UTC')::date - 2
+                   AND socket = 'funnel' AND status_class = '4xx'), 0)")
+          test "$second" = "3|1|3|2" || {
+            echo "::error::late-row recompute drifted (raw|rows|count|ips=$second, want 3|1|3|2)"
+            exit 1
+          }
+
+          # A third pass has the same complete raw set and must therefore be
+          # exactly idempotent. The finalization tests below separately prove
+          # that D+31 rows are counted before deletion and that still-later
+          # arrivals merge additively into an already-finalized day.
+          docker exec -i -e PGPASSWORD="$OPENBRAIN_APP_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_app -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/summarize_funnel.sql >/dev/null
+          third=$(docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
+            "SELECT COUNT(*), COALESCE(MAX(request_count), 0), COALESCE(MAX(unique_ips), 0)
+             FROM funnel_access_summary
+             WHERE day = (now() AT TIME ZONE 'UTC')::date - 2
+               AND socket = 'funnel' AND status_class = '4xx'")
+          test "$third" = "1|3|2" || {
+            echo "::error::in-horizon re-run was not idempotent (rows|count|ips=$third, want 1|3|2)"
+            exit 1
+          }
+          echo "late in-horizon row recomputed exactly; raw retained; re-run idempotent"
+
       - name: Smoke test — late funnel rows are summarized before retention deletes them
         run: |
           # The late-arrival retention race (audit finding PR55-OPS-001): a
