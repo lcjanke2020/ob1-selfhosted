@@ -650,16 +650,19 @@ jobs:
             exit 1
           }
 
-          # This row arrives after its event day already has a summary. The
+          # These rows arrive after their event day already has a summary. The
           # next run must replace that summary from the complete retained raw
-          # set, not leave the day stale or add onto the old aggregate.
+          # set, not leave the day stale or add onto the old aggregate. One
+          # repeats the original IP so request_count and unique_ips diverge.
           docker exec -e PGPASSWORD="$OPENBRAIN_INGESTER_PASSWORD" pgci \
             psql -h 127.0.0.1 -U openbrain_ingester -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c \
             "INSERT INTO funnel_access_log
                (ts, socket, client_ip, method, path, status, duration_ms, bytes_out, user_agent)
              VALUES
                ($event_ts, 'funnel', '203.0.113.18'::inet,
-                'GET', '/late/second', 401, 13, 103, 'late-window-second')"
+                'GET', '/late/second', 401, 13, 103, 'late-window-second'),
+               ($event_ts, 'funnel', '203.0.113.17'::inet,
+                'GET', '/late/third', 401, 15, 105, 'late-window-third')"
 
           docker exec -i -e PGPASSWORD="$OPENBRAIN_APP_PASSWORD" pgci \
             psql -h 127.0.0.1 -U openbrain_app -d "$POSTGRES_DB" \
@@ -679,8 +682,8 @@ jobs:
                COALESCE((SELECT unique_ips FROM funnel_access_summary
                  WHERE day = (now() AT TIME ZONE 'UTC')::date - 2
                    AND socket = 'funnel' AND status_class = '4xx'), 0)")
-          test "$second" = "2|1|2|2" || {
-            echo "::error::late-row recompute drifted (raw|rows|count|ips=$second, want 2|1|2|2)"
+          test "$second" = "3|1|3|2" || {
+            echo "::error::late-row recompute drifted (raw|rows|count|ips=$second, want 3|1|3|2)"
             exit 1
           }
 
@@ -697,8 +700,8 @@ jobs:
              FROM funnel_access_summary
              WHERE day = (now() AT TIME ZONE 'UTC')::date - 2
                AND socket = 'funnel' AND status_class = '4xx'")
-          test "$third" = "1|2|2" || {
-            echo "::error::in-horizon re-run was not idempotent (rows|count|ips=$third, want 1|2|2)"
+          test "$third" = "1|3|2" || {
+            echo "::error::in-horizon re-run was not idempotent (rows|count|ips=$third, want 1|3|2)"
             exit 1
           }
           echo "late in-horizon row recomputed exactly; raw retained; re-run idempotent"
