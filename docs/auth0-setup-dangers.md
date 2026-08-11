@@ -14,8 +14,10 @@ dashboard ever asks it, and no error fires if you skip it:
 >
 > Your tenant mints tokens. Your app trusts tokens your tenant mints for its
 > audience. Whoever can become a user of your tenant can therefore reach your
-> app — so decide who can become a user **before** you expose the endpoint, and
-> verify the answer instead of assuming it.
+> app through any application that enables their connection and is authorized
+> for the API — and allow-all is the documented default policy for a new API's
+> user flows — so decide who can become a user **before** you expose the
+> endpoint, and verify the answer instead of assuming it.
 
 We got this wrong ourselves, found it in a security review, and confirmed the
 hole was real by walking through it. This doc is the write-up we wish we had
@@ -94,11 +96,15 @@ The social row is the trap, and it deserves to be stated twice:
 That is exactly what bit us: the database connection's mental model ("nobody
 else signed up") silently applied to a connection type where it means nothing.
 
-## The four checks
+## The five checks
 
 Run these against every tenant that fronts something you care about. They take
-five minutes in the dashboard — or run the Management API versions in the next
-section, which are the ones you can keep as evidence.
+five minutes in the dashboard. Note the division of labor: these are
+**configuration** checks (dashboard work — scriptable via the `connections`,
+`clients`, and `client-grants` Management API endpoints, but none of the
+evidence commands in the next section inspects configuration); the next section
+captures **outcome** evidence — who enrolled, what the logs still retain.
+Running the evidence commands does not audit the configuration.
 
 1. **Which connections are enabled, and on which applications?** Every
    enabled-connection × application pair is a login path. Connections you don't
@@ -116,10 +122,15 @@ section, which are the ones you can keep as evidence.
    baseline. Auth0's own guidance warns against authorizing by email domain; if
    you must match on email, require `email_verified === true` and exact
    normalized addresses, and remember a federated email attribute is asserted by
-   the upstream IdP, not proven by your tenant. Confirm the Action is bound to
-   the intended connection and applications. Know its limit, too: it denies the
-   login and token issuance, but the first authentication can still create the
-   user profile before the Action's verdict — see
+   the upstream IdP, not proven by your tenant. And know where the scoping
+   lives: a Post-Login Action is attached to the tenant's Login flow and runs
+   for **every** application and connection — there is no per-connection binding
+   to configure — so the restriction is code: deny by default across the whole
+   tenant (simplest), or condition on `event.connection.id` /
+   `event.client.client_id` and fail closed when that context is missing or
+   unexpected. Know the Action's limit, too: it denies the login and token
+   issuance, but the first authentication can still create the user profile
+   before the Action's verdict — see
    [Verification, not assertion](#verification-not-assertion) for what a user
    record does and doesn't prove.
 4. **Is any connection promoted to Domain Level?** Domain-Level promotion
@@ -129,6 +140,14 @@ section, which are the ones you can keep as evidence.
    Promotion is sticky: disabling Dynamic Client Registration afterwards does
    **not** undo it. If a past DCR window promoted a connection, it is still
    promoted today.
+5. **Which applications are authorized for your API — and what is its
+   user-delegated access policy?** Tenant membership is not the only gate Auth0
+   offers. An API's policy for user-delegated tokens can be `allow_all` (the
+   documented default for a new API), `require_client_grant`, or `deny_all`;
+   under `require_client_grant`, only applications explicitly granted to your
+   API can obtain tokens for its audience — a real intermediate layer between
+   tenant enrollment and your app's own allowlist. Prefer it, and audit which
+   applications hold grants for your API.
 
 ## DCR and Domain-Level promotion: time-box, then check the residue
 
@@ -158,17 +177,19 @@ and `read:logs`, then:
 
 ```bash
 # Quick audit: which profiles currently exist for a given connection?
-# Paginate explicitly — repeat with page=1,2,... until an empty page (the
-# default page size is 50 when unset; user search is capped at 1,000
-# results and eventually consistent). Enough to spot strangers on a small
+# Paginate explicitly — repeat with page=1,2,... until an empty page.
+# per_page=50 is valid on every plan (Auth0's current docs cap Public
+# Cloud tenants lower than Private Cloud); user search is capped at 1,000
+# results and eventually consistent. Enough to spot strangers on a small
 # tenant, NOT a complete export.
 curl -s -H "Authorization: Bearer $MGMT_TOKEN" \
-  "https://$TENANT/api/v2/users?search_engine=v3&page=0&per_page=100&include_fields=true&fields=user_id,email,identities,created_at,last_login,logins_count&q=identities.connection%3A%22google-oauth2%22"
+  "https://$TENANT/api/v2/users?search_engine=v3&page=0&per_page=50&include_fields=true&fields=user_id,email,identities,created_at,last_login,logins_count&q=identities.connection%3A%22google-oauth2%22"
 
 # The artifact to save: a bulk user-export job — a complete point-in-time
-# snapshot of current profiles. Auth0's guide says omitting "limit" exports
-# everything, but its endpoint schema suggests a small default — so always
-# check the downloaded record count against your expected user population.
+# snapshot of current profiles. Auth0's docs don't pin the omitted-"limit"
+# behavior (staff guidance says everything; the endpoint schema suggests a
+# small default) — so always check the downloaded record count against
+# your expected user population.
 # Add "connection_id" (a con_... id) to scope it to one connection, or omit
 # it to export every user in the tenant. Poll the returned job id until
 # "completed", download the file at its "location", verify the count — and
@@ -181,9 +202,12 @@ curl -s -H "Authorization: Bearer $MGMT_TOKEN" \
   "https://$TENANT/api/v2/jobs/$JOB_ID"
 
 # Recent authentication events for a connection. Success Signup is type
-# "ss", Success Login is "s".
+# "ss", Success Login is "s". Repeat with page=1,2,... until an empty
+# page — log search returns at most 100 events per request and 1,000 in
+# total; for a complete sweep of the retained window, use checkpoint
+# pagination (from=<log_id>&take=100) or a log stream set up in advance.
 curl -s -H "Authorization: Bearer $MGMT_TOKEN" \
-  "https://$TENANT/api/v2/logs?per_page=100&q=connection%3A%22google-oauth2%22"
+  "https://$TENANT/api/v2/logs?page=0&per_page=100&q=connection%3A%22google-oauth2%22"
 ```
 
 Read the results with these four facts in hand:
@@ -194,11 +218,13 @@ Read the results with these four facts in hand:
 - **A user record proves an enrollment attempt, not an admission.** The record
   is created on the first authentication through the connection; Auth0 documents
   that this can happen even when a Post-Login Action then denies the login. The
-  Action's verdict exists **only** in the tenant's logs (or a log stream you set
-  up in advance): a denied login never produces a token, so no request reaches
-  your app and no app-side audit can ever capture it. Your own audit answers a
-  different question — a present admission row proves a request passed your
-  server's checks; an absent row proves nothing.
+  Action's authoritative verdict lives in the tenant's logs (or a log stream you
+  set up in advance): a denied login never produces a token, so no request
+  reaches your resource server and its audit cannot capture the verdict — the
+  initiating client does receive the `access_denied` response, but a stranger's
+  client is not your evidence. Your own audit answers a different question — a
+  present admission row proves a request passed your server's checks; an absent
+  row proves nothing.
 - **The user list and the export are snapshots, not history.** Both show the
   profiles that exist _at query time_. A present record is positive evidence an
   attempt reached your tenant; an empty result proves only that nothing matches
@@ -268,7 +294,7 @@ The durable lesson, in one line: **tenant membership control and an in-app
 allowlist are two different layers, and you want both.**
 
 - The tenant layer is where enrollment actually happens — it must be configured
-  deliberately (the four checks) because no app-side control can un-mint a token
+  deliberately (the five checks) because no app-side control can un-mint a token
   or delete a user record.
 - The app layer is what makes a single dashboard toggle survivable. Tenant
   configuration is mutable, invisible to your repo, outside your change control,

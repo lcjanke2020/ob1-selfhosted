@@ -76,12 +76,14 @@ generic subject mapping, and a browserless verification command are covered in
 [OAuth service accounts](../../docs/service-account-oauth-client.md).
 
 > **Decide tenant membership control before the Funnel goes public.** Whoever
-> can become a user of your tenant can request tokens for this API. For every
-> login connection you enable: a Database connection needs **"Disable Sign
-> Ups"** turned on (it ships off — sign-ups allowed); a Social connection has
-> **no sign-up toggle at all** — everyone with that IdP's account already holds
-> a credential your tenant will accept, so leave it disabled unless an Action
-> deliberately restricts who may log in. The full trap catalog, the four-check
+> can become a user of your tenant can request tokens for this API through any
+> application that enables their connection and is authorized for it (allow-all
+> is the documented default policy for a new API's user flows). For every login
+> connection you enable: a Database connection needs **"Disable Sign Ups"**
+> turned on (it ships off — sign-ups allowed); a Social connection has **no
+> sign-up toggle at all** — everyone with that IdP's account already holds a
+> credential your tenant will accept, so leave it disabled unless an Action
+> deliberately restricts who may log in. The full trap catalog, the five-check
 > audit, and the Management API verification commands are in
 > [Auth0 setup dangers](../../docs/auth0-setup-dangers.md).
 

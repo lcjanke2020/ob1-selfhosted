@@ -11,11 +11,11 @@ CLI** wired up as an OAuth-only client, using a **public PKCE client with no
 secret**.
 
 > **Tenant membership control comes first.** Whoever can become a user of your
-> tenant can request tokens for its APIs — decide who may enroll _before_ wiring
-> up any client, and verify it with the Management API rather than the
-> dashboard. The traps (an open social connection has **no** sign-up toggle;
-> Domain-Level promotion outlives the DCR window that required it) are in
-> [auth0-setup-dangers.md](auth0-setup-dangers.md).
+> tenant can request tokens for any API its applications are authorized for —
+> decide who may enroll _before_ wiring up any client, and verify it with the
+> Management API rather than the dashboard. The traps (an open social connection
+> has **no** sign-up toggle; Domain-Level promotion outlives the DCR window that
+> required it) are in [auth0-setup-dangers.md](auth0-setup-dangers.md).
 
 The procedure below registers a local Codex process as an OpenBrain client over
 OAuth. It deliberately configures **no** `x-brain-key`, **no** bearer-token
