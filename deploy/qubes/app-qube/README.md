@@ -170,6 +170,16 @@ for what the schema contains, and
 [Upgrading an existing deployment](#upgrading-an-existing-deployment) for how to
 apply it in this topology.
 
+Server 1.20.0 requires a re-apply of `db/02-observability.sql` (it now converges
+`mcp_auth_events` in place to the allowed+denied audit shape) AND
+`OAUTH_ALLOWED_SUBJECTS` in this qube's `.env` **before the container roll**:
+the allowlist fails closed, so rolling the container without it leaves the
+OAuth-only deployment rejecting every Bearer — a deliberate lockout posture,
+loudly warned in the boot log, but not what an upgrade intends. Set it to the
+exact `sub` claim(s) to admit (Auth0 dashboard → User Management → Users →
+user_id), then roll, then verify a live client and check `mcp_auth_events` for
+the new `outcome='allowed'` rows.
+
 ## Upgrading an existing deployment
 
 `db/*.sql` are `docker-entrypoint-initdb.d` scripts: PostgreSQL runs them only
@@ -253,20 +263,23 @@ AppVM-local install disappears on reboot.
 
 ### Which migration each server version requires
 
-Rows start at 1.7.0. `db/01-schema.sql`, `db/02-observability.sql`, and
-`db/04-sessions.sql` have no upgrade row of their own; a database predating any
-of them needs it applied first, in that order. `db/03-grants-assertion.sql` is
-deliberately not third — it is a read-only check of the completed catalog, so it
-runs after every pending row below and fails by design if run before the
-relations it asserts on exist. The db qube records the same canonical order
+Rows start at 1.7.0. `db/01-schema.sql` and `db/04-sessions.sql` have no upgrade
+row of their own; a database predating either needs it applied first, in that
+order (`db/02-observability.sql` gained an upgrade row at 1.20.0 — older
+databases still apply it in its numbered position first).
+`db/03-grants-assertion.sql` is deliberately not third — it is a read-only check
+of the completed catalog, so it runs after every pending row below and fails by
+design if run before the relations it asserts on exist. The db qube records the
+same canonical order
 ([First boot / provisioning](../db-qube/README.md#first-boot--provisioning)).
 
-| Server | Migration                        | Additional requirement                                        |
-| ------ | -------------------------------- | ------------------------------------------------------------- |
-| 1.7.0  | `db/05-hybrid-search.sql`        | pgvector 0.8.0+ (filtered iterative scans)                    |
-| 1.9.0  | `db/06-spaces.sql`               | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner   |
-| 1.16.0 | `db/07-metadata-degradation.sql` | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env` |
-| 1.19.0 | `db/08-access-tokens.sql`        | —                                                             |
+| Server | Migration                                                                  | Additional requirement                                                         |
+| ------ | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| 1.7.0  | `db/05-hybrid-search.sql`                                                  | pgvector 0.8.0+ (filtered iterative scans)                                     |
+| 1.9.0  | `db/06-spaces.sql`                                                         | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner                    |
+| 1.16.0 | `db/07-metadata-degradation.sql`                                           | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env`                  |
+| 1.19.0 | `db/08-access-tokens.sql`                                                  | —                                                                              |
+| 1.20.0 | `db/02-observability.sql` (re-apply; converges `mcp_auth_events` in place) | `OAUTH_ALLOWED_SUBJECTS` in `.env` **before** the container roll — fail-closed |
 
 Migration 08 is required by 1.19.0 **even when native tokens are disabled**.
 `ENABLE_NATIVE_TOKENS` gates the credential door, not the schema: the server's
@@ -322,11 +335,12 @@ access log is written to a local sink on the
 [ingress qube](../ingress-qube/README.md#daily-rollup-and-retention-host-side-not-compose),
 which runs [`db/summarize_funnel.sql`](../../../db/summarize_funnel.sql) there.
 Here, [`db/summarize_auth_events.sql`](../../../db/summarize_auth_events.sql)
-handles the reason-coded 401 audit that mcp writes into the corpus. Set
-`SUMMARY_SQL_FILE` accordingly — left unset it resolves to **both** shipped
-files (the single-host default), and the funnel half would then operate on the
-stale, no-longer-written `funnel_access_log` left behind in this database,
-producing an empty report section and a pointless retention DELETE.
+handles the auth-decision audit mcp writes into the corpus — reason-coded
+denials plus the per-request admission rows (1.20.0+). Set `SUMMARY_SQL_FILE`
+accordingly — left unset it resolves to **both** shipped files (the single-host
+default), and the funnel half would then operate on the stale, no-longer-written
+`funnel_access_log` left behind in this database, producing an empty report
+section and a pointless retention DELETE.
 
 The relations themselves stay in the corpus schema deliberately. Dropping them
 would diverge from
@@ -386,14 +400,17 @@ systemctl --user daemon-reload
 ```
 
 Run the service once before enabling the schedule. This is the catch-up pass:
-for this qube's auth half it removes `mcp_auth_events` rows beyond the 30-day
-horizon and prints the rolling 24h auth-failure report. That removal is
-irreversible, so take a database snapshot first if you may need the older rows.
-A failure before the SQL transaction commits leaves the raw rows intact; any
-failed run leaves the last complete Markdown artifact intact instead of
-replacing it with partial output. If a connection fails after the database
-commit but while the report queries are streaming, the database may be ahead of
-the artifact; the next idempotent run regenerates the report.
+for this qube's auth half it enforces `mcp_auth_events`' per-class horizons — 30
+days for anonymous denials, 365 for admission rows and `subject_not_allowed`
+denials (the identity-carrying classes) — and prints the rolling 24h
+auth-failure and admitted-identities reports. The removals are irreversible, so
+take a database snapshot first if you may need the older rows. The two retention
+DELETEs autocommit independently (no shared transaction): a failure between them
+leaves each class individually consistent, and the next idempotent run converges
+whichever half lagged; any failed run leaves the last complete Markdown artifact
+intact instead of replacing it with partial output. If a connection fails after
+the database commit but while the report queries are streaming, the database may
+be ahead of the artifact; the next idempotent run regenerates the report.
 
 ```sh
 systemctl --user start funnel-summary.service

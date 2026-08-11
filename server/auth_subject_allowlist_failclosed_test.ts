@@ -1,20 +1,19 @@
-// Tests for the `requireAuth` middleware with ONLY the OAuth door enabled —
-// MCP_ACCESS_KEY unset, so the x-brain-key door is OFF. This is the
-// compose-tailnet (funnel) + qubes deployment posture: a single OAuth auth path,
-// with the static x-brain-key removed entirely.
+// Tests for the OAUTH_ALLOWED_SUBJECTS FAIL-CLOSED posture: OAuth door
+// enabled, allowlist left unset. Companion to auth_subject_allowlist_test.ts
+// (non-empty allowlist) — split across files because config.ts is read once
+// per module load, so each env state needs its own test file.
 //
-// The load-bearing assertion is that a presented `x-brain-key` is IGNORED when
-// the door is disabled — a leaked or stale key from an older deployment can't be
-// used against an Auth0-only server, even if Caddy fails to strip the header.
-//
-// Strategy mirrors auth_oauth_test.ts: mock globalThis.fetch to serve a local
-// JWKS, dynamic-import auth.ts after env is set, mint real RS256 JWTs via jose.
-// Run with `deno task test`.
+// The property under test: an unset/empty allowlist means NO Bearer token is
+// accepted, however valid — misconfiguration denies rather than allows — while
+// the x-brain-key door on a mixed deployment keeps working, so the failure
+// mode of "operator upgraded and forgot the new var" is a scoped OAuth outage
+// plus a loud boot warning, not a silently-open door.
 
 import { assertEquals } from "jsr:@std/assert@1";
 import { Hono, type MiddlewareHandler } from "hono";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
+const BRAIN_KEY = "b".repeat(64);
 const ISSUER = "https://test.invalid/";
 const AUDIENCE = "https://test.invalid:8443/mcp";
 const JWKS_URL = "https://test.invalid/.well-known/jwks.json";
@@ -41,7 +40,7 @@ function makeApp(mw: MiddlewareHandler) {
   return app;
 }
 
-Deno.test("requireAuth (OAuth only — x-brain-key door disabled)", async (t) => {
+Deno.test("requireAuth fails closed with no OAUTH_ALLOWED_SUBJECTS", async (t) => {
   const origFetch = globalThis.fetch;
   const origEnv = new Map<string, string | undefined>(
     ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
@@ -73,8 +72,9 @@ Deno.test("requireAuth (OAuth only — x-brain-key door disabled)", async (t) =>
     return origFetch(input, init);
   }) as typeof fetch;
 
-  // OAuth door ON, x-brain-key door OFF (MCP_ACCESS_KEY deliberately deleted).
-  Deno.env.delete("MCP_ACCESS_KEY");
+  // Mixed deployment: static x-brain-key door on AND OAuth on — the shape
+  // where the fail-closed blast radius matters (Bearer sealed, key working).
+  Deno.env.set("MCP_ACCESS_KEY", BRAIN_KEY);
   Deno.env.set("ENABLE_NATIVE_TOKENS", "false");
   Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
   Deno.env.set("DB_PASSWORD", "test-password");
@@ -82,9 +82,7 @@ Deno.test("requireAuth (OAuth only — x-brain-key door disabled)", async (t) =>
   Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
   Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
   Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-  // Authorization allowlist (fail-closed): admit the one subject this file
-  // mints for its success paths.
-  Deno.env.set("OAUTH_ALLOWED_SUBJECTS", "user-under-test");
+  Deno.env.delete("OAUTH_ALLOWED_SUBJECTS");
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
   Deno.env.set("METADATA_FALLBACK_POLICY", "off");
   Deno.env.set("JWKS_FETCH_TIMEOUT_MS", "2000");
@@ -92,8 +90,8 @@ Deno.test("requireAuth (OAuth only — x-brain-key door disabled)", async (t) =>
   const { requireAuth } = await import("./auth.ts");
   const app = makeApp(requireAuth);
 
-  async function signToken(): Promise<string> {
-    return await new SignJWT({ sub: "user-under-test" })
+  async function signToken(sub: string): Promise<string> {
+    return await new SignJWT({ sub })
       .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
       .setIssuer(ISSUER)
       .setAudience(AUDIENCE)
@@ -103,34 +101,40 @@ Deno.test("requireAuth (OAuth only — x-brain-key door disabled)", async (t) =>
   }
 
   try {
-    await t.step("valid Bearer → 200", async () => {
-      const token = await signToken();
-      const res = await app.request("/", {
-        headers: { "authorization": `Bearer ${token}` },
-      });
-      assertEquals(res.status, 200);
-    });
-
     await t.step(
-      "x-brain-key header alone → 401 (door disabled, header ignored)",
+      "fully valid Bearer → 401 (empty allowlist admits nobody)",
       async () => {
-        // No key is configured, so any x-brain-key value is ignored and the
-        // request reads as missing_credentials → HTTP 401.
         const res = await app.request("/", {
-          headers: { "x-brain-key": "any-value-since-no-key-is-configured" },
+          headers: {
+            "authorization": `Bearer ${await signToken("auth0|any-user")}`,
+          },
         });
         assertEquals(res.status, 401);
+        const body = await res.json();
+        assertEquals(body.error?.code, -32001);
       },
     );
 
     await t.step(
-      "x-brain-key + valid Bearer → 200 (Bearer honored, key irrelevant)",
+      "x-brain-key door is unaffected by the sealed OAuth door",
       async () => {
-        const token = await signToken();
+        const res = await app.request("/", {
+          headers: { "x-brain-key": BRAIN_KEY },
+        });
+        assertEquals(res.status, 200);
+      },
+    );
+
+    await t.step(
+      "valid key + valid-but-unadmitted Bearer → 200 (either-valid holds)",
+      async () => {
+        // The dual-header contract is unchanged: a request authenticates if
+        // EITHER credential is valid, and the key path short-circuits before
+        // the Bearer is even examined.
         const res = await app.request("/", {
           headers: {
-            "x-brain-key": "ignored",
-            "authorization": `Bearer ${token}`,
+            "x-brain-key": BRAIN_KEY,
+            "authorization": `Bearer ${await signToken("auth0|any-user")}`,
           },
         });
         assertEquals(res.status, 200);

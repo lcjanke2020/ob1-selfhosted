@@ -111,6 +111,19 @@ dumps can still read it.
   profile)—or an exact operator-configured subject for Auth0's RFC 9068 profile
   or another issuer—select the `service` provenance label. That mapping changes
   neither authentication nor authorization.
+- **Authorization is in-app, not delegated to the tenant.** After every
+  cryptographic check passes, the verified `sub` must appear on the
+  `OAUTH_ALLOWED_SUBJECTS` allowlist or the request is rejected — with the same
+  uniform 401 as any other failure externally, and reason `subject_not_allowed`
+  plus the verified subject on the audit row internally. The list fails
+  **closed**: with the OAuth door enabled and the list unset or empty, every
+  Bearer is rejected (the boot log warns loudly). This exists because "the
+  tenant minted this token" and "the operator admits this account" are different
+  questions: an IdP-side misconfiguration — an accidentally-enabled social
+  connection, an unintended signup flow — mints perfectly valid tokens for
+  accounts the operator never meant to admit, and tenant configuration must not
+  be the only gate. The `OAUTH_SERVICE_ACCOUNT_SUBJECTS` attribution list never
+  grants access; a machine subject must also be allowlisted.
 - A boot-time JWKS reachability probe (with an explicit wall-clock timeout that
   also caps every later refresh) surfaces a typo'd JWKS URI at startup rather
   than at the first attacker request.
@@ -124,6 +137,42 @@ dumps can still read it.
   Operator-facing messages are collapsed to a single "unauthorized" — the
   granular reason goes to the audit table, not to the caller, closing a
   credential-status side-channel.
+- **Both auth outcomes are audited, not just rejections.** Each auth decision
+  enqueues one `mcp_auth_events` row recording, for admissions, the verified
+  identity (`subject` for OAuth, `token_label` for native tokens), the door, the
+  path, and the client IP — so "who accessed this server in the last N days" is
+  answerable from local data rather than from the IdP's logs, up to the queue
+  semantics that follow. The write is deliberately **best-effort telemetry
+  through one shared queue, not a durable ledger**: fire-and-forget (Postgres
+  latency never extends a response, and audit unavailability never denies
+  service), with a single in-flight cap shared by BOTH outcomes. When inserts
+  back up past that cap — sustained database distress, or request volume
+  outrunning the queue (a sustained 401 flood is attacker-reachable and can
+  saturate it) — events are dropped **regardless of outcome or identity**: a
+  flood of denials can shed admission rows for unrelated identities arriving in
+  the same window. The drop counter and its rate-limited warning evidence that a
+  gap exists and how many events it swallowed; they cannot reconstruct which
+  events — or whose — are missing. Two bounds remain hard: a boot-time schema
+  probe refuses to start against a pre-audit table shape (a missed migration is
+  a loud refusal, never a silent drop), and the gap is always self-announcing
+  (counted + warned). The inverse design — blocking each request on a durable
+  audit write — would hand the audit path a denial-of-service lever over the
+  whole server; the opt-in fail-closed mode, and any per-outcome quota or
+  reservation scheme, are tracked separately (GH #88).
+- **Audit retention keys on verified identity.** Rows naming a real,
+  tenant-minted identity keep 365 days: every allowed row, plus
+  `subject_not_allowed` denials (which verified identity knocked and was refused
+  — the question an incident review asks months later). Anonymous denials
+  (scanner noise, credential fumbles) keep 30 days, matched to the raw access
+  log so a 401 and the request that produced it age out together. The long
+  horizon is identity- and time-bounded, not size-bounded: those rows require a
+  Bearer the tenant actually minted — which bounds **who** can grow the table,
+  not how many rows a single credential can generate — so growth tracks
+  legitimate use, an accepted storage trade-off. A stolen credential inflating
+  it is loud in the very table it inflates (and in the edge burst alerts), and
+  the horizon is a one-line operator lever in `db/summarize_auth_events.sql`.
+  Only server-verified identity lands in the table — never as-presented
+  credentials or header values.
 - Captured content is hard-capped (100,000 UTF-8 bytes) on both
   `capture_thought` and `session_capture`; the REST gateway enforces the
   identical cap via the same shared schema module, plus a 1 MiB request-body
@@ -253,13 +302,19 @@ security review.
   warnings otherwise serialize the full request header map (incl. a Bearer) to
   `docker logs`; the ingester additionally keeps only UA + Host from headers and
   strips query strings.
-- Every 401 inserts a reason-coded row into `mcp_auth_events` (fire-and-forget,
-  with an in-flight cap so a 401 flood can't queue unbounded memory).
+- Each auth decision enqueues a row into `mcp_auth_events` — reason-coded
+  denials AND per-request admissions with the verified identity
+  (fire-and-forget, with an in-flight cap so a 401 flood can't queue unbounded
+  memory; best-effort semantics above — either outcome can drop under
+  saturation).
 - Successful writes carry the server-owned credential label and verified
   subject, distinguishing `service` machine identities from `funnel` user
-  identities. Successful reads have no application-level identity audit in this
-  release; Caddy retains request metadata only. Failed tokens are not classified
-  as machine or user because their unverified claims are attacker-controlled.
+  identities. Reads are covered at request-level granularity by the best-effort
+  `mcp_auth_events` admission row (who authenticated, to which path, when —
+  delivery gaps possible and self-announcing); there is no per-tool or per-row
+  read audit in this release — Caddy retains request metadata only. Failed
+  tokens are not classified as machine or user because their unverified claims
+  are attacker-controlled.
 - Every degraded classification appends history plus a transactional outbox row
   in the thought transaction. The optional Pushover/ntfy worker consumes only
   committed queue rows and selects finite codes and counts—never thought

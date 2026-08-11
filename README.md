@@ -183,11 +183,12 @@ detail — both auth branches, step by step — is in
   identities while retaining the JWT `sub`. The doors are independently
   toggleable and the server refuses to boot with neither; the public overlay
   explicitly disables both native-token and static-key verification.
-- **Observability** — Caddy JSON access logs, an auth-failure audit table, a
-  log-ingester sidecar, and a daily rollup with retention, so a public endpoint
-  is _measured_, not guessed at. The split ingress monitor can optionally turn
-  public-door 401 bursts into privacy-safe, first-occurrence + periodic-rollup
-  Pushover alerts containing only a generic label and aggregate count.
+- **Observability** — Caddy JSON access logs, an auth-decision audit table
+  (denials and admissions), a log-ingester sidecar, and a daily rollup with
+  retention, so a public endpoint is _measured_, not guessed at. The split
+  ingress monitor can optionally turn public-door 401 bursts into privacy-safe,
+  first-occurrence + periodic-rollup Pushover alerts containing only a generic
+  label and aggregate count.
 - **Defense in depth** — loopback-only binds, dropped capabilities, read-only
   rootfs, least-privilege DB roles with a drift assertion, an Anthropic-egress
   IP allowlist at the proxy edge (the primary public perimeter, CI-guarded so it

@@ -44,6 +44,7 @@ const ENV_KEYS = [
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
   "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
+  "OAUTH_ALLOWED_SUBJECTS",
   "OBS_AUTH_EVENTS_ENABLED",
   "METADATA_FALLBACK_POLICY",
   "JWKS_FETCH_TIMEOUT_MS",
@@ -109,6 +110,23 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
   Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
   Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
   Deno.env.set("OAUTH_SERVICE_ACCOUNT_SUBJECTS", "generic-service-subject");
+  // Authorization allowlist (fail-closed): every subject a step expects to
+  // reach 200 with. Deliberately includes the case-variant + unmapped-machine
+  // subjects — those steps assert door CLASSIFICATION, which requires the
+  // token to be admitted first. "forged-machine" stays off the list: that
+  // step's token dies at signature verification, before authorization.
+  Deno.env.set(
+    "OAUTH_ALLOWED_SUBJECTS",
+    [
+      "auth0|leo-source-marker-test",
+      "auth0-m2m-client@clients",
+      "generic-service-subject",
+      "Generic-Service-Subject",
+      "rfc9068-machine@clients",
+      "password-flow-user",
+      "auth0|fallthrough-test",
+    ].join(","),
+  );
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
   Deno.env.set("METADATA_FALLBACK_POLICY", "off");
   Deno.env.set("JWKS_FETCH_TIMEOUT_MS", "2000");

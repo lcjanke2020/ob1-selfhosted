@@ -34,9 +34,10 @@ Deno.test("auth_audit (disabled path)", async (t) => {
   Deno.env.set("DB_PASSWORD", "test-password");
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
 
-  const { logAuthFailure, shutdownAuthAuditForTests } = await import(
-    "./auth_audit.ts"
-  );
+  const { logAuthFailure, logAuthSuccess, shutdownAuthAuditForTests } =
+    await import(
+      "./auth_audit.ts"
+    );
 
   try {
     await t.step("logAuthFailure: returns synchronously, no throw", () => {
@@ -65,7 +66,47 @@ Deno.test("auth_audit (disabled path)", async (t) => {
         clientIp: undefined,
         path: undefined,
       });
+      // The one failure class that carries a verified identity.
+      logAuthFailure({
+        reason: "subject_not_allowed",
+        middleware: "require_auth",
+        clientIp: "192.0.2.1",
+        path: "/mcp",
+        subject: "auth0|refused-subject",
+      });
     });
+
+    await t.step(
+      "logAuthSuccess: returns synchronously, no throw, all door shapes",
+      () => {
+        // Same disabled-branch contract as the failure emitter: fire-and-
+        // forget, never throws, safe in tight succession.
+        for (let i = 0; i < 100; i++) {
+          logAuthSuccess({
+            door: "funnel",
+            middleware: "require_auth",
+            subject: "auth0|admitted-user",
+            clientIp: "192.0.2.1",
+            path: "/mcp",
+          });
+        }
+        logAuthSuccess({
+          door: "service",
+          middleware: "require_auth",
+          subject: "machine@clients",
+          path: "/",
+        });
+        // tailnet static key: no subject, no label.
+        logAuthSuccess({ door: "tailnet", middleware: "require_auth" });
+        // tailnet native token: label only.
+        logAuthSuccess({
+          door: "tailnet",
+          middleware: "require_auth",
+          tokenLabel: "laptop-2026",
+        });
+        assertStrictEquals(typeof logAuthSuccess, "function");
+      },
+    );
 
     await t.step("shutdownAuthAuditForTests: idempotent", async () => {
       await shutdownAuthAuditForTests();

@@ -322,14 +322,38 @@ async function main(): Promise<void> {
     throw new Error("access token sub is missing or unsafe to display");
   }
 
+  // Opt-in subject print happens BEFORE the MCP attempt: under the server's
+  // fail-closed OAUTH_ALLOWED_SUBJECTS gate, a never-yet-enrolled client's
+  // first run ends in the 401 below, and this printed subject is exactly the
+  // value the operator needs to enroll it. Printing after success would make
+  // enrollment circular (can't succeed until enrolled, can't read the subject
+  // until succeeding). The value is decoded locally from a token this client
+  // just minted with its own credentials — nothing the operator doesn't
+  // already hold, and no server verification is claimed for it.
+  if (Deno.env.get("OAUTH_SMOKE_PRINT_SUBJECT") === "true") {
+    console.log(`Token subject (locally decoded): ${payload.sub}`);
+  }
+
   const initializeResponse = await fetch(
     buildInitializeRequest(mcpUrl, token),
     { signal: AbortSignal.timeout(timeout) },
   );
   const initializeBody = await responseText(initializeResponse);
   if (!initializeResponse.ok) {
+    const enrollmentHint = initializeResponse.status === 401
+      ? " One common cause: this subject is not in the server's " +
+        "OAUTH_ALLOWED_SUBJECTS (fail-closed admission gate) — re-run with " +
+        "OAUTH_SMOKE_PRINT_SUBJECT=true to print the subject, enroll it, " +
+        "restart the server, and retry. If the allowlist is the cause, the " +
+        "refusal is normally recorded server-side (best-effort) in " +
+        "mcp_auth_events with reason subject_not_allowed and the verified " +
+        "subject; other 401 causes (wrong issuer/audience, expired or " +
+        "malformed token) normally land there as token_validation_failed " +
+        "instead."
+      : "";
     throw new Error(
-      `MCP initialize returned HTTP ${initializeResponse.status}`,
+      `MCP initialize returned HTTP ${initializeResponse.status}.` +
+        enrollmentHint,
     );
   }
   const result = parseInitializeResponse(
@@ -356,11 +380,12 @@ async function main(): Promise<void> {
       "Attribution signal: no signed gty=client-credentials claim; service labeling requires this exact subject in OAUTH_SERVICE_ACCOUNT_SUBJECTS.",
     );
   }
-  if (Deno.env.get("OAUTH_SMOKE_PRINT_SUBJECT") === "true") {
-    console.log(`Verified JWT subject: ${payload.sub}`);
-  } else if (payload.gty !== "client-credentials") {
+  if (
+    Deno.env.get("OAUTH_SMOKE_PRINT_SUBJECT") !== "true" &&
+    payload.gty !== "client-credentials"
+  ) {
     console.log(
-      "Set OAUTH_SMOKE_PRINT_SUBJECT=true for one run to print the verified subject needed by that allowlist.",
+      "Set OAUTH_SMOKE_PRINT_SUBJECT=true for one run to print the token subject needed by that attribution list.",
     );
   }
 }

@@ -201,8 +201,14 @@ services:
       AUTH0_ISSUER: ${AUTH0_ISSUER:-}
       AUTH0_JWKS_URI: ${AUTH0_JWKS_URI:-}
       AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:-}
+      # Required whenever the OAuth door above is enabled: the in-app
+      # authorization allowlist of exact JWT `sub` claims. FAIL-CLOSED — with
+      # OAuth on and this empty, every Bearer token is rejected (the native/
+      # static door above is unaffected). Irrelevant while AUTH0_* are empty.
+      OAUTH_ALLOWED_SUBJECTS: ${OAUTH_ALLOWED_SUBJECTS:-}
       # Optional exact JWT subjects for service accounts whose issuer does not
-      # emit Auth0's signed gty=client-credentials claim. Attribution only.
+      # emit Auth0's signed gty=client-credentials claim. Attribution only — a
+      # machine subject must ALSO be in OAUTH_ALLOWED_SUBJECTS to be admitted.
       OAUTH_SERVICE_ACCOUNT_SUBJECTS: ${OAUTH_SERVICE_ACCOUNT_SUBJECTS:-}
       # Operator tunables documented in .env.example. Compose only forwards
       # enumerated variables, so each knob must be listed here — otherwise
