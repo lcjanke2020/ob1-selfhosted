@@ -49,7 +49,8 @@ designed behavior of an open social connection (see the table below).
 Containment, in the order that matters:
 
 - **Export first.** The full user list was exported via the Management API
-  _before_ any deletion — it is the durable evidence of who ever enrolled.
+  _before_ any deletion — a point-in-time snapshot of every profile then in the
+  tenant, and the only artifact guaranteed to survive the cleanup that followed.
 - **Search for strangers.** The export contained no accounts other than the
   operator's own (including the deliberate Google test account). A server-side
   sweep — edge access logs, ownership markers on stored data, the auth-failure
@@ -64,8 +65,8 @@ Containment, in the order that matters:
   requests — nothing recorded who was successfully admitted, so "nobody got in"
   rested on the tenant's user list and short-retention IdP logs rather than on
   our own data. Both halves are now fixed in-app (server 1.20.0): a fail-closed
-  subject allowlist and an audit row for every auth decision, admissions
-  included. See
+  subject allowlist, and every auth decision — admissions included — now
+  enqueues a best-effort audit row. See
   [What OpenBrain checks](#what-openbrain-checks-and-what-your-app-must) below.
 
 The rest of this doc generalizes that incident into checks you can run today.
@@ -76,11 +77,11 @@ An Auth0 **connection** is a source of users. The types differ in the one
 dimension that matters here — how a stranger becomes a user — and the dashboard
 presents them as interchangeable checkboxes:
 
-| Connection type              | How a stranger becomes a user                              | The membership control                                                                                                                                                                                         |
-| ---------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Database**                 | Self sign-up on your hosted login page                     | The **"Disable Sign Ups"** toggle — **off by default**, i.e. sign-ups are _allowed_ until you turn it off                                                                                                      |
-| **Social** (Google, GitHub…) | **They already are one.** They bring their own IdP account | **No sign-up toggle exists** — there is no sign-up step to disable. Only an Action filtering `sub`/email/domain restricts who may log in (legacy Rules are end-of-life), or don't enable the connection at all |
-| **Enterprise**               | Membership in your organization's IdP                      | Your IdP's own membership administration                                                                                                                                                                       |
+| Connection type              | How a stranger becomes a user                              | The membership control                                                                                                                                                                                                                           |
+| ---------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Database**                 | Self sign-up on your hosted login page                     | The **"Disable Sign Ups"** toggle — **off by default**, i.e. sign-ups are _allowed_ until you turn it off                                                                                                                                        |
+| **Social** (Google, GitHub…) | **They already are one.** They bring their own IdP account | **No sign-up toggle exists** — there is no sign-up step to disable. Only a fail-closed Action can restrict who may log in (legacy Rules are end-of-life; check 3 covers what the Action must actually do), or don't enable the connection at all |
+| **Enterprise**               | Membership in your organization's IdP                      | Your IdP's own membership administration                                                                                                                                                                                                         |
 
 The social row is the trap, and it deserves to be stated twice:
 
@@ -107,12 +108,20 @@ section, which are the ones you can keep as evidence.
    uses **Auth0 Organizations**, check each organization too: Organization
    Signup takes priority over the connection's own signup configuration, so an
    organization can re-open the self-registration this toggle appears to close.
-3. **For each Social connection: is there an Action restricting who may log
-   in?** If not, **the internet can log in** — every holder of that IdP's
-   accounts is one consent screen away from a user record in your tenant. Know
-   the Action's limit, too: it denies the login and token issuance, but the
-   first authentication can still create the user profile before the Action's
-   verdict — see the next section for what a user record does and doesn't prove.
+3. **For each Social connection: is there a fail-closed Action restricting who
+   may log in?** If not, **the internet can log in** — every holder of that
+   IdP's accounts is one consent screen away from a user record in your tenant.
+   And "an Action exists" is not itself the control. It must deny by default and
+   admit by **exact `sub` match** — the immutable identifier is the safe
+   baseline. Auth0's own guidance warns against authorizing by email domain; if
+   you must match on email, require `email_verified === true` and exact
+   normalized addresses, and remember a federated email attribute is asserted by
+   the upstream IdP, not proven by your tenant. Confirm the Action is bound to
+   the intended connection and applications. Know its limit, too: it denies the
+   login and token issuance, but the first authentication can still create the
+   user profile before the Action's verdict — see
+   [Verification, not assertion](#verification-not-assertion) for what a user
+   record does and doesn't prove.
 4. **Is any connection promoted to Domain Level?** Domain-Level promotion
    exposes the connection to third-party applications — our own DCR fallback
    docs require it temporarily and warn that it persists
@@ -148,17 +157,22 @@ Management API → API Explorer, or a dedicated M2M application) with `read:user
 and `read:logs`, then:
 
 ```bash
-# Quick audit: who enrolled through a given connection? Paginated (100 per
-# page, user search is capped at 1,000 results and eventually consistent) —
-# enough to spot strangers on a small tenant, NOT a complete export.
+# Quick audit: which profiles currently exist for a given connection?
+# Paginate explicitly — repeat with page=1,2,... until an empty page (the
+# default page size is 50 when unset; user search is capped at 1,000
+# results and eventually consistent). Enough to spot strangers on a small
+# tenant, NOT a complete export.
 curl -s -H "Authorization: Bearer $MGMT_TOKEN" \
-  "https://$TENANT/api/v2/users?search_engine=v3&include_fields=true&fields=user_id,email,identities,created_at,last_login,logins_count&q=identities.connection%3A%22google-oauth2%22"
+  "https://$TENANT/api/v2/users?search_engine=v3&page=0&per_page=100&include_fields=true&fields=user_id,email,identities,created_at,last_login,logins_count&q=identities.connection%3A%22google-oauth2%22"
 
-# The durable artifact: a bulk user-export job — complete, not capped, when
-# "limit" is omitted. Add "connection_id" (a con_... id) to scope it to one
-# connection, or omit it to export every user in the tenant. Poll the
-# returned job id until "completed", download the file at its "location" —
-# and only then delete anything.
+# The artifact to save: a bulk user-export job — a complete point-in-time
+# snapshot of current profiles. Auth0's guide says omitting "limit" exports
+# everything, but its endpoint schema suggests a small default — so always
+# check the downloaded record count against your expected user population.
+# Add "connection_id" (a con_... id) to scope it to one connection, or omit
+# it to export every user in the tenant. Poll the returned job id until
+# "completed", download the file at its "location", verify the count — and
+# only then delete anything.
 curl -s -X POST -H "Authorization: Bearer $MGMT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"format": "json", "fields": [{"name": "user_id"}, {"name": "email"}, {"name": "identities"}, {"name": "created_at"}, {"name": "last_login"}, {"name": "logins_count"}]}' \
@@ -172,29 +186,39 @@ curl -s -H "Authorization: Bearer $MGMT_TOKEN" \
   "https://$TENANT/api/v2/logs?per_page=100&q=connection%3A%22google-oauth2%22"
 ```
 
-Read the results with these three facts in hand:
+Read the results with these four facts in hand:
 
 - **Log retention is short and plan-tiered:** 1 day on the free tier, 5–10 days
   on paid tiers, 30 on Enterprise. **Absence of log entries proves nothing**
   about any period before that horizon.
-- **A user record proves an enrollment, not an admission — and lives only as
-  long as its connection.** The record is created on the first authentication
-  through the connection; Auth0 documents that this can happen even when a
-  Post-Login Action then denies the login, so a stranger's record proves an
-  attempt reached your tenant, while the Action's verdict lives only in the
-  short-retention logs (or in your app's own audit — below). An empty users
-  result for a still-existing connection is real evidence; an empty _log_ is
-  not.
+- **A user record proves an enrollment attempt, not an admission.** The record
+  is created on the first authentication through the connection; Auth0 documents
+  that this can happen even when a Post-Login Action then denies the login. The
+  Action's verdict exists **only** in the tenant's logs (or a log stream you set
+  up in advance): a denied login never produces a token, so no request reaches
+  your app and no app-side audit can ever capture it. Your own audit answers a
+  different question — a present admission row proves a request passed your
+  server's checks; an absent row proves nothing.
+- **The user list and the export are snapshots, not history.** Both show the
+  profiles that exist _at query time_. A present record is positive evidence an
+  attempt reached your tenant; an empty result proves only that nothing matches
+  _now_ — profiles removed before you looked (a connection deletion, an
+  administrator, or Auth0's own Action-cleanup workaround for social logins)
+  leave no trace here. Historical absence needs logs retained from the period in
+  question, or your own app/edge evidence.
 - **Export before you delete — deletion destroys the evidence.** Auth0's support
   guidance is that deleting a connection **deletes the users under it** (a batch
   job, irreversible), even though the endpoint description mentions only the
   login path. Whichever behavior your tenant exhibits, the conclusion is the
-  same: run the export job, confirm it completed and the file is saved somewhere
-  durable, and only then delete.
+  same: run the export job, confirm it completed, save the file somewhere
+  durable, and check its record count against your expected user population —
+  only then delete.
 
 ## What OpenBrain checks (and what your app must)
 
-As of server 1.20.0, `verifyBearer` checks, in order — and nothing else:
+As of server 1.20.0, `verifyBearer` checks, in order — and, beyond the library's
+standard claim validation (jose also enforces `nbf` and a well-formed `iat`
+automatically when those claims are present), nothing else:
 
 1. **Signature** against the issuer's JWKS (pinned `AUTH0_JWKS_URI`, RS256
    only);
