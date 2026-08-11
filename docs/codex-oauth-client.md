@@ -125,9 +125,11 @@ Create an Auth0 **Application** with:
   [auth0-setup-dangers.md](auth0-setup-dangers.md).
 - If the API's user-delegated access policy is `require_client_grant`
   ([auth0-setup-dangers.md](auth0-setup-dangers.md), check 5): a
-  **User-Delegated Access grant** for this application (API → Application Access
-  → Edit → Grant Access). Without it, the token exchange fails after a
-  successful login. Under the default allow-all policy no grant is needed.
+  **User-Delegated Access grant** for this application — check 5 covers the
+  documented switch-then-grant dashboard order and the Management API pre-grant
+  alternative. Without it, Auth0 will not issue this application an access token
+  for the API; inspect **Monitoring → Logs** for the actual failure. Under the
+  default allow-all policy no grant is needed.
 
 Create a separate application for Codex rather than repurposing a Claude
 custom-connector application: the latter is normally a confidential Regular Web

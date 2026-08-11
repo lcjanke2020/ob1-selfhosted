@@ -148,12 +148,22 @@ retain. Running the evidence commands does not audit the configuration.
    documented default for a new API), `require_client_grant`, or `deny_all`;
    under `require_client_grant`, only applications explicitly granted to your
    API can obtain tokens for its audience — a real intermediate layer between
-   tenant enrollment and your app's own allowlist. Prefer it — but complete its
-   prerequisite **first**: grant User-Delegated Access to every first-party
-   application you actually run (API → Application Access → Edit → Grant Access)
-   before flipping the policy, or token issuance for your own clients stops
-   after an apparently-successful login, with no obvious cause. Then audit which
-   applications hold grants for your API.
+   tenant enrollment and your app's own allowlist. Prefer it — and plan the
+   switch around its prerequisite: every application that should keep working
+   needs a **User-Delegated Access grant** for your API. Auth0's documented
+   dashboard order is switch-then-grant: enable Per-app authorization and save,
+   then immediately grant access to each application intended to use this API
+   (Application Access → Edit → Grant Access — the control appears once the
+   policy is per-app), then exercise each client's OAuth flow to confirm. To
+   avoid even that brief transition window, pre-create the grants through the
+   Management API (`POST /api/v2/client-grants` with the application's
+   `client_id`, your API's audience, the intended permissions, and
+   `subject_type: "user"`) before changing the policy. Grant only the
+   applications that are meant to use this API — blanket grants defeat the
+   least-privilege point of the policy. Without a grant, Auth0 will not issue
+   that application an access token for this API; where the failure surfaces
+   varies by flow, so read **Monitoring → Logs** for the actual error. Then
+   audit which applications hold grants for your API.
 
 ## DCR and Domain-Level promotion: time-box, then check the residue
 
