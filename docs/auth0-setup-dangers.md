@@ -21,9 +21,10 @@ dashboard ever asks it, and no error fires if you skip it:
 
 We got this wrong ourselves, found it in a security review, and confirmed the
 hole was real by walking through it. This doc is the write-up we wish we had
-read first: how the trap works, the checklist that catches it, how to verify
-with the Management API instead of the dashboard, and the in-app control that
-keeps one dashboard toggle from ever being your entire boundary again.
+read first: how the trap works, the checklist that catches it, how to gather
+outcome evidence with the Management API instead of trusting the dashboard, and
+the in-app control that keeps one dashboard toggle from ever being your entire
+boundary again.
 
 ## How this bit us
 
@@ -100,11 +101,12 @@ else signed up") silently applied to a connection type where it means nothing.
 
 Run these against every tenant that fronts something you care about. They take
 five minutes in the dashboard. Note the division of labor: these are
-**configuration** checks (dashboard work — scriptable via the `connections`,
-`clients`, and `client-grants` Management API endpoints, but none of the
-evidence commands in the next section inspects configuration); the next section
-captures **outcome** evidence — who enrolled, what the logs still retain.
-Running the evidence commands does not audit the configuration.
+**configuration** checks — dashboard work (the state is also readable through
+the Management API's configuration endpoint families: `connections`, `clients`,
+`client-grants`, `organizations` enabled-connections, `actions` trigger
+bindings, `resource-servers` — but this doc does not supply those commands); the
+next section captures **outcome** evidence — who enrolled, what the logs still
+retain. Running the evidence commands does not audit the configuration.
 
 1. **Which connections are enabled, and on which applications?** Every
    enabled-connection × application pair is a login path. Connections you don't
@@ -146,7 +148,11 @@ Running the evidence commands does not audit the configuration.
    documented default for a new API), `require_client_grant`, or `deny_all`;
    under `require_client_grant`, only applications explicitly granted to your
    API can obtain tokens for its audience — a real intermediate layer between
-   tenant enrollment and your app's own allowlist. Prefer it, and audit which
+   tenant enrollment and your app's own allowlist. Prefer it — but complete its
+   prerequisite **first**: grant User-Delegated Access to every first-party
+   application you actually run (API → Application Access → Edit → Grant Access)
+   before flipping the policy, or token issuance for your own clients stops
+   after an apparently-successful login, with no obvious cause. Then audit which
    applications hold grants for your API.
 
 ## DCR and Domain-Level promotion: time-box, then check the residue
@@ -204,8 +210,12 @@ curl -s -H "Authorization: Bearer $MGMT_TOKEN" \
 # Recent authentication events for a connection. Success Signup is type
 # "ss", Success Login is "s". Repeat with page=1,2,... until an empty
 # page — log search returns at most 100 events per request and 1,000 in
-# total; for a complete sweep of the retained window, use checkpoint
-# pagination (from=<log_id>&take=100) or a log stream set up in advance.
+# total. Checkpoint pagination (from=<log_id>&take=100) is unbounded but
+# reads FORWARD only: it returns events newer than the exclusive seed id,
+# ignores every other parameter (including q — filter locally), and pages
+# via the response's Link: rel="next" header. It cannot reach further back
+# than its seed, so it does not turn a late start into a complete history;
+# the only complete-window path is a log stream set up in advance.
 curl -s -H "Authorization: Bearer $MGMT_TOKEN" \
   "https://$TENANT/api/v2/logs?page=0&per_page=100&q=connection%3A%22google-oauth2%22"
 ```
@@ -220,11 +230,13 @@ Read the results with these four facts in hand:
   that this can happen even when a Post-Login Action then denies the login. The
   Action's authoritative verdict lives in the tenant's logs (or a log stream you
   set up in advance): a denied login never produces a token, so no request
-  reaches your resource server and its audit cannot capture the verdict — the
-  initiating client does receive the `access_denied` response, but a stranger's
-  client is not your evidence. Your own audit answers a different question — a
-  present admission row proves a request passed your server's checks; an absent
-  row proves nothing.
+  reaches your resource server and its audit cannot capture the verdict. The
+  initiating application _may_ receive the `access_denied` response — only when
+  its redirect policy permits error callbacks; strict third-party clients get
+  Auth0's own error page instead — and client-side logs are not evidence you can
+  rely on either way. Your own audit answers a different question — a present
+  admission row proves a request passed your server's checks; an absent row
+  proves nothing.
 - **The user list and the export are snapshots, not history.** Both show the
   profiles that exist _at query time_. A present record is positive evidence an
   attempt reached your tenant; an empty result proves only that nothing matches

@@ -12,10 +12,11 @@ secret**.
 
 > **Tenant membership control comes first.** Whoever can become a user of your
 > tenant can request tokens for any API its applications are authorized for —
-> decide who may enroll _before_ wiring up any client, and verify it with the
-> Management API rather than the dashboard. The traps (an open social connection
-> has **no** sign-up toggle; Domain-Level promotion outlives the DCR window that
-> required it) are in [auth0-setup-dangers.md](auth0-setup-dangers.md).
+> decide who may enroll _before_ wiring up any client, and verify who has
+> actually enrolled with the Management API rather than the dashboard. The traps
+> (an open social connection has **no** sign-up toggle; Domain-Level promotion
+> outlives the DCR window that required it) are in
+> [auth0-setup-dangers.md](auth0-setup-dangers.md).
 
 The procedure below registers a local Codex process as an OpenBrain client over
 OAuth. It deliberately configures **no** `x-brain-key`, **no** bearer-token
@@ -122,6 +123,11 @@ Create an Auth0 **Application** with:
   connection, an Action restricting who may log in for a Social one (which has
   no sign-up toggle at all). See
   [auth0-setup-dangers.md](auth0-setup-dangers.md).
+- If the API's user-delegated access policy is `require_client_grant`
+  ([auth0-setup-dangers.md](auth0-setup-dangers.md), check 5): a
+  **User-Delegated Access grant** for this application (API → Application Access
+  → Edit → Grant Access). Without it, the token exchange fails after a
+  successful login. Under the default allow-all policy no grant is needed.
 
 Create a separate application for Codex rather than repurposing a Claude
 custom-connector application: the latter is normally a confidential Regular Web

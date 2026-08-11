@@ -84,7 +84,7 @@ generic subject mapping, and a browserless verification command are covered in
 > sign-up toggle at all** — everyone with that IdP's account already holds a
 > credential your tenant will accept, so leave it disabled unless an Action
 > deliberately restricts who may log in. The full trap catalog, the five-check
-> audit, and the Management API verification commands are in
+> audit, and the outcome-evidence Management API commands are in
 > [Auth0 setup dangers](../../docs/auth0-setup-dangers.md).
 
 > **`OAUTH_ALLOWED_SUBJECTS` is required in practice whenever the OAuth door is
