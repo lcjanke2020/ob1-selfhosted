@@ -34,6 +34,10 @@ laptop" to "compartmentalized Qubes OS deployment with a hardened public edge":
 >   You'll register one API whose identifier must equal your public MCP URL
 >   byte-for-byte (it's immutable — pick the hostname first) and one
 >   confidential application whose client id + secret you paste into claude.ai.
+>   **Before creating the tenant, read
+>   [Auth0 setup dangers](docs/auth0-setup-dangers.md)** — the dashboard never
+>   asks the setup's most important question (who may become a user), and its
+>   defaults answer it wrong.
 >
 > The Funnel overlay also needs **Docker Compose v2.20+** (the `!reset` YAML
 > tag); the Qubes path additionally assumes a working **Qubes OS** machine with
@@ -72,12 +76,13 @@ failure modes.
 ## Architecture at a glance
 
 The hardened shape (the **Qubes OS** install path). Each tinted box is a
-separate Qubes VM, connected over a firewall-scoped tailnet — a compromised
-public edge holds no memory store and no app credential. On the **Tailnet /
-Funnel** path the same components co-locate on one host over the local docker
-network — same OAuth door, minus the VM boundaries. **Local compose** is simpler
-still: just Postgres + the MCP server + Ollama behind the `x-brain-key` door,
-with no public edge at all.
+separate Qubes VM, connected only over dom0-policy-gated `qubes.ConnectTCP`
+channels — neither the app qube's mcp nor the db qube's Postgres has a
+network-facing listener — so a compromised public edge holds no memory store and
+no app credential. On the **Tailnet / Funnel** path the same components
+co-locate on one host over the local docker network — same OAuth door, minus the
+VM boundaries. **Local compose** is simpler still: just Postgres + the MCP
+server + Ollama behind the `x-brain-key` door, with no public edge at all.
 
 ```mermaid
 flowchart TB
@@ -88,6 +93,7 @@ flowchart TB
         TS["tailscaled<br/>Funnel :443 — TLS terminates here"]
         CA["Caddy :9787<br/>funnel-header split · Anthropic IP allowlist<br/>(Funnel requests only)"]
         LI["log-ingester"]
+        SK["log sink<br/>socket-only Postgres (funnel logs)"]
         TS --> CA
         CA -. "JSON access logs<br/>(credential-redacted)" .-> LI
     end
@@ -104,9 +110,9 @@ flowchart TB
 
     CL -- "HTTPS :443 via Funnel relay" --> TS
     CD -. "WireGuard (tailnet)" .-> TS
-    CA -- "MCP port only, scoped tailnet<br/>Bearer JWT forwarded" --> MCP
-    MCP -- "openbrain_app role:<br/>SELECT / INSERT / UPDATE —<br/>no DELETE on thoughts" --> PG
-    LI -. "openbrain_ingester role:<br/>INSERT-only, one table (funnel_access_log)" .-> PG
+    CA -- "qubes.ConnectTCP (dom0-gated)<br/>Bearer JWT forwarded" --> MCP
+    MCP -- "qubes.ConnectTCP (dom0-gated)<br/>openbrain_app role:<br/>SELECT / INSERT / UPDATE —<br/>no DELETE on thoughts" --> PG
+    LI -. "openbrain_ingester role:<br/>INSERT-only, unix socket<br/>(funnel_access_log)" .-> SK
 
     style ING fill:#d777571a,stroke:#d77757
     style APP fill:#3cc8781a,stroke:#3cc878
@@ -116,9 +122,11 @@ flowchart TB
 In text: clients reach tailscaled's single Funnel listener on the ingress qube;
 Caddy applies the funnel-header split (Pattern Y — tailnet clients hit the same
 listener) and the Anthropic IP allowlist, then proxies to the MCP server on the
-app qube, which embeds via Ollama and reads/writes Postgres on the db qube; the
-edge's log-ingester writes access-log rows to the db qube on an INSERT-only
-role. Design reasoning and the enforcement layers behind each arrow:
+app qube over a dom0-gated `qubes.ConnectTCP` channel; the MCP server embeds via
+Ollama and reads/writes Postgres on the db qube over a second such channel; the
+edge's log-ingester writes access-log rows to a local socket-only sink on the
+ingress qube itself — it holds no credential for, and no route to, the db qube.
+Design reasoning and the enforcement layers behind each arrow:
 [`three-qube-design.md`](deploy/qubes/three-qube-design.md). Request-level
 detail — both auth branches, step by step — is in
 [Request flow in detail](#request-flow-in-detail) below.
@@ -179,11 +187,12 @@ detail — both auth branches, step by step — is in
   identities while retaining the JWT `sub`. The doors are independently
   toggleable and the server refuses to boot with neither; the public overlay
   explicitly disables both native-token and static-key verification.
-- **Observability** — Caddy JSON access logs, an auth-failure audit table, a
-  log-ingester sidecar, and a daily rollup with retention, so a public endpoint
-  is _measured_, not guessed at. The split ingress monitor can optionally turn
-  public-door 401 bursts into privacy-safe, first-occurrence + periodic-rollup
-  Pushover alerts containing only a generic label and aggregate count.
+- **Observability** — Caddy JSON access logs, an auth-decision audit table
+  (denials and admissions), a log-ingester sidecar, and a daily rollup with
+  retention, so a public endpoint is _measured_, not guessed at. The split
+  ingress monitor can optionally turn public-door 401 bursts into privacy-safe,
+  first-occurrence + periodic-rollup Pushover alerts containing only a generic
+  label and aggregate count.
 - **Defense in depth** — loopback-only binds, dropped capabilities, read-only
   rootfs, least-privilege DB roles with a drift assertion, an Anthropic-egress
   IP allowlist at the proxy edge (the primary public perimeter, CI-guarded so it
@@ -217,7 +226,8 @@ in the `x-brain-key` door.)
 
 On the [Qubes install path](deploy/qubes/README.md) these roles are split across
 **three qubes** — a Funnel + Caddy **ingress** qube, an **app** qube (mcp +
-Ollama), and a **db** qube (Postgres) — reached over a firewall-scoped tailnet
+Ollama), and a **db** qube (Postgres) — connected hop-by-hop over
+dom0-policy-gated `qubes.ConnectTCP` channels
 ([three-qube-design.md](deploy/qubes/three-qube-design.md)) so that a
 compromised public edge need not expose the memory store, which lives in its own
 db qube. The sequence below traces a request through that topology; on a single
@@ -246,10 +256,10 @@ sequenceDiagram
         CD->>TS: HTTPS :443, Authorization Bearer JWT
         TS->>CA: HTTP 127.0.0.1:9787 (no Tailscale-Funnel-Request)
         Note right of CA: at @tailnet, forward Authorization (no strip) — allowlist not applied
-        CA->>OB: HTTP :8787 over tailnet (ingress to app), Bearer
+        CA->>OB: HTTP :8787 via ConnectTCP (ingress to app), Bearer
         OB->>OB: requireAuth (jwtVerify RS256, keyset cached)
         OB->>OL: embed (capture / search)
-        OB->>DB: tool exec over tailnet (app to db)
+        OB->>DB: tool exec via ConnectTCP (app to db)
         DB-->>OB: rows / embedding
         OB-->>CA: 200 + JSON
         CA-->>TS: 200
@@ -261,12 +271,12 @@ sequenceDiagram
         CL->>TS: HTTPS :443, Authorization Bearer JWT
         TS->>CA: HTTP 127.0.0.1:9787 (Tailscale-Funnel-Request injected)
         Note right of CA: at @anthropic_funnel needs funnel header AND Anthropic IP 160.79.104.0/21, else 403
-        CA->>OB: HTTP :8787 over tailnet (ingress to app), Bearer
+        CA->>OB: HTTP :8787 via ConnectTCP (ingress to app), Bearer
         OB->>A0: fetch JWKS (first request, then cached)
         A0-->>OB: keyset
         OB->>OB: jwtVerify (RS256 sig, iss, aud, exp)
         OB->>OL: embed
-        OB->>DB: tool exec over tailnet (app to db)
+        OB->>DB: tool exec via ConnectTCP (app to db)
         DB-->>OB: rows / embedding
         OB-->>CA: 200 + JSON
         CA-->>TS: 200
@@ -494,13 +504,12 @@ authenticated identity. The longer version is in
   [`three-qube-design.md`](deploy/qubes/three-qube-design.md)): Postgres in its
   own db qube; the app (mcp + Ollama) plus the encrypted off-box backup in an
   app qube; Funnel + Caddy + the log-ingester in an ingress qube that
-  reverse-proxies to the app qube across a firewall-scoped tailnet. The ingress
-  qube no longer starts the app containers
+  reverse-proxies to the app qube over a dom0-policy-gated `qubes.ConnectTCP`
+  channel. The ingress qube no longer starts the app containers
   ([#13](https://github.com/lcjanke2020/ob1-selfhosted/issues/13)) — its compose
-  defines only Caddy + the log-ingester. The log-ingester writes its access-log
-  rows across to the db qube for now, with a parked local logs store on the
-  ingress qube as its documented future home
-  ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)).
+  defines Caddy, the log-ingester, and a local socket-only log sink the ingester
+  writes to ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12)
+  resolved): the edge holds no credential for, and no route to, the db qube.
 
 ## Contributing
 

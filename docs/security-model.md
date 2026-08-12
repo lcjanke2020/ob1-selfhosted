@@ -48,15 +48,26 @@ dumps can still read it.
 
 ### Network layer
 
-- On the single-host install paths every service binds `127.0.0.1` only — the
-  LAN can't reach any port directly; exposure is an explicit
-  `tailscale serve`/`funnel` act. **Split-Qubes exception:** the app qube
-  publishes `mcp` on `0.0.0.0:8787` (all host interfaces) so the ingress qube's
-  Caddy can reach it across qubes. That port is kept private not by a loopback
-  bind but by the Tailscale ACL (only the ingress qube may reach it) + the app
-  qube's `DOCKER-USER` host-firewall rule (docker DNAT bypasses the Qubes
-  `INPUT` chain) + mcp's OAuth — see the
-  [Qubes README](../deploy/qubes/README.md).
+- Every OB1 container service binds `127.0.0.1` only — on the single-host
+  install paths the LAN can't reach any port directly, and exposure is an
+  explicit `tailscale serve`/`funnel` act. This now includes the split-Qubes app
+  qube: its `mcp` publishes loopback only, and the ingress qube's Caddy reaches
+  it over a dom0-policy-gated `qubes.ConnectTCP` channel (a socat forwarder on
+  the ingress qube bridges Caddy to the qrexec call). There is no network-facing
+  mcp listener to scope — an earlier revision published `0.0.0.0:8787` and
+  scoped the wide bind with a Tailscale ACL grant plus a `DOCKER-USER`
+  host-firewall rule that had to stay continuously correct; the qrexec transport
+  removed that listener class entirely. See
+  [the ingress→app hop](../deploy/qubes/ingress-qube/README.md#the-ingressapp-hop-qubesconnecttcp).
+  The db qube's Postgres rides the same pattern: it binds **loopback only**, and
+  the app qube reaches it through a host-side forwarder over a second
+  dom0-policy-gated `qubes.ConnectTCP` channel
+  ([the app→db hop](../deploy/qubes/app-qube/README.md#the-appdb-hop-qubesconnecttcp))
+  — the tailnet listener and its three-layer ACL + nftables + `pg_hba`-source
+  scoping are retired. The only deliberate **non-loopback listeners** left in
+  the split topology are the host-side qrexec forwarders themselves, which bind
+  their qube's own IP (reachable only from that qube's own workloads — the qubes
+  input chain default-drops eth0/tailnet sources).
 - In Pattern B the override file **removes** mcp's host port
   (`ports: !reset null`). The raw backend is unreachable from the host, so a
   misconfigured `tailscale funnel` pointed at `:8787` fails closed instead of
@@ -100,6 +111,19 @@ dumps can still read it.
   profile)—or an exact operator-configured subject for Auth0's RFC 9068 profile
   or another issuer—select the `service` provenance label. That mapping changes
   neither authentication nor authorization.
+- **Authorization is in-app, not delegated to the tenant.** After every
+  cryptographic check passes, the verified `sub` must appear on the
+  `OAUTH_ALLOWED_SUBJECTS` allowlist or the request is rejected — with the same
+  uniform 401 as any other failure externally, and reason `subject_not_allowed`
+  plus the verified subject on the audit row internally. The list fails
+  **closed**: with the OAuth door enabled and the list unset or empty, every
+  Bearer is rejected (the boot log warns loudly). This exists because "the
+  tenant minted this token" and "the operator admits this account" are different
+  questions: an IdP-side misconfiguration — an accidentally-enabled social
+  connection, an unintended signup flow — mints perfectly valid tokens for
+  accounts the operator never meant to admit, and tenant configuration must not
+  be the only gate. The `OAUTH_SERVICE_ACCOUNT_SUBJECTS` attribution list never
+  grants access; a machine subject must also be allowlisted.
 - A boot-time JWKS reachability probe (with an explicit wall-clock timeout that
   also caps every later refresh) surfaces a typo'd JWKS URI at startup rather
   than at the first attacker request.
@@ -113,6 +137,42 @@ dumps can still read it.
   Operator-facing messages are collapsed to a single "unauthorized" — the
   granular reason goes to the audit table, not to the caller, closing a
   credential-status side-channel.
+- **Both auth outcomes are audited, not just rejections.** Each auth decision
+  enqueues one `mcp_auth_events` row recording, for admissions, the verified
+  identity (`subject` for OAuth, `token_label` for native tokens), the door, the
+  path, and the client IP — so "who accessed this server in the last N days" is
+  answerable from local data rather than from the IdP's logs, up to the queue
+  semantics that follow. The write is deliberately **best-effort telemetry
+  through one shared queue, not a durable ledger**: fire-and-forget (Postgres
+  latency never extends a response, and audit unavailability never denies
+  service), with a single in-flight cap shared by BOTH outcomes. When inserts
+  back up past that cap — sustained database distress, or request volume
+  outrunning the queue (a sustained 401 flood is attacker-reachable and can
+  saturate it) — events are dropped **regardless of outcome or identity**: a
+  flood of denials can shed admission rows for unrelated identities arriving in
+  the same window. The drop counter and its rate-limited warning evidence that a
+  gap exists and how many events it swallowed; they cannot reconstruct which
+  events — or whose — are missing. Two bounds remain hard: a boot-time schema
+  probe refuses to start against a pre-audit table shape (a missed migration is
+  a loud refusal, never a silent drop), and the gap is always self-announcing
+  (counted + warned). The inverse design — blocking each request on a durable
+  audit write — would hand the audit path a denial-of-service lever over the
+  whole server; the opt-in fail-closed mode, and any per-outcome quota or
+  reservation scheme, are tracked separately (GH #88).
+- **Audit retention keys on verified identity.** Rows naming a real,
+  tenant-minted identity keep 365 days: every allowed row, plus
+  `subject_not_allowed` denials (which verified identity knocked and was refused
+  — the question an incident review asks months later). Anonymous denials
+  (scanner noise, credential fumbles) keep 30 days, matched to the raw access
+  log so a 401 and the request that produced it age out together. The long
+  horizon is identity- and time-bounded, not size-bounded: those rows require a
+  Bearer the tenant actually minted — which bounds **who** can grow the table,
+  not how many rows a single credential can generate — so growth tracks
+  legitimate use, an accepted storage trade-off. A stolen credential inflating
+  it is loud in the very table it inflates (and in the edge burst alerts), and
+  the horizon is a one-line operator lever in `db/summarize_auth_events.sql`.
+  Only server-verified identity lands in the table — never as-presented
+  credentials or header values.
 - Captured content is hard-capped (100,000 UTF-8 bytes) on both
   `capture_thought` and `session_capture`; the REST gateway enforces the
   identical cap via the same shared schema module, plus a 1 MiB request-body
@@ -147,14 +207,32 @@ dumps can still read it.
 
 Six roles, least privilege, with drift detection:
 
-| Role                    | Privileges                                                                                                                                                                                                                                                                                                                                                                                       | Used by                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `postgres`              | superuser                                                                                                                                                                                                                                                                                                                                                                                        | init + DB admin (role provisioning / migrations) — never the app runtime. In the three-qube split it's reachable from the app qube's IP only for remote admin — a deliberate trade-off (a compromised app qube then has full DB admin, including an app→db OS pivot via `COPY … TO/FROM PROGRAM`); see [db-qube/README.md](../deploy/qubes/db-qube/README.md) and [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15) |
-| `openbrain_app`         | SELECT/INSERT/UPDATE on `thoughts` (+ scoped observability/sessions grants); SELECT/INSERT-only on metadata-degradation history, SELECT/INSERT/DELETE on its pending-delivery outbox, SELECT/UPDATE on its singleton delivery ledger, and SELECT of only the four native-token verification fields; **no thought/history DELETE or token mutation**, no schema-wide DML, and no role memberships | MCP server, daily summary, metadata notification worker                                                                                                                                                                                                                                                                                                                                                                          |
-| `openbrain_ingester`    | INSERT-only on `funnel_access_log`                                                                                                                                                                                                                                                                                                                                                               | log-ingester sidecar — it parses attacker-influenced log lines, so its blast radius is one table                                                                                                                                                                                                                                                                                                                                 |
-| `openbrain_monitor`     | SELECT on `funnel_access_log` only                                                                                                                                                                                                                                                                                                                                                               | host-side funnel monitor ([`scripts/funnel_monitor.sh`](../scripts/funnel_monitor.sh)) — its credential sits on the internet-adjacent edge, so it reads public-door request metadata but can never reach a thought or reason-coded auth event. Optional, like the ingester                                                                                                                                                       |
-| `openbrain_token_admin` | Lists token ID/prefix/label/timestamps and executes fixed register/revoke functions; cannot read hashes, memories, or mutate the table directly                                                                                                                                                                                                                                                  | profile-gated one-shot `token-admin` CLI; `NOLOGIN` when no password is provisioned                                                                                                                                                                                                                                                                                                                                              |
-| `openbrain_readonly`    | SELECT on everything + `BYPASSRLS` so full `pg_dump` works; no DML                                                                                                                                                                                                                                                                                                                               | trusted backup job, humans with psql/DBeaver                                                                                                                                                                                                                                                                                                                                                                                     |
+| Role                    | Privileges                                                                                                                                                                                                                                                                                                                                                                                       | Used by                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `postgres`              | superuser                                                                                                                                                                                                                                                                                                                                                                                        | init + DB admin (role provisioning / migrations) — never the app runtime. In the three-qube split it's reachable only through the app qube's dom0-gated ConnectTCP channel for remote admin — a deliberate trade-off (a compromised app qube then has full DB admin, including an app→db OS pivot via `COPY … TO/FROM PROGRAM`); see [db-qube/README.md](../deploy/qubes/db-qube/README.md) and [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15) |
+| `openbrain_app`         | SELECT/INSERT/UPDATE on `thoughts` (+ scoped observability/sessions grants); SELECT/INSERT-only on metadata-degradation history, SELECT/INSERT/DELETE on its pending-delivery outbox, SELECT/UPDATE on its singleton delivery ledger, and SELECT of only the four native-token verification fields; **no thought/history DELETE or token mutation**, no schema-wide DML, and no role memberships | MCP server, daily summary, metadata notification worker                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `openbrain_ingester`    | INSERT-only on `funnel_access_log`                                                                                                                                                                                                                                                                                                                                                               | log-ingester sidecar — it parses attacker-influenced log lines, so its blast radius is one table. In the three-qube split this role lives on the ingress qube's **local log sink**, not the corpus (see below)                                                                                                                                                                                                                                                 |
+| `openbrain_monitor`     | SELECT on `funnel_access_log` only                                                                                                                                                                                                                                                                                                                                                               | host-side funnel monitor ([`scripts/funnel_monitor.sh`](../scripts/funnel_monitor.sh)) — its credential sits on the internet-adjacent edge, so it reads public-door request metadata but can never reach a thought or reason-coded auth event. Optional, like the ingester; likewise on the sink in the split                                                                                                                                                  |
+| `openbrain_token_admin` | Lists token ID/prefix/label/timestamps and executes fixed register/revoke functions; cannot read hashes, memories, or mutate the table directly                                                                                                                                                                                                                                                  | profile-gated one-shot `token-admin` CLI; `NOLOGIN` when no password is provisioned                                                                                                                                                                                                                                                                                                                                                                            |
+| `openbrain_readonly`    | SELECT on everything + `BYPASSRLS` so full `pg_dump` works; no DML                                                                                                                                                                                                                                                                                                                               | trusted backup job, humans with psql/DBeaver                                                                                                                                                                                                                                                                                                                                                                                                                   |
+
+**Where those roles actually live in the three-qube split.** The corpus on the
+db qube holds only `postgres`, `openbrain_app`, `openbrain_readonly`, and
+`openbrain_token_admin` — every one of them reachable from the app qube alone.
+`openbrain_ingester` and `openbrain_monitor` are roles on a **separate
+cluster**: the ingress qube's local Funnel-log sink, a socket-only Postgres
+holding two request-metadata relations and nothing else
+([`deploy/qubes/ingress-qube/README.md`](../deploy/qubes/ingress-qube/README.md#local-log-sink)).
+That cluster adds a third, `openbrain_logs_rollup`, for the daily summary and
+retention pass — named apart from `openbrain_app` so no secret on the
+internet-facing qube shares a name with an app-role secret.
+
+The point is not the grants but the layer they sit at. Grants are enforced
+_inside_ Postgres, above where a pre-auth wire-protocol or SCRAM-handshake flaw
+would live; an INSERT-only role bounds a well-behaved client, not one that never
+reaches the grant check. Moving the edge's store onto the edge removes the route
+instead of narrowing what can be done over it. Single-host installs keep all six
+roles in one database, where this distinction does not arise.
 
 `db/06-spaces.sql` forces RLS on thoughts, sessions, and artifacts for the
 application role. Missing transaction context matches no rows, personal rows
@@ -224,13 +302,19 @@ security review.
   warnings otherwise serialize the full request header map (incl. a Bearer) to
   `docker logs`; the ingester additionally keeps only UA + Host from headers and
   strips query strings.
-- Every 401 inserts a reason-coded row into `mcp_auth_events` (fire-and-forget,
-  with an in-flight cap so a 401 flood can't queue unbounded memory).
+- Each auth decision enqueues a row into `mcp_auth_events` — reason-coded
+  denials AND per-request admissions with the verified identity
+  (fire-and-forget, with an in-flight cap so a 401 flood can't queue unbounded
+  memory; best-effort semantics above — either outcome can drop under
+  saturation).
 - Successful writes carry the server-owned credential label and verified
   subject, distinguishing `service` machine identities from `funnel` user
-  identities. Successful reads have no application-level identity audit in this
-  release; Caddy retains request metadata only. Failed tokens are not classified
-  as machine or user because their unverified claims are attacker-controlled.
+  identities. Reads are covered at request-level granularity by the best-effort
+  `mcp_auth_events` admission row (who authenticated, to which path, when —
+  delivery gaps possible and self-announcing); there is no per-tool or per-row
+  read audit in this release — Caddy retains request metadata only. Failed
+  tokens are not classified as machine or user because their unverified claims
+  are attacker-controlled.
 - Every degraded classification appends history plus a transactional outbox row
   in the thought transaction. The optional Pushover/ntfy worker consumes only
   committed queue rows and selects finite codes and counts—never thought
@@ -323,6 +407,9 @@ security review.
 - **Edge↔store isolation (Qubes path)** — resolved by the
   [three-qube split](../deploy/qubes/three-qube-design.md): Funnel + Caddy
   (ingress qube), mcp + Ollama (app qube), and Postgres (db qube) run in
-  separate VMs over a firewall-scoped tailnet, so a compromised public edge
-  holds no memory store and no app credential. The single-host install paths
-  still co-locate these by design (one trust boundary).
+  separate VMs, so a compromised public edge holds no memory store and no app
+  credential. The ingress→app hop rides a dom0-policy-gated `qubes.ConnectTCP`
+  channel (the app qube has no network-facing listener); the app→db hop rides a
+  second such channel (the db qube's Postgres binds loopback only — no tailnet
+  listener). The single-host install paths still co-locate these by design (one
+  trust boundary).

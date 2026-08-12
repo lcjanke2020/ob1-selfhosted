@@ -1,10 +1,15 @@
-// Lightweight, non-blocking auth-event audit emitter.
+// Lightweight, non-blocking auth-event audit emitter — both outcomes.
 //
 // `requireAuth` in auth.ts calls `logAuthFailure()` from its 401 / JSON-RPC
-// error branches. Calls are fire-and-forget (queueMicrotask + a
-// promise we don't await) so the 401 response goes out at the same
-// latency as before — Postgres downtime can't extend an auth-failure
-// response.
+// error branches and `logAuthSuccess()` from each authenticated branch, so
+// `mcp_auth_events` records who is turned away AND who is let in (the
+// success side is what makes "who accessed this server in the last N days"
+// answerable from local data — previously only rejections left a trace.
+// Best-effort: under backpressure or DB distress events are dropped, counted,
+// and warned, so treat the table as telemetry with drop evidence, not a
+// gap-free ledger). Calls are fire-and-forget (queueMicrotask + a
+// promise we don't await) so neither the 401 nor the authenticated
+// response waits on Postgres — downtime there can't extend request latency.
 //
 // The emitter is a no-op when:
 //   - The audit pool can't be constructed (e.g., DB_PASSWORD missing in a
@@ -16,9 +21,12 @@
 //     table to assert against the response shape.
 //
 // Sensitive-data discipline: this module accepts a finite-set `reason`
-// code (not user-controlled text), the matched Hono route `path`, and
-// the client IP from an X-Forwarded-For-style header. NO bodies, NO
-// header values beyond the IP itself.
+// code (not user-controlled text), the matched Hono route `path`, the
+// client IP from an X-Forwarded-For-style header, and a server-VERIFIED
+// identity (the JWT `sub` that passed signature checks, or a verified
+// native-token label). NO bodies, NO credentials, NO header values beyond
+// the IP itself — identity lands here only after verification, never as
+// presented text.
 
 import { Pool, type PoolClient } from "postgres";
 import { getClient } from "./db_pool.ts";
@@ -121,9 +129,16 @@ const pool: Pool | null = !FORCE_DISABLED && DB_PASSWORD
 //   'Token validation failed'          → 'token_validation_failed'
 //   'Invalid credentials'              → 'invalid_credentials'
 //   'Missing or unsupported credentials' → 'missing_credentials'
+// 'subject_not_allowed' has no operator-facing string of its own (the
+// response stays the uniform 401 envelope): it marks a Bearer that passed
+// every cryptographic check but whose verified `sub` is not on the
+// OAUTH_ALLOWED_SUBJECTS allowlist — the one failure class where a real,
+// tenant-minted identity knocked and was refused, so the row carries that
+// verified subject for the operator to inspect.
 export type AuthFailureReason =
   | "invalid_brain_key"
   | "token_validation_failed"
+  | "subject_not_allowed"
   | "invalid_credentials"
   | "missing_credentials";
 
@@ -136,6 +151,24 @@ export type AuthMiddleware = "require_auth";
 export interface AuthFailureRecord {
   reason: AuthFailureReason;
   middleware: AuthMiddleware;
+  clientIp?: string | null;
+  path?: string | null;
+  // Server-VERIFIED subject, set only for 'subject_not_allowed' (the sub
+  // passed signature/issuer/audience checks before the allowlist refused
+  // it). Never populated from unverified request text.
+  subject?: string | null;
+}
+
+// Success-side record — one per authenticated request. Field semantics
+// mirror AuthContext (auth_context.ts): OAuth doors carry the verified
+// `sub` and a null tokenLabel; the tailnet door carries a null subject and,
+// for rotatable native tokens, the verified label (both null on the legacy
+// static shared key — that credential simply has no per-holder identity).
+export interface AuthSuccessRecord {
+  door: "funnel" | "tailnet" | "service";
+  middleware: AuthMiddleware;
+  subject?: string | null;
+  tokenLabel?: string | null;
   clientIp?: string | null;
   path?: string | null;
 }
@@ -151,7 +184,23 @@ function logRateLimited(msg: string): void {
   }
 }
 
-async function doInsert(rec: AuthFailureRecord): Promise<void> {
+// Internal row shape both public entries reduce to — one INSERT statement,
+// one backpressure path, whichever outcome. Matches the mcp_auth_events
+// columns in db/02-observability.sql (outcome/door/subject/token_label are
+// the success-audit additions; denied rows leave door/token_label null and
+// carry a subject only for 'subject_not_allowed').
+interface AuthEventRow {
+  outcome: "allowed" | "denied";
+  reason: AuthFailureReason | null;
+  middleware: AuthMiddleware;
+  door: "funnel" | "tailnet" | "service" | null;
+  subject: string | null;
+  tokenLabel: string | null;
+  clientIp: string | null;
+  path: string | null;
+}
+
+async function doInsert(row: AuthEventRow): Promise<void> {
   if (!pool) return;
   let client: PoolClient | null = null;
   try {
@@ -164,13 +213,18 @@ async function doInsert(rec: AuthFailureRecord): Promise<void> {
     // borrow, so the pool self-heals on the *next* audit insert.
     client = await getClient(pool, 1);
     await client.queryArray(
-      `INSERT INTO mcp_auth_events (reason, middleware, client_ip, path)
-       VALUES ($1, $2, $3::inet, $4)`,
+      `INSERT INTO mcp_auth_events
+         (outcome, reason, middleware, door, subject, token_label, client_ip, path)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::inet, $8)`,
       [
-        rec.reason,
-        rec.middleware,
-        rec.clientIp ?? null,
-        rec.path ?? null,
+        row.outcome,
+        row.reason,
+        row.middleware,
+        row.door,
+        row.subject,
+        row.tokenLabel,
+        row.clientIp,
+        row.path,
       ],
     );
   } catch (e) {
@@ -180,15 +234,18 @@ async function doInsert(rec: AuthFailureRecord): Promise<void> {
   }
 }
 
-// Public entry. Fire-and-forget; never throws.
-export function logAuthFailure(rec: AuthFailureRecord): void {
+// Shared fire-and-forget scheduler behind both public entries; never throws.
+function enqueue(row: AuthEventRow): void {
   if (!pool) return;
   // Synchronous backpressure check. If too many inserts are
   // already in flight (postgres is lagging or briefly unavailable), drop
   // this audit event instead of letting the microtask queue grow without
   // bound. The check is synchronous-before-queueMicrotask so a sustained
   // sync-loop flood (e.g. one 401 per request handler turn) hits the cap
-  // deterministically. The 401 response shape is unaffected.
+  // deterministically. The cap is shared across outcomes deliberately:
+  // it exists to protect the mcp process's memory, and response shape is
+  // unaffected either way — under flood-induced drop the raw Caddy access
+  // log remains the fallback record.
   if (inFlight >= MAX_IN_FLIGHT) {
     droppedTotal++;
     droppedSinceLastWarn++;
@@ -196,18 +253,48 @@ export function logAuthFailure(rec: AuthFailureRecord): void {
     return;
   }
   inFlight++;
-  // Don't await — the 401 response should not wait for postgres. queueMicrotask
+  // Don't await — the response should not wait for postgres. queueMicrotask
   // schedules the work after the current sync turn so the response.send
   // chain isn't disturbed. inFlight is decremented in the finally regardless
   // of insert success/failure.
   queueMicrotask(() => {
-    doInsert(rec)
+    doInsert(row)
       .catch((e) => {
         logRateLimited(`unexpected throw: ${(e as Error).message}`);
       })
       .finally(() => {
         inFlight--;
       });
+  });
+}
+
+// Public entry — rejection rows. Fire-and-forget; never throws.
+export function logAuthFailure(rec: AuthFailureRecord): void {
+  enqueue({
+    outcome: "denied",
+    reason: rec.reason,
+    middleware: rec.middleware,
+    door: null,
+    subject: rec.subject ?? null,
+    tokenLabel: null,
+    clientIp: rec.clientIp ?? null,
+    path: rec.path ?? null,
+  });
+}
+
+// Public entry — one row per authenticated request. Fire-and-forget; never
+// throws, and callers do not await it, so a Postgres stall can't delay the
+// authenticated response it records.
+export function logAuthSuccess(rec: AuthSuccessRecord): void {
+  enqueue({
+    outcome: "allowed",
+    reason: null,
+    middleware: rec.middleware,
+    door: rec.door,
+    subject: rec.subject ?? null,
+    tokenLabel: rec.tokenLabel ?? null,
+    clientIp: rec.clientIp ?? null,
+    path: rec.path ?? null,
   });
 }
 

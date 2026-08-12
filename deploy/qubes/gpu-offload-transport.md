@@ -23,14 +23,20 @@
 >    in the qubes-os-explorations repo. This doc is the OB1-specific how-to.
 
 ```
-mcp container ──(compose-bridge gateway :11434)──▶ socat  [app qube host]
-                                                     └─ qubes.ConnectTCP+11434 (qrexec) ─▶ <gpu-qube> 127.0.0.1:11434
+mcp container ──(app qube's own IP :11434)──▶ socat  [app qube host]
+                                                └─ qubes.ConnectTCP+11434 (qrexec) ─▶ <gpu-qube> 127.0.0.1:11434
 ```
 
 Placeholders below: `<app-qube>` = the qube running this compose project,
-`<gpu-qube>` = the qube with the GPU + the loopback model server, `<compose-gw>`
-= the gateway IP of this project's docker bridge (see step 2). `11434` is the
+`<gpu-qube>` = the qube with the GPU + the loopback model server, `<qube-ip>` =
+the app qube's own IP (`qubesdb-read /qubes-ip` — see step 2). `11434` is the
 ollama port; substitute your server's port throughout.
+
+This doc assumes the deployed **rootless** docker posture
+([Qubes README § Rootless docker](README.md#rootless-docker-the-deployed-engine-posture)),
+where the forwarder binds the qube's own IP and no firewall rule is needed; the
+rootful variant (bridge-gateway bind + a `custom-input` accept) is kept as a
+note in step 3.
 
 ---
 
@@ -47,10 +53,9 @@ forwarder accepts the TCP connection, the qrexec call is refused, the connection
 closes with no timeout burn, fallback classifies in the same request, and the
 GPU qube stays halted. Re-enable by starting the GPU qube; no code or config
 change is required (the extractor is endpoint-agnostic). To park the transport
-entirely, additionally stop + disable the forwarder unit, remove its rc.local
-restage lines, and drop the step-3 accept stanza from
-`qubes-firewall-user-script` — otherwise the firewall hook re-adds the
-(now-listenerless) `:11434` accept at each boot.
+entirely, additionally stop + disable the forwarder unit and remove its rc.local
+restage lines (under the rootless posture there is no firewall stanza to unwind;
+on the rootful variant, also drop the step-3 `br-*` accept).
 
 ---
 
@@ -108,10 +113,12 @@ reboot.)
 
 ```bash
 #!/bin/bash
+# Bind the qube's OWN IP: under rootless docker the mcp container reaches its
+# host via slirp4netns at that address (the packet arrives on lo, which the
+# qubes input chain accepts); eth0/tailscale peers are covered by the qubes
+# input default-drop — no accept rule exists for :11434.
 set -e
-# Bind to THIS compose project's bridge gateway (see the gotcha below) so the
-# mcp container can reach it — not docker0 / host.docker.internal.
-BIND_IP="<compose-gw>"
+BIND_IP="$(qubesdb-read /qubes-ip)"
 exec socat TCP-LISTEN:11434,fork,reuseaddr,bind="${BIND_IP}" \
   EXEC:'/usr/bin/qrexec-client-vm <gpu-qube> qubes.ConnectTCP+11434'
 ```
@@ -125,16 +132,15 @@ chmod +x /rw/config/ob1-ollama-forward.sh
 
 (No port clash with the compose stack's own `ollama` container: that publishes
 `127.0.0.1:11434` — the CPU-only **embeddings** server — while the forwarder
-binds the same port on a different address, the bridge gateway. Two sockets, two
+binds the same port on a different address, the qube's own IP. Two sockets, two
 roles; the CPU ollama keeps serving embeddings either way.)
 
 `/rw/config/ob1-ollama-forward.service`:
 
 ```ini
 [Unit]
-Description=OB1 ollama forwarder (compose-gw:11434 -> <gpu-qube> via qrexec ConnectTCP)
-After=docker.service qubes-network.service
-Wants=docker.service
+Description=OB1 ollama forwarder (qube-ip:11434 -> <gpu-qube> via qrexec ConnectTCP)
+After=qubes-network.service
 [Service]
 ExecStart=/rw/config/ob1-ollama-forward.sh
 Restart=always
@@ -143,95 +149,73 @@ RestartSec=2
 WantedBy=multi-user.target
 ```
 
-**Gotcha — inter-bridge isolation.** A container on a _user-defined_ docker
-bridge (any compose project) **cannot** reach `docker0` / `host.docker.internal`
-— docker isolates bridges from each other. Bind the forwarder to the container's
-**own** compose-network gateway and point `CHAT_API_BASE` there. Find the
-gateway:
+(No docker dependency: the bind address is the qube's own IP, which exists as
+soon as qubes networking is up — the unit no longer waits on a compose bridge,
+and `Restart=always` converges over anything transient.)
 
-```sh
-docker network inspect <project>_default -f '{{(index .IPAM.Config 0).Gateway}}'
-```
+**Why the qube's own IP — and why not a bridge gateway.** Two docker facts
+combine here. A container on a _user-defined_ bridge cannot reach `docker0` /
+`host.docker.internal` (inter-bridge isolation) — that rules out the obvious
+targets under any engine. And under **rootless** docker the compose bridge
+itself lives inside rootlesskit's network namespace, so a host-side bind on the
+bridge-gateway IP (the rootful-era answer) is unreachable from the host side
+entirely. What does work is slirp4netns's own path: a container connecting to
+its **host's own IP** is delivered to the host on `lo`. The qube's IP is also
+stable across compose recreates — no subnet pinning needed.
 
-For a _stable_ gateway across recreates, pin the subnet/gateway in a local,
-uncommitted `docker-compose.override.yml` next to
-[`app-qube/docker-compose.yml`](app-qube/docker-compose.yml) (compose
-auto-merges an override that sits beside the base file; keeping it local and
-uncommitted keeps your private subnet out of git):
+## 3. Qubes firewall — nothing to add (rootless)
 
-```yaml
-networks:
-  default:
-    ipam:
-      config:
-        - subnet: <your-private-/24>
-          gateway: <compose-gw>
-```
+Qubes' nft `input` chain is **policy-drop**, which is exactly why the qube-IP
+bind works with no rule: slirp4netns delivers container→own-host-IP traffic to
+the host on **`lo`**, and the stock chain accepts loopback. Meanwhile
+eth0/tailscale peers get the default-drop — no accept rule exists for `:11434`,
+so only this qube's own workloads can reach the forwarder.
 
-## 3. Qubes firewall (custom-input)
-
-Qubes' nft `input` chain is **policy-drop**, so a container→host packet to
-`:11434` is silently dropped. Add an accept to `custom-input` in
-`/rw/config/qubes-firewall-user-script`, **before** its trailing `exit 0`:
-
-```bash
-# Allow docker user-defined bridges (br-*) -> host :11434 (the forwarder).
-if ! nft list chain ip qubes custom-input 2>/dev/null | grep -q 'dport 11434'; then
-  nft add rule ip qubes custom-input iifname "br-*" tcp dport 11434 ct state new accept
-fi
-```
-
-`qubes-firewall` runs this script when its worker starts — boot or a service
-restart. An ordinary firewall **reload** reapplies the QubesDB rules but does
-_not_ re-run the user script, so treat this as boot-time persistence (the rule,
-once added, stays in the chain for the qube's uptime). Two scope caveats:
-
-- **`br-*` matches every docker user-defined bridge on the qube**, not just this
-  project's — fine on a single-purpose app qube, where the OB1 bridge is the
-  only one. If the qube runs other compose projects, pin the rule to this
-  project's bridge instead: give the bridge a fixed name in the override file
-  (`driver_opts: {com.docker.network.bridge.name: …}` under the network) — the
-  default `br-<id>` name changes whenever the network is recreated.
-- **The hook only runs where the `qubes-firewall` service flag is on** (check
-  `systemctl is-active qubes-firewall`); on qubes without it the script sits
-  unexecuted and the rule silently never appears. The step-4 rc.local block
-  mirrors the rule so those qubes get it too.
+> **Rootful variant (historical / non-rootless installs).** Under a rootful
+> daemon the compose bridge is a host-side `br-*` interface: bind the forwarder
+> to _this project's_ bridge-gateway IP (find it with
+> `docker network inspect <project>_default -f
+> '{{(index .IPAM.Config 0).Gateway}}'`;
+> pin subnet/gateway in a local, uncommitted `docker-compose.override.yml` for
+> stability), and add a `custom-input` accept, since that path is _not_
+> loopback:
+>
+> ```bash
+> nft add rule ip qubes custom-input iifname "br-*" tcp dport 11434 ct state new accept
+> ```
+>
+> Caveats that made this the more fragile shape: `br-*` matches every
+> user-defined bridge on the qube; the default `br-<id>` name changes when the
+> network is recreated; and the `qubes-firewall` hook that would apply the
+> script never fires on a qube that doesn't route other qubes — the rule needs a
+> one-shot unit or an rc.local mirror. The qube-IP bind above retires all of it.
 
 ## 4. Persistence (rc.local)
 
 `/etc/systemd` is reset from the template each boot, so restage + enable the
-forwarder unit from `/rw/config` in `/rw/config/rc.local` — placed **after the
-docker start** in [`app-qube/rc.local`](app-qube/rc.local)'s boot order (the
-forwarder binds the compose gateway, so starting it earlier just leaves
-`Restart=always` spinning until docker has created the bridge):
+forwarder unit from `/rw/config` in `/rw/config/rc.local` — the shipped
+[`app-qube/rc.local`](app-qube/rc.local) carries exactly this block (guarded:
+absent files = transport not installed, boot carries on cleanly):
 
 ```bash
 if [ -f /rw/config/ob1-ollama-forward.service ]; then
   cp /rw/config/ob1-ollama-forward.service /etc/systemd/system/
   systemctl daemon-reload
   systemctl enable --now ob1-ollama-forward.service
-
-  # Mirror of the step-3 firewall rule (idempotent) — covers qubes where the
-  # qubes-firewall service flag is off and the user-script hook never runs.
-  # Inside the same guard so a parked transport doesn't re-add the accept from
-  # here; the step-3 stanza still does where the hook runs — remove it too when
-  # parking (see the degradation section).
-  if ! nft list chain ip qubes custom-input 2>/dev/null | grep -q 'dport 11434'; then
-    nft add rule ip qubes custom-input iifname "br-*" tcp dport 11434 ct state new accept
-  fi
 fi
 ```
 
-(`Restart=always` lets the unit converge once docker is up; where the
-qubes-firewall hook does run, it re-applies the step-3 rule at boot as well —
-this mirror just removes the service-flag dependency.)
+(Ordering doesn't matter under rootless — the qube's own IP exists as soon as
+qubes networking is up, and the rootless daemon is the operator account's user
+service, started by linger independently of rc.local.)
 
 ## 5. Wire it to OB1
 
-In the app qube's `.env`:
+In the app qube's `.env` (`<qube-ip>` = `qubesdb-read /qubes-ip` on the app
+qube):
 
 ```dotenv
-CHAT_API_BASE=http://<compose-gw>:11434/v1
+CHAT_API_BASE=http://<qube-ip>:11434/v1
 CHAT_MODEL=<your-served-model>
 # CHAT_API_KEY blank for a local ollama (no auth)
 ENABLE_PRIMARY_EXTRACTION=true
@@ -416,9 +400,9 @@ front of a capture. Two companion settings, same qube:
   rollups, plus the legacy log-monitor fallback, are in
   [`docs/metadata-degradation-monitoring.md`](../../docs/metadata-degradation-monitoring.md).
 - **Verify the transport:** from the app-qube host,
-  `curl http://<compose-gw>:11434/v1/models` (should list the model); from
-  inside the container,
-  `docker exec <mcp-container> deno eval 'console.log((await fetch("http://<compose-gw>:11434/v1/models")).status)'`
+  `curl http://<qube-ip>:11434/v1/models` (should list the model); from inside
+  the container,
+  `docker exec <mcp-container> deno eval 'console.log((await fetch("http://<qube-ip>:11434/v1/models")).status)'`
   should print `200`.
 - **Then verify classification — transport alone isn't enough.** `/v1/models`
   proves the path, but the extractor actually POSTs `/chat/completions` with a

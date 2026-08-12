@@ -54,6 +54,27 @@ USER deno
 #              DB_HOST is set (e.g. a dedicated DB qube). Kept SCOPED rather than
 #              dropped to unrestricted `--allow-net` like mcp, so a compromised
 #              ingester still can't reach the outside world.
+#              UNIX-SOCKET DB_HOST (an absolute path — the ingress qube's local
+#              log sink) is ALSO a --allow-net permission, not a filesystem
+#              one: Deno describes a unix connect as `unix:<socket path>` and
+#              requires --allow-net for it, on top of --allow-read AND
+#              --allow-write on the path (all three, verified against Deno
+#              2.9; read-and-write alone fails with "Requires net access to
+#              unix:…"). The scope is enforced — a `unix:` value naming a
+#              different path is rejected — so the socket branch grants exactly
+#              one socket file and NO TCP host whatsoever, which is strictly
+#              tighter than the TCP branch it replaces.
+#              DB_HOST itself should be the socket DIRECTORY — the contract
+#              dbHostType() in log_ingester.ts documents, and the shape every
+#              env example ships. The grant still lists both spellings
+#              because the driver stats the path and branches
+#              (#openSocketConnection): a directory gets `.s.PGSQL.$DB_PORT`
+#              appended, while a path that stats as a FILE is connected to
+#              as-is — the grant tracks the driver's reach, not just the
+#              documented convention.
+#              The compose service additionally runs `network_mode: none`, so
+#              the container has no network stack to reach even if this grant
+#              were wider.
 # --allow-env  The 8 vars log_ingester.ts reads explicitly + the 7 PG*
 #              vars `deno-postgres@v0.19.3` reads internally at Pool
 #              construction time. log_ingester.ts:83 passes explicit
@@ -84,7 +105,13 @@ USER deno
 #                override can't strand the container in a NotCapable loop
 #                against the hard-coded defaults; overriding the cursor
 #                dir still needs a writable mount at the new path.
-# --allow-write  the cursor dir only. Cursor files (<basename>.cursor)
+#                A unix-socket DB_HOST is added to BOTH read and write:
+#                Deno requires each separately for `Deno.connect({ transport:
+#                "unix" })`, and the driver stats the directory before
+#                appending `.s.PGSQL.<port>`. It is added only on the socket
+#                branch, so a TCP deployment gains no filesystem reach.
+# --allow-write  the cursor dir (plus a unix-socket DB_HOST, above). Cursor
+#                files (<basename>.cursor)
 #                live in a SEPARATE volume from the log files
 #                (caddy_cursors, mounted RW only here): the ingester runs
 #                as the non-root `deno` user and caddy creates the
@@ -92,13 +119,21 @@ USER deno
 #                writing cursors there would fail with EACCES. The
 #                default path is non-nested vs caddy_logs to avoid the
 #                read-only-rootfs + nested-mountpoint init failure.
-# `sh -c` wrapper so ${DB_HOST}/${DB_PORT} expand into the --allow-net target at
+# `sh -c` wrapper so ${DB_HOST}/${DB_PORT} expand into the permission targets at
 # start (exec-form CMD doesn't expand env); `exec` keeps deno as PID 1. The
 # wrapper is the ENTRYPOINT and the entrypoint .ts is the CMD (forwarded as
 # "$@"): keeps it overridable, and the --allow-env drift check
 # (scripts/check_allow_env.ts) finds the quoted .ts in CMD. Defaults preserve
-# the bundled-postgres behavior. IPv6 hosts (a tailnet DB qube may be addressed
-# by its IPv6) are bracketed — Deno requires `--allow-net=[::1]:5432` form — by
-# testing the host for a colon.
-ENTRYPOINT ["sh", "-c", "H=${DB_HOST:-postgres}; case \"$H\" in *:*) NET=\"[$H]:${DB_PORT:-5432}\" ;; *) NET=\"$H:${DB_PORT:-5432}\" ;; esac; L=${CADDY_LOG_DIR:-/var/log/caddy}; C=${INGESTER_CURSOR_DIR:-/var/lib/ingester/cursors}; exec deno run --allow-net=\"$NET\" --allow-env=DB_HOST,DB_PORT,DB_NAME,DB_USER,DB_PASSWORD,CADDY_LOG_DIR,INGESTER_POLL_INTERVAL_MS,INGESTER_CURSOR_DIR,PGAPPNAME,PGDATABASE,PGHOST,PGOPTIONS,PGPASSWORD,PGPORT,PGUSER --allow-read=\"$L,$C,/app\" --allow-write=\"$C\" \"$@\"", "sh"]
+# the bundled-postgres behavior.
+#
+# THREE host shapes, one `case`, keeping every flag a self-contained
+# `--opt=value` token (the drift check's parsing contract — see --allow-net
+# above):
+#   /*    unix socket            → dbHostType() in log_ingester.ts routes the
+#         driver to `transport: "unix"`. Net grant names the socket FILE (both
+#         spellings, see above); read+write cover the path. No TCP host.
+#   *:*   IPv6 literal           → bracketed; Deno requires
+#         `--allow-net=[::1]:5432` form.
+#   *     hostname or IPv4       → the historical default.
+ENTRYPOINT ["sh", "-c", "H=${DB_HOST:-postgres}; P=${DB_PORT:-5432}; L=${CADDY_LOG_DIR:-/var/log/caddy}; C=${INGESTER_CURSOR_DIR:-/var/lib/ingester/cursors}; case \"$H\" in /*) NET=\"unix:$H,unix:$H/.s.PGSQL.$P\"; RD=\"$L,$C,/app,$H\"; WR=\"$C,$H\" ;; *:*) NET=\"[$H]:$P\"; RD=\"$L,$C,/app\"; WR=\"$C\" ;; *) NET=\"$H:$P\"; RD=\"$L,$C,/app\"; WR=\"$C\" ;; esac; exec deno run --allow-net=\"$NET\" --allow-env=DB_HOST,DB_PORT,DB_NAME,DB_USER,DB_PASSWORD,CADDY_LOG_DIR,INGESTER_POLL_INTERVAL_MS,INGESTER_CURSOR_DIR,PGAPPNAME,PGDATABASE,PGHOST,PGOPTIONS,PGPASSWORD,PGPORT,PGUSER --allow-read=\"$RD\" --allow-write=\"$WR\" \"$@\"", "sh"]
 CMD ["log_ingester.ts"]

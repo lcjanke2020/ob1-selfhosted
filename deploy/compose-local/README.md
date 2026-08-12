@@ -201,6 +201,13 @@ older, update the pinned pgvector image/package and run
 `ALTER EXTENSION vector UPDATE;` before the migration:
 
 ```bash
+# 1.20.0+: converges mcp_auth_events to the allowed+denied audit shape in
+# place (idempotent). The server's boot probe refuses to start against the
+# old denied-only shape, so skipping this step turns the container roll
+# below into a loud restart loop rather than a silently dead audit trail.
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/02-observability.sql
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/05-hybrid-search.sql
@@ -221,6 +228,12 @@ docker compose exec -T postgres \
 docker compose build mcp
 docker compose up -d --no-deps mcp
 ```
+
+> **Upgrading to 1.20.0+ with the OAuth door enabled?** Set
+> `OAUTH_ALLOWED_SUBJECTS` in `.env` **before** the `up -d` roll — the new
+> in-app allowlist fails closed, so rolling without it rejects every Bearer
+> token (the native/static door is unaffected; the boot log warns). See the
+> variable's comment block in `.env.example`.
 
 The migration backfills a stored `tsvector` under an access-exclusive lock that
 is held through both regular GIN index builds until commit, blocking searches

@@ -5,10 +5,13 @@
 # application half ONLY:
 #
 #   mcp     — The Open Brain MCP server (Deno + Hono). Published on
-#             0.0.0.0:8787 so the ingress qube's Caddy can reach it over the
-#             tailnet (see the 3-layer scoping note on the `ports` key below).
+#             127.0.0.1:8787 ONLY — the ingress qube's Caddy reaches it over a
+#             dom0-policy-gated qubes.ConnectTCP channel, not a network
+#             listener (see the note on the `ports` key below).
 #             Connects to the canonical Postgres on the dedicated DB qube
-#             (DB_HOST in .env), writing thoughts as the openbrain_app role.
+#             through the host-side ob1-db-forward ConnectTCP forwarder
+#             (DB_HOST in .env = this qube's own IP), writing thoughts as
+#             the openbrain_app role.
 #   ollama  — Embeddings, CPU-only (a Qubes app qube has no GPU passthrough).
 #             Point OLLAMA_URL at an external GPU box to offload it.
 #
@@ -17,9 +20,11 @@
 # the file simply doesn't define them, so the app qube cannot start them.
 #
 # Credentials: this is the trusted compartment, so its .env holds the
-# admin/superuser POSTGRES_PASSWORD — used to administer the db qube REMOTELY over
-# the tailnet (role provisioning + schema/migrations), which the db-qube pg_hba
-# allows from THIS qube's IP only (a deliberate trade-off; see ../db-qube/README.md)
+# admin/superuser POSTGRES_PASSWORD — used to administer the db qube REMOTELY
+# through this qube's ConnectTCP forwarder (role provisioning + schema/
+# migrations); the db-qube pg_hba admits the superuser on loopback only,
+# reachable solely through the channel dom0 policy grants to THIS qube
+# (a deliberate trade-off; see ../db-qube/README.md)
 # — plus the openbrain_app password (mcp writes thoughts) and the openbrain_readonly
 # password (the encrypted backup job — see backup/). It never holds the
 # log-ingester credential; that lives only on the ingress qube.
@@ -27,11 +32,14 @@
 # Run (from this directory, after copying .env.example to .env):
 #   docker compose up -d
 #
-# Network lockdown: mcp's 0.0.0.0:8787 bind is scoped to the ingress qube by
-# THREE independent layers — Tailscale ACL, the host firewall
-# (qubes-firewall-user-script in this dir, a DOCKER-USER drop), and mcp app
-# auth. The bind itself grants no protection. See README.md + the firewall
-# script header.
+# Network lockdown: mcp has NO network-facing listener. It publishes on
+# loopback only; the ingress qube reaches it through a host-side forwarder +
+# qubes.ConnectTCP, with dom0 policy gating the channel and mcp's OAuth door
+# authenticating every request. See README.md § Ingress→app transport.
+#
+# The deployed posture runs this compose project under a ROOTLESS dockerd
+# (the operator account's systemd --user daemon) — see the Qubes README
+# § Rootless docker. The file itself is engine-agnostic.
 
 services:
   mcp:
@@ -57,11 +65,12 @@ services:
     # error line and `restart: unless-stopped` retries until it is back
     # (see the boot probe wired in server/db.ts).
     environment:
-      # The canonical Postgres lives on the dedicated DB qube. DB_HOST is
+      # The canonical Postgres lives on the dedicated DB qube, reached through
+      # the host-side ConnectTCP forwarder on this qube's own IP. DB_HOST is
       # MANDATORY here (no `postgres` service to fall back to): `:?` makes
       # compose fail at `config` time with this message rather than failing
       # only at connect time against a nonexistent host.
-      DB_HOST: ${DB_HOST:?set DB_HOST to the db qube tailnet address (the three-qube split has no local postgres)}
+      DB_HOST: ${DB_HOST:?set DB_HOST to this qube's own IP — the ob1-db-forward ConnectTCP forwarder (the three-qube split has no local postgres)}
       DB_PORT: ${DB_PORT:-5432}
       DB_NAME: ${POSTGRES_DB:-openbrain}
       DB_USER: openbrain_app
@@ -119,33 +128,45 @@ services:
       AUTH0_ISSUER: ${AUTH0_ISSUER:?set AUTH0_ISSUER (Qubes deployment is OAuth-only)}
       AUTH0_JWKS_URI: ${AUTH0_JWKS_URI:?set AUTH0_JWKS_URI (Qubes deployment is OAuth-only)}
       AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:?set AUTH0_AUDIENCE (Qubes deployment is OAuth-only)}
+      # REQUIRED in practice on this OAuth-only deployment: the in-app
+      # authorization allowlist of exact JWT `sub` claims. FAIL-CLOSED —
+      # left empty, the server boots but rejects EVERY Bearer token, so an
+      # empty value here is a deliberate lockout, not a permissive default.
+      # Compose deliberately does not `:?`-require it: the fail-closed
+      # runtime posture (plus the boot-log warning) is the contract, and a
+      # hard compose failure would block an operator intentionally sealing
+      # the door during an incident.
+      OAUTH_ALLOWED_SUBJECTS: ${OAUTH_ALLOWED_SUBJECTS:-}
       # Optional exact JWT subjects for non-Auth0 service-account attribution.
       # Auth0 client-credentials tokens are recognized from their signed gty.
+      # Attribution only — a machine subject must ALSO be present in
+      # OAUTH_ALLOWED_SUBJECTS above to be admitted.
       OAUTH_SERVICE_ACCOUNT_SUBJECTS: ${OAUTH_SERVICE_ACCOUNT_SUBJECTS:-}
       JWKS_FETCH_TIMEOUT_MS: ${JWKS_FETCH_TIMEOUT_MS:-10000}
       OBS_AUTH_EVENTS_ENABLED: ${OBS_AUTH_EVENTS_ENABLED:-true}
       OBS_AUTH_EVENTS_MAX_IN_FLIGHT: ${OBS_AUTH_EVENTS_MAX_IN_FLIGHT:-500}
       AUTH_BODY_READ_TIMEOUT_MS: ${AUTH_BODY_READ_TIMEOUT_MS:-2000}
       PORT: "8787"
-    # Published on ALL host interfaces (0.0.0.0) so the ingress qube's Caddy can
-    # reach mcp across qubes over the tailnet — the single-qube Pattern B kept
-    # this on loopback because Caddy shared the host; here Caddy is elsewhere.
-    # The bind grants no protection on its own; reachability is restricted to
-    # the ingress qube by three independent layers, none of which is the bind:
-    #   1. Tailscale ACL  — only the ingress qube → this qube:8787.
-    #   2. Host firewall  — a DOCKER-USER rule dropping :8787 from anything but
-    #      the ingress qube (docker DNAT bypasses the qubes INPUT chain, so the
-    #      rule must live in DOCKER-USER). See qubes-firewall-user-script here.
-    #   3. mcp app auth   — OAuth Bearer JWT (the only auth path; no x-brain-key).
+    # Loopback-only publish: nothing listens on eth0 or the tailnet. The
+    # ingress qube's Caddy reaches mcp over qubes.ConnectTCP — dom0 policy
+    #   qubes.ConnectTCP +8787 <ingress-qube> <app-qube> allow autostart=no
+    # gates the channel, and a socat forwarder on the ingress qube bridges
+    # Caddy's MCP_UPSTREAM to the qrexec call (../ingress-qube/
+    # ob1-mcp-forward.sh). qubes.ConnectTCP connects to 127.0.0.1:8787 on this
+    # qube, which is exactly this publish. An earlier revision published
+    # 0.0.0.0:8787 and scoped it with a Tailscale ACL grant + a DOCKER-USER
+    # host-firewall rule; the qrexec transport removes that listener class
+    # entirely — there is no wide bind left to scope, and no firewall state
+    # that must be continuously right. mcp's OAuth door still authenticates
+    # every request that arrives over the channel.
     ports:
-      - "0.0.0.0:8787:8787"
-    # To offload metadata classification to an external GPU box, reach a
-    # host-side forwarder on :11434 via THIS compose network's gateway — NOT
-    # host.docker.internal / docker0, which a container on a user-defined bridge
-    # can't reach (inter-bridge isolation). Find the gateway with:
-    #   docker network inspect app-qube_default -f '{{(index .IPAM.Config 0).Gateway}}'
-    # and set CHAT_API_BASE=http://<that-gateway-ip>:11434/v1. For a STABLE
-    # gateway, pin it in a local (uncommitted) docker-compose.override.yml.
+      - "127.0.0.1:8787:8787"
+    # To offload metadata classification to a GPU qube, reach the host-side
+    # forwarder on :11434 at THIS QUBE'S OWN IP (`qubesdb-read /qubes-ip`):
+    # under the deployed rootless docker a container reaches its own host via
+    # slirp4netns, so set CHAT_API_BASE=http://<qube-ip>:11434/v1. (The old
+    # compose-bridge-gateway bind is unreachable under rootless — the bridge
+    # lives inside rootlesskit's netns.) See ../gpu-offload-transport.md.
 
   ollama:
     # Pinned to the version currently in production (0.24.0). Bump deliberately
@@ -168,14 +189,3 @@ services:
 
 volumes:
   ollama_data:
-
-# Reaching a host-side GPU forwarder (see the CHAT_API_BASE note on the mcp
-# service) needs a stable gateway IP for THIS bridge. Pin it in a LOCAL,
-# uncommitted docker-compose.override.yml (keeps your private subnet out of
-# git) — compose auto-merges it:
-#   networks:
-#     default:
-#       ipam:
-#         config:
-#           - subnet: <your-private-/24>
-#             gateway: <your-gateway-ip>   # bind the forwarder + CHAT_API_BASE here

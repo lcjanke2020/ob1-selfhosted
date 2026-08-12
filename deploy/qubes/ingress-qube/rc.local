@@ -1,0 +1,64 @@
+#!/bin/sh
+# Ingress qube boot tasks.
+#
+# Install at: /rw/config/rc.local   (chmod +x)
+#
+# /etc/systemd/system is wiped on every AppVM reboot, so units that must persist
+# are stashed under /rw/config and (re)installed + enabled here at each boot.
+# Boot order: tailscaled → re-assert rootful docker OFF → custom-input firewall
+# one-shot → mcp forwarder.
+#
+# What is deliberately ABSENT: any docker start, and any compose self-heal. The
+# ingress stack runs under the operator account's ROOTLESS dockerd; the user
+# manager starts it at boot because the linger flag persists via the
+# /var/lib/systemd/linger bind-dir (see the Qubes README § Rootless docker),
+# and `restart: unless-stopped` resumes the containers. The Funnel rule
+# persists in tailscaled's own state (/var/lib/tailscale bind-dir).
+
+LOG=/var/log/ob1-ingress-boot.log
+exec >>"$LOG" 2>&1
+echo "=== rc.local $(date -Is) ==="
+
+# --- Tailscale ---
+# Same template note as the app qube: the shared template keeps tailscaled
+# DISABLED on purpose (enabling it in the template broke the template's apt
+# updates-proxy). Start it explicitly in the AppVM instead.
+systemctl start tailscaled
+
+# --- Rootful docker: off and unreachable, every boot ---
+# Same block as app-qube/rc.local, same reason: /etc (unit enablement) and
+# /etc/group (docker membership — root-equivalent by construction) are reset
+# from the shared template on every AppVM boot. This is the PUBLIC-EDGE qube,
+# where that re-assert matters most.
+systemctl disable --now docker.service docker.socket containerd.service 2>/dev/null || true
+systemctl mask docker.service docker.socket containerd.service 2>/dev/null || true
+gpasswd -d user docker 2>/dev/null || true
+# Tidy: a template-enabled docker.socket makes systemd create the rootful
+# socket inode at boot BEFORE the mask above lands — remove the dead inode.
+rm -f /var/run/docker.sock
+
+# --- Host firewall (custom-input rules) ---
+# The qubes-firewall service's hook doesn't fire on this qube, so this
+# one-shot (After=tailscaled) is what applies
+# /rw/config/qubes-firewall-user-script: tailnet SSH and a conservative :443
+# accept (see the script header for why :443 is not load-bearing on current
+# Tailscale). Guarded with a LOUD warning: silently skipping this block would
+# cost tailnet SSH at the next boot with nothing in the log to say why.
+if [ -f /rw/config/ob1-ingress-firewall.service ] \
+	&& [ -x /rw/config/qubes-firewall-user-script ]; then
+	cp /rw/config/ob1-ingress-firewall.service /etc/systemd/system/
+	systemctl daemon-reload
+	systemctl enable --now ob1-ingress-firewall.service
+else
+	echo "WARNING: ob1-ingress-firewall.service or qubes-firewall-user-script not staged in /rw/config — custom-input accepts (tailnet SSH) NOT applied this boot"
+fi
+
+# --- OB1 mcp forwarder (Caddy → app qube over qubes.ConnectTCP) ---
+# See ob1-mcp-forward.sh; Caddy's MCP_UPSTREAM points at it. Restart=always
+# converges if anything it needs isn't up yet. Guarded: absent file = not
+# staged yet, and the boot carries on cleanly.
+if [ -f /rw/config/ob1-mcp-forward.service ]; then
+	cp /rw/config/ob1-mcp-forward.service /etc/systemd/system/
+	systemctl daemon-reload
+	systemctl enable --now ob1-mcp-forward.service
+fi

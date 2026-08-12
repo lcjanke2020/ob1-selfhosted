@@ -386,40 +386,43 @@ if ((AUTH0_ISSUER || AUTH0_JWKS_URI || AUTH0_AUDIENCE) && !ENABLE_OAUTH) {
   );
 }
 
-// Auth0's default access-token profile identifies client-credentials tokens
-// with the signed `gty = "client-credentials"` claim. Its RFC 9068 profile and
-// many other issuers provide no grant-type claim even when the JWT is otherwise
-// valid. This optional exact-subject allowlist supplies that fallback.
-//
-// It changes attribution only, never authentication or authorization: every
-// token still has to pass signature/issuer/audience/algorithm/exp/sub checks,
-// and the verified `sub` remains the RLS principal. Values are not logged.
-function oauthServiceAccountSubjects(): ReadonlySet<string> {
-  const raw = optionalTrimmed("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
+// Shared parser for the two exact-subject env lists below. Both carry verified
+// JWT `sub` claims, so they share one contract: comma-separated, each entry
+// trimmed, non-empty, control-character-free, at most 1024 chars, no
+// duplicates, at most 256 entries. Error messages name the env var but never
+// echo entry values — boot logs must not become an identity inventory.
+// Takes the already-read raw value rather than reading the env itself: the
+// allow-env drift gate (scripts/check_allow_env.ts) requires every
+// optionalTrimmed() call to carry a string-literal key so env reads stay
+// statically auditable, so each caller below performs its own literal read.
+function oauthSubjectList(
+  envName: string,
+  raw: string,
+): ReadonlySet<string> {
   if (!raw) return new Set();
 
   const entries = raw.split(",").map((value) => value.trim());
   if (entries.some((value) => !value)) {
     throw new Error(
-      "OAUTH_SERVICE_ACCOUNT_SUBJECTS must be a comma-separated list of non-empty exact JWT subjects",
+      `${envName} must be a comma-separated list of non-empty exact JWT subjects`,
     );
   }
   if (entries.length > 256) {
     throw new Error(
-      "OAUTH_SERVICE_ACCOUNT_SUBJECTS must contain at most 256 subjects",
+      `${envName} must contain at most 256 subjects`,
     );
   }
 
   const subjects = new Set<string>();
   for (const entry of entries) {
     const subject = noControlCharacters(
-      "OAUTH_SERVICE_ACCOUNT_SUBJECTS entry",
+      `${envName} entry`,
       entry,
       1024,
     );
     if (subjects.has(subject)) {
       throw new Error(
-        "OAUTH_SERVICE_ACCOUNT_SUBJECTS must not contain duplicate subjects",
+        `${envName} must not contain duplicate subjects`,
       );
     }
     subjects.add(subject);
@@ -427,10 +430,52 @@ function oauthServiceAccountSubjects(): ReadonlySet<string> {
   return subjects;
 }
 
-export const OAUTH_SERVICE_ACCOUNT_SUBJECTS = oauthServiceAccountSubjects();
+// Auth0's default access-token profile identifies client-credentials tokens
+// with the signed `gty = "client-credentials"` claim. Its RFC 9068 profile and
+// many other issuers provide no grant-type claim even when the JWT is otherwise
+// valid. This optional exact-subject allowlist supplies that fallback.
+//
+// It changes attribution only, never authentication or authorization: every
+// token still has to pass signature/issuer/audience/algorithm/exp/sub checks
+// AND the OAUTH_ALLOWED_SUBJECTS authorization gate below, and the verified
+// `sub` remains the RLS principal. Values are not logged.
+export const OAUTH_SERVICE_ACCOUNT_SUBJECTS = oauthSubjectList(
+  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
+  optionalTrimmed("OAUTH_SERVICE_ACCOUNT_SUBJECTS"),
+);
 if (OAUTH_SERVICE_ACCOUNT_SUBJECTS.size > 0 && !ENABLE_OAUTH) {
   throw new Error(
     "OAUTH_SERVICE_ACCOUNT_SUBJECTS requires the OAuth door (all three AUTH0_* variables)",
+  );
+}
+
+// The OAuth door's AUTHORIZATION gate — the in-app subject allowlist.
+//
+// Verification (signature/issuer/audience/algorithm/exp/sub shape) proves the
+// token came from the configured tenant; it says nothing about WHICH accounts
+// the operator intends to admit. Tenant configuration alone must not be the
+// boundary: an Auth0 dashboard misconfiguration (an accidentally-enabled
+// social connection, an unintended signup flow) would otherwise equal full
+// access. `verifyBearer` therefore rejects any verified token whose `sub` is
+// not on this list.
+//
+// FAIL CLOSED: when the OAuth door is enabled and this list is unset or
+// empty, EVERY Bearer token is rejected. Misconfiguration denies rather than
+// allows. (Deliberately a runtime denial, not a boot refusal: on a
+// mixed-door deployment the x-brain-key door keeps working, and on an
+// OAuth-only deployment a hard boot-loop would take /health and /ready down
+// with it. index.ts warns loudly at boot instead.)
+//
+// Interaction with OAUTH_SERVICE_ACCOUNT_SUBJECTS: that list stays
+// attribution-only. A machine subject must ALSO appear here to be admitted —
+// listing a subject there never grants access.
+export const OAUTH_ALLOWED_SUBJECTS = oauthSubjectList(
+  "OAUTH_ALLOWED_SUBJECTS",
+  optionalTrimmed("OAUTH_ALLOWED_SUBJECTS"),
+);
+if (OAUTH_ALLOWED_SUBJECTS.size > 0 && !ENABLE_OAUTH) {
+  throw new Error(
+    "OAUTH_ALLOWED_SUBJECTS requires the OAuth door (all three AUTH0_* variables)",
   );
 }
 

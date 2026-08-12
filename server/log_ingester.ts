@@ -63,6 +63,39 @@ function optionalInt(name: string, fallback: number): number {
 const DB_HOST = optional("DB_HOST", "postgres");
 const DB_PORT = optionalInt("DB_PORT", 5432);
 const DB_NAME = optional("DB_NAME", "openbrain");
+
+/**
+ * Classify DB_HOST as a TCP hostname or a unix-socket DIRECTORY.
+ *
+ * An absolute path means the local log-sink deployment (ingress qube): the
+ * database is a sibling container sharing a socket directory, with no TCP
+ * listener anywhere — see deploy/qubes/ingress-qube/README.md § Local log
+ * sink. `deno-postgres` appends `.s.PGSQL.<port>` to the directory itself, so
+ * DB_PORT still selects the socket file.
+ *
+ * `host_type` must be passed EXPLICITLY. The driver's own default is
+ * "socket" only when NO host is provided; the moment one is
+ * (`params.hostname ?? pgEnv.hostname`), it defaults to "tcp" regardless of
+ * shape — see `createParams()` in deno-postgres@v0.19.3
+ * connection/connection_params.ts. Without this, an absolute path is handed
+ * to `Deno.connect({ transport: "tcp" })` and fails as a DNS lookup.
+ *
+ * The container needs THREE Deno permissions for the socket path, not two:
+ * `--allow-net=unix:<socket file>` plus `--allow-read` plus `--allow-write`.
+ * Deno classifies a unix connect as a NET operation described as
+ * `unix:<path>`, so read+write alone fails with "Requires net access to
+ * unix:…". Dockerfile.ingester's ENTRYPOINT derives all three from the same
+ * leading-slash test used here — keep the two in step.
+ *
+ * Only the ingester has this branch. mcp keeps the TCP path: it is the one
+ * client that never shares a host with its database (the app qube reaches the
+ * db qube over qubes.ConnectTCP), and giving it socket support would mean
+ * reworking server/Dockerfile's flat `--allow-read=/app` into the same
+ * host-shape-dependent permission wrapper this image's ENTRYPOINT carries.
+ */
+export function dbHostType(host: string): "tcp" | "socket" {
+  return host.startsWith("/") ? "socket" : "tcp";
+}
 // Default to the observability-only role. The compose env wires
 // this explicitly; the default is here so a direct `deno run` invocation
 // (dev / one-off) picks up the right role too.
@@ -93,6 +126,7 @@ const UA_MAX_LEN = 200;
 const pool = new Pool(
   {
     hostname: DB_HOST,
+    host_type: dbHostType(DB_HOST),
     port: DB_PORT,
     database: DB_NAME,
     user: DB_USER,

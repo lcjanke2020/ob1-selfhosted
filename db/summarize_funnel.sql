@@ -1,4 +1,22 @@
--- Daily summary + retention enforcement.
+-- Daily summary + retention enforcement — the FUNNEL ACCESS half.
+--
+-- Owns exactly two relations: `funnel_access_log` (raw, 30-day) and
+-- `funnel_access_summary` (aggregate, 365-day). It touches nothing else, and
+-- in particular it does NOT touch `mcp_auth_events` — that table's retention
+-- and report live in the companion file, db/summarize_auth_events.sql.
+--
+-- WHY THE SPLIT. These two halves stopped sharing a database. In the
+-- three-qube topology the Funnel access log is written by a local sink on the
+-- INGRESS qube (deploy/qubes/ingress-qube/README.md § Local log sink), while
+-- `mcp_auth_events` is written by mcp into the canonical corpus on the DB
+-- qube. One file spanning both would be unrunnable on either qube. Splitting
+-- by owning-table also means each half fails independently: a broken edge
+-- rollup can no longer stop the corpus side's auth-event retention.
+--
+-- Single-host installs (compose-local / compose-tailnet) keep BOTH tables in
+-- one database and should run BOTH files — which is the default:
+-- scripts/funnel_daily_summary.sh's SUMMARY_SQL_FILE resolves to both, in
+-- order, in one psql session and one report.
 --
 -- Run by the host-side cron / systemd timer (see deploy/compose-tailnet/README.md §Observability).
 -- Wraps everything in a single transaction so partial failure leaves the
@@ -10,8 +28,9 @@
 -- same project as the running stack or it finds no container:
 --   docker compose exec -T postgres psql -U openbrain_app -d openbrain \
 --     < ../../db/summarize_funnel.sql > /tmp/funnel.md
--- The split Qubes deployment uses scripts/funnel_daily_summary.sh's postgres
--- backend and the shipped app-qube user timer instead of a local container.
+-- The split Qubes deployment runs this file on the INGRESS qube against the
+-- local log sink over its unix socket, via scripts/funnel_daily_summary.sh's
+-- postgres backend and the shipped ingress-qube user timer.
 --
 -- The SELECT at the end emits a markdown report on stdout so the cron
 -- wrapper can `tee` it to the summary directory .
@@ -393,8 +412,9 @@ ON CONFLICT (day, socket, status_class) DO UPDATE SET
 DELETE FROM funnel_access_log
 WHERE ts < (((now() AT TIME ZONE 'UTC')::date - 30)::timestamp AT TIME ZONE 'UTC');
 
-DELETE FROM mcp_auth_events
-WHERE ts < now() - interval '30 days';
+-- `mcp_auth_events` retention lives in summarize_auth_events.sql, not here:
+-- the two tables no longer share a database in the split topology. See this
+-- file's header.
 
 -- ---------- 4. Retention: drop summary rows older than 365 days ----------
 DELETE FROM funnel_access_summary
@@ -461,19 +481,6 @@ WHERE ts > now() - interval '24 hours'
 GROUP BY socket, status, path
 ORDER BY hits DESC
 LIMIT 30;
-
-\echo ''
-\echo '## Rolling 24h — auth-failure reasons (mcp side)'
-\echo ''
-SELECT
-  middleware,
-  reason,
-  COUNT(*) AS count,
-  COUNT(DISTINCT client_ip) AS unique_ips
-FROM mcp_auth_events
-WHERE ts > now() - interval '24 hours'
-GROUP BY middleware, reason
-ORDER BY count DESC;
 
 \echo ''
 \echo '## 7-day trend — request count by socket+status_class'

@@ -5,8 +5,17 @@
 #
 # /etc/systemd/system is wiped on every AppVM reboot, so units that must persist
 # are stashed under /rw/config and (re)installed + enabled here at each boot.
-# Ordering: bring tailscale0 up, ensure docker is up, re-apply the DOCKER-USER
-# firewall scoping, then (re)enable the encrypted-backup timer.
+# Boot order: tailscaled → re-assert rootful docker OFF → custom-input firewall
+# one-shot → db forwarder (required, readiness-gated — must precede the backup
+# timer) → encrypted-backup timer → GPU-offload forwarder (optional).
+#
+# What is deliberately ABSENT: any docker start. The app stack runs under the
+# operator account's ROOTLESS dockerd (a systemd --user unit; storage in
+# ~/.local/share/docker, which persists natively inside home — see the Qubes
+# README § Rootless docker). `loginctl enable-linger user` — persisted via the
+# /var/lib/systemd/linger bind-dir — makes the user manager bring the daemon
+# up at boot, and `restart: unless-stopped` resumes the containers: no
+# root-side docker start, no compose self-heal.
 
 LOG=/var/log/ob1-app-boot.log
 exec >>"$LOG" 2>&1
@@ -18,25 +27,87 @@ echo "=== rc.local $(date -Is) ==="
 # that stage → EAI_ADDRFAMILY). Start it explicitly in the AppVM instead.
 systemctl start tailscaled
 
-# --- Docker + its firewall drop-in ---
-# Install the docker.service drop-in (re-applies the DOCKER-USER rule on every
-# later daemon restart) and the boot one-shot unit BEFORE bringing docker up,
-# then daemon-reload so the drop-in is active. /etc/systemd/system is wiped each
-# reboot, so both are restaged here every boot.
-mkdir -p /etc/systemd/system/docker.service.d
-cp /rw/config/docker-ob1-firewall.conf /etc/systemd/system/docker.service.d/ob1-firewall.conf
+# --- Rootful docker: off and unreachable, every boot ---
+# The shared template still ships rootful docker, and /etc (unit enablement)
+# plus /etc/group (docker membership — root-equivalent by construction) are
+# reset from the template on each AppVM boot. Re-assert the rootless-only
+# posture here so a template update can't quietly resurrect the root daemon:
+systemctl disable --now docker.service docker.socket containerd.service 2>/dev/null || true
+systemctl mask docker.service docker.socket containerd.service 2>/dev/null || true
+gpasswd -d user docker 2>/dev/null || true
+# Tidy: a template-enabled docker.socket makes systemd create the rootful
+# socket inode at boot BEFORE the mask above lands — remove the dead inode so
+# nothing can be confused by a socket no daemon serves.
+rm -f /var/run/docker.sock
+
+# --- Host firewall (custom-input rules) ---
+# The qubes-firewall service's hook doesn't fire on this qube, so this
+# one-shot (After=tailscaled) is what applies
+# /rw/config/qubes-firewall-user-script at boot. See both file headers.
 cp /rw/config/ob1-app-firewall.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl start docker
+systemctl enable --now ob1-app-firewall.service
 
-# --- Host firewall: scope mcp :8787 to the ingress qube (DOCKER-USER) ---
-# Apply once now via the one-shot (its ExecStartPre waits for tailscale0 AND
-# DOCKER-USER to exist). If docker was already auto-started before rc.local ran,
-# the drop-in's ExecStartPost didn't fire this boot — this one-shot is what
-# guarantees the rule lands at boot; the drop-in then covers later restarts.
-# --no-block so rc.local doesn't stall on that wait.
-systemctl enable ob1-app-firewall.service
-systemctl start --no-block ob1-app-firewall.service
+# --- db forwarder (app→db Postgres over qubes.ConnectTCP) ---
+# Restage + enable the qube-IP socat forwarder every DB client on this qube
+# targets (DB_HOST): mcp, the encrypted backup, the rollup, admin psql. The
+# db qube has no network-facing Postgres listener — this channel is the only
+# path, so unlike the optional GPU block below a half-staged install is a
+# hard failure: every DB client on this qube is down. This block runs BEFORE
+# the backup timer below: the timer's Persistent=true can queue a missed
+# occurrence the moment it is enabled, and that catch-up run must find the
+# forwarder already serving. Guard on BOTH artifacts (a unit whose ExecStart
+# script is missing or non-executable would just crash-loop under
+# Restart=always, hiding the root cause) and on every install/enable step,
+# then gate on READINESS, not on a point-in-time state probe: Type=simple
+# means `enable --now` returns at fork, before socat has even exec'd — an
+# instantly-crashing ExecStart is still `active` when checked immediately
+# (measured: an ExecStart=/bin/false unit passed an immediate is-active 8/8
+# times). Poll up to 10 s for the real signal — the :5432 listener — bailing
+# early the moment the unit leaves `active` (a crash-looper spends its time
+# in `activating (auto-restart)`, where is-active is nonzero). Any failure
+# shouts to the boot log and propagates through rc.local's exit status at
+# the bottom of this file.
+if [ -f /rw/config/ob1-db-forward.service ] && [ -x /rw/config/ob1-db-forward.sh ]; then
+	# The listener probe is address-exact AND owner-exact: match the qube-IP
+	# bind the forwarder actually makes (same source of truth the forwarder
+	# script uses), and require the socket to be held by THIS unit's MainPID.
+	# Address alone is not enough twice over: a stray loopback listener (e.g.
+	# a leftover local postgres publish on 127.0.0.1:5432) must not satisfy
+	# the gate, and neither must the exact qube-IP:5432 socket when another
+	# process owns it — that is the EADDRINUSE case, where a squatter keeps
+	# the address while this unit's socat crash-loops behind it. A
+	# failed/empty qubesdb-read fails the chain loudly.
+	fwd_ok=""
+	if BIND_IP="$(qubesdb-read /qubes-ip)" && [ -n "$BIND_IP" ] \
+		&& cp /rw/config/ob1-db-forward.service /etc/systemd/system/ \
+		&& systemctl daemon-reload \
+		&& systemctl enable --now ob1-db-forward.service; then
+		i=0
+		while [ "$i" -lt 10 ]; do
+			systemctl is-active --quiet ob1-db-forward.service || break
+			MAIN_PID="$(systemctl show --property MainPID --value ob1-db-forward.service)"
+			if [ -n "$MAIN_PID" ] && [ "$MAIN_PID" != "0" ] \
+				&& ss -ltnp | grep -F "${BIND_IP}:5432 " | grep -qF "pid=${MAIN_PID},"; then
+				fwd_ok=1
+				break
+			fi
+			i=$((i + 1))
+			sleep 1
+		done
+		if [ -z "$fwd_ok" ]; then
+			echo "ERROR: ob1-db-forward.service does not own a ${BIND_IP}:5432 listener after start — every DB client on this qube is down (diagnose: systemctl status ob1-db-forward.service; ss -ltnp | grep 5432)"
+			BOOT_FAIL=1
+		fi
+	else
+		echo "ERROR: ob1-db-forward.service failed to stage/enable (or the qube IP could not be read) — every DB client on this qube is down (diagnose: systemctl status ob1-db-forward.service)"
+		BOOT_FAIL=1
+	fi
+else
+	[ -f /rw/config/ob1-db-forward.service ] || echo "ERROR: /rw/config/ob1-db-forward.service missing — db forwarder NOT staged; every DB client on this qube is down"
+	[ -x /rw/config/ob1-db-forward.sh ] || echo "ERROR: /rw/config/ob1-db-forward.sh missing or not executable — db forwarder NOT started; every DB client on this qube is down"
+	BOOT_FAIL=1
+fi
 
 # --- Encrypted DB backup timer ---
 # Units stashed under /rw/config/openbrain-units/ (the .service + .timer from
@@ -45,5 +116,30 @@ systemctl start --no-block ob1-app-firewall.service
 if [ -d /rw/config/openbrain-units ]; then
 	cp /rw/config/openbrain-units/*.service /rw/config/openbrain-units/*.timer /etc/systemd/system/ 2>/dev/null
 	systemctl daemon-reload
-	systemctl enable --now ob1-db-backup.timer 2>/dev/null
+	# Enable the timer ONLY on a boot whose db forwarder passed its readiness
+	# gate above: Persistent=true queues any missed occurrence the moment the
+	# timer is enabled, and a catch-up dispatched against a known-dead DB_HOST
+	# fails once with no retry — the day's backup is burned. Skipped instead,
+	# the occurrence stays owed and fires when the operator fixes the
+	# forwarder and enables the timer (or reboots into a healthy gate).
+	if [ -n "${fwd_ok:-}" ]; then
+		systemctl enable --now ob1-db-backup.timer 2>/dev/null
+	else
+		echo "WARNING: db forwarder not ready — ob1-db-backup.timer NOT enabled this boot; fix the forwarder, then run 'systemctl enable --now ob1-db-backup.timer' (or reboot)"
+	fi
 fi
+
+# --- GPU-offload forwarder (optional; see ../gpu-offload-transport.md) ---
+# Restage + enable the qube-IP socat forwarder that bridges the mcp container
+# to a GPU qube over qubes.ConnectTCP. Guarded: absent files = transport not
+# installed, and the boot carries on cleanly.
+if [ -f /rw/config/ob1-ollama-forward.service ]; then
+	cp /rw/config/ob1-ollama-forward.service /etc/systemd/system/
+	systemctl daemon-reload
+	systemctl enable --now ob1-ollama-forward.service
+fi
+
+# Propagate a required-transport staging failure (the db-forwarder guard
+# above) so the boot log's ERROR lines are backed by a non-zero rc.local
+# exit — a healthy-looking boot must not mask a down DB path.
+exit "${BOOT_FAIL:-0}"

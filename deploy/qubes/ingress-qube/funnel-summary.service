@@ -1,0 +1,29 @@
+# systemd USER unit — install at ~/.config/systemd/user/funnel-summary.service
+# on the INGRESS qube. Runs the FUNNEL half of the observability rollup
+# (db/summarize_funnel.sql) against this qube's local log sink; the app qube
+# runs the mcp_auth_events half against the corpus. The wrapper loads
+# ~/.config/funnel-summary.env itself so the same command works both under
+# systemd and during manual verification.
+[Unit]
+Description=Open Brain daily Funnel summary and retention (local log sink)
+# Bound one initial attempt plus two retries so a transient startup race — the
+# sink container coming up after the user manager — does not consume the timer
+# occurrence, while a bad config cannot loop forever.
+StartLimitIntervalSec=2h
+StartLimitBurst=3
+# A silent failure leaves raw-log retention inactive until a later successful
+# run. Install a user notify-failure@.service and uncomment this hook, or monitor
+# `systemctl --user --failed` and this unit's journal.
+# OnFailure=notify-failure@%n.service
+
+[Service]
+Type=oneshot
+Environment=FUNNEL_SUMMARY_ENV_FILE=%h/.config/funnel-summary.env
+ExecStart=/usr/bin/bash %h/funnel_daily_summary.sh
+UMask=0077
+Restart=on-failure
+RestartSec=2min
+# A timeout before COMMIT aborts psql's open transaction; report staging always
+# preserves the last complete artifact. The sink is small (30 days of request
+# metadata), so this bound is generous.
+TimeoutStartSec=30min

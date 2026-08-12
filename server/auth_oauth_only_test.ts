@@ -28,6 +28,7 @@ const ENV_KEYS = [
   "AUTH0_JWKS_URI",
   "AUTH0_AUDIENCE",
   "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
+  "OAUTH_ALLOWED_SUBJECTS",
   "OBS_AUTH_EVENTS_ENABLED",
   "METADATA_FALLBACK_POLICY",
   "JWKS_FETCH_TIMEOUT_MS",
@@ -81,6 +82,9 @@ Deno.test("requireAuth (OAuth only — x-brain-key door disabled)", async (t) =>
   Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
   Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
   Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
+  // Authorization allowlist (fail-closed): admit the one subject this file
+  // mints for its success paths.
+  Deno.env.set("OAUTH_ALLOWED_SUBJECTS", "user-under-test");
   Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
   Deno.env.set("METADATA_FALLBACK_POLICY", "off");
   Deno.env.set("JWKS_FETCH_TIMEOUT_MS", "2000");

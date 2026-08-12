@@ -46,6 +46,8 @@ import {
   METADATA_NTFY_TOPIC,
   METADATA_PUSHOVER_APP_TOKEN,
   METADATA_PUSHOVER_USER_KEY,
+  OAUTH_ALLOWED_SUBJECTS,
+  OAUTH_SERVICE_ACCOUNT_SUBJECTS,
   PORT,
 } from "./config.ts";
 import { createApiRouter } from "./api.ts";
@@ -186,6 +188,42 @@ if ((ENABLE_BRAIN_KEY || ENABLE_NATIVE_TOKENS) && ENABLE_OAUTH) {
   );
 } else {
   console.log("[auth] OAuth door only (x-brain-key disabled).");
+}
+
+// OAuth authorization posture. The allowlist fails CLOSED (config.ts): an
+// enabled OAuth door with an empty OAUTH_ALLOWED_SUBJECTS rejects every
+// Bearer at runtime, which on an OAuth-only deployment is a full lockout.
+// That is the intended misconfiguration posture — but it must be loud in the
+// boot log, not discovered from a mystery wall of 401s. Counts only, never
+// subject values: boot logs must not become an identity inventory.
+if (ENABLE_OAUTH) {
+  if (OAUTH_ALLOWED_SUBJECTS.size === 0) {
+    console.warn(
+      "[auth] OAuth door enabled but OAUTH_ALLOWED_SUBJECTS is unset/empty — " +
+        "EVERY Bearer token will be rejected (fail-closed). Set it to the " +
+        "exact `sub` claim(s) you intend to admit.",
+    );
+  } else {
+    // Log no subject values AND no counts: CodeQL's clear-text-logging
+    // taint tracking flags any expression derived from these sets reaching
+    // console output, and a fixed string is the stronger form of the
+    // "boot logs are not an identity inventory" rule anyway. The sets feed
+    // only the branch conditions here.
+    const hasUnadmittedServiceSubject = [...OAUTH_SERVICE_ACCOUNT_SUBJECTS]
+      .some((sub) => !OAUTH_ALLOWED_SUBJECTS.has(sub));
+    console.log("[auth] OAuth subject allowlist active.");
+    if (hasUnadmittedServiceSubject) {
+      // OAUTH_SERVICE_ACCOUNT_SUBJECTS is attribution-only and never grants
+      // access — a machine subject listed there but absent from the
+      // allowlist will be denied. Almost always an upgrade oversight.
+      console.warn(
+        "[auth] at least one OAUTH_SERVICE_ACCOUNT_SUBJECTS entry is NOT in " +
+          "OAUTH_ALLOWED_SUBJECTS and will be denied — that list is " +
+          "attribution-only. Add the machine subject(s) to " +
+          "OAUTH_ALLOWED_SUBJECTS if those clients should authenticate.",
+      );
+    }
+  }
 }
 
 // REST posture, next to the auth posture: an unexpectedly-on gateway should

@@ -32,9 +32,14 @@ import {
   ENABLE_OAUTH,
   JWKS_FETCH_TIMEOUT_MS,
   MCP_ACCESS_KEY,
+  OAUTH_ALLOWED_SUBJECTS,
   OAUTH_SERVICE_ACCOUNT_SUBJECTS,
 } from "./config.ts";
-import { type AuthFailureReason, logAuthFailure } from "./auth_audit.ts";
+import {
+  type AuthFailureReason,
+  logAuthFailure,
+  logAuthSuccess,
+} from "./auth_audit.ts";
 import { parseInetCandidate } from "./inet.ts";
 
 // Best-effort source-IP extraction for the audit emitter. Caddy
@@ -210,6 +215,19 @@ export type NativeAccessTokenVerifier = (
 
 type VerifiedBearerPayload = JWTPayload & { sub: string };
 
+// Thrown by `verifyBearer` when a token passes every cryptographic check but
+// its verified `sub` is not on the OAUTH_ALLOWED_SUBJECTS allowlist. Carries
+// the VERIFIED subject so `createRequireAuth` can put it on the audit row —
+// this is the one rejection class where a real tenant-minted identity was
+// refused, and the operator needs to see which. Never surfaces in the
+// response: the caller collapses it into the uniform 401 envelope like every
+// other rejection (no authorized-vs-unauthenticated side-channel).
+class SubjectNotAllowedError extends Error {
+  constructor(readonly sub: string) {
+    super("OAuth token subject is not on the allowlist");
+  }
+}
+
 async function verifyBearer(token: string): Promise<VerifiedBearerPayload> {
   if (!jwks) throw new Error("OAuth not enabled");
   // `requiredClaims: ["exp"]` forces the token to carry an
@@ -238,6 +256,18 @@ async function verifyBearer(token: string): Promise<VerifiedBearerPayload> {
   // never cross into RLS ownership or durable provenance.
   if (!isOAuthSubject(payload.sub)) {
     throw new Error("OAuth token subject is invalid");
+  }
+  // AUTHORIZATION, after authentication: the checks above prove the token
+  // came from the configured tenant; this one asks whether the operator
+  // intends to admit that account at all. An unset/empty
+  // OAUTH_ALLOWED_SUBJECTS means the `has()` below can never pass — the
+  // documented fail-closed posture (config.ts) — so a tenant-side
+  // misconfiguration (open social connection, unintended signup flow) stops
+  // here instead of equaling full access. Ordered after the subject-shape
+  // check so only a well-formed verified identity is ever compared or
+  // carried onto the audit row.
+  if (!OAUTH_ALLOWED_SUBJECTS.has(payload.sub)) {
+    throw new SubjectNotAllowedError(payload.sub);
   }
   return payload as VerifiedBearerPayload;
 }
@@ -436,6 +466,10 @@ function extractJsonRpcId(bodyText: string | null): string | number | null {
 async function unauthorized(
   c: Context,
   code: AuthFailureReason,
+  // Verified-but-refused subject, present only on 'subject_not_allowed'
+  // (see SubjectNotAllowedError). Audit-row-only — the response below is
+  // byte-identical across reasons.
+  subject?: string,
 ) {
   if (PROTECTED_RESOURCE_METADATA_URL) {
     c.header(
@@ -453,6 +487,7 @@ async function unauthorized(
     middleware: "require_auth",
     clientIp: clientIpFor(c),
     path: c.req.path,
+    subject: subject ?? null,
   });
 
   // MCP path → JSON-RPC envelope. Extract the inbound id so strict-MCP
@@ -509,6 +544,20 @@ export function createRequireAuth(
       c.set("door", "tailnet");
       c.set("sub", null);
       c.set("tokenLabel", null);
+      // Success-side audit — the row that makes admissions (not just
+      // rejections) reconstructable from local data. ENQUEUED before next()
+      // so the attempt is captured even if the downstream handler throws;
+      // delivery is best-effort (fire-and-forget through the shared capped
+      // queue in auth_audit.ts — under backpressure the event can drop,
+      // counted + warned), and response latency is unaffected. subject and
+      // tokenLabel are both null here: the static shared key carries no
+      // per-holder identity (the row's door value is the identity floor).
+      logAuthSuccess({
+        door: "tailnet",
+        middleware: "require_auth",
+        clientIp: clientIpFor(c),
+        path: c.req.path,
+      });
       await next();
       return;
     }
@@ -524,6 +573,16 @@ export function createRequireAuth(
           c.set("door", "tailnet");
           c.set("sub", null);
           c.set("tokenLabel", identity.label);
+          // Success-side audit: the verified token label is the per-holder
+          // identity on this door (sub stays null — labels are attribution,
+          // not OAuth subjects).
+          logAuthSuccess({
+            door: "tailnet",
+            middleware: "require_auth",
+            tokenLabel: identity.label,
+            clientIp: clientIpFor(c),
+            path: c.req.path,
+          });
           await next();
           return;
         }
@@ -534,6 +593,11 @@ export function createRequireAuth(
     }
 
     let bearerTried = false;
+    // Set when the Bearer failed ONLY the allowlist: a verified,
+    // tenant-minted subject that the operator has not admitted. Drives the
+    // 'subject_not_allowed' audit reason + subject column below; the
+    // response stays the uniform envelope.
+    let disallowedSubject: string | null = null;
     if (ENABLE_OAUTH) {
       const authz = c.req.header("authorization") ?? "";
       const m = /^Bearer\s+(.+)$/i.exec(authz);
@@ -543,17 +607,30 @@ export function createRequireAuth(
           // Capture the verified payload's `sub` claim, then classify the
           // OAuth credential as a user (`funnel`) or machine (`service`).
           // `verifyBearer` requires and runtime-validates `sub` (see above),
-          // so only a bounded non-empty string reaches either context field.
-          // The single-vs-dual-door decision (deliberately open)
+          // enforces the OAUTH_ALLOWED_SUBJECTS authorization gate, and so
+          // only a bounded non-empty ADMITTED string reaches either context
+          // field. The single-vs-dual-door decision (deliberately open)
           // remains separate scope — the source-marker work doesn't
           // depend on either outcome of that deliberation.
           const payload = await verifyBearer(m[1].trim());
-          c.set("door", oauthDoorFor(payload));
+          const door = oauthDoorFor(payload);
+          c.set("door", door);
           c.set("sub", payload.sub);
           c.set("tokenLabel", null);
+          // Success-side audit: the verified subject is the identity.
+          logAuthSuccess({
+            door,
+            middleware: "require_auth",
+            subject: payload.sub,
+            clientIp: clientIpFor(c),
+            path: c.req.path,
+          });
           await next();
           return;
-        } catch (_err) {
+        } catch (err) {
+          if (err instanceof SubjectNotAllowedError) {
+            disallowedSubject = err.sub;
+          }
           // Fall through to 401 with a token-validation reason below.
         }
       }
@@ -569,12 +646,17 @@ export function createRequireAuth(
     const brainKeyTried = (ENABLE_BRAIN_KEY || ENABLE_NATIVE_TOKENS) &&
       brainKey !== undefined && brainKey !== "";
     let code: AuthFailureReason;
-    if (brainKeyTried && bearerTried) code = "invalid_credentials";
+    // 'subject_not_allowed' wins over the both-doors-tried collapse: it is
+    // strictly more specific (the Bearer verified; only authorization
+    // refused it), and the audit row's subject column is only meaningful
+    // under this code.
+    if (disallowedSubject !== null) code = "subject_not_allowed";
+    else if (brainKeyTried && bearerTried) code = "invalid_credentials";
     else if (brainKeyTried) code = "invalid_brain_key";
     else if (bearerTried) code = "token_validation_failed";
     else code = "missing_credentials";
 
-    return unauthorized(c, code);
+    return unauthorized(c, code, disallowedSubject ?? undefined);
   };
 }
 

@@ -174,7 +174,7 @@ Deno.test("service-account smoke helper accepts JSON and SSE initialize results"
     id: 1,
     result: {
       protocolVersion: "2025-06-18",
-      serverInfo: { name: "open-brain-homelab", version: "1.19.0" },
+      serverInfo: { name: "open-brain-homelab", version: "1.20.0" },
     },
   };
   assertEquals(

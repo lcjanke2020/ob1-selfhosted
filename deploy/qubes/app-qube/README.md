@@ -19,17 +19,87 @@ docker compose up -d
 ```
 
 [`docker-compose.yml`](docker-compose.yml) is self-contained — `mcp` + `ollama`
-only, no override stack. `mcp` is published on `0.0.0.0:8787` so the ingress
-qube's Caddy can reach it across qubes (set
-`MCP_UPSTREAM=<this-qube-tailnet-ip>:8787` in the _ingress_ qube's `.env`).
-Ollama runs CPU-only (no GPU passthrough in a Qubes app qube); point
-`OLLAMA_URL` at an external GPU box to offload it.
+only, no override stack. `mcp` publishes on `127.0.0.1:8787` **only** — it has
+no network-facing listener. The ingress qube's Caddy reaches it over a
+dom0-policy-gated qubes.ConnectTCP channel; the forwarder, policy line, and
+verification live in the
+[ingress qube's README](../ingress-qube/README.md#the-ingressapp-hop-qubesconnecttcp).
+The canonical Postgres is on the db qube, reached through this qube's **own**
+ConnectTCP forwarder (`DB_HOST` = this qube's own IP) — install
+[the app→db hop](#the-appdb-hop-qubesconnecttcp) below before expecting `mcp` to
+come up healthy. Ollama runs CPU-only (no GPU passthrough in a Qubes app qube);
+point `OLLAMA_URL` at an external GPU box to offload it.
 
-The compose project is **not** auto-started on reboot (`restart: unless-stopped`
-only resurrects containers while the daemon is up, not the project after an
-AppVM reboot). To bring it back automatically, add
-`docker compose -f /path/to/app-qube/docker-compose.yml up -d` to `rc.local`
-after the docker start, or run it by hand after a reboot.
+The stack runs under the operator account's **rootless** dockerd (see the
+[Qubes README § Rootless docker](../README.md#rootless-docker-the-deployed-engine-posture)),
+which also answers reboot recovery: `loginctl enable-linger user` — persisted by
+the `/var/lib/systemd/linger` bind-dir, without which the flag lasts exactly one
+boot — makes the user manager start the rootless daemon at boot, and
+`restart: unless-stopped` resumes the containers; no `rc.local` compose start,
+no manual `up -d` after a reboot. Verify with `docker compose ps` after the qube
+comes back, before any interactive login (a login starts the user manager and
+masks a broken linger).
+
+## The app→db hop (qubes.ConnectTCP)
+
+Every DB client on this qube — mcp, the encrypted backup, the auth-events
+rollup, admin psql — reaches the canonical Postgres through a small host-side
+`socat` forwarder rather than a db-qube network address: the db qube's cluster
+binds **loopback only** and has no network-facing listener at all (same pattern
+as the ingress→app hop, one hop further down):
+
+```
+mcp container ──(this qube's own IP :5432)──▶ socat  [app qube host]
+                     └─ qubes.ConnectTCP+5432 (qrexec) ─▶ <db-qube> 127.0.0.1:5432
+```
+
+The forwarder binds the qube's **own IP** (`qubesdb-read /qubes-ip`): under
+rootless docker the mcp container reaches its own host via slirp4netns — the
+packet arrives on `lo`, which the qubes input chain accepts, so no firewall rule
+is needed — while eth0/tailscale peers are covered by the qubes input
+default-drop (nothing accepts `:5432`). Host-side clients (backup, rollup, psql)
+target the same address, so one `DB_HOST` value serves everything.
+
+Install (the qube's **template** must have `socat`; `/usr` is template-provided,
+so an AppVM-local install vanishes on reboot):
+
+1. dom0 policy (validate with `qubes-policy-lint`; explicit destination, not
+   `@default` — both gotchas in
+   [`../gpu-offload-transport.md`](../gpu-offload-transport.md)):
+
+   ```
+   qubes.ConnectTCP +5432 <app-qube> <db-qube> allow autostart=no
+   ```
+
+   `autostart=no` matches this repo's other ConnectTCP rules: a stray connection
+   must never boot a halted db qube as a side effect — start it deliberately.
+   (The trade-off is real on this hop: with the flag, recovery from a down db
+   qube is a manual `qvm-start`; without it, the first connection self-heals by
+   booting the qube. Pick one knowingly.)
+
+2. Stage [`ob1-db-forward.sh`](ob1-db-forward.sh) (chmod +x; edit its `DB_QUBE`
+   name to match the policy line's destination) and
+   [`ob1-db-forward.service`](ob1-db-forward.service) under `/rw/config/`; the
+   shipped [`rc.local`](rc.local) restages + enables the unit each boot. For the
+   current boot, also install + `systemctl enable --now` it by hand.
+
+3. Set `DB_HOST=<this-qube-ip>` in `.env` — and in **every other** `DB_HOST`
+   carrier: the backup job's env file and `~/.config/funnel-summary.env`. A
+   stale copy pointing at the old db-qube address fails only when that listener
+   goes away, on the consumer's own timer cadence.
+
+The db-qube side needs no transport install — `qubes.ConnectTCP` is a stock
+qrexec service that connects to `127.0.0.1:5432` on the target; its `pg_hba`
+must carry the loopback scram lines
+([`../db-qube/pg_hba.snippet.conf`](../db-qube/pg_hba.snippet.conf)). Migrating
+a live install off the old firewall-scoped tailnet listener is a phased
+checklist:
+[`../db-qube/README.md` § Migrating an existing install to ConnectTCP](../db-qube/README.md#migrating-an-existing-install-to-connecttcp).
+
+Verify from this qube's host: `pg_isready -h <this-qube-ip> -p 5432` answers
+"accepting connections" (that traverses socat → qrexec → the db qube's
+loopback), and an authenticated
+`psql -h <this-qube-ip> -U openbrain_app -d openbrain -c 'select 1;'` completes.
 
 ## Offloading metadata classification (`CHAT_*`) to a GPU qube
 
@@ -41,8 +111,8 @@ to a hosted OpenAI-compatible provider; neither needs plumbing. To instead keep
 thought content on a **GPU qube on this same Qubes host** whose model server is
 bound to loopback only (no network-facing listener — no LAN/tailnet bind, no
 sshd), see [`../gpu-offload-transport.md`](../gpu-offload-transport.md): a
-host-side `socat` forwarder + qrexec `ConnectTCP` transport, with the
-firewall/`custom-input`, persistence, and `autostart=no` safety notes. It is a
+host-side `socat` forwarder (bound to this qube's own IP) + qrexec `ConnectTCP`
+transport, with the persistence and `autostart=no` safety notes. It is a
 deliberate tradeoff, not a default — the why and the costs are covered in
 [Serving From a Qube With No Network-Facing Listener](https://github.com/lcjanke2020/qubes-os-explorations/blob/master/qrexec-connecttcp-service-qube.md).
 
@@ -58,9 +128,11 @@ line `[metadata] fallback policy: ...` reports the intended value.
 
 This qube holds the **admin/superuser** `POSTGRES_PASSWORD` (the trusted
 compartment holds it, never the internet-adjacent ingress qube) and uses it to
-**administer the db qube remotely** over the tailnet — role provisioning +
-schema/migrations. The db qube's `pg_hba` grants the superuser a host line from
-**this qube's IP only** — a deliberate trade-off (a compromised app qube then
+**administer the db qube remotely** through the same
+[ConnectTCP channel](#the-appdb-hop-qubesconnecttcp) every other DB client here
+uses — role provisioning + schema/migrations. The db qube's `pg_hba` grants the
+superuser a **loopback** host line, reachable only through the channel dom0
+policy grants to this qube — a deliberate trade-off (a compromised app qube then
 has full DB admin — including `COPY … TO/FROM PROGRAM`, i.e. an app→db OS pivot
 — not just the app role; accepted for now since this compartment runs the memory
 application and the db qube is highly contained (the runtime app role itself is
@@ -98,6 +170,16 @@ for what the schema contains, and
 [Upgrading an existing deployment](#upgrading-an-existing-deployment) for how to
 apply it in this topology.
 
+Server 1.20.0 requires a re-apply of `db/02-observability.sql` (it now converges
+`mcp_auth_events` in place to the allowed+denied audit shape) AND
+`OAUTH_ALLOWED_SUBJECTS` in this qube's `.env` **before the container roll**:
+the allowlist fails closed, so rolling the container without it leaves the
+OAuth-only deployment rejecting every Bearer — a deliberate lockout posture,
+loudly warned in the boot log, but not what an upgrade intends. Set it to the
+exact `sub` claim(s) to admit (Auth0 dashboard → User Management → Users →
+user_id), then roll, then verify a live client and check `mcp_auth_events` for
+the new `outcome='allowed'` rows.
+
 ## Upgrading an existing deployment
 
 `db/*.sql` are `docker-entrypoint-initdb.d` scripts: PostgreSQL runs them only
@@ -108,8 +190,9 @@ Apply them by hand, in order, during an operator window.
 The per-migration recipes under [`docs/`](../../../docs/) assume the single-box
 compose install and `docker compose exec -T postgres`. **In this split topology
 that command has nothing to exec into** — Postgres is not in the app compose
-project. Run the same files from this qube's repository checkout, over the
-tailnet, as the database superuser:
+project. Run the same files from this qube's repository checkout, through this
+qube's [ConnectTCP forwarder](#the-appdb-hop-qubesconnecttcp) (`DB_HOST`), as
+the database superuser:
 
 ```sh
 (
@@ -180,20 +263,23 @@ AppVM-local install disappears on reboot.
 
 ### Which migration each server version requires
 
-Rows start at 1.7.0. `db/01-schema.sql`, `db/02-observability.sql`, and
-`db/04-sessions.sql` have no upgrade row of their own; a database predating any
-of them needs it applied first, in that order. `db/03-grants-assertion.sql` is
-deliberately not third — it is a read-only check of the completed catalog, so it
-runs after every pending row below and fails by design if run before the
-relations it asserts on exist. The db qube records the same canonical order
+Rows start at 1.7.0. `db/01-schema.sql` and `db/04-sessions.sql` have no upgrade
+row of their own; a database predating either needs it applied first, in that
+order (`db/02-observability.sql` gained an upgrade row at 1.20.0 — older
+databases still apply it in its numbered position first).
+`db/03-grants-assertion.sql` is deliberately not third — it is a read-only check
+of the completed catalog, so it runs after every pending row below and fails by
+design if run before the relations it asserts on exist. The db qube records the
+same canonical order
 ([First boot / provisioning](../db-qube/README.md#first-boot--provisioning)).
 
-| Server | Migration                        | Additional requirement                                        |
-| ------ | -------------------------------- | ------------------------------------------------------------- |
-| 1.7.0  | `db/05-hybrid-search.sql`        | pgvector 0.8.0+ (filtered iterative scans)                    |
-| 1.9.0  | `db/06-spaces.sql`               | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner   |
-| 1.16.0 | `db/07-metadata-degradation.sql` | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env` |
-| 1.19.0 | `db/08-access-tokens.sql`        | —                                                             |
+| Server | Migration                                                                  | Additional requirement                                                         |
+| ------ | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| 1.7.0  | `db/05-hybrid-search.sql`                                                  | pgvector 0.8.0+ (filtered iterative scans)                                     |
+| 1.9.0  | `db/06-spaces.sql`                                                         | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner                    |
+| 1.16.0 | `db/07-metadata-degradation.sql`                                           | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env`                  |
+| 1.19.0 | `db/08-access-tokens.sql`                                                  | —                                                                              |
+| 1.20.0 | `db/02-observability.sql` (re-apply; converges `mcp_auth_events` in place) | `OAUTH_ALLOWED_SUBJECTS` in `.env` **before** the container roll — fail-closed |
 
 Migration 08 is required by 1.19.0 **even when native tokens are disabled**.
 `ENABLE_NATIVE_TOKENS` gates the credential door, not the schema: the server's
@@ -237,9 +323,53 @@ year, but those policies are active only when
 [`scripts/funnel_daily_summary.sh`](../../../scripts/funnel_daily_summary.sh)
 runs. In this split topology Postgres is not in the app compose project, so the
 shipped job uses the wrapper's explicit `postgres` backend: host `psql` connects
-to the db qube as `openbrain_app`, the existing role whose observability grants
-cover the transactional rollup and retention deletes. The internet-adjacent
-ingress qube never receives that credential.
+to the db qube through the
+[ConnectTCP forwarder](#the-appdb-hop-qubesconnecttcp) (`DB_HOST` = this qube's
+own IP) as `openbrain_app`, the existing role whose observability grants cover
+the transactional rollup and retention deletes. The internet-adjacent ingress
+qube never receives that credential.
+
+**This qube runs only the `mcp_auth_events` half.** The rollup is split by
+owning table, because the two halves no longer share a database: the Funnel
+access log is written to a local sink on the
+[ingress qube](../ingress-qube/README.md#daily-rollup-and-retention-host-side-not-compose),
+which runs [`db/summarize_funnel.sql`](../../../db/summarize_funnel.sql) there.
+Here, [`db/summarize_auth_events.sql`](../../../db/summarize_auth_events.sql)
+handles the auth-decision audit mcp writes into the corpus — reason-coded
+denials plus the per-request admission rows (1.20.0+). Set `SUMMARY_SQL_FILE`
+accordingly — left unset it resolves to **both** shipped files (the single-host
+default), and the funnel half would then operate on the stale, no-longer-written
+`funnel_access_log` left behind in this database, producing an empty report
+section and a pointless retention DELETE.
+
+The relations themselves stay in the corpus schema deliberately. Dropping them
+would diverge from
+[`db/02-observability.sql`](../../../db/02-observability.sql), which single-host
+installs still create, and keeping them means repointing the ingester back at
+this database is a config change rather than a migration. Their ROWS are a
+one-time cutover decision, because nothing retains them anymore — the moment
+this qube's job went auth-only, the funnel half's 30-day raw and 365-day
+aggregate DELETEs stopped running against this database:
+
+- **Raw log — truncate.** Archive first if you want the history
+  (`pg_dump --data-only --table=funnel_access_log`, encrypted like the nightly
+  backup), then `TRUNCATE funnel_access_log;` **as the database superuser** —
+  the runtime `openbrain_app` role deliberately lacks TRUNCATE (measured:
+  `permission denied`), so use the same superuser-psql path as
+  [Upgrading an existing deployment](#upgrading-an-existing-deployment). Left
+  alone, request metadata (client IPs, paths, user agents) sits in the corpus
+  forever, outliving the 30-day promise the retention policy made.
+- **Aggregates — keep or truncate, but decide.** `funnel_access_summary` is
+  small, static from now on, and useful as trend history; keeping it is
+  reasonable. If you keep it, know the 365-day horizon no longer applies — the
+  rows are frozen until you delete them by hand.
+
+Verify the raw side once the cutover is done:
+`SELECT count(*) FROM
+funnel_access_log;` must return 0 — nonzero means the step
+above was skipped. The full edge-retirement pass (pg_hba lines, corpus roles,
+tailnet ACL) is
+[db-qube/README.md § Retiring the ingress qube's old access](../db-qube/README.md#retiring-the-ingress-qubes-old-access-existing-installs).
 
 The job reads a dedicated environment file containing only its database
 settings. Do not point it at this directory's `.env`: exporting the full app
@@ -259,7 +389,7 @@ the app qube—an AppVM-local package install disappears on reboot.
 ```sh
 mkdir -p ~/.config/systemd/user
 install -m 0755 scripts/funnel_daily_summary.sh ~/funnel_daily_summary.sh
-install -m 0644 db/summarize_funnel.sql ~/summarize_funnel.sql
+install -m 0644 db/summarize_auth_events.sql ~/summarize_auth_events.sql
 install -m 0600 deploy/qubes/app-qube/funnel-summary.env.example ~/.config/funnel-summary.env
 $EDITOR ~/.config/funnel-summary.env       # set DB_HOST + OPENBRAIN_APP_PASSWORD
 install -d -m 0700 ~/openbrain-funnel-summaries
@@ -269,17 +399,18 @@ sudo loginctl enable-linger "$USER"
 systemctl --user daemon-reload
 ```
 
-Run the service once before enabling the schedule. This is the catch-up pass: it
-builds the previous daily summaries before transactionally removing raw rows
-beyond the retention horizon. That removal is irreversible, so take a database
-snapshot first if you may need the pre-30-day raw rows. A failure before the SQL
-transaction commits leaves the raw rows intact; any failed run leaves the last
-complete Markdown artifact intact instead of replacing it with partial output.
-If a connection fails after the database commit but while the report queries are
-streaming, the database may be ahead of the artifact; the next idempotent run
-regenerates the report. A multi-day catch-up stores every day in
-`funnel_access_summary`, but publishes one Markdown artifact for the most
-recently completed day rather than recreating a historical report file per day.
+Run the service once before enabling the schedule. This is the catch-up pass:
+for this qube's auth half it enforces `mcp_auth_events`' per-class horizons — 30
+days for anonymous denials, 365 for admission rows and `subject_not_allowed`
+denials (the identity-carrying classes) — and prints the rolling 24h
+auth-failure and admitted-identities reports. The removals are irreversible, so
+take a database snapshot first if you may need the older rows. The two retention
+DELETEs autocommit independently (no shared transaction): a failure between them
+leaves each class individually consistent, and the next idempotent run converges
+whichever half lagged; any failed run leaves the last complete Markdown artifact
+intact instead of replacing it with partial output. If a connection fails after
+the database commit but while the report queries are streaming, the database may
+be ahead of the artifact; the next idempotent run regenerates the report.
 
 ```sh
 systemctl --user start funnel-summary.service
@@ -311,39 +442,48 @@ but a persistent failure still needs a visible signal. Install a user
 journal.
 
 When updating the rollup implementation, reinstall **both** the wrapper and
-`summarize_funnel.sql`, then manually start the service once and inspect its
-journal before waiting for the next timer occurrence. When rotating
-`OPENBRAIN_APP_PASSWORD`, update the mode-0600 summary env at the same time as
-the app compose `.env` so the unattended job does not silently retain the old
-credential.
+`summarize_auth_events.sql` (this qube's half), then manually start the service
+once and inspect its journal before waiting for the next timer occurrence. When
+rotating `OPENBRAIN_APP_PASSWORD`, update the mode-0600 summary env at the same
+time as the app compose `.env` so the unattended job does not silently retain
+the old credential.
 
-## Host firewall (scope the `0.0.0.0:8787` bind)
+## Host firewall (custom-input; no `:8787` machinery)
 
-The `0.0.0.0` bind is reachable on every interface (tailnet **and** LAN). Three
-independent layers narrow it to the ingress qube — Tailscale ACL, this host
-firewall, and mcp app auth. Install the firewall artifacts (counterpart to the
-db qube's):
+mcp publishes loopback only, so there is **no mcp listener to scope** — the
+elaborate `DOCKER-USER` machinery an earlier revision shipped (an iptables
+insert script, a `docker.service` drop-in re-applying it on daemon restarts, and
+a boot one-shot ordered after docker) is retired along with the `0.0.0.0:8787`
+publish it existed to narrow. What remains is small:
 
-| File                                                       | Install at                                                                                                                       | Purpose                                                                                                             |
-| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| [`qubes-firewall-user-script`](qubes-firewall-user-script) | `/rw/config/qubes-firewall-user-script` (chmod +x)                                                                               | `DOCKER-USER` rule: accept `:8787` only from the ingress qube's tailnet IP, drop it on every other source/interface |
-| [`docker-ob1-firewall.conf`](docker-ob1-firewall.conf)     | `/rw/config/docker-ob1-firewall.conf` (rc.local copies it to `/etc/systemd/system/docker.service.d/ob1-firewall.conf` each boot) | docker drop-in: re-runs the script `ExecStartPost` so a daemon restart can't leave `:8787` open                     |
-| [`ob1-app-firewall.service`](ob1-app-firewall.service)     | `/rw/config/ob1-app-firewall.service`                                                                                            | boot one-shot that applies the rule once `After=tailscaled` + docker                                                |
-| [`rc.local`](rc.local)                                     | `/rw/config/rc.local` (chmod +x)                                                                                                 | boot order: tailscaled → install docker drop-in → docker → firewall one-shot → backup timer                         |
+| File                                                       | Install at                                         | Purpose                                                                                     |
+| ---------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| [`qubes-firewall-user-script`](qubes-firewall-user-script) | `/rw/config/qubes-firewall-user-script` (chmod +x) | `custom-input` accepts for host services (SSH on `tailscale0`; optional Syncthing)          |
+| [`ob1-app-firewall.service`](ob1-app-firewall.service)     | `/rw/config/ob1-app-firewall.service`              | one-shot that runs the script `After=tailscaled` — the applier on this qube (see below)     |
+| [`rc.local`](rc.local)                                     | `/rw/config/rc.local` (chmod +x)                   | boot order: tailscaled → rootful-docker-off → firewall one-shot → backup timer → forwarders |
 
-The rule lives in `DOCKER-USER`, **not** the Qubes `custom-input` chain, because
-docker's DNAT bypasses the qubes `INPUT` path — a `custom-input` accept/drop
-never sees the published-port traffic. The script **inserts** (`-I`) above
-docker's seeded `RETURN` rule (an appended rule would land below it and never
-run) and rebuilds idempotently. Replace `<ingress-qube-tailnet-ip>` in the
-script with the ingress qube's address; if you later **rotate** that address,
-flush the chain and re-run
-(`sudo iptables -F DOCKER-USER && sudo
-/rw/config/qubes-firewall-user-script`)
-so the old ACCEPT doesn't linger. Two triggers keep the rule live: the boot
-one-shot applies it at startup, and the docker drop-in re-applies it on every
-daemon restart. (This layer also closes the LAN-reachable-`0.0.0.0`-bind gap —
-it drops `:8787` on all interfaces, not just `tailscale0`.)
+Two properties do the work the old machinery did:
+
+- **The qubes input chain default-drops.** Nothing accepts `:8787` (or the
+  forwarders' `:5432`/`:11434`) from `eth0`/`tailscale0` — a third qube's probe
+  times out at that drop — and mcp has no socket there anyway, so even a packet
+  the firewall let through would find nothing listening (`ss -tlnp` is the check
+  that proves the socket claim; see Verify). What changed vs the old design is
+  not that a firewall stopped mattering, but that reachability no longer depends
+  on _mutable, docker-managed_ firewall state — the static input default-drop
+  needs no re-assertion machinery.
+- **Container→host traffic arrives on `lo` under rootless docker** (slirp4netns
+  delivers a container's packet to its own host's IP on loopback, which the
+  stock chain accepts) — so the forwarder transports need no `custom-input`
+  accepts either, and the old `br-*` bridge rules are gone (the compose bridge
+  now lives inside rootlesskit's netns, invisible to the host chain).
+
+One Qubes-ism to know: on an app qube that doesn't route other qubes, the
+`qubes-firewall` service's own hook never fires, so `qubes-firewall-user-script`
+would sit unexecuted. The shipped `ob1-app-firewall.service` one-shot
+(restaged + enabled from `rc.local` each boot) is what actually applies it,
+ordered after tailscaled so the `tailscale0`-scoped accepts land on the running
+interface.
 
 ## Encrypted DB backup
 
@@ -408,6 +548,11 @@ journalctl -u ob1-db-backup.service -n 50 --no-pager
 ```sh
 docker compose config --services      # exactly: mcp, ollama
 docker compose up -d
-# from the ingress qube, a Caddy request to MCP_UPSTREAM should reach mcp;
-# from any OTHER tailnet peer, :8787 should be dropped by the host firewall.
+ss -tlnp | grep 8787                  # 127.0.0.1:8787 ONLY — no 0.0.0.0, no tailnet IP
+ss -tlnp | grep 5432                  # <this-qube-ip>:5432 — the db forwarder (socat), nothing else
+pg_isready -h <this-qube-ip> -p 5432  # "accepting connections" — via qrexec to the db qube
+# from the ingress qube, a Caddy request through the ConnectTCP forwarder
+# reaches mcp; from any OTHER qube or tailnet peer, a connect to this qube's
+# :8787 or :5432 times out (the qubes input default-drop — the ss lines above
+# are what prove no wider listener exists behind it).
 ```

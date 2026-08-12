@@ -254,6 +254,45 @@ Deno.test("cursor files: JSON round-trip, legacy offset-only, and garbage fallba
   });
 });
 
+// The DB_HOST shape branch. Two consumers must agree on it or the ingester
+// fails at connect time: dbHostType() picks the driver transport, and
+// Dockerfile.ingester's ENTRYPOINT `case` picks the Deno permission set from
+// the SAME leading-slash rule. Anything not absolute stays TCP — including
+// bare IPv6 literals and relative paths, which are hostnames as far as both
+// sides are concerned.
+Deno.test("dbHostType: absolute paths are unix sockets, everything else is TCP", async () => {
+  // Not `async`: every assertion here is synchronous, and `require-await`
+  // rejects an async callback with no await. withIngesterEnv wants a promise,
+  // so hand it a resolved one.
+  await withIngesterEnv(({ dbHostType }) => {
+    // Unix-socket DIRECTORIES (deno-postgres appends `.s.PGSQL.<port>`).
+    assertEquals(dbHostType("/var/run/postgresql"), "socket");
+    assertEquals(dbHostType("/tmp"), "socket");
+    assertEquals(dbHostType("/"), "socket");
+
+    // Hostnames and IPv4 — the historical default, and the compose default.
+    // Literals come from the RFC 5737 / RFC 3849 documentation ranges: a
+    // tailnet-shaped address would trip the repo's leak guard, and the branch
+    // cannot tell one IPv4 from another anyway.
+    assertEquals(dbHostType("postgres"), "tcp");
+    assertEquals(dbHostType("192.0.2.10"), "tcp");
+    assertEquals(dbHostType("db.example.ts.net"), "tcp");
+
+    // IPv6 literals contain no leading slash, so they stay TCP; the
+    // ENTRYPOINT brackets them for --allow-net on the same branch.
+    assertEquals(dbHostType("::1"), "tcp");
+    assertEquals(dbHostType("2001:db8::1"), "tcp");
+
+    // A relative path is NOT promoted to a socket. The driver would reject
+    // it anyway (createParams resolves non-absolute socket hosts against
+    // Deno.mainModule), and silently reinterpreting it would diverge from
+    // the ENTRYPOINT's `/*` glob.
+    assertEquals(dbHostType("run/postgresql"), "tcp");
+    assertEquals(dbHostType("./run"), "tcp");
+    return Promise.resolve();
+  });
+});
+
 // Declared last so it runs after every test above: drop the shared
 // module-scope cursor temp dir and restore INGESTER_CURSOR_DIR to
 // whatever the process had before this file's module setup ran.
