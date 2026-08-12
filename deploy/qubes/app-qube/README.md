@@ -296,7 +296,10 @@ version. Apply migrations before the roll, not with it.
 
    ```bash
    mcp_image="$(docker compose images -q mcp)"
-   test -n "$mcp_image"
+   if [[ -z "$mcp_image" || "$mcp_image" == *$'\n'* ]]; then
+     echo "expected exactly one current mcp image" >&2
+     exit 1
+   fi
    docker tag "$mcp_image" "openbrain-mcp:rollback-<previous-commit>"
    ```
 

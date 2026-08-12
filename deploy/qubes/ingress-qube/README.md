@@ -221,10 +221,13 @@ the qube already gives them: Caddy's access logs are on the same disk.
 TCP socket; `network_mode: none` leaves both containers with only `lo`; and no
 port is published. The check that proves it is on the **host**:
 
-```sh
+```bash
 ss -tlnp | grep 5432          # → nothing
 log_sink_container="$(docker compose ps -q log-sink)"
-test -n "$log_sink_container"
+if [[ -z "$log_sink_container" || "$log_sink_container" == *$'\n'* ]]; then
+  echo "expected exactly one running log-sink container" >&2
+  exit 1
+fi
 docker inspect "$log_sink_container" \
   --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}'   # → none
 ```
