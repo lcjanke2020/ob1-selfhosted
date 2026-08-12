@@ -7,12 +7,16 @@
 # Caddy is running, so it's also profile-gated.
 #
 # Usage (with the profile flag):
-#   docker compose -f docker-compose.yml -f docker-compose.pattern-b.yml \
+#   docker compose --env-file .env --project-directory . \
+#                  -f ../compose-local/docker-compose.yml \
+#                  -f docker-compose.pattern-b.yml \
 #                  --profile pattern-b up -d
 #
-# Or set these in .env so a bare `docker compose up -d` does the right thing:
-#   COMPOSE_FILE=docker-compose.yml:docker-compose.pattern-b.yml
+# Or set these in .env, then run `docker compose --env-file .env up -d`:
+#   COMPOSE_FILE=../compose-local/docker-compose.yml:docker-compose.pattern-b.yml
 #   COMPOSE_PROFILES=pattern-b
+# The explicit env-file flag prevents Compose from also loading
+# ../compose-local/.env and filling keys that are absent here.
 #
 # Without this override, mcp's `127.0.0.1:8787:8787` host port stays published.
 # A stray `tailscale funnel http://127.0.0.1:8787` then reaches mcp directly,

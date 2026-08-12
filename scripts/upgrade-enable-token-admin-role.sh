@@ -15,6 +15,11 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
+# Keep the explicit file for the same uniform invocation used by Pattern B.
+# These `ps`/`exec` calls do not interpolate service variables; the sourced
+# COMPOSE_FILE + COMPOSE_PROJECT_NAME values select the running project.
+compose_cmd=(docker compose --env-file .env)
+
 set -a
 # shellcheck disable=SC1091
 . .env
@@ -22,12 +27,12 @@ set +a
 
 : "${OPENBRAIN_TOKEN_ADMIN_PASSWORD:?set OPENBRAIN_TOKEN_ADMIN_PASSWORD in .env before running this upgrade}"
 
-if ! docker compose ps --status=running postgres | grep -q postgres; then
+if ! "${compose_cmd[@]}" ps --status=running postgres | grep -q postgres; then
   echo "[upgrade-token-admin] postgres container not running; aborting" >&2
   exit 1
 fi
 
-existing="$(docker compose exec -T postgres \
+existing="$("${compose_cmd[@]}" exec -T postgres \
   psql -tA -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-openbrain}" \
   -c "SELECT 1 FROM pg_roles WHERE rolname='openbrain_token_admin'" \
   | tr -d '[:space:]')"
@@ -40,7 +45,7 @@ else
   sql="CREATE ROLE openbrain_token_admin LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD :'token_admin_password';"
 fi
 
-docker compose exec -T postgres \
+"${compose_cmd[@]}" exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-postgres}" \
   -d "${POSTGRES_DB:-openbrain}" \
   --set=token_admin_password="$OPENBRAIN_TOKEN_ADMIN_PASSWORD" \

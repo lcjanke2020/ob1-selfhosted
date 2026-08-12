@@ -22,7 +22,7 @@
 -- exec has to resolve the same project as the running stack or it finds no
 -- container:
 --
---   docker compose exec -T postgres \
+--   docker compose --env-file .env exec -T postgres \
 --     psql -U postgres -d openbrain < ../../db/04-sessions.sql
 --
 -- A deployment whose database is not in that compose project has nothing to

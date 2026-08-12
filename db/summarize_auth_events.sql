@@ -30,7 +30,8 @@
 -- Manual invocation, single-host compose (from deploy/compose-tailnet,
 -- invoked the way you start the stack there — the exec has to resolve the
 -- same project as the running stack or it finds no container):
---   docker compose exec -T postgres psql -U openbrain_app -d openbrain \
+--   docker compose --env-file .env exec -T postgres \
+--     psql -U openbrain_app -d openbrain \
 --     < ../../db/summarize_auth_events.sql
 --
 -- Runs under the same least-privilege role as the funnel half: the DELETE and
