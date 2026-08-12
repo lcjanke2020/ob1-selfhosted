@@ -99,39 +99,42 @@ generic subject mapping, and a browserless verification command are covered in
 
 Copy your filled-in `.env` into this directory (including the required
 `METADATA_FALLBACK_POLICY`; Pattern B also needs the `AUTH0_*` trio and
-`OPENBRAIN_INGESTER_PASSWORD`), then either run with explicit flags:
+`OPENBRAIN_INGESTER_PASSWORD`) and uncomment `COMPOSE_FILE` + `COMPOSE_PROFILES`
+at its bottom. Then either run with explicit flags:
 
 ```bash
 cd deploy/compose-tailnet
-docker compose --project-directory . \
+docker compose --env-file .env \
+               --project-directory . \
                -f ../compose-local/docker-compose.yml \
                -f docker-compose.pattern-b.yml \
                --profile pattern-b up -d
 ```
 
-…or uncomment `COMPOSE_FILE` + `COMPOSE_PROFILES` at the bottom of the `.env` so
-a bare `docker compose up -d` from this directory does the same thing. The two
-forms agree on file paths (resolved per-file) and on project identity (pinned by
-`COMPOSE_PROJECT_NAME`) — so later `exec`/`logs`/`ps`/`down` commands resolve
-the running stack whichever form started it.
+…or let those two `.env` settings select the files and profile:
 
-**They are NOT equivalent on a third axis: which `.env` files load.** With
-`COMPOSE_FILE` set (form 2), Compose resolves its _project directory_ to
-`deploy/compose-local` (the first file's directory), and that directory's `.env`
-loads **in addition to** this one. This directory's values win on conflict — but
-any key **absent** here silently inherits the local install's value. Verified on
-Compose 5.3.1: with `METADATA_FALLBACK_POLICY` deleted from this directory's
-`.env` and set to `allow` in `deploy/compose-local/.env`, form 2 renders `allow`
-on the internet-facing box, while form 1 (which pins `--project-directory .`)
-fails fast with the intended `:?` error.
+```bash
+docker compose --env-file .env up -d
+```
 
-Two rules keep form 2 safe: copy the **complete** filled `.env` into this
-directory, never a trimmed subset; and to unset a choice, leave the key
-present-but-empty (`KEY=`) — an explicitly empty value still wins over the
-inherited one and preserves the fail-fast.
+The two supported forms agree on file paths (resolved per-file), project
+identity (pinned by `COMPOSE_PROJECT_NAME`), and interpolation source (the
+explicit `.env`) — so later `exec`/`logs`/`ps`/`down` commands resolve the
+running stack whichever form started it.
+
+**The `--env-file .env` flag is load-bearing. Do not shorten form 2 to a bare
+`docker compose up -d`.** Without an explicit env file, `COMPOSE_FILE` makes
+Compose resolve its _project directory_ to `deploy/compose-local` (the first
+file's directory), then load that directory's `.env` as a second,
+lower-precedence source. Any key absent from this directory can then silently
+inherit the local install's value — including a future `:?`-guarded setting an
+older tailnet `.env` does not know about. Naming the env file explicitly
+suppresses that fallback: an absent or empty required value stays absent or
+empty and fails closed.
 
 A `.env` that predates the `COMPOSE_PROJECT_NAME` pin doesn't get the
-project-identity guarantee — see §"Upgrading an existing deployment" before
+project-identity guarantee: form 1 falls back to `compose-tailnet`, while form 2
+falls back to `compose-local`. See §"Upgrading an existing deployment" before
 crossing forms.
 
 ### Wire Tailscale
@@ -163,7 +166,7 @@ Controls → the `funnel` node attribute). Verify with `tailscale funnel status`
 > way into the funnel branch because the funnel header itself is injected by
 > `tailscaled`, not the client). If Anthropic announces additional ranges,
 > extend the `client_ip` matcher in the `Caddyfile` (space-separated CIDRs) and
-> `docker compose restart caddy`.
+> `docker compose --env-file .env restart caddy`.
 
 ### Verify the OAuth door + allowlist
 
@@ -314,7 +317,7 @@ the MCP container against an existing data directory, check the installed
 extension version:
 
 ```bash
-docker compose exec -T postgres \
+docker compose --env-file .env exec -T postgres \
   psql -U postgres -d openbrain -tAc \
   "SELECT extversion FROM pg_extension WHERE extname = 'vector';"
 ```
@@ -324,9 +327,9 @@ Postgres image so it provides a current extension, then upgrade and verify the
 database extension before restarting MCP:
 
 ```bash
-docker compose exec -T postgres \
+docker compose --env-file .env exec -T postgres \
   psql -U postgres -d openbrain -c "ALTER EXTENSION vector UPDATE;"
-docker compose exec -T postgres \
+docker compose --env-file .env exec -T postgres \
   psql -U postgres -d openbrain -tAc \
   "SELECT extversion FROM pg_extension WHERE extname = 'vector';"
 ```
@@ -334,21 +337,22 @@ docker compose exec -T postgres \
 **New schema files** (observability, sessions, hybrid search, spaces, metadata
 degradation audit, native-token storage) apply cleanly and are idempotent. Run
 the block below from this directory with the running stack's `.env` present —
-that `.env` is what lets each `docker compose exec` resolve the running project
-(§"Start the stack"). The spaces migration is not a cheap no-op on
-reapplication; it rebuilds its fingerprint index each time:
+the explicit env-file flag is what lets each `docker compose exec` resolve the
+running project without falling back to `deploy/compose-local/.env` (§"Start the
+stack"). The spaces migration is not a cheap no-op on reapplication; it rebuilds
+its fingerprint index each time:
 
 ```bash
 # Set OPENBRAIN_INGESTER_PASSWORD in .env first (openssl rand -hex 24), then:
 bash ../../scripts/upgrade-add-ingester-role.sh
-docker compose exec -T postgres psql -U postgres -d openbrain < ../../db/02-observability.sql
-docker compose exec -T postgres psql -U postgres -d openbrain < ../../db/04-sessions.sql
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/05-hybrid-search.sql
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/06-spaces.sql
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/07-metadata-degradation.sql
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/08-access-tokens.sql
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
-docker compose build mcp && docker compose up -d
+docker compose --env-file .env exec -T postgres psql -U postgres -d openbrain < ../../db/02-observability.sql
+docker compose --env-file .env exec -T postgres psql -U postgres -d openbrain < ../../db/04-sessions.sql
+docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/05-hybrid-search.sql
+docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/06-spaces.sql
+docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/07-metadata-degradation.sql
+docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/08-access-tokens.sql
+docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
+docker compose --env-file .env build mcp && docker compose --env-file .env up -d
 ```
 
 Upgrading to **1.20.0+**: `02-observability.sql` in the block above now also
@@ -398,17 +402,22 @@ shape — set `OPENBRAIN_MONITOR_PASSWORD` in `.env`, run
 The full `up -d` matters on the upgrade path: it creates services newly defined
 since the last deploy (e.g. `log-ingester`) as well as recreating changed ones.
 
-For an MCP code-only rollout with no schema or edge change, run
-`docker compose build mcp && docker compose up -d --no-deps mcp` instead. This
-recreates the MCP container without restarting Postgres, Ollama, Caddy, or the
-log ingester.
+For an MCP code-only rollout with no schema or edge change, run:
+
+```bash
+docker compose --env-file .env build mcp && \
+  docker compose --env-file .env up -d --no-deps mcp
+```
+
+This recreates the MCP container without restarting Postgres, Ollama, Caddy, or
+the log ingester.
 
 **Edits to existing init files** (a tightened grant, a new role) silently
 _don't_ reach an already-initialized DB. The drift check is read-only and safe
 to run any time:
 
 ```bash
-docker compose exec -T postgres \
+docker compose --env-file .env exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
 ```
 

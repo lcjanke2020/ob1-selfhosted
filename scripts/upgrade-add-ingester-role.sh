@@ -10,8 +10,8 @@
 # Works against deploy/compose-tailnet by default; set COMPOSE_DIR to point it
 # at another compose project directory (e.g. deploy/compose-local). Your cwd
 # doesn't matter — the script cd's there itself. The directory must hold the
-# running stack's .env: that's what lets the bare `docker compose` calls below
-# resolve the same project as the running stack, or they find no container
+# running stack's .env: every Compose call names it explicitly so Pattern B
+# cannot also load deploy/compose-local/.env as a lower-precedence fallback
 # (deploy/compose-tailnet/README.md §"Start the stack" gives both start forms).
 # Idempotent and reconciling — safe to re-run, and the "role exists"
 # branch runs `ALTER ROLE ... WITH PASSWORD` so the role's password is
@@ -37,6 +37,8 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
+compose_cmd=(docker compose --env-file .env)
+
 # Load .env so OPENBRAIN_INGESTER_PASSWORD + POSTGRES_DB are in scope.
 # Scoped via set -a/+a so we don't pollute the caller's environment.
 set -a
@@ -46,14 +48,14 @@ set +a
 
 : "${OPENBRAIN_INGESTER_PASSWORD:?OPENBRAIN_INGESTER_PASSWORD must be set in .env before running this upgrade}"
 
-if ! docker compose ps --status=running postgres | grep -q postgres; then
+if ! "${compose_cmd[@]}" ps --status=running postgres | grep -q postgres; then
   echo "[upgrade-ingester-role] postgres container not running; aborting" >&2
   exit 1
 fi
 
 # Existence check first so we can pick CREATE vs ALTER and give a clear
 # message about which branch ran.
-existing="$(docker compose exec -T postgres \
+existing="$("${compose_cmd[@]}" exec -T postgres \
   psql -tA -U postgres -d "${POSTGRES_DB:-openbrain}" \
   -c "SELECT 1 FROM pg_roles WHERE rolname='openbrain_ingester'" \
   | tr -d '[:space:]')"
@@ -73,7 +75,7 @@ if [[ -n "$existing" ]]; then
   # in .env. ALTER ROLE is idempotent at the catalog level (a no-op
   # when password hash matches), so re-running this script when the
   # password hasn't changed is also fine.
-  docker compose exec -T postgres \
+  "${compose_cmd[@]}" exec -T postgres \
     psql -v ON_ERROR_STOP=1 -U postgres -d "${POSTGRES_DB:-openbrain}" \
     --set=ingester_password="$OPENBRAIN_INGESTER_PASSWORD" \
     <<-'EOSQL'
@@ -83,7 +85,7 @@ EOSQL
   exit 0
 fi
 
-docker compose exec -T postgres \
+"${compose_cmd[@]}" exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d "${POSTGRES_DB:-openbrain}" \
   --set=ingester_password="$OPENBRAIN_INGESTER_PASSWORD" \
   <<-'EOSQL'

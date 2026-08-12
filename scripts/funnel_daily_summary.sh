@@ -203,6 +203,11 @@ run_summary() {
       compose_dir="${COMPOSE_DIR:-$(cd "$SCRIPT_DIR/../deploy/compose-tailnet" && pwd)}"
       cd "$compose_dir"
 
+      # The explicit file is a security boundary for Pattern B: without it,
+      # COMPOSE_FILE can make Compose load deploy/compose-local/.env as a
+      # second source and fill a key missing from this deployment's file.
+      local -a compose_cmd=(docker compose --env-file .env)
+
       # Load .env only for POSTGRES_DB. Docker Compose reads the same file for
       # interpolation itself, so none of its secrets need to be allexported by
       # this wrapper. psql connects to the container-local socket under the
@@ -221,12 +226,12 @@ run_summary() {
         export -n OPENBRAIN_APP_PASSWORD POSTGRES_PASSWORD 2>/dev/null || true
       fi
 
-      if ! docker compose ps --status=running postgres | grep -q postgres; then
+      if ! "${compose_cmd[@]}" ps --status=running postgres | grep -q postgres; then
         echo "[funnel_daily_summary] postgres container not running; aborting" >&2
         return 1
       fi
 
-      cat -- "${SQL_FILES[@]}" | docker compose exec -T postgres \
+      cat -- "${SQL_FILES[@]}" | "${compose_cmd[@]}" exec -T postgres \
         psql -X -v ON_ERROR_STOP=1 -U "$SUMMARY_ROLE" \
         -d "${POSTGRES_DB:-openbrain}" -f - || return 1
       ;;
