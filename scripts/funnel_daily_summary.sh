@@ -203,16 +203,18 @@ run_summary() {
       compose_dir="${COMPOSE_DIR:-$(cd "$SCRIPT_DIR/../deploy/compose-tailnet" && pwd)}"
       cd "$compose_dir"
 
-      # The explicit file is a security boundary for Pattern B: without it,
-      # COMPOSE_FILE can make Compose load deploy/compose-local/.env as a
-      # second source and fill a key missing from this deployment's file.
-      local -a compose_cmd=(docker compose --env-file .env)
+      # `ps` and `exec` select a running project without interpolating its
+      # service variables, so compose-local can still work here without a
+      # .env. When one exists, name and source the same file so Pattern B's
+      # COMPOSE_FILE + COMPOSE_PROJECT_NAME select the intended stack.
+      local -a compose_cmd=(docker compose)
 
       # Load .env only for POSTGRES_DB. Docker Compose reads the same file for
       # interpolation itself, so none of its secrets need to be allexported by
       # this wrapper. psql connects to the container-local socket under the
       # image's local trust rule.
       if [[ -f .env ]]; then
+        compose_cmd+=(--env-file .env)
         # An inherited COMPOSE_PROJECT_NAME (the documented override above)
         # must beat the .env's pinned value — compose's own env-beats-.env
         # precedence — so preserve it across the source.
