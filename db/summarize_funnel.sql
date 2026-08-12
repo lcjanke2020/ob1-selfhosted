@@ -26,7 +26,8 @@
 -- deploy/compose-tailnet, invoked the way you start the stack there (its
 -- README §"Start the stack" gives both forms) — the exec has to resolve the
 -- same project as the running stack or it finds no container:
---   docker compose exec -T postgres psql -U openbrain_app -d openbrain \
+--   docker compose --env-file .env exec -T postgres \
+--     psql -U openbrain_app -d openbrain \
 --     < ../../db/summarize_funnel.sql > /tmp/funnel.md
 -- The split Qubes deployment runs this file on the INGRESS qube against the
 -- local log sink over its unix socket, via scripts/funnel_daily_summary.sh's

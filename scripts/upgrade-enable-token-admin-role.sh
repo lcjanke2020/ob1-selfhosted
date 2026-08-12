@@ -15,8 +15,9 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
-# Explicitly naming the file is harmless for compose-local and prevents an
-# override project from loading a second project-directory .env.
+# Keep the explicit file for the same uniform invocation used by Pattern B.
+# These `ps`/`exec` calls do not interpolate service variables; the sourced
+# COMPOSE_FILE + COMPOSE_PROJECT_NAME values select the running project.
 compose_cmd=(docker compose --env-file .env)
 
 set -a

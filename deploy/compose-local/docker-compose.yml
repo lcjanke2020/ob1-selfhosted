@@ -25,9 +25,8 @@
 #    Caddy is not started (gated by the pattern-b profile).
 #
 # B. Tailnet + Funnel with OAuth (Auth0 RS256 — recommended for public access):
-#      docker compose -f docker-compose.yml -f docker-compose.pattern-b.yml \
-#                     --profile pattern-b up -d
-#    (or set COMPOSE_FILE / COMPOSE_PROFILES in .env — see .env.example).
+#    Start from deploy/compose-tailnet with an explicit `--env-file .env`;
+#    its README §"Start the stack" gives both supported invocation forms.
 #    1. Set AUTH0_ISSUER / AUTH0_JWKS_URI / AUTH0_AUDIENCE in .env.
 #    2. The pattern-b.yml override REMOVES mcp's host port mapping. The raw
 #       mcp port is unreachable from the host; caddy is the only entry point

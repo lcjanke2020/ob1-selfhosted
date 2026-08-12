@@ -122,7 +122,8 @@ identity (pinned by `COMPOSE_PROJECT_NAME`), and interpolation source (the
 explicit `.env`) — so later `exec`/`logs`/`ps`/`down` commands resolve the
 running stack whichever form started it.
 
-**The `--env-file .env` flag is load-bearing. Do not shorten form 2 to a bare
+**The `--env-file .env` flag is load-bearing whenever Compose renders the model
+(including `config`, `up`, and `build`). Do not shorten form 2 to a bare
 `docker compose up -d`.** Without an explicit env file, `COMPOSE_FILE` makes
 Compose resolve its _project directory_ to `deploy/compose-local` (the first
 file's directory), then load that directory's `.env` as a second,
@@ -130,7 +131,10 @@ lower-precedence source. Any key absent from this directory can then silently
 inherit the local install's value — including a future `:?`-guarded setting an
 older tailnet `.env` does not know about. Naming the env file explicitly
 suppresses that fallback: an absent or empty required value stays absent or
-empty and fails closed.
+empty and fails closed. Running-project commands such as `exec`, `ps`, `logs`,
+and `restart` do not interpolate service variables; they keep the flag as a
+uniform convention, while this directory's `.env` supplies `COMPOSE_FILE` and
+`COMPOSE_PROJECT_NAME` so they find the same stack.
 
 A `.env` that predates the `COMPOSE_PROJECT_NAME` pin doesn't get the
 project-identity guarantee: form 1 falls back to `compose-tailnet`, while form 2
@@ -337,10 +341,11 @@ docker compose --env-file .env exec -T postgres \
 **New schema files** (observability, sessions, hybrid search, spaces, metadata
 degradation audit, native-token storage) apply cleanly and are idempotent. Run
 the block below from this directory with the running stack's `.env` present —
-the explicit env-file flag is what lets each `docker compose exec` resolve the
-running project without falling back to `deploy/compose-local/.env` (§"Start the
-stack"). The spaces migration is not a cheap no-op on reapplication; it rebuilds
-its fingerprint index each time:
+its `COMPOSE_FILE` and `COMPOSE_PROJECT_NAME` values let each migration command
+resolve the running project (§"Start the stack"). The flag stays on those
+commands for invocation consistency; it becomes load-bearing on the final
+`build` and `up`, which render the model. The spaces migration is not a cheap
+no-op on reapplication; it rebuilds its fingerprint index each time:
 
 ```bash
 # Set OPENBRAIN_INGESTER_PASSWORD in .env first (openssl rand -hex 24), then:

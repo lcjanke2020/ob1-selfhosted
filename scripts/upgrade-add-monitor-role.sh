@@ -22,9 +22,11 @@
 # Works against deploy/compose-tailnet by default; set COMPOSE_DIR to point it
 # at another compose project directory (e.g. deploy/compose-local). Your cwd
 # doesn't matter — the script cd's there itself. The directory must hold the
-# running stack's .env: every Compose call names it explicitly so Pattern B
-# cannot also load deploy/compose-local/.env as a lower-precedence fallback
-# (deploy/compose-tailnet/README.md §"Start the stack" gives both start forms).
+# running stack's .env: its COMPOSE_FILE + COMPOSE_PROJECT_NAME values let the
+# `ps`/`exec` calls resolve the same stack, or they find no configuration. The
+# calls keep `--env-file .env` as the uniform Pattern B invocation even though
+# those running-project subcommands do not interpolate service variables.
+# See deploy/compose-tailnet/README.md §"Start the stack".
 # Idempotent and reconciling — safe to re-run, and the "role exists"
 # branch runs `ALTER ROLE ... WITH PASSWORD` so the role's password is
 # brought into sync with the current OPENBRAIN_MONITOR_PASSWORD value

@@ -34,10 +34,10 @@
 #                                            # app-qube/README.md § The app→db hop)
 #     COMPOSE_FILE=../compose-local/docker-compose.yml:../compose-tailnet/docker-compose.pattern-b.yml:docker-compose.external-db.yml:docker-compose.cpu-ollama.yml
 #     COMPOSE_PROFILES=pattern-b
-#   then: docker compose up -d
+#   then: docker compose --env-file .env up -d
 #
 # Verify the bundled postgres is excluded before bringing the stack up:
-#   docker compose config --services        # must NOT list `postgres`
+#   docker compose --env-file .env config --services  # must NOT list `postgres`
 #
 # The app role (openbrain_app) and the log-ingester role (openbrain_ingester)
 # must exist on the external DB with the passwords in .env, and the external
