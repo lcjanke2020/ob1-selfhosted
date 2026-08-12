@@ -291,8 +291,15 @@ version. Apply migrations before the roll, not with it.
 
 1. Take the labelled pre-migration rollback point and verify it off-box —
    [Deploy-window rollback point](#deploy-window-rollback-point).
-2. Tag the running image so a rollback needs no rebuild:
-   `docker tag app-qube-mcp:latest app-qube-mcp:rollback-<previous-commit>`.
+2. Tag the running image so a rollback needs no rebuild. Resolve it through the
+   Compose service instead of reconstructing the project-prefixed image name:
+
+   ```bash
+   mcp_image="$(docker compose images -q mcp)"
+   test -n "$mcp_image"
+   docker tag "$mcp_image" "openbrain-mcp:rollback-<previous-commit>"
+   ```
+
 3. `git pull` the checkout on **every** qube that installs something from it:
    this one for compose and the rollup, the ingress qube for the Funnel monitor.
 4. Reconcile `.env` against `.env.example`. `docker compose config --quiet` is a

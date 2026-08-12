@@ -223,7 +223,9 @@ port is published. The check that proves it is on the **host**:
 
 ```sh
 ss -tlnp | grep 5432          # → nothing
-docker inspect ingress-qube-log-sink-1 \
+log_sink_container="$(docker compose ps -q log-sink)"
+test -n "$log_sink_container"
+docker inspect "$log_sink_container" \
   --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}'   # → none
 ```
 
