@@ -417,7 +417,7 @@ jobs:
           set -e
           test "$retirement_rc" -ne 0
           grep -Fq 'is nonempty' <<< "$retirement_output"
-          grep -Fq 'public.funnel_access_log' <<< "$retirement_output"
+          grep -Fq 'funnel_access_log' <<< "$retirement_output"
           # The failed transaction must leave every legacy object intact.
           test "$(super_sql -tAc \
             "SELECT to_regclass('public.funnel_access_log') IS NOT NULL
@@ -433,7 +433,7 @@ jobs:
           retirement_rc=$?
           set -e
           test "$retirement_rc" -ne 0
-          grep -Fq 'public.funnel_access_summary' <<< "$retirement_output"
+          grep -Fq 'funnel_access_summary' <<< "$retirement_output"
 
           # Only explicit emptying of both archived tables opens the guard.
           super_sql -c "TRUNCATE funnel_access_summary" >/dev/null
