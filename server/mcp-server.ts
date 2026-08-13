@@ -269,7 +269,10 @@ export function createMcpServer(
     // fail-closed subject allowlist (empty list admits nobody), and each
     // auth decision — admissions included — is enqueued best-effort to
     // mcp_auth_events with the verified identity, door, and path.
-    version: "1.20.0",
+    // 1.21.0: branch lookup plus default and explicit last_update listing use
+    // effective freshness; lookup and listing orders resolve full ties by
+    // newest id.
+    version: "1.21.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -608,7 +611,7 @@ export function createMcpServer(
     {
       title: "Look up Session",
       description:
-        "Retrieve a stored session record by id or branch — this does NOT resume execution, it fetches the record. Returns the full record (resume_context, next_actions, blockers, artifacts, raw_toml), or null if no match. Structured fields are authoritative; raw_toml is the verbatim input from the last session_capture, may differ from current structured fields (for example, after session_update_status), and must not be used as a recapture template. On a branch tie the most-recently-updated session wins. Oversized MCP records identify omitted fields and the optional tailnet REST recovery path.",
+        "Retrieve a stored session record by id or branch — this does NOT resume execution, it fetches the record. Returns the full record (resume_context, next_actions, blockers, artifacts, raw_toml), or null if no match. Structured fields are authoritative; raw_toml is the verbatim input from the last session_capture, may differ from current structured fields (for example, after session_update_status), and must not be used as a recapture template. On a branch tie, effective freshness wins: caller-supplied last_update when present, otherwise server-managed updated_at; remaining ties use updated_at then id. Oversized MCP records identify omitted fields and the optional tailnet REST recovery path.",
       annotations: { readOnlyHint: true },
       inputSchema: sessionLookupSchema,
     },
@@ -687,7 +690,7 @@ export function createMcpServer(
     {
       title: "List Sessions",
       description:
-        "List sessions by structured filters (no embedding) — the 'show me everything awaiting_review' path. A fitting response is the existing array of lightweight rows; a truncated response is {results, truncation}. Rows are ordered by the chosen column, and oversized MCP results retain complete rows while identifying omitted session IDs.",
+        "List sessions by structured filters (no embedding) — the 'show me everything awaiting_review' path. A fitting response is the existing array of lightweight rows; a truncated response is {results, truncation}. The default order uses effective freshness: caller-supplied last_update when present, otherwise server-managed updated_at; remaining ties use updated_at then id. Explicit alternate order_by values retain their chosen primary column and deterministic ties. Oversized MCP results retain complete rows while identifying omitted session IDs.",
       annotations: { readOnlyHint: true },
       inputSchema: sessionListSchema,
     },
@@ -711,12 +714,12 @@ export function createMcpServer(
     {
       title: "Update Session Status",
       description:
-        "Lightweight lifecycle flip (e.g. mark 'done' after a PR merges), usable from any surface with no repo checkout — updates the structured status in the canonical store and leaves historical raw_toml unchanged. Returns {id, status}.",
+        "Lightweight lifecycle flip (e.g. mark 'done' after a PR merges), usable from any surface with no repo checkout — updates the structured status in the canonical store and leaves historical raw_toml unchanged. The status write advances server-managed updated_at, so it also advances effective freshness when the session has no caller-supplied last_update. Returns {id, status}.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
         destructiveHint: false,
-        idempotentHint: true,
+        idempotentHint: false,
       },
       inputSchema: sessionUpdateStatusSchema,
     },

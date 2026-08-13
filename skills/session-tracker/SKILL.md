@@ -316,7 +316,9 @@ title = "Benchmark: sliding-window vs token-bucket"
 - On a resume cue, locate the session first, supplying its workspace/project
   scope when it is not in the configured default:
   - by branch → `session_lookup(branch="<branch>", scope={…})` (on a branch tie,
-    newest-updated wins);
+    effective freshness wins: caller-supplied `last_update` when present,
+    otherwise server-managed `updated_at`; remaining ties use `updated_at` then
+    `id`);
   - by id → `session_lookup(id=<id>, scope={…})`;
   - fuzzy ("the session where I chased the flaky invoice test") →
     `session_search(query=…, scope={…})`, then `session_lookup` the best hit.
@@ -373,7 +375,10 @@ was reconstructed from the session record.
   stuck) → `session_update_status(id, status, scope={…})`. Usable from any
   surface with no checkout; it writes the new structured `status` straight to
   the canonical store and returns `{id, status}`. It intentionally does not
-  rewrite historical `raw_toml`. There is no file to reconcile.
+  rewrite historical `raw_toml`. The write advances server-managed `updated_at`,
+  so it also advances effective freshness when caller-supplied `last_update` is
+  absent; a branch lookup may then select that session as the newest match.
+  There is no file to reconcile.
 
 ## Honesty guardrails
 
