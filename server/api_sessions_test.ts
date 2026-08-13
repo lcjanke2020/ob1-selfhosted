@@ -367,6 +367,29 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
     );
 
     await t.step(
+      "GET /sessions: explicit last_update uses effective freshness",
+      async () => {
+        let listSql = "";
+        const api = makeApi((sql) => {
+          if (sql.includes("FROM sessions.session")) {
+            listSql = sql;
+            return { rows: [] };
+          }
+          return undefined;
+        });
+        const res = await api.request(
+          "/sessions?order_by=last_update",
+          authed(),
+        );
+        assertEquals(res.status, 200);
+        assert(
+          /ORDER BY COALESCE\(last_update, updated_at\) DESC, updated_at DESC, id DESC/
+            .test(listSql),
+        );
+      },
+    );
+
+    await t.step(
       "GET /sessions: explicit ordering stays deterministic",
       async () => {
         let listSql = "";

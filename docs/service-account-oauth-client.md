@@ -221,7 +221,7 @@ the Auth0 RFC 9068 or generic-issuer discovery run, then unset it.
 A successful Auth0 run ends like this, without disclosing the credential:
 
 ```text
-OK: browserless client_credentials authenticated to open-brain-homelab 1.20.0
+OK: browserless client_credentials authenticated to open-brain-homelab 1.21.0
 Attribution signal: signed gty=client-credentials present; expected server label is service.
 ```
 

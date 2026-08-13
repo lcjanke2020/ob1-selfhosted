@@ -112,6 +112,15 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
         sessionListTool?.description?.includes("effective freshness"),
         "session_list must publish the effective-freshness rule",
       );
+      const sessionUpdateStatus = listed.tools.find((tool) =>
+        tool.name === "session_update_status"
+      );
+      assert(
+        sessionUpdateStatus?.description?.includes(
+          "advances effective freshness",
+        ),
+        "session_update_status must publish its effective-freshness effect",
+      );
       const capture = listed.tools.find((tool) =>
         tool.name === "capture_thought"
       );

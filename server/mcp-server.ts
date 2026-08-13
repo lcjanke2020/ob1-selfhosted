@@ -269,8 +269,8 @@ export function createMcpServer(
     // fail-closed subject allowlist (empty list admits nobody), and each
     // auth decision — admissions included — is enqueued best-effort to
     // mcp_auth_events with the verified identity, door, and path.
-    // 1.21.0: session branch lookup and default listing share deterministic
-    // effective-freshness ordering when caller last_update is absent.
+    // 1.21.0: branch lookup plus default and explicit last_update listing use
+    // effective freshness; all session orders resolve full ties by newest id.
     version: "1.21.0",
   });
 
@@ -713,7 +713,7 @@ export function createMcpServer(
     {
       title: "Update Session Status",
       description:
-        "Lightweight lifecycle flip (e.g. mark 'done' after a PR merges), usable from any surface with no repo checkout — updates the structured status in the canonical store and leaves historical raw_toml unchanged. Returns {id, status}.",
+        "Lightweight lifecycle flip (e.g. mark 'done' after a PR merges), usable from any surface with no repo checkout — updates the structured status in the canonical store and leaves historical raw_toml unchanged. The status write advances server-managed updated_at, so it also advances effective freshness when the session has no caller-supplied last_update. Returns {id, status}.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,

@@ -375,7 +375,10 @@ was reconstructed from the session record.
   stuck) → `session_update_status(id, status, scope={…})`. Usable from any
   surface with no checkout; it writes the new structured `status` straight to
   the canonical store and returns `{id, status}`. It intentionally does not
-  rewrite historical `raw_toml`. There is no file to reconcile.
+  rewrite historical `raw_toml`. The write advances server-managed `updated_at`,
+  so it also advances effective freshness when caller-supplied `last_update` is
+  absent; a branch lookup may then select that session as the newest match.
+  There is no file to reconcile.
 
 ## Honesty guardrails
 
