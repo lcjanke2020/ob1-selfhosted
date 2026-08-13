@@ -262,6 +262,15 @@ this qube to the db qube, which is exactly the network path this design removes.
   # → FATAL: password authentication failed
   ```
 
+- **A failed first init stays failed.** The stock image writes `PG_VERSION`
+  before running `initdb.d`, so an ordinary restart can skip the script that
+  failed and start a partial schema. This deployment writes
+  `.openbrain-log-sink-init-complete` only after the final assertion, checks it
+  in both the entrypoint and healthcheck, and refuses a pre-existing data
+  directory without it. Inspect the first-init logs; never create the marker by
+  hand. For a genuinely new/disposable sink, remove and recreate only its
+  `log_sink_data` volume after correcting the cause.
+
 - **Keep the socket directory path short.** A unix socket path is capped at 107
   bytes (`sun_path`), and it is the **host** path that counts for the host-side
   monitor and rollup. A deep directory fails at _connect_ time with
@@ -509,8 +518,8 @@ docker compose config --services             # exactly: caddy, log-ingester, log
 docker compose up -d
 curl -s http://127.0.0.1:9787/caddy-health   # → ok
 
-# the sink came up clean and holds only what it should
-docker compose logs log-sink | grep 'invariants OK'
+# the sink came up clean, holds only what it should, and completed init
+docker compose logs log-sink | grep -E 'invariants OK|init completion marker written'
 ss -tlnp | grep 5432 || echo 'no TCP listener — correct'
 
 # a request actually lands
@@ -520,7 +529,7 @@ docker compose logs --tail=3 log-ingester    # → "N/N rows inserted"
 
 `invariants OK` comes from
 [`db/log-sink/02-log-sink-assertion.sql`](../../../db/log-sink/02-log-sink-assertion.sql),
-which runs last during init and **fails the init** if the sink ever holds a
-third relation, a role with cluster-level privileges, an unenumerated grant, or
-a `GRANT … TO PUBLIC`. Its absence from the log is as meaningful as its
-presence.
+which runs immediately before the marker script and **fails the init** if the
+sink ever holds a third relation, a role with cluster-level privileges, an
+unenumerated grant, or a `GRANT … TO PUBLIC`. The entrypoint refuses every later
+start unless both messages were reached; either message's absence is meaningful.

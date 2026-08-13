@@ -90,10 +90,18 @@ def assert-pattern-b-sink [name: string, rendered: record] {
     if $sink.command != ["postgres" "-c" "listen_addresses="] {
         error make { msg: $"($name): log-sink does not disable Postgres TCP listeners" }
     }
+    if $sink.entrypoint != ["/bin/sh" "/usr/local/bin/openbrain-log-sink-entrypoint.sh"] {
+        error make { msg: $"($name): log-sink does not enforce the init completion marker" }
+    }
+    if not (($sink.healthcheck.test | str join " ") | str contains ".openbrain-log-sink-init-complete") {
+        error make { msg: $"($name): log-sink healthcheck ignores init completion" }
+    }
     for required_mount in [
+        "/usr/local/bin/openbrain-log-sink-entrypoint.sh"
         "/docker-entrypoint-initdb.d/00-log-sink-roles.sh"
         "/docker-entrypoint-initdb.d/01-log-sink.sql"
         "/docker-entrypoint-initdb.d/99-log-sink-assertion.sql"
+        "/docker-entrypoint-initdb.d/zz-log-sink-ready.sh"
     ] {
         if $required_mount not-in $sink_mounts {
             error make { msg: $"($name): log-sink is missing ($required_mount)" }

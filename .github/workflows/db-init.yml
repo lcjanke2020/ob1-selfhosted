@@ -12,7 +12,7 @@
 #
 # The same completed init is also the integration fixture for the corpus
 # breakout invariant. The assertion is mounted last, then deliberately re-run
-# after retired edge roles, Funnel relations, and a stale pg_hba rule are
+# after sink-only roles, Funnel relations, and stale/unprovable pg_hba rules are
 # introduced; each old-shape fixture must fail closed.
 #
 # Rather than enumerate privileges in a static assertion (which lags the next
@@ -236,7 +236,11 @@ jobs:
           docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
             "SELECT COUNT(*) = 0 FROM pg_roles
-             WHERE rolname IN ('openbrain_ingester', 'openbrain_monitor')" | grep -q t
+             WHERE rolname IN (
+               'openbrain_ingester',
+               'openbrain_monitor',
+               'openbrain_logs_rollup'
+             )" | grep -q t
           docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -tAc \
             "SELECT to_regclass('public.funnel_access_log') IS NULL
@@ -294,6 +298,19 @@ jobs:
           # after 02-observability.sql.
           run_assertion >/dev/null
 
+          # HBA introspection is superuser-restricted. A lower-privilege caller
+          # gets the documented diagnostic before any partial catalog check.
+          set +e
+          readonly_output=$(docker exec -i \
+            -e PGPASSWORD="$OPENBRAIN_READONLY_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U openbrain_readonly -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -f - < db/03-grants-assertion.sql 2>&1)
+          readonly_rc=$?
+          set -e
+          test "$readonly_rc" -ne 0
+          grep -Fq 'grants assertion requires a database superuser' \
+            <<< "$readonly_output"
+
           # An existing deployment may contain a pre-created or drifted role.
           # The migration must preserve LOGIN while removing every unsafe
           # cluster-level privilege flag, and the assertion must reject drift
@@ -331,6 +348,20 @@ jobs:
             -v ON_ERROR_STOP=1 -c \
             "REVOKE openbrain_readonly FROM openbrain_app"
 
+          # PUBLIC default ACLs are delayed grants: no current table need expose
+          # them, but the next migration would materialize the privilege.
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -c \
+            "ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO PUBLIC"
+          expect_rejected "PUBLIC default table privileges" \
+            "default privileges would grant future relations or sequences to PUBLIC" \
+            "SELECT on future relations"
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -c \
+            "ALTER DEFAULT PRIVILEGES REVOKE SELECT ON TABLES FROM PUBLIC"
+
           # The corpus must reject the retired role names even before a grant
           # is attached. The sink job separately proves these roles are valid
           # only inside the log-only cluster.
@@ -338,7 +369,7 @@ jobs:
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
             -v ON_ERROR_STOP=1 -c "CREATE ROLE openbrain_monitor LOGIN"
           expect_rejected "retired monitor role" \
-            "corpus contains retired edge role(s)" "openbrain_monitor"
+            "corpus contains sink-only role(s)" "openbrain_monitor"
           docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
             -v ON_ERROR_STOP=1 -c "DROP ROLE openbrain_monitor"
@@ -347,10 +378,19 @@ jobs:
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
             -v ON_ERROR_STOP=1 -c "CREATE ROLE openbrain_ingester LOGIN"
           expect_rejected "retired ingester role" \
-            "corpus contains retired edge role(s)" "openbrain_ingester"
+            "corpus contains sink-only role(s)" "openbrain_ingester"
           docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
             -v ON_ERROR_STOP=1 -c "DROP ROLE openbrain_ingester"
+
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -c "CREATE ROLE openbrain_logs_rollup LOGIN"
+          expect_rejected "sink-only rollup role" \
+            "corpus contains sink-only role(s)" "openbrain_logs_rollup"
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 -c "DROP ROLE openbrain_logs_rollup"
 
           # A relation name is rejected independently of its shape, including
           # the BIGSERIAL sequence and indexes created by the historical DDL.
@@ -366,27 +406,60 @@ jobs:
             -v ON_ERROR_STOP=1 -c \
             "DROP TABLE funnel_access_summary; DROP TABLE funnel_access_log"
 
-          # A named HBA rule is drift even when its role does not exist. Append
-          # one to this ephemeral container, reload, prove rejection, then
-          # remove exactly the appended last line and reload again.
+          # A named HBA rule is drift even when its role does not exist. Use the
+          # new rollup name to prove the complete sink-only census.
           hba_file=$(docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
             "SHOW hba_file")
           docker exec pgci sh -c \
-            'printf "%s\\n" "host all openbrain_monitor 127.0.0.1/32 scram-sha-256" >> "$1"' \
+            'printf "%s\\n" "host all openbrain_logs_rollup 127.0.0.1/32 scram-sha-256" >> "$1"' \
             hba-append "$hba_file"
           docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
             "SELECT pg_reload_conf()" | grep -q t
           expect_rejected "retired-role HBA rule" \
-            "corpus pg_hba.conf still names retired edge role(s)" "openbrain_monitor"
+            "corpus pg_hba.conf names a retired sink-only role" "openbrain_logs_rollup"
           docker exec pgci sed -i '$d' "$hba_file"
           docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
             "SELECT pg_reload_conf()" | grep -q t
 
+          # Regex and @file tokens are interpreted by HBA at authentication
+          # time but remain opaque to this catalog check. Reject rather than
+          # pretending they exclude the retired identities.
+          docker exec pgci sh -c \
+            'printf "%s\\n" "host all \"/^openbrain_.*\" 127.0.0.1/32 scram-sha-256" >> "$1"' \
+            hba-append "$hba_file"
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+            "SELECT pg_reload_conf()" | grep -q t
+          expect_rejected "regex HBA user token" \
+            "unprovable regex/@file user token" "/^openbrain_"
+          docker exec pgci sed -i '$d' "$hba_file"
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+            "SELECT pg_reload_conf()" | grep -q t
+
+          hba_role_file="${hba_file}.ci-sink-users"
+          docker exec pgci sh -c \
+            'printf "%s\\n" openbrain_logs_rollup > "$1"' \
+            hba-users "$hba_role_file"
+          docker exec pgci sh -c \
+            'printf "host all @%s 127.0.0.1/32 scram-sha-256\\n" "$2" >> "$1"' \
+            hba-append "$hba_file" "$hba_role_file"
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+            "SELECT pg_reload_conf()" | grep -q t
+          expect_rejected "@file HBA user token" \
+            "corpus pg_hba.conf names a retired sink-only role"
+          docker exec pgci sed -i '$d' "$hba_file"
+          docker exec pgci rm -f "$hba_role_file"
+          docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+            "SELECT pg_reload_conf()" | grep -q t
+
           run_assertion >/dev/null
-          echo "protected-role assertions accepted the clean catalog and rejected role, relation, HBA, token-admin, and app-membership drift"
+          echo "protected-role assertions accepted the clean catalog and rejected role, relation, HBA, default-ACL, token-admin, and app-membership drift"
 
       - name: Smoke test — corpus retirement archives before restrictive drop
         run: |
@@ -404,12 +477,31 @@ jobs:
           super_sql -c \
             "CREATE ROLE openbrain_ingester LOGIN;
              CREATE ROLE openbrain_monitor LOGIN;
+             CREATE ROLE openbrain_logs_rollup LOGIN;
              CREATE TABLE funnel_access_log (id BIGSERIAL PRIMARY KEY, marker text);
              CREATE TABLE funnel_access_summary (day date PRIMARY KEY);
              GRANT INSERT ON funnel_access_log TO openbrain_ingester;
+             GRANT INSERT ON funnel_access_log TO openbrain_app;
+             GRANT USAGE ON SEQUENCE funnel_access_log_id_seq TO openbrain_app;
              GRANT SELECT ON mcp_auth_events TO openbrain_monitor;
              INSERT INTO funnel_access_log (marker) VALUES ('must-archive');
              INSERT INTO funnel_access_summary (day) VALUES (current_date)" >/dev/null
+
+          # Migration 09 carries the same conservative HBA proof as the final
+          # assertion; pin its regex/@file arm independently before row checks.
+          hba_file=$(super_sql -tAc "SHOW hba_file")
+          docker exec pgci sh -c \
+            'printf "%s\\n" "host all \"/^openbrain_.*\" 127.0.0.1/32 scram-sha-256" >> "$1"' \
+            hba-append "$hba_file"
+          super_sql -tAc "SELECT pg_reload_conf()" | grep -q t
+          set +e
+          retirement_output=$(run_retirement 2>&1)
+          retirement_rc=$?
+          set -e
+          test "$retirement_rc" -ne 0
+          grep -Fq 'unprovable regex/@file user token' <<< "$retirement_output"
+          docker exec pgci sed -i '$d' "$hba_file"
+          super_sql -tAc "SELECT pg_reload_conf()" | grep -q t
 
           set +e
           retirement_output=$(run_retirement 2>&1)
@@ -435,15 +527,83 @@ jobs:
           test "$retirement_rc" -ne 0
           grep -Fq 'funnel_access_summary' <<< "$retirement_output"
 
-          # Only explicit emptying of both archived tables opens the guard.
+          # Only explicit emptying of both archived tables can open the row
+          # guard. An archive-like third relation must still stop retirement
+          # before either canonical table is dropped.
           super_sql -c "TRUNCATE funnel_access_summary" >/dev/null
+          super_sql -c \
+            "CREATE TABLE funnel_access_log_archive (marker text);
+             INSERT INTO funnel_access_log_archive VALUES ('still-in-corpus')" >/dev/null
+          set +e
+          retirement_output=$(run_retirement 2>&1)
+          retirement_rc=$?
+          set -e
+          test "$retirement_rc" -ne 0
+          grep -Fq 'unexpected matching relation(s)' <<< "$retirement_output"
+          grep -Fq 'funnel_access_log_archive' <<< "$retirement_output"
+          test "$(super_sql -tAc \
+            "SELECT to_regclass('public.funnel_access_log') IS NOT NULL
+                    AND to_regclass('public.funnel_access_summary') IS NOT NULL")" = t
+          super_sql -c "DROP TABLE funnel_access_log_archive" >/dev/null
+
+          # An application writer that began before migration is deliberately
+          # outside the edge-session census. Migration must wait for its row,
+          # acquire ACCESS EXCLUSIVE, then observe and reject the committed row.
+          writer_log="$RUNNER_TEMP/corpus-retirement-writer.log"
+          (
+            docker exec -e PGPASSWORD="$OPENBRAIN_APP_PASSWORD" pgci \
+              psql -h 127.0.0.1 -U openbrain_app -d "$POSTGRES_DB" \
+              -v ON_ERROR_STOP=1 -c \
+              "BEGIN;
+               INSERT INTO funnel_access_log (marker) VALUES ('concurrent-writer');
+               SELECT pg_sleep(5) /* ci-retirement-writer */;
+               COMMIT;"
+          ) >"$writer_log" 2>&1 &
+          writer_pid=$!
+          writer_ready=
+          for _ in $(seq 1 25); do
+            if [[ "$(super_sql -tAc \
+              "SELECT EXISTS (
+                 SELECT 1 FROM pg_stat_activity
+                 WHERE usename = 'openbrain_app'
+                   AND query LIKE '%ci-retirement-writer%'
+                   AND state = 'active'
+               )")" = t ]]; then
+              writer_ready=1
+              break
+            fi
+            sleep 0.2
+          done
+          test "$writer_ready" = 1 || {
+            echo "::error::concurrent retirement writer did not reach its hold point"
+            cat "$writer_log"
+            exit 1
+          }
+
+          set +e
+          retirement_output=$(run_retirement 2>&1)
+          retirement_rc=$?
+          wait "$writer_pid"
+          writer_rc=$?
+          set -e
+          test "$writer_rc" -eq 0 || { cat "$writer_log"; exit 1; }
+          test "$retirement_rc" -ne 0
+          grep -Fq 'funnel_access_log is nonempty' <<< "$retirement_output"
+          test "$(super_sql -tAc \
+            "SELECT count(*) FROM funnel_access_log WHERE marker='concurrent-writer'")" = 1
+
+          super_sql -c "TRUNCATE funnel_access_log" >/dev/null
           run_retirement >/dev/null
           test "$(super_sql -tAc \
             "SELECT to_regclass('public.funnel_access_log') IS NULL
                     AND to_regclass('public.funnel_access_summary') IS NULL
                     AND NOT EXISTS (
                       SELECT 1 FROM pg_roles
-                      WHERE rolname IN ('openbrain_ingester','openbrain_monitor')
+                      WHERE rolname IN (
+                        'openbrain_ingester',
+                        'openbrain_monitor',
+                        'openbrain_logs_rollup'
+                      )
                     )")" = t
           # Already-retired reapplication is a no-op, and the final invariant
           # recognizes the converged state.
@@ -451,7 +611,7 @@ jobs:
           docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
             -v ON_ERROR_STOP=1 < db/03-grants-assertion.sql >/dev/null
-          echo "each nonempty legacy table independently blocked the migration; explicit emptying enabled an idempotent restrictive retirement"
+          echo "each nonempty table, an archive-like relation, and an in-flight writer blocked retirement; explicit emptying enabled an idempotent restrictive drop"
 
       - name: Smoke test — metadata audit is append-only and coherent
         run: |
@@ -800,7 +960,93 @@ jobs:
           test "$transport_rc" -eq 2
           grep -Fq 'target=sink requires an absolute unix-socket DB_HOST' \
             "$smoke_root/transport.err"
-          echo "auth-event wrapper confined its credential, published atomically, rejected stale free-form SQL, and refused the sink-over-TCP shape"
+
+          # Name the operator-facing credential, not the internal tuple field,
+          # when a fresh target config leaves its password blank.
+          {
+            printf 'SUMMARY_BACKEND=postgres\n'
+            printf 'SUMMARY_TARGET=sink\n'
+            printf 'DB_HOST=/var/run/postgresql\n'
+            printf 'LOG_SINK_DB=openbrain_logs\n'
+            printf 'SUMMARY_DIR=%q\n' "$smoke_root/missing-credential-reports"
+            printf 'PSQL_BIN=/bin/false\n'
+          } > "$env_file"
+          chmod 0600 "$env_file"
+          set +e
+          PATH="$probe_bin:$PATH" FUNNEL_SUMMARY_ENV_FILE="$env_file" \
+            scripts/funnel_daily_summary.sh \
+            >"$smoke_root/missing.out" 2>"$smoke_root/missing.err"
+          missing_rc=$?
+          set -e
+          test "$missing_rc" -eq 2
+          grep -Fq 'OPENBRAIN_LOGS_ROLLUP_PASSWORD is required for target=sink' \
+            "$smoke_root/missing.err"
+          echo "auth-event wrapper confined its credential, published atomically, rejected stale free-form SQL, refused sink-over-TCP, and named missing credentials"
+
+      - name: Smoke test — Compose project env cannot repin the summary target
+        run: |
+          set -euo pipefail
+          smoke_root="$RUNNER_TEMP/compose-summary-target"
+          compose_dir="$smoke_root/compose"
+          report_dir="$smoke_root/reports"
+          config_env="$smoke_root/funnel-summary.env"
+          probe_bin="$smoke_root/bin"
+          install -d -m 0700 "$smoke_root" "$compose_dir" "$report_dir" "$probe_bin"
+
+          # This is the regression: a project's ordinary Compose .env may carry
+          # a stale target value, but it cannot alter the invocation's reviewed
+          # sink tuple after that tuple has been selected.
+          cat > "$compose_dir/.env" <<'ENV'
+          SUMMARY_TARGET=corpus
+          POSTGRES_DB=poison_corpus
+          LOG_SINK_DB=ci_sink_from_compose
+          ENV
+
+          {
+            printf 'SUMMARY_BACKEND=compose\n'
+            printf 'SUMMARY_TARGET=sink\n'
+            printf 'COMPOSE_DIR=%q\n' "$compose_dir"
+            printf 'SUMMARY_DIR=%q\n' "$report_dir"
+          } > "$config_env"
+          chmod 0600 "$config_env"
+
+          cat > "$probe_bin/docker" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          printf '%q ' "$@" >> "$COMPOSE_PROBE_LOG"
+          printf '\n' >> "$COMPOSE_PROBE_LOG"
+          if [[ " $* " == *" ps --status=running log-sink "* ]]; then
+            echo log-sink
+            exit 0
+          fi
+          if [[ " $* " == *" exec -T log-sink "* ]]; then
+            test "${@: -1}" = ci_sink_from_compose
+            cat > "$COMPOSE_PROBE_INPUT"
+            grep -Fq '# Funnel observability report' "$COMPOSE_PROBE_INPUT"
+            ! grep -Fq 'auth-failure reasons' "$COMPOSE_PROBE_INPUT"
+            echo '# Funnel observability report'
+            exit 0
+          fi
+          echo "unexpected docker invocation: $*" >&2
+          exit 45
+          SH
+          chmod 0755 "$probe_bin/docker"
+
+          export COMPOSE_PROBE_LOG="$smoke_root/docker.log"
+          export COMPOSE_PROBE_INPUT="$smoke_root/stdin.sql"
+          PATH="$probe_bin:$PATH" FUNNEL_SUMMARY_ENV_FILE="$config_env" \
+            scripts/funnel_daily_summary.sh
+
+          grep -Fq 'exec -T log-sink' "$COMPOSE_PROBE_LOG"
+          ! grep -Fq 'exec -T postgres' "$COMPOSE_PROBE_LOG"
+          mapfile -t reports < <(
+            find "$report_dir" -maxdepth 1 -type f \
+              -name 'funnel-summary-*.md' -print
+          )
+          test "${#reports[@]}" -eq 1
+          test -z "$(find "$report_dir" -maxdepth 1 -type f \
+            -name 'auth-events-summary-*.md' -print -quit)"
+          echo "Compose .env could customize the selected sink database name but not flip the target tuple"
 
       - name: Container logs on failure
         if: failure()
@@ -846,6 +1092,50 @@ jobs:
           echo "PG_IMAGE=$img" >> "$GITHUB_ENV"
           echo "Using $img (from deploy/qubes/ingress-qube/docker-compose.yml)"
 
+      - name: Failed first init cannot restart as a partial sink
+        run: |
+          set -euo pipefail
+          partial_volume="sinkci-partial-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          failure_sql="$RUNNER_TEMP/log-sink-intentional-init-failure.sql"
+          printf '%s\n' '\set ON_ERROR_STOP on' 'SELECT 1 / 0;' > "$failure_sql"
+          docker volume create "$partial_volume" >/dev/null
+          cleanup_partial() {
+            docker rm -f sinkci-partial-first sinkci-partial-restart >/dev/null 2>&1 || true
+            docker volume rm "$partial_volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup_partial EXIT
+
+          set +e
+          docker run --name sinkci-partial-first --network none \
+            -e POSTGRES_PASSWORD=ci_partial_superuser_pw \
+            -v "$partial_volume:/var/lib/postgresql/data" \
+            -v "$GITHUB_WORKSPACE/db/log-sink/log-sink-entrypoint.sh:/usr/local/bin/openbrain-log-sink-entrypoint.sh:ro" \
+            -v "$failure_sql:/docker-entrypoint-initdb.d/99-intentional-failure.sql:ro" \
+            --entrypoint /bin/sh \
+            "$PG_IMAGE" /usr/local/bin/openbrain-log-sink-entrypoint.sh \
+            postgres -c listen_addresses= >/dev/null 2>&1
+          first_rc=$?
+          set -e
+          test "$first_rc" -ne 0 || {
+            echo "::error::intentional first-init failure unexpectedly succeeded"
+            exit 1
+          }
+          docker rm sinkci-partial-first >/dev/null
+
+          set +e
+          restart_output=$(docker run --name sinkci-partial-restart --network none \
+            -e POSTGRES_PASSWORD=ci_partial_superuser_pw \
+            -v "$partial_volume:/var/lib/postgresql/data" \
+            -v "$GITHUB_WORKSPACE/db/log-sink/log-sink-entrypoint.sh:/usr/local/bin/openbrain-log-sink-entrypoint.sh:ro" \
+            --entrypoint /bin/sh \
+            "$PG_IMAGE" /usr/local/bin/openbrain-log-sink-entrypoint.sh \
+            postgres -c listen_addresses= 2>&1)
+          restart_rc=$?
+          set -e
+          test "$restart_rc" -ne 0
+          grep -Fq 'missing the Open Brain init completion marker' <<< "$restart_output"
+          echo "partial PGDATA remained fail-closed across restart"
+
       - name: Start the sink exactly as the ingress qube does
         run: |
           set -euo pipefail
@@ -858,14 +1148,22 @@ jobs:
             -e POSTGRES_HOST_AUTH_METHOD=reject \
             -e OPENBRAIN_INGESTER_PASSWORD -e OPENBRAIN_LOGS_ROLLUP_PASSWORD \
             -e OPENBRAIN_MONITOR_PASSWORD \
+            -v "$GITHUB_WORKSPACE/db/log-sink/log-sink-entrypoint.sh:/usr/local/bin/openbrain-log-sink-entrypoint.sh:ro" \
             -v "$GITHUB_WORKSPACE/db/log-sink/00-log-sink-roles.sh:/docker-entrypoint-initdb.d/00-log-sink-roles.sh:ro" \
             -v "$GITHUB_WORKSPACE/db/log-sink/01-log-sink.sql:/docker-entrypoint-initdb.d/01-log-sink.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/log-sink/02-log-sink-assertion.sql:/docker-entrypoint-initdb.d/99-log-sink-assertion.sql:ro" \
-            "$PG_IMAGE" -c listen_addresses=
+            -v "$GITHUB_WORKSPACE/db/log-sink/03-log-sink-ready.sh:/docker-entrypoint-initdb.d/zz-log-sink-ready.sh:ro" \
+            --entrypoint /bin/sh \
+            "$PG_IMAGE" /usr/local/bin/openbrain-log-sink-entrypoint.sh \
+            postgres -c listen_addresses=
           for i in $(seq 1 60); do
-            docker exec sinkci pg_isready -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1 && break
+            docker exec sinkci sh -c \
+              'test -f "$PGDATA/.openbrain-log-sink-init-complete" && pg_isready -h /var/run/postgresql -U "$1" -d "$2"' \
+              ready "$POSTGRES_USER" "$POSTGRES_DB" >/dev/null 2>&1 && break
             sleep 2
           done
+          docker exec sinkci test -f \
+            /var/lib/postgresql/data/.openbrain-log-sink-init-complete
           docker exec sinkci pg_isready -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
 
       - name: Init assertion ran and passed
@@ -874,6 +1172,7 @@ jobs:
           # Absence is as meaningful as failure: a silently-skipped assertion
           # would let every check below pass against an unverified schema.
           docker logs sinkci 2>&1 | grep -F 'log sink: invariants OK'
+          docker logs sinkci 2>&1 | grep -F 'log sink: init completion marker written'
 
       - name: Socket only — no TCP listener exists to connect to
         run: |

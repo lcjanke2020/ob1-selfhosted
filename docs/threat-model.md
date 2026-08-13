@@ -94,11 +94,12 @@ One line per layer; each links to its section of
   no auth door; fresh hash/revocation lookup for native tokens;
   pinned-everything JWT validation; boot-time JWKS probe; shaped auth failures
   that close a credential-status side-channel.
-- [**Database**](security-model.md#database-layer) — six least-privilege roles
-  plus forced RLS on memory rows; missing audience context matches nothing, the
-  app cannot DELETE thoughts or mutate token lifecycle state, the token
-  administrator cannot read memories/hashes, and the ingester exists only on a
-  separate log cluster where it can INSERT into one observability table.
+- [**Database**](security-model.md#database-layer) — seven named role identities
+  across two disjoint clusters, plus forced RLS on memory rows; missing audience
+  context matches nothing, the app cannot DELETE thoughts or mutate token
+  lifecycle state, the token administrator cannot read memories/hashes, and the
+  ingester exists only on a separate log cluster where it can INSERT into one
+  observability table.
 - [**Container**](security-model.md#container-layer) — the MCP server and
   log-ingester run non-root with `cap_drop: ALL` and a read-only rootfs; Caddy
   keeps the image's root user but runs with a genuinely empty capability set (a

@@ -332,16 +332,19 @@ For a pre-Arc-B Pattern B stack, first add fresh values for
 short absolute `LOG_SINK_SOCKET_DIR`, and keep/set fresh sink-only ingester and
 optional monitor passwords. Then:
 
-1. Stop the old log-ingester, create the socket directory, start `log-sink`,
-   recreate the ingester, and verify a new request row lands in
-   `openbrain_logs`. The durable Caddy log plus existing cursor bridges the
-   short cutover; the new sink does not replay already-consumed historical
-   files.
+1. Stop the old log-ingester, build its new socket-only image, create the socket
+   directory, start `log-sink`, recreate the ingester, and verify a new request
+   row lands in `openbrain_logs`. The durable Caddy log plus existing cursor
+   bridges the short cutover; the new sink does not replay already-consumed
+   historical files. The sink becomes healthy only after its final assertion
+   writes the durable init-completion marker.
 
    ```sh
    docker compose --env-file .env stop log-ingester
+   docker compose --env-file .env build log-ingester
    mkdir -p /the/exact/absolute/path/set-as-LOG_SINK_SOCKET_DIR
-   docker compose --env-file .env --profile pattern-b up -d log-sink
+   docker compose --env-file .env --profile pattern-b up -d --wait log-sink
+   docker compose --env-file .env logs log-sink | grep -E 'invariants OK|init completion marker written'
    docker compose --env-file .env --profile pattern-b up -d --no-deps log-ingester
    ```
 
@@ -352,8 +355,10 @@ optional monitor passwords. Then:
    substituting this container-local superuser path.
 3. Explicitly `TRUNCATE public.funnel_access_log` and
    `public.funnel_access_summary` in the corpus. Do not skip the frozen summary
-   just because the raw table is empty. Update summary/monitor jobs to the new
-   target/socket configuration before enabling their next timer occurrence.
+   just because the raw table is empty. Replace/update both
+   `~/.config/funnel-summary.env` and `~/.config/funnel-monitor.env` for the new
+   target/socket configuration before enabling their next timer occurrence; the
+   retired knobs deliberately make stale files fail closed.
 
 Now run the block below from this directory with the running stack's `.env`
 present — its `COMPOSE_FILE` and `COMPOSE_PROJECT_NAME` values let each
@@ -371,7 +376,7 @@ docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postg
 docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/08-access-tokens.sql
 docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/09-retire-corpus-funnel.sql
 docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
-docker compose --env-file .env build mcp && docker compose --env-file .env up -d
+docker compose --env-file .env build mcp log-ingester && docker compose --env-file .env up -d
 ```
 
 Upgrading to **1.20.0+**: `02-observability.sql` in the block above now also
@@ -431,7 +436,7 @@ the log ingester.
 
 **Edits to existing init files** (a tightened grant, a new role) silently
 _don't_ reach an already-initialized DB. The drift check is read-only and safe
-to run any time:
+to run any time as a database superuser (needed for HBA-file inspection):
 
 ```bash
 docker compose --env-file .env exec -T postgres \

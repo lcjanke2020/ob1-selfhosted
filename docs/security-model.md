@@ -269,13 +269,18 @@ grant assertion verifies exact column privileges, function ownership/config,
 standalone role membership, sequence access, and backup visibility.
 
 `db/01-schema.sql` actively REVOKEs historical broad grants (idempotent, safe on
-live DBs), and `db/03-grants-assertion.sql` is a read-only invariant check you
-can run any time — because init scripts only run on a fresh data directory, a
-tightened grant **does not** reach an existing deployment by itself. Arc B
-inverts the old monitor allowlist: the corpus assertion rejects either edge role
-name, every `public.funnel_access_*` relation, matching `pg_hba_file_rules`, and
-any HBA parse error that would make absence unprovable. The runbook archives
-first; the archive-gated `db/09` migration then drops the old shape without
+live DBs), and `db/03-grants-assertion.sql` is a read-only **superuser**
+invariant check you can run any time — superuser is needed to inspect
+`pg_hba_file_rules`, not to mutate the catalog. Because init scripts only run on
+a fresh data directory, a tightened grant **does not** reach an existing
+deployment by itself. Arc B inverts the old monitor allowlist: the corpus
+assertion rejects all three sink-only role names, every `public.funnel_access_*`
+relation, standing default table/sequence grants to `PUBLIC`, matching HBA
+rules, and regex/`@file` HBA user tokens whose exclusion of the sink roles
+cannot be proven. Any HBA parse error likewise fails closed. The HBA view reads
+the installed file; operators still reload separately before restoring service.
+The runbook archives first; the archive-gated `db/09` migration then locks both
+canonical tables before its emptiness check and drops the old shape without
 `CASCADE`. The separate sink assertion independently pins its exact roles,
 relations, and grants. PostgreSQL grants function execution to `PUBLIC` by
 default, so any future `SECURITY DEFINER` routine must revoke that default and

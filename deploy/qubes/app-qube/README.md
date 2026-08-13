@@ -267,10 +267,11 @@ Rows start at 1.7.0. `db/01-schema.sql` and `db/04-sessions.sql` have no upgrade
 row of their own; a database predating either needs it applied first, in that
 order (`db/02-observability.sql` gained an upgrade row at 1.20.0 — older
 databases still apply it in its numbered position first).
-`db/03-grants-assertion.sql` is deliberately not third — it is a read-only check
-of the completed catalog, so it runs after every pending row below and fails by
-design if run before the relations it asserts on exist. The db qube records the
-same canonical order
+`db/03-grants-assertion.sql` is deliberately not third — it is a read-only
+**superuser** check of the completed catalog (HBA inspection requires that
+privilege), so it runs after every pending row below and fails by design if run
+before the relations it asserts on exist. The db qube records the same canonical
+order
 ([First boot / provisioning](../db-qube/README.md#first-boot--provisioning)).
 
 | Server | Migration                                                                  | Additional requirement                                                                             |

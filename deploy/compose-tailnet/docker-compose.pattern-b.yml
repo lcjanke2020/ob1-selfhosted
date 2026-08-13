@@ -129,18 +129,22 @@ services:
       OPENBRAIN_INGESTER_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD:?set OPENBRAIN_INGESTER_PASSWORD (the log-ingester INSERT-only role)}
       OPENBRAIN_LOGS_ROLLUP_PASSWORD: ${OPENBRAIN_LOGS_ROLLUP_PASSWORD:?set OPENBRAIN_LOGS_ROLLUP_PASSWORD (the sink summary/retention role)}
       OPENBRAIN_MONITOR_PASSWORD: ${OPENBRAIN_MONITOR_PASSWORD:-}
-    entrypoint: ["docker-entrypoint.sh"]
+    # Refuse an existing PGDATA unless the lexically-last init script wrote its
+    # completion marker; restart must not bless a failed first init.
+    entrypoint: ["/bin/sh", "/usr/local/bin/openbrain-log-sink-entrypoint.sh"]
     command: ["postgres", "-c", "listen_addresses="]
     volumes:
       - log_sink_data:/var/lib/postgresql/data
       - ${LOG_SINK_SOCKET_DIR:?set LOG_SINK_SOCKET_DIR to a short absolute host path}:/var/run/postgresql:z
+      - ../../db/log-sink/log-sink-entrypoint.sh:/usr/local/bin/openbrain-log-sink-entrypoint.sh:ro
       - ../../db/log-sink/00-log-sink-roles.sh:/docker-entrypoint-initdb.d/00-log-sink-roles.sh:ro
       - ../../db/log-sink/01-log-sink.sql:/docker-entrypoint-initdb.d/01-log-sink.sql:ro
       - ../../db/log-sink/02-log-sink-assertion.sql:/docker-entrypoint-initdb.d/99-log-sink-assertion.sql:ro
+      - ../../db/log-sink/03-log-sink-ready.sh:/docker-entrypoint-initdb.d/zz-log-sink-ready.sh:ro
     healthcheck:
       test: [
         "CMD-SHELL",
-        "pg_isready -h /var/run/postgresql -U ${LOG_SINK_SUPERUSER:-postgres} -d ${LOG_SINK_DB:-openbrain_logs}",
+        "test -f \"$$PGDATA/.openbrain-log-sink-init-complete\" && pg_isready -h /var/run/postgresql -U ${LOG_SINK_SUPERUSER:-postgres} -d ${LOG_SINK_DB:-openbrain_logs}",
       ]
       interval: 10s
       timeout: 5s

@@ -1,6 +1,6 @@
 # systemd USER unit — install at ~/.config/systemd/user/auth-events-summary.service
-# on the app qube. The wrapper loads ~/.config/auth-events-summary.env itself so the
-# same command works both under systemd and during manual verification.
+# on the app qube. This unit selects ~/.config/auth-events-summary.env through
+# FUNNEL_SUMMARY_ENV_FILE; use the same variable for an equivalent manual run.
 [Unit]
 Description=Open Brain daily auth-event summary and retention
 # Bound one initial attempt plus two retries so a transient tailnet startup race

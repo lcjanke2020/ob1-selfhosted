@@ -1,6 +1,6 @@
 -- Invariant assertions for protected corpus grants and topology: openbrain_app
 -- must be a standalone, non-bypass role with its intended memory access, while
--- Funnel relations, edge roles, and matching pg_hba rules must be absent.
+-- Funnel relations, sink-only roles, and matching pg_hba rules must be absent.
 --
 -- Why this is its own file:
 --
@@ -22,11 +22,13 @@
 --      this stable source path last. In both cases the assertion sees the
 --      completed catalog, so an init file that widens a protected role fails
 --      loudly.
---   2. Drift check against a deployed DB: an operator can run this
+--   2. Drift check against a deployed DB: a superuser can run this
 --      file standalone (`psql -f db/03-grants-assertion.sql`) against
 --      a live DB and the assertion exercises the LIVE catalog state
 --      without mutating anything — no REVOKE+GRANT to wipe the drift
---      first. This is the intended contract.
+--      first. Superuser is required only because pg_hba_file_rules restricts
+--      its contents; the assertion remains read-only. This is the intended
+--      contract.
 --
 -- Invariants checked:
 --   (a) `openbrain_app` must have no role memberships and must not be a
@@ -35,17 +37,35 @@
 --   (c) `openbrain_app` MUST have SELECT, INSERT, UPDATE on
 --       `public.thoughts`.
 --   (d) the app may read but not mutate the memory-space registry, and only
---       it may execute the two reviewed memory_scope helpers (never PUBLIC or
---       the edge-resident monitor).
+--       it may execute the two reviewed memory_scope helpers (never PUBLIC).
 --   (e) metadata degradation history is append-only to the app; its pending-
 --       delivery outbox is enqueue/consume-only, and only the singleton
 --       notification ledger is otherwise mutable.
+--   (f) PUBLIC has no standing default table/sequence grant, and Funnel
+--       relations, sink-only roles, and matching/unprovable HBA user tokens
+--       are absent from the corpus.
 --
 -- The openbrain_app check is deliberately scoped to thoughts:
 -- 02-observability.sql and 04-sessions.sql legitimately grant it access to
--- other application tables. The monitor check below is deliberately the
--- inverse: it permits one small relation allowlist and rejects everything
--- else in every non-system schema.
+-- other application tables. The final breakout check is deliberately inverse:
+-- it rejects every sink-only role and public.funnel_access_% relation rather
+-- than maintaining a corpus-side allowlist for either.
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_roles
+    WHERE rolname = current_user
+      AND rolsuper
+  ) THEN
+    RAISE EXCEPTION
+      'grants assertion requires a database superuser to inspect '
+      'pg_hba_file_rules; current_user=%',
+      current_user;
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
 
 DO $$
 DECLARE
@@ -565,7 +585,53 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Funnel-log breakout invariants. The edge roles and relations belong only to
+-- Default ACLs are standing instructions, not observed relation grants. A
+-- snapshot-only scan would pass until the next object materialized the
+-- privilege, so reject future relation/sequence access granted to PUBLIC in
+-- every non-system schema.
+DO $$
+DECLARE
+  bad_default_acls TEXT;
+BEGIN
+  SELECT string_agg(
+           default_grant.description,
+           ', ' ORDER BY default_grant.description
+         )
+    INTO bad_default_acls
+  FROM (
+    SELECT DISTINCT format(
+      '%s on future %s in %s (owner %I)',
+      a.privilege_type,
+      CASE d.defaclobjtype WHEN 'S' THEN 'sequences' ELSE 'relations' END,
+      CASE
+        WHEN d.defaclnamespace = 0 THEN 'all schemas'
+        ELSE format('schema %I', n.nspname)
+      END,
+      owner_role.rolname
+    ) AS description
+    FROM pg_default_acl d
+    JOIN pg_roles owner_role ON owner_role.oid = d.defaclrole
+    LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace
+    CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+    WHERE d.defaclobjtype IN ('r', 'S')
+      AND a.grantee = 0
+      AND (
+        d.defaclnamespace = 0
+        OR (n.nspname <> 'information_schema' AND n.nspname !~ '^pg_')
+      )
+  ) default_grant;
+
+  IF bad_default_acls IS NOT NULL THEN
+    RAISE EXCEPTION
+      'grants assertion failed: default privileges would grant future relations '
+      'or sequences to PUBLIC: %. Revoke the standing default grant before '
+      'deploying.',
+      bad_default_acls;
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Funnel-log breakout invariants. The sink-only roles and relations belong only to
 -- the dedicated log-sink cluster. Keeping this check in the corpus's final
 -- assertion turns the old shared-database shape into an init/upgrade failure,
 -- including when an operator skipped part of the retirement runbook.
@@ -579,11 +645,15 @@ BEGIN
   SELECT string_agg(quote_ident(rolname), ', ' ORDER BY rolname)
     INTO bad_roles
   FROM pg_roles
-  WHERE rolname IN ('openbrain_ingester', 'openbrain_monitor');
+  WHERE rolname IN (
+    'openbrain_ingester',
+    'openbrain_monitor',
+    'openbrain_logs_rollup'
+  );
 
   IF bad_roles IS NOT NULL THEN
     RAISE EXCEPTION
-      'grants assertion failed: corpus contains retired edge role(s): %. '
+      'grants assertion failed: corpus contains sink-only role(s): %. '
       'Cut Pattern B over to its log sink, remove matching pg_hba rules, then '
       'apply db/09-retire-corpus-funnel.sql.',
       bad_roles;
@@ -602,8 +672,9 @@ BEGIN
   IF bad_relations IS NOT NULL THEN
     RAISE EXCEPTION
       'grants assertion failed: corpus contains retired Funnel relation(s): %. '
-      'Archive and verify any legacy rows, truncate the legacy tables, then '
-      'apply db/09-retire-corpus-funnel.sql.',
+      'Export and verify every matching relation; remove any noncanonical '
+      'archive-like relation explicitly, truncate the two canonical legacy '
+      'tables, then apply db/09-retire-corpus-funnel.sql.',
       bad_relations;
   END IF;
 
@@ -635,14 +706,20 @@ BEGIN
   WHERE EXISTS (
     SELECT 1
     FROM unnest(COALESCE(h.user_name, ARRAY[]::TEXT[])) AS configured(role_name)
-    WHERE ltrim(configured.role_name, '+')
-          IN ('openbrain_ingester', 'openbrain_monitor')
+    WHERE ltrim(configured.role_name, '+') IN (
+            'openbrain_ingester',
+            'openbrain_monitor',
+            'openbrain_logs_rollup'
+          )
+       OR left(configured.role_name, 1) IN ('/', '@')
   );
 
   IF bad_hba IS NOT NULL THEN
     RAISE EXCEPTION
-      'grants assertion failed: corpus pg_hba.conf still names retired edge '
-      'role(s): %. Remove the rules, reload Postgres, and rerun this assertion.',
+      'grants assertion failed: corpus pg_hba.conf names a retired sink-only '
+      'role or uses an unprovable regex/@file user token: %. Replace those '
+      'rules with explicit corpus-role names and rerun this assertion; reload '
+      'Postgres separately before restoring service.',
       bad_hba;
   END IF;
 END;

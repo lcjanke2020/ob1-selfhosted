@@ -156,9 +156,11 @@ sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
 Do not load `db/*.sql` in filename order: `03-grants-assertion.sql` is a
-read-only completed-catalog check, not the third schema migration. Run it last
-during native provisioning, and rerun it after every later schema migration so
-new relations, retired role names, and HBA topology are checked together.
+read-only **superuser** completed-catalog check, not the third schema migration.
+Superuser is required to inspect `pg_hba_file_rules`; the file does not mutate
+the catalog. Run it last during native provisioning, and rerun it after every
+later schema migration so new relations, retired role names, default ACLs, and
+HBA topology are checked together.
 
 Apply `pg_hba.snippet.conf` and `postgresql.local.conf` after the roles exist —
 including the snippet header's removal of the stock broad loopback lines (first
@@ -297,9 +299,10 @@ tailnet path stays live as a fallback until the new one is verified.
 ## Retiring the ingress qube's old access (existing installs)
 
 A deployment that predates Arc B may still contain frozen Funnel history, the
-two retired edge roles, or HBA rules naming them. The shipped corpus now rejects
-all three. Perform this one-time migration only after the ingress qube (or
-non-Qubes Pattern B stack) is healthy on its separate socket-only sink.
+retired sink-only roles, or HBA rules capable of selecting them. The shipped
+corpus now rejects all three. Perform this one-time migration only after the
+ingress qube (or non-Qubes Pattern B stack) is healthy on its separate
+socket-only sink.
 
 1. **Prove the new path first.** On the ingress host, confirm new
    `funnel_access_log` rows land in `openbrain_logs`, then run the sink monitor
@@ -342,9 +345,11 @@ non-Qubes Pattern B stack) is healthy on its separate socket-only sink.
    Do not skip the archive because the first table happens to be empty; the
    frozen aggregate table is history too. `db/09-retire-corpus-funnel.sql`
    aborts transactionally if either table still has even one row.
-4. **Remove every HBA entry naming `openbrain_ingester` or
-   `openbrain_monitor`.** Keep a dated copy of the installed file, reload, then
-   require this query to return zero:
+4. **Remove every HBA entry naming `openbrain_ingester`, `openbrain_monitor`, or
+   `openbrain_logs_rollup`.** Replace regex and `@file` user tokens with
+   explicit corpus-role names: the guard cannot prove that an opaque/dynamic
+   token excludes the sink roles. Keep a dated copy of the installed file,
+   reload, then require this query to return zero:
 
    ```sql
    SELECT count(*)
@@ -353,8 +358,12 @@ non-Qubes Pattern B stack) is healthy on its separate socket-only sink.
       OR EXISTS (
         SELECT 1
         FROM unnest(coalesce(h.user_name, ARRAY[]::text[])) AS u(name)
-        WHERE ltrim(u.name, '+')
-              IN ('openbrain_ingester', 'openbrain_monitor')
+        WHERE ltrim(u.name, '+') IN (
+                'openbrain_ingester',
+                'openbrain_monitor',
+                'openbrain_logs_rollup'
+              )
+           OR left(u.name, 1) IN ('/', '@')
       );
    ```
 
@@ -367,9 +376,12 @@ non-Qubes Pattern B stack) is healthy on its separate socket-only sink.
    psql -X -v ON_ERROR_STOP=1 -f db/03-grants-assertion.sql
    ```
 
-   Migration 09 uses no `CASCADE` and no `DROP OWNED`. A nonempty table, stale
-   HBA rule, active edge session, dependent relation, or unexpected role
-   dependency aborts and rolls the entire retirement back for inspection.
+   Migration 09 takes `ACCESS EXCLUSIVE` locks on both canonical legacy tables
+   before checking emptiness, and uses no `CASCADE` or `DROP OWNED`. A nonempty
+   table (including a row committed by an in-flight writer), unexpected matching
+   relation, stale/unprovable HBA rule, active sink-role session, dependent
+   relation, or unexpected role dependency aborts and rolls the entire
+   retirement back for inspection.
 6. **Verify the negative from the catalog:**
 
    ```sql
@@ -377,7 +389,11 @@ non-Qubes Pattern B stack) is healthy on its separate socket-only sink.
           to_regclass('public.funnel_access_summary');
    SELECT rolname
    FROM pg_roles
-   WHERE rolname IN ('openbrain_ingester', 'openbrain_monitor');
+   WHERE rolname IN (
+     'openbrain_ingester',
+     'openbrain_monitor',
+     'openbrain_logs_rollup'
+   );
    ```
 
    Both queries must return only null/zero-row results. Re-running the final

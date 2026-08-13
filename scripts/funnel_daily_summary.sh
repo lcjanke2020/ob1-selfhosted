@@ -127,18 +127,24 @@ unset retired_knob
 case "${SUMMARY_TARGET:-}" in
   sink)
     TARGET_ROLE=openbrain_logs_rollup
-    TARGET_DB="${LOG_SINK_DB:-openbrain_logs}"
+    TARGET_DB_ENV=LOG_SINK_DB
+    TARGET_DB_DEFAULT=openbrain_logs
+    TARGET_DB="${LOG_SINK_DB:-$TARGET_DB_DEFAULT}"
     TARGET_SERVICE=log-sink
     TARGET_SQL_BASENAME=summarize_funnel.sql
     TARGET_PASSWORD="${OPENBRAIN_LOGS_ROLLUP_PASSWORD:-}"
+    TARGET_PASSWORD_NAME=OPENBRAIN_LOGS_ROLLUP_PASSWORD
     REPORT_STEM=funnel-summary
     ;;
   corpus)
     TARGET_ROLE=openbrain_app
-    TARGET_DB="${POSTGRES_DB:-openbrain}"
+    TARGET_DB_ENV=POSTGRES_DB
+    TARGET_DB_DEFAULT=openbrain
+    TARGET_DB="${POSTGRES_DB:-$TARGET_DB_DEFAULT}"
     TARGET_SERVICE=postgres
     TARGET_SQL_BASENAME=summarize_auth_events.sql
     TARGET_PASSWORD="${OPENBRAIN_APP_PASSWORD:-}"
+    TARGET_PASSWORD_NAME=OPENBRAIN_APP_PASSWORD
     REPORT_STEM=auth-events-summary
     ;;
   *)
@@ -146,6 +152,12 @@ case "${SUMMARY_TARGET:-}" in
     exit 2
     ;;
 esac
+
+# These are the reviewed target tuple. A Compose project's .env is sourced
+# later only for its project identity and selected database-name variable; it
+# must not be able to recombine the service, role, SQL, credential, or report.
+readonly TARGET_ROLE TARGET_DB_ENV TARGET_DB_DEFAULT TARGET_SERVICE \
+  TARGET_SQL_BASENAME TARGET_PASSWORD TARGET_PASSWORD_NAME REPORT_STEM
 
 # A checkout keeps SQL under ../db; per-qube installs put the one selected file
 # beside this wrapper. There is deliberately no arbitrary SQL path override.
@@ -158,6 +170,7 @@ if [[ ! -r "$SQL_FILE" ]]; then
   echo "[funnel_daily_summary] summary SQL is missing/unreadable: $SQL_FILE" >&2
   exit 2
 fi
+readonly SQL_FILE
 
 if [[ ! -d "$SUMMARY_DIR" ]]; then
   echo "[funnel_daily_summary] SUMMARY_DIR=$SUMMARY_DIR does not exist; creating" >&2
@@ -193,7 +206,9 @@ run_summary() {
 
       # Load .env for the selected database name and Compose project identity.
       # Docker Compose reads the same file for interpolation; no secret needs
-      # to remain exported by this wrapper.
+      # to remain exported by this wrapper. SUMMARY_TARGET is already resolved
+      # into the readonly tuple above, so a same-named project variable cannot
+      # switch halves after validation.
       if [[ -f .env ]]; then
         compose_cmd+=(--env-file .env)
         # An inherited COMPOSE_PROJECT_NAME (the documented override above)
@@ -201,23 +216,22 @@ run_summary() {
         # precedence — so preserve it across the source.
         local inherited_project_set="${COMPOSE_PROJECT_NAME+x}"
         local inherited_project="${COMPOSE_PROJECT_NAME-}"
+        local pinned_summary_target="$SUMMARY_TARGET"
         # shellcheck disable=SC1091
         . .env
+        SUMMARY_TARGET="$pinned_summary_target"
         if [[ -n "$inherited_project_set" ]]; then
           export COMPOSE_PROJECT_NAME="$inherited_project"
         fi
         export -n OPENBRAIN_APP_PASSWORD OPENBRAIN_LOGS_ROLLUP_PASSWORD \
           LOG_SINK_SUPERUSER_PASSWORD OPENBRAIN_INGESTER_PASSWORD \
-          OPENBRAIN_MONITOR_PASSWORD POSTGRES_PASSWORD 2>/dev/null || true
+          OPENBRAIN_MONITOR_PASSWORD POSTGRES_PASSWORD SUMMARY_TARGET \
+          2>/dev/null || true
       fi
 
       # Reconcile a custom database name loaded from the Compose .env while the
       # target keeps the service, role, and SQL identity fixed.
-      if [[ "$SUMMARY_TARGET" == "sink" ]]; then
-        TARGET_DB="${LOG_SINK_DB:-openbrain_logs}"
-      else
-        TARGET_DB="${POSTGRES_DB:-openbrain}"
-      fi
+      TARGET_DB="${!TARGET_DB_ENV:-$TARGET_DB_DEFAULT}"
 
       if ! "${compose_cmd[@]}" ps --status=running "$TARGET_SERVICE" |
            grep -q "$TARGET_SERVICE"; then
@@ -225,10 +239,11 @@ run_summary() {
         return 1
       fi
 
-      # Both database images require password auth on their long-lived local
-      # socket in supported Pattern B deployments. Read the already-scoped
-      # service env inside the container so no password appears in host argv.
-      if [[ "$SUMMARY_TARGET" == "sink" ]]; then
+      # Read the already-scoped service credential inside the selected database
+      # container so no password appears in host argv. The sink requires SCRAM
+      # on its socket; the corpus call still uses the app identity even where a
+      # stock local HBA happens to trust container-local connections.
+      if [[ "$TARGET_SERVICE" == "log-sink" ]]; then
         cat -- "$SQL_FILE" | "${compose_cmd[@]}" exec -T log-sink \
           sh -eu -c \
           'PGPASSWORD="$OPENBRAIN_LOGS_ROLLUP_PASSWORD" exec psql -X -w -v ON_ERROR_STOP=1 -h /var/run/postgresql -U openbrain_logs_rollup -d "$1" -f -' \
@@ -242,12 +257,14 @@ run_summary() {
       ;;
 
     postgres)
-      for required in DB_HOST TARGET_PASSWORD; do
-        if [[ -z "${!required:-}" ]]; then
-          echo "[funnel_daily_summary] $required is required for SUMMARY_BACKEND=postgres" >&2
-          return 2
-        fi
-      done
+      if [[ -z "${DB_HOST:-}" ]]; then
+        echo "[funnel_daily_summary] DB_HOST is required for SUMMARY_BACKEND=postgres" >&2
+        return 2
+      fi
+      if [[ -z "$TARGET_PASSWORD" ]]; then
+        echo "[funnel_daily_summary] $TARGET_PASSWORD_NAME is required for target=$SUMMARY_TARGET with SUMMARY_BACKEND=postgres" >&2
+        return 2
+      fi
 
       if [[ "$SUMMARY_TARGET" == "sink" && "$DB_HOST" != /* ]]; then
         echo "[funnel_daily_summary] target=sink requires an absolute unix-socket DB_HOST" >&2

@@ -1,4 +1,4 @@
--- One-time retirement of the legacy Funnel tables and edge roles from the
+-- One-time retirement of the legacy Funnel tables and sink-only roles from the
 -- corpus cluster. Run as a database superuser only after Pattern B writes,
 -- monitoring, and retention have moved to the dedicated log sink.
 --
@@ -17,13 +17,12 @@
 
 BEGIN;
 
-DO $retirement_guard$
-DECLARE
-  relation_name REGCLASS;
-  has_rows      BOOLEAN;
-  bad_hba       TEXT;
-  hba_errors    TEXT;
-  active_roles  TEXT;
+-- Pin the visibility rule before any catalog read. In particular, the
+-- emptiness guard below must see rows committed by a writer that the exclusive
+-- lock had to wait for.
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+
+DO $superuser_guard$
 BEGIN
   IF NOT EXISTS (
     SELECT 1
@@ -35,7 +34,43 @@ BEGIN
       'db/09-retire-corpus-funnel.sql must run as a database superuser; current_user=%',
       current_user;
   END IF;
+END;
+$superuser_guard$ LANGUAGE plpgsql;
 
+-- Acquire the strongest lock on every canonical legacy table, in a stable
+-- order, before deciding that it is empty. A writer that began first is allowed
+-- to finish and is then visible to the next statement's READ COMMITTED snapshot;
+-- later writers wait behind this transaction and cannot land between the check
+-- and DROP TABLE.
+DO $lock_legacy_tables$
+DECLARE
+  relation_name REGCLASS;
+BEGIN
+  FOREACH relation_name IN ARRAY ARRAY[
+    to_regclass('public.funnel_access_log'),
+    to_regclass('public.funnel_access_summary')
+  ]
+  LOOP
+    CONTINUE WHEN relation_name IS NULL;
+    EXECUTE format(
+      'LOCK TABLE %s IN ACCESS EXCLUSIVE MODE',
+      relation_name
+    );
+  END LOOP;
+END;
+$lock_legacy_tables$ LANGUAGE plpgsql;
+
+DO $retirement_guard$
+DECLARE
+  raw_relation         REGCLASS := to_regclass('public.funnel_access_log');
+  summary_relation     REGCLASS := to_regclass('public.funnel_access_summary');
+  relation_name        REGCLASS;
+  has_rows             BOOLEAN;
+  bad_hba              TEXT;
+  hba_errors           TEXT;
+  active_roles         TEXT;
+  unexpected_relations TEXT;
+BEGIN
   SELECT string_agg(
            format('line %s: %s', line_number, error),
            '; ' ORDER BY line_number
@@ -64,14 +99,20 @@ BEGIN
   WHERE EXISTS (
     SELECT 1
     FROM unnest(COALESCE(h.user_name, ARRAY[]::TEXT[])) AS configured(role_name)
-    WHERE ltrim(configured.role_name, '+')
-          IN ('openbrain_ingester', 'openbrain_monitor')
+    WHERE ltrim(configured.role_name, '+') IN (
+            'openbrain_ingester',
+            'openbrain_monitor',
+            'openbrain_logs_rollup'
+          )
+       OR left(configured.role_name, 1) IN ('/', '@')
   );
 
   IF bad_hba IS NOT NULL THEN
     RAISE EXCEPTION
       'refusing corpus Funnel retirement: pg_hba.conf still names retired '
-      'edge role(s): %. Remove those rules, reload Postgres, and rerun.',
+      'sink-only role(s), or uses an unprovable regex/@file user token: %. '
+      'Replace those rules with explicit corpus-role names and rerun; reload '
+      'Postgres separately before restoring service.',
       bad_hba;
   END IF;
 
@@ -81,19 +122,73 @@ BEGIN
          )
     INTO active_roles
   FROM pg_stat_activity
-  WHERE usename IN ('openbrain_ingester', 'openbrain_monitor')
+  WHERE usename IN (
+          'openbrain_ingester',
+          'openbrain_monitor',
+          'openbrain_logs_rollup'
+        )
     AND pid <> pg_backend_pid();
 
   IF active_roles IS NOT NULL THEN
     RAISE EXCEPTION
-      'refusing corpus Funnel retirement: retired edge role sessions are still '
+      'refusing corpus Funnel retirement: sink-only role sessions are still '
       'connected: %. Cut the writers/readers over to the sink and retry.',
       active_roles;
   END IF;
 
+  -- The final corpus assertion rejects every public.funnel_access_% relation,
+  -- not only the two historical tables. Refuse an archive-like table/view here
+  -- before committing the canonical drops. Owned sequences and indexes are
+  -- expected dependencies of those tables and disappear with their owner.
+  SELECT string_agg(
+           format('%I.%I (%s)', n.nspname, c.relname, c.relkind),
+           ', ' ORDER BY c.relname
+         )
+    INTO unexpected_relations
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'public'
+    AND c.relname LIKE 'funnel_access_%'
+    AND NOT (
+      c.oid = ANY(array_remove(
+        ARRAY[raw_relation::OID, summary_relation::OID],
+        NULL::OID
+      ))
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM pg_index i
+      WHERE i.indexrelid = c.oid
+        AND i.indrelid = ANY(array_remove(
+          ARRAY[raw_relation::OID, summary_relation::OID],
+          NULL::OID
+        ))
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM pg_depend d
+      WHERE d.classid = 'pg_class'::REGCLASS
+        AND d.objid = c.oid
+        AND d.refclassid = 'pg_class'::REGCLASS
+        AND d.refobjid = ANY(array_remove(
+          ARRAY[raw_relation::OID, summary_relation::OID],
+          NULL::OID
+        ))
+        AND d.deptype IN ('a', 'i')
+    );
+
+  IF unexpected_relations IS NOT NULL THEN
+    RAISE EXCEPTION
+      'refusing corpus Funnel retirement: unexpected matching relation(s): %. '
+      'Export and verify their contents, then remove them explicitly before '
+      'rerunning; this migration retires only the two canonical legacy tables '
+      'and their owned indexes/sequences.',
+      unexpected_relations;
+  END IF;
+
   FOREACH relation_name IN ARRAY ARRAY[
-    to_regclass('public.funnel_access_log'),
-    to_regclass('public.funnel_access_summary')
+    raw_relation,
+    summary_relation
   ]
   LOOP
     CONTINUE WHEN relation_name IS NULL;
@@ -138,5 +233,6 @@ $revoke_historical_grants$ LANGUAGE plpgsql;
 
 DROP ROLE IF EXISTS openbrain_monitor;
 DROP ROLE IF EXISTS openbrain_ingester;
+DROP ROLE IF EXISTS openbrain_logs_rollup;
 
 COMMIT;

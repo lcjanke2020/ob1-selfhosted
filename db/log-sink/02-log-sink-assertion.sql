@@ -1,7 +1,8 @@
 -- Invariant assertions for the ingress qube's local log sink.
 --
--- Run last during init (the entrypoint sees it as 99-…), and re-run by hand
--- after any change to 01-log-sink.sql. Counterpart to
+-- Run as the final catalog check during init (the entrypoint sees it as 99-…;
+-- only the zz- completion-marker script follows), and re-run by hand after any
+-- change to 01-log-sink.sql. Counterpart to
 -- db/03-grants-assertion.sql on the corpus, but the claim here is stronger
 -- and simpler to state: this cluster contains TWO relations, TWO required
 -- roles, and at most one optional monitor role;

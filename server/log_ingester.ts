@@ -87,11 +87,12 @@ const DB_NAME = optional("DB_NAME", "openbrain_logs");
  * unix:…". Dockerfile.ingester's ENTRYPOINT derives all three from the same
  * leading-slash test used here — keep the two in step.
  *
- * Only the ingester has this socket-only contract. mcp keeps the TCP path: it is the one
- * client that never shares a host with its database (the app qube reaches the
- * db qube over qubes.ConnectTCP), and giving it socket support would mean
- * reworking server/Dockerfile's flat `--allow-read=/app` into the same
- * host-shape-dependent permission wrapper this image's ENTRYPOINT carries.
+ * Only the ingester has this socket-only contract. mcp keeps the TCP path: no
+ * supported deployment gives it the corpus cluster's unix-socket directory
+ * (the split app qube reaches the db qube over qubes.ConnectTCP), and giving it
+ * socket support would mean reworking server/Dockerfile's flat
+ * `--allow-read=/app` into the same host-shape-dependent permission wrapper
+ * this image's ENTRYPOINT carries.
  */
 export function dbHostType(host: string): "socket" {
   if (!host.startsWith("/")) {
