@@ -298,9 +298,9 @@ CREATE TRIGGER session_updated_at
 -- DELETE is granted on the sessions tables (unlike public.thoughts, where the
 -- grants invariant forbids it) because session_capture reconciles artifact
 -- children with a qualified delete-and-reinsert. The grants assertion in
--- 03-grants-assertion.sql applies its schema-wide negative only to
--- openbrain_monitor, so these openbrain_app grants do not affect it.
--- Precedent: 02-observability.sql grants DML on its own app-owned tables.
+-- 03-grants-assertion.sql checks the app role against explicit per-schema
+-- allowlists, so these session-owned grants are reviewed there as a unit.
+-- Precedent: 02-observability.sql grants DML on its corpus auth-event table.
 
 -- No sequence USAGE grant is needed here: sessions.artifact.id and
 -- sessions.session.id are both GENERATED ALWAYS AS IDENTITY, whose sequences are

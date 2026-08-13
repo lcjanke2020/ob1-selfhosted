@@ -212,13 +212,14 @@ services:
     # `-c listen_addresses=''` — so this flag governs the FINAL server, the one
     # that outlives init.)
     #
-    # The entrypoint is spelled out rather than inherited because
-    # scripts/check_allow_env.ts refuses to audit a `command` override on an
-    # image whose launcher defaults it cannot resolve. These two lines are the
-    # image's own ENTRYPOINT/CMD (["docker-entrypoint.sh"] / ["postgres"]) with
-    # the flag appended, so declaring them changes nothing but makes the
-    # effective launcher checkable.
-    entrypoint: ["docker-entrypoint.sh"]
+    # The checked-in wrapper still delegates to the image entrypoint, but first
+    # refuses an existing PGDATA unless fresh init or assertion-gated adoption
+    # wrote its completion marker. This keeps restart: unless-stopped from
+    # turning a failed first init into a running partial schema. A healthy volume
+    # created before the marker existed must first pass
+    # scripts/adopt-log-sink-marker.sh while its old container is still running;
+    # the wrapper never auto-adopts.
+    entrypoint: ["/bin/sh", "/usr/local/bin/openbrain-log-sink-entrypoint.sh"]
     command: ["postgres", "-c", "listen_addresses="]
     volumes:
       - log_sink_data:/var/lib/postgresql/data
@@ -240,17 +241,20 @@ services:
       # A deep directory produces `Unix-domain socket path ... is too long`
       # at connect time, not at mount time.
       - ${LOG_SINK_SOCKET_DIR:?set LOG_SINK_SOCKET_DIR to a SHORT host path, e.g. /home/user/ob1-log-sink/run}:/var/run/postgresql:z
+      - ../../../db/log-sink/log-sink-entrypoint.sh:/usr/local/bin/openbrain-log-sink-entrypoint.sh:ro
       - ../../../db/log-sink/00-log-sink-roles.sh:/docker-entrypoint-initdb.d/00-log-sink-roles.sh:ro
       - ../../../db/log-sink/01-log-sink.sql:/docker-entrypoint-initdb.d/01-log-sink.sql:ro
       # Runs last so the invariants are checked against the finished schema,
       # while keeping its stable operator-facing source path.
       - ../../../db/log-sink/02-log-sink-assertion.sql:/docker-entrypoint-initdb.d/99-log-sink-assertion.sql:ro
+      # Lexically after 99: if the assertion aborts, this marker is never made.
+      - ../../../db/log-sink/03-log-sink-ready.sh:/docker-entrypoint-initdb.d/zz-log-sink-ready.sh:ro
     healthcheck:
       # -h is required: with no TCP listener, pg_isready's default host would
       # have nothing to probe.
       test: [
         "CMD-SHELL",
-        "pg_isready -h /var/run/postgresql -U ${LOG_SINK_SUPERUSER:-postgres} -d ${LOG_SINK_DB:-openbrain_logs}",
+        "test -f \"$$PGDATA/.openbrain-log-sink-init-complete\" && pg_isready -h /var/run/postgresql -U ${LOG_SINK_SUPERUSER:-postgres} -d ${LOG_SINK_DB:-openbrain_logs}",
       ]
       interval: 10s
       timeout: 5s

@@ -7,8 +7,8 @@
 # Postgres — layer it on ../compose-local/docker-compose.yml as shown below.
 #
 # This is the compose-side of pulling Postgres out (see three-qube-design.md and
-# issue #4): the `postgres` service is removed from the running stack and the mcp
-# server + log-ingester are pointed at an external Postgres — in the deployed
+# issue #4): the corpus `postgres` service is removed from the running stack and
+# mcp is pointed at an external Postgres — in the deployed
 # Qubes shape, the db qube reached through the app qube's own ConnectTCP
 # forwarder (no listener on the db qube); on other setups, any reachable
 # Postgres address.
@@ -16,15 +16,14 @@
 # What it does:
 #   1. Parks the bundled `postgres` service under a profile that is never
 #      activated, so `docker compose up` does not start it. (DB_HOST in .env
-#      points mcp/log-ingester at the real database instead.)
-#   2. Clears the `depends_on: postgres` health-gate on mcp, token-admin, and
-#      log-ingester — there is no local postgres to wait on. Uses the `!reset` tag (compose
+#      points mcp at the real database instead.) Pattern B's separate log-sink
+#      remains local and is unaffected by this corpus override.
+#   2. Clears the `depends_on: postgres` health-gate on mcp and token-admin —
+#      there is no local corpus Postgres to wait on. Uses the `!reset` tag (compose
 #      needs a Compose v2 that supports `!reset`; v2.24.4 documents it), same mechanism as
 #      docker-compose.pattern-b.yml's `ports: !reset`.
 #   3. Makes DB_HOST mandatory under this override (fail-fast at `docker compose
-#      config` time, not at connect time), and gates the log-ingester entry
-#      behind the `pattern-b` profile so this file is safe to load even without
-#      docker-compose.pattern-b.yml.
+#      config` time, not at connect time).
 #
 # Usage (with the Pattern B + Funnel stack):
 #   In .env:
@@ -39,8 +38,8 @@
 # Verify the bundled postgres is excluded before bringing the stack up:
 #   docker compose --env-file .env config --services  # must NOT list `postgres`
 #
-# The app role (openbrain_app) and the log-ingester role (openbrain_ingester)
-# must exist on the external DB with the passwords in .env, and the external
+# The app role (openbrain_app) must exist on the external corpus DB with the
+# password in .env, and the external
 # Postgres must permit the deployment's ACTUAL connection source in pg_hba
 # (scram): on the ConnectTCP-forwarder path Postgres sees loopback, so it needs
 # the 127.0.0.1/::1 lines from db-qube/pg_hba.snippet.conf (with the stock
@@ -59,8 +58,8 @@ services:
     # No local postgres to gate on; DB_HOST points elsewhere. If the external
     # DB is unreachable at boot, mcp exits with a clear `[db]` error line and
     # `restart: unless-stopped` retries until it is back (see the boot probe
-    # wired in server/db.ts). mcp only — the log-ingester's pool is lazy and
-    # does not get the boot fail-fast.
+    # wired in server/db.ts). The log-ingester is unaffected: Pattern B keeps it
+    # on the separate local socket sink even when the corpus is external.
     depends_on: !reset null
     environment:
       # Fail-fast: with the bundled `postgres` parked, an unset DB_HOST would
@@ -72,16 +71,6 @@ services:
   # the base file, but point it at the same external database without reviving
   # the parked bundled Postgres dependency.
   token-admin:
-    depends_on: !reset null
-    environment:
-      DB_HOST: ${DB_HOST:?set DB_HOST to the external Postgres address (Qubes split — this qube own-IP ConnectTCP db forwarder) when layering the external-db override}
-
-  # Gated behind `pattern-b` (where the service is actually defined) so loading
-  # this override WITHOUT docker-compose.pattern-b.yml doesn't leave a bodyless
-  # `log-ingester` with no image/build.
-  log-ingester:
-    profiles:
-      - pattern-b
     depends_on: !reset null
     environment:
       DB_HOST: ${DB_HOST:?set DB_HOST to the external Postgres address (Qubes split — this qube own-IP ConnectTCP db forwarder) when layering the external-db override}

@@ -11,7 +11,7 @@ hardware you own: they connect from Anthropic's cloud, not from your device, so
 This doc is the transferable half of this repo: what Funnel does and doesn't
 give you, and the pattern for putting any MCP server behind it. The
 implementation here (`Caddyfile`, `server/auth.ts`, `server/auth_audit.ts`,
-`db/02-observability.sql`) is a working reference.
+`db/02-observability.sql`, `db/log-sink/`) is a working reference.
 
 ## What Funnel doesn't give you
 
@@ -65,12 +65,20 @@ In dependency order — each step is independently testable:
    JWT subject). Trivial code, large analytic payoff — it's how you distinguish
    mobile/cloud writes from tailnet writes forever after.
 8. **An auth audit table** recording `(ts, reason, middleware, client_ip, path)`
-   per failure. Proxy logs only see the 401 status; the reason code is the
-   difference between "I fat-fingered the key" and "someone is probing".
-9. **An alert-only monitor** over that table, filtering out
-   `missing_credentials` (it's the expected first event of every OAuth dance,
-   not an attack signal). Alert-only beats auto-shutoff: an auto-response with a
-   subtly wrong command silently no-ops exactly when you need it.
+   per failure and the verified identity/door on admissions. Proxy logs only see
+   the HTTP status; the application reason code is the difference between "I
+   fat-fingered the key" and "someone is probing".
+9. **Keep proxy request metadata out of the corpus.** This stack writes it to a
+   separate Postgres containing only the two Funnel relations. The sink has no
+   TCP listener; the ingester has no network stack and reaches only the SCRAM
+   unix socket. The corpus assertion rejects those relations, edge role names,
+   and matching HBA rules if the old shared shape reappears.
+10. **An alert-only edge monitor** over the sink's `funnel_access_log`. It uses
+    a monotonic row-ID cursor to count newly ingested public-door 401s and can
+    send a content-free aggregate alert. It deliberately cannot see the corpus
+    auth table, so it cannot filter by application reason; alert-only still
+    beats auto-shutoff, where a subtly wrong response command silently no-ops
+    exactly when you need it.
 
 ## Failure-mode catalog
 

@@ -2,8 +2,8 @@
 // strings (X-Forwarded-For tokens, Caddy `remote_addr`, etc.).
 //
 // Why this exists:
-//   `funnel_access_log.client_ip` and `mcp_auth_events.client_ip` are
-//   typed as Postgres `inet`. When we INSERT with `$N::inet`, Postgres
+//   `funnel_access_log.client_ip` (log sink) and `mcp_auth_events.client_ip`
+//   (corpus) are typed as Postgres `inet`. When we INSERT with `$N::inet`, Postgres
 //   rejects values that aren't parseable as an IP — and silently drops
 //   the row from the caller's perspective (the INSERT throws; the catch
 //   in auth_audit/log_ingester logs and moves on, but the audit/log row

@@ -205,34 +205,36 @@ dumps can still read it.
 
 ### Database layer
 
-Six roles, least privilege, with drift detection:
+Pattern B uses two disjoint clusters, each with least-privilege roles and drift
+detection:
 
-| Role                    | Privileges                                                                                                                                                                                                                                                                                                                                                                                       | Used by                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `postgres`              | superuser                                                                                                                                                                                                                                                                                                                                                                                        | init + DB admin (role provisioning / migrations) — never the app runtime. In the three-qube split it's reachable only through the app qube's dom0-gated ConnectTCP channel for remote admin — a deliberate trade-off (a compromised app qube then has full DB admin, including an app→db OS pivot via `COPY … TO/FROM PROGRAM`); see [db-qube/README.md](../deploy/qubes/db-qube/README.md) and [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15) |
-| `openbrain_app`         | SELECT/INSERT/UPDATE on `thoughts` (+ scoped observability/sessions grants); SELECT/INSERT-only on metadata-degradation history, SELECT/INSERT/DELETE on its pending-delivery outbox, SELECT/UPDATE on its singleton delivery ledger, and SELECT of only the four native-token verification fields; **no thought/history DELETE or token mutation**, no schema-wide DML, and no role memberships | MCP server, daily summary, metadata notification worker                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `openbrain_ingester`    | INSERT-only on `funnel_access_log`                                                                                                                                                                                                                                                                                                                                                               | log-ingester sidecar — it parses attacker-influenced log lines, so its blast radius is one table. In the three-qube split this role lives on the ingress qube's **local log sink**, not the corpus (see below)                                                                                                                                                                                                                                                 |
-| `openbrain_monitor`     | SELECT on `funnel_access_log` only                                                                                                                                                                                                                                                                                                                                                               | host-side funnel monitor ([`scripts/funnel_monitor.sh`](../scripts/funnel_monitor.sh)) — its credential sits on the internet-adjacent edge, so it reads public-door request metadata but can never reach a thought or reason-coded auth event. Optional, like the ingester; likewise on the sink in the split                                                                                                                                                  |
-| `openbrain_token_admin` | Lists token ID/prefix/label/timestamps and executes fixed register/revoke functions; cannot read hashes, memories, or mutate the table directly                                                                                                                                                                                                                                                  | profile-gated one-shot `token-admin` CLI; `NOLOGIN` when no password is provisioned                                                                                                                                                                                                                                                                                                                                                                            |
-| `openbrain_readonly`    | SELECT on everything + `BYPASSRLS` so full `pg_dump` works; no DML                                                                                                                                                                                                                                                                                                                               | trusted backup job, humans with psql/DBeaver                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Role                    | Privileges                                                                                                                                                                                                                                                                                                                                                                                           | Used by                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `postgres`              | superuser                                                                                                                                                                                                                                                                                                                                                                                            | init + DB admin (role provisioning / migrations) — never the app runtime. In the three-qube split it's reachable only through the app qube's dom0-gated ConnectTCP channel for remote admin — a deliberate trade-off (a compromised app qube then has full DB admin, including an app→db OS pivot via `COPY … TO/FROM PROGRAM`); see [db-qube/README.md](../deploy/qubes/db-qube/README.md) and [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15) |
+| `openbrain_app`         | SELECT/INSERT/UPDATE on `thoughts` (+ scoped corpus auth-event/sessions grants); SELECT/INSERT-only on metadata-degradation history, SELECT/INSERT/DELETE on its pending-delivery outbox, SELECT/UPDATE on its singleton delivery ledger, and SELECT of only the four native-token verification fields; **no thought/history DELETE or token mutation**, no schema-wide DML, and no role memberships | MCP server, auth-event summary, metadata notification worker                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `openbrain_ingester`    | INSERT-only on `funnel_access_log`                                                                                                                                                                                                                                                                                                                                                                   | log-ingester sidecar on the separate log sink — it parses attacker-influenced log lines, so its database blast radius is one disposable table and the role name is rejected by the corpus                                                                                                                                                                                                                                                                      |
+| `openbrain_monitor`     | SELECT on `funnel_access_log` only                                                                                                                                                                                                                                                                                                                                                                   | host-side funnel monitor ([`scripts/funnel_monitor.sh`](../scripts/funnel_monitor.sh)) on the separate sink; it cannot read even the aggregate table, much less a thought or reason-coded auth event                                                                                                                                                                                                                                                           |
+| `openbrain_logs_rollup` | SELECT/DELETE on `funnel_access_log`; SELECT/INSERT/UPDATE/DELETE on `funnel_access_summary`                                                                                                                                                                                                                                                                                                         | target-pinned sink summary and retention job; no schema creation and no corpus presence                                                                                                                                                                                                                                                                                                                                                                        |
+| `openbrain_token_admin` | Lists token ID/prefix/label/timestamps and executes fixed register/revoke functions; cannot read hashes, memories, or mutate the table directly                                                                                                                                                                                                                                                      | profile-gated one-shot `token-admin` CLI; `NOLOGIN` when no password is provisioned                                                                                                                                                                                                                                                                                                                                                                            |
+| `openbrain_readonly`    | SELECT on everything + `BYPASSRLS` so full `pg_dump` works; no DML                                                                                                                                                                                                                                                                                                                                   | trusted backup job, humans with psql/DBeaver                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
-**Where those roles actually live in the three-qube split.** The corpus on the
-db qube holds only `postgres`, `openbrain_app`, `openbrain_readonly`, and
-`openbrain_token_admin` — every one of them reachable from the app qube alone.
-`openbrain_ingester` and `openbrain_monitor` are roles on a **separate
-cluster**: the ingress qube's local Funnel-log sink, a socket-only Postgres
-holding two request-metadata relations and nothing else
+**Where those roles live in every Pattern B deployment.** The corpus holds only
+its own `postgres`, `openbrain_app`, `openbrain_readonly`, and
+`openbrain_token_admin`. `openbrain_ingester`, `openbrain_monitor`, and
+`openbrain_logs_rollup` are roles on a **separate cluster**: a socket-only
+Funnel-log sink holding two request-metadata relations and nothing else
 ([`deploy/qubes/ingress-qube/README.md`](../deploy/qubes/ingress-qube/README.md#local-log-sink)).
-That cluster adds a third, `openbrain_logs_rollup`, for the daily summary and
-retention pass — named apart from `openbrain_app` so no secret on the
-internet-facing qube shares a name with an app-role secret.
+The rollup name stays apart from `openbrain_app` so no sink credential can be
+mistaken for a corpus credential.
 
 The point is not the grants but the layer they sit at. Grants are enforced
 _inside_ Postgres, above where a pre-auth wire-protocol or SCRAM-handshake flaw
 would live; an INSERT-only role bounds a well-behaved client, not one that never
-reaches the grant check. Moving the edge's store onto the edge removes the route
-instead of narrowing what can be done over it. Single-host installs keep all six
-roles in one database, where this distinction does not arise.
+reaches the grant check. Moving the edge's store into a no-network sibling
+cluster removes the route instead of narrowing what can be done over it. On a
+single host this is a container/process boundary, not a VM boundary: host-root
+compromise still reaches both volumes, but a compromised networkless ingester
+has no database transport toward the corpus.
 
 `db/06-spaces.sql` forces RLS on thoughts, sessions, and artifacts for the
 application role. Missing transaction context matches no rows, personal rows
@@ -267,23 +269,28 @@ grant assertion verifies exact column privileges, function ownership/config,
 standalone role membership, sequence access, and backup visibility.
 
 `db/01-schema.sql` actively REVOKEs historical broad grants (idempotent, safe on
-live DBs), and `db/03-grants-assertion.sql` is a read-only invariant check you
-can run any time — because init scripts only run on a fresh data directory, a
-tightened grant **does not** reach an existing deployment by itself. Its monitor
-check scans every non-system application relation across schemas, rejects
-default ACLs that would grant future relations to the monitor or `PUBLIC`, and
-permits only `funnel_access_log`, so future relation grants fail closed without
-extending a denylist. Replaying `db/02-observability.sql` converges the v4
-monitor grant by revoking its historical `mcp_auth_events` access; the assertion
-is how you verify that happened. This invariant is relation-scoped: PostgreSQL
-grants function execution to `PUBLIC` by default, so any future
-`SECURITY DEFINER` routine must revoke that default and receive a separate
-security review.
+live DBs), and `db/03-grants-assertion.sql` is a read-only **superuser**
+invariant check you can run any time — superuser is needed to inspect
+`pg_hba_file_rules`, not to mutate the catalog. Because init scripts only run on
+a fresh data directory, a tightened grant **does not** reach an existing
+deployment by itself. Arc B inverts the old monitor allowlist: the corpus
+assertion rejects all three sink-only role names, every `public.funnel_access_*`
+relation, standing default table/sequence grants to `PUBLIC`, matching HBA
+rules, and regex/`@file` HBA user tokens whose exclusion of the sink roles
+cannot be proven. Any HBA parse error likewise fails closed. The HBA view reads
+the installed file; operators still reload separately before restoring service.
+The runbook archives first; the archive-gated `db/09` migration then locks both
+canonical tables before its emptiness check and drops the old shape without
+`CASCADE`. The separate sink assertion independently pins its exact roles,
+relations, and grants. PostgreSQL grants function execution to `PUBLIC` by
+default, so any future `SECURITY DEFINER` routine must revoke that default and
+receive a separate security review.
 
 ### Container layer
 
 - `mcp` and `log-ingester`: non-root user, `cap_drop: [ALL]`, `read_only: true`
-  rootfs, size-capped tmpfs, `no-new-privileges`.
+  rootfs, size-capped tmpfs, `no-new-privileges`; Pattern B additionally gives
+  the ingester `network_mode: none` and only the sink socket bind.
 - `token-admin`: the same container hardening, profile-gated and one-shot. Only
   it receives the dedicated lifecycle password; the long-running MCP container
   never does.
@@ -411,5 +418,6 @@ security review.
   credential. The ingress→app hop rides a dom0-policy-gated `qubes.ConnectTCP`
   channel (the app qube has no network-facing listener); the app→db hop rides a
   second such channel (the db qube's Postgres binds loopback only — no tailnet
-  listener). The single-host install paths still co-locate these by design (one
-  trust boundary).
+  listener). Single-host Pattern B uses the same separate, socket-only log
+  cluster and networkless ingester, but remains one host trust boundary rather
+  than claiming Qubes-equivalent isolation.

@@ -14,6 +14,7 @@ on:
       - "deploy/qubes/docker-compose.external-db.yml"
       - "deploy/qubes/app-qube/docker-compose.yml"
       - "deploy/qubes/app-qube/.env.example"
+      - "deploy/qubes/ingress-qube/docker-compose.yml"
       - "scripts/check_fetch_timeout_compose.nu"
       - ".github/workflows/compose-config.yml"
   push:
@@ -25,6 +26,7 @@ on:
       - "deploy/qubes/docker-compose.external-db.yml"
       - "deploy/qubes/app-qube/docker-compose.yml"
       - "deploy/qubes/app-qube/.env.example"
+      - "deploy/qubes/ingress-qube/docker-compose.yml"
       - "scripts/check_fetch_timeout_compose.nu"
       - ".github/workflows/compose-config.yml"
   workflow_dispatch:
