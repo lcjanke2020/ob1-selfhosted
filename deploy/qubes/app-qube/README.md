@@ -84,7 +84,7 @@ so an AppVM-local install vanishes on reboot):
    current boot, also install + `systemctl enable --now` it by hand.
 
 3. Set `DB_HOST=<this-qube-ip>` in `.env` — and in **every other** `DB_HOST`
-   carrier: the backup job's env file and `~/.config/funnel-summary.env`. A
+   carrier: the backup job's env file and `~/.config/auth-events-summary.env`. A
    stale copy pointing at the old db-qube address fails only when that listener
    goes away, on the consumer's own timer cadence.
 
@@ -273,13 +273,14 @@ design if run before the relations it asserts on exist. The db qube records the
 same canonical order
 ([First boot / provisioning](../db-qube/README.md#first-boot--provisioning)).
 
-| Server | Migration                                                                  | Additional requirement                                                         |
-| ------ | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| 1.7.0  | `db/05-hybrid-search.sql`                                                  | pgvector 0.8.0+ (filtered iterative scans)                                     |
-| 1.9.0  | `db/06-spaces.sql`                                                         | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner                    |
-| 1.16.0 | `db/07-metadata-degradation.sql`                                           | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env`                  |
-| 1.19.0 | `db/08-access-tokens.sql`                                                  | —                                                                              |
-| 1.20.0 | `db/02-observability.sql` (re-apply; converges `mcp_auth_events` in place) | `OAUTH_ALLOWED_SUBJECTS` in `.env` **before** the container roll — fail-closed |
+| Server | Migration                                                                  | Additional requirement                                                                             |
+| ------ | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| 1.7.0  | `db/05-hybrid-search.sql`                                                  | pgvector 0.8.0+ (filtered iterative scans)                                                         |
+| 1.9.0  | `db/06-spaces.sql`                                                         | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner                                        |
+| 1.16.0 | `db/07-metadata-degradation.sql`                                           | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env`                                      |
+| 1.19.0 | `db/08-access-tokens.sql`                                                  | —                                                                                                  |
+| 1.20.0 | `db/02-observability.sql` (re-apply; converges `mcp_auth_events` in place) | `OAUTH_ALLOWED_SUBJECTS` in `.env` **before** the container roll — fail-closed                     |
+| Arc B  | `db/02-observability.sql`, then `db/09-retire-corpus-funnel.sql`           | sink cutover complete; both legacy tables archived, verified, and empty; retired HBA rules removed |
 
 Migration 08 is required by 1.19.0 **even when native tokens are disabled**.
 `ENABLE_NATIVE_TOKENS` gates the credential door, not the schema: the server's
@@ -326,18 +327,17 @@ version. Apply migrations before the roll, not with it.
 8. Verify from the outside — a real request through the public door, not only a
    local health check.
 
-## Daily Funnel rollup and retention (host-side)
+## Daily auth-event rollup and retention (host-side)
 
-The access-log schema retains raw rows for 30 days and daily aggregates for one
-year, but those policies are active only when
+The corpus auth-event horizons are active only when
 [`scripts/funnel_daily_summary.sh`](../../../scripts/funnel_daily_summary.sh)
 runs. In this split topology Postgres is not in the app compose project, so the
 shipped job uses the wrapper's explicit `postgres` backend: host `psql` connects
 to the db qube through the
 [ConnectTCP forwarder](#the-appdb-hop-qubesconnecttcp) (`DB_HOST` = this qube's
-own IP) as `openbrain_app`, the existing role whose observability grants cover
-the transactional rollup and retention deletes. The internet-adjacent ingress
-qube never receives that credential.
+own IP) as `openbrain_app`, the existing role whose corpus grants cover the
+auth-event report and retention deletes. The internet-adjacent ingress qube
+never receives that credential.
 
 **This qube runs only the `mcp_auth_events` half.** The rollup is split by
 owning table, because the two halves no longer share a database: the Funnel
@@ -346,40 +346,19 @@ access log is written to a local sink on the
 which runs [`db/summarize_funnel.sql`](../../../db/summarize_funnel.sql) there.
 Here, [`db/summarize_auth_events.sql`](../../../db/summarize_auth_events.sql)
 handles the auth-decision audit mcp writes into the corpus — reason-coded
-denials plus the per-request admission rows (1.20.0+). Set `SUMMARY_SQL_FILE`
-accordingly — left unset it resolves to **both** shipped files (the single-host
-default), and the funnel half would then operate on the stale, no-longer-written
-`funnel_access_log` left behind in this database, producing an empty report
-section and a pointless retention DELETE.
+denials plus the per-request admission rows (1.20.0+). `SUMMARY_TARGET=corpus`
+pins the wrapper to that SQL file, `openbrain_app`, the corpus database, and a
+non-socket host; the retired free-form role/SQL knobs fail closed. The ingress
+job uses `SUMMARY_TARGET=sink` and the opposite tuple.
 
-The relations themselves stay in the corpus schema deliberately. Dropping them
-would diverge from
-[`db/02-observability.sql`](../../../db/02-observability.sql), which single-host
-installs still create, and keeping them means repointing the ingester back at
-this database is a config change rather than a migration. Their ROWS are a
-one-time cutover decision, because nothing retains them anymore — the moment
-this qube's job went auth-only, the funnel half's 30-day raw and 365-day
-aggregate DELETEs stopped running against this database:
-
-- **Raw log — truncate.** Archive first if you want the history
-  (`pg_dump --data-only --table=funnel_access_log`, encrypted like the nightly
-  backup), then `TRUNCATE funnel_access_log;` **as the database superuser** —
-  the runtime `openbrain_app` role deliberately lacks TRUNCATE (measured:
-  `permission denied`), so use the same superuser-psql path as
-  [Upgrading an existing deployment](#upgrading-an-existing-deployment). Left
-  alone, request metadata (client IPs, paths, user agents) sits in the corpus
-  forever, outliving the 30-day promise the retention policy made.
-- **Aggregates — keep or truncate, but decide.** `funnel_access_summary` is
-  small, static from now on, and useful as trend history; keeping it is
-  reasonable. If you keep it, know the 365-day horizon no longer applies — the
-  rows are frozen until you delete them by hand.
-
-Verify the raw side once the cutover is done:
-`SELECT count(*) FROM
-funnel_access_log;` must return 0 — nonzero means the step
-above was skipped. The full edge-retirement pass (pg_hba lines, corpus roles,
-tailnet ACL) is
-[db-qube/README.md § Retiring the ingress qube's old access](../db-qube/README.md#retiring-the-ingress-qubes-old-access-existing-installs).
+Arc B removes the old Funnel tables and roles from this cluster entirely. For an
+existing deployment, follow
+[db-qube/README.md § Retiring the ingress qube's old access](../db-qube/README.md#retiring-the-ingress-qubes-old-access-existing-installs):
+export and verify both legacy tables, explicitly empty them, remove the old HBA
+rules, then apply `db/09-retire-corpus-funnel.sql`. The migration refuses
+nonempty tables or stale HBA rules and rolls back on an unexpected dependency;
+the final grants assertion rejects any old-shape relation or role that
+reappears.
 
 The job reads a dedicated environment file containing only its database
 settings. Do not point it at this directory's `.env`: exporting the full app
@@ -396,18 +375,28 @@ the app qube—an AppVM-local package install disappears on reboot.
 
 **Install on the app qube** as the regular user, from the repository checkout:
 
+If the pre-Arc-B `funnel-summary.*` app-qube unit exists, disable its timer
+first. Install and verify the renamed auth-event unit before deleting the old
+unit files; never leave both timers enabled against the same corpus.
+
 ```sh
+systemctl --user disable --now funnel-summary.timer 2>/dev/null || true
 mkdir -p ~/.config/systemd/user
 install -m 0755 scripts/funnel_daily_summary.sh ~/funnel_daily_summary.sh
 install -m 0644 db/summarize_auth_events.sql ~/summarize_auth_events.sql
-install -m 0600 deploy/qubes/app-qube/funnel-summary.env.example ~/.config/funnel-summary.env
-$EDITOR ~/.config/funnel-summary.env       # set DB_HOST + OPENBRAIN_APP_PASSWORD
+install -m 0600 deploy/qubes/app-qube/auth-events-summary.env.example ~/.config/auth-events-summary.env
+$EDITOR ~/.config/auth-events-summary.env  # set DB_HOST + OPENBRAIN_APP_PASSWORD
 install -d -m 0700 ~/openbrain-funnel-summaries
-install -m 0644 deploy/qubes/app-qube/funnel-summary.service ~/.config/systemd/user/
-install -m 0644 deploy/qubes/app-qube/funnel-summary.timer   ~/.config/systemd/user/
+install -m 0644 deploy/qubes/app-qube/auth-events-summary.service ~/.config/systemd/user/
+install -m 0644 deploy/qubes/app-qube/auth-events-summary.timer   ~/.config/systemd/user/
 sudo loginctl enable-linger "$USER"
 systemctl --user daemon-reload
 ```
+
+After the new service passes its manual run, remove the obsolete app-qube
+`~/.config/systemd/user/funnel-summary.{service,timer}` and
+`~/.config/funnel-summary.env`, then run `systemctl --user daemon-reload` once
+more. The ingress qube intentionally keeps its own `funnel-summary.*` names.
 
 Run the service once before enabling the schedule. This is the catch-up pass:
 for this qube's auth half it enforces `mcp_auth_events`' per-class horizons — 30
@@ -423,13 +412,13 @@ the database commit but while the report queries are streaming, the database may
 be ahead of the artifact; the next idempotent run regenerates the report.
 
 ```sh
-systemctl --user start funnel-summary.service
-systemctl --user show funnel-summary.service -p Result -p ExecMainStatus
-journalctl --user -u funnel-summary.service -n 50 --no-pager
+systemctl --user start auth-events-summary.service
+systemctl --user show auth-events-summary.service -p Result -p ExecMainStatus
+journalctl --user -u auth-events-summary.service -n 50 --no-pager
 ls -l ~/openbrain-funnel-summaries/
 
-systemctl --user enable --now funnel-summary.timer
-systemctl --user list-timers funnel-summary.timer --no-pager
+systemctl --user enable --now auth-events-summary.timer
+systemctl --user list-timers auth-events-summary.timer --no-pager
 ```
 
 The timer runs at 00:30 UTC, matching the SQL's UTC day boundaries.
@@ -438,18 +427,19 @@ wakes; the service makes up to two additional attempts at two-minute intervals
 so a transient tailnet startup race does not consume that occurrence. User
 lingering keeps the unit eligible when no shell is open. Reports default to the
 local, mode-0700 `~/openbrain-funnel-summaries` directory because they contain
-request metadata. To retain an off-box copy, set `SUMMARY_DIR` in
-`~/.config/funnel-summary.env` to a trusted replicated directory and protect
-that destination accordingly. For Syncthing, add `/.funnel-summary-*` to the
-folder's `.stignore`; final reports have no leading dot, while an uncatchable
-hard kill or qube crash can leave a private staging dotfile behind.
+verified identity metadata. To retain an off-box copy, set `SUMMARY_DIR` in
+`~/.config/auth-events-summary.env` to a trusted replicated directory and
+protect that destination accordingly. For Syncthing, add
+`/.auth-events-summary-*` to the folder's `.stignore`; final reports have no
+leading dot, while an uncatchable hard kill or qube crash can leave a private
+staging dotfile behind.
 
 A user service cannot order itself after the system tailnet unit. The bounded
 retries handle the common race, and later successful runs catch up idempotently,
 but a persistent failure still needs a visible signal. Install a user
 `notify-failure@.service` and uncomment the `OnFailure=` example in
-`funnel-summary.service`, or monitor `systemctl --user --failed` and the unit
-journal.
+`auth-events-summary.service`, or monitor `systemctl --user --failed` and the
+unit journal.
 
 When updating the rollup implementation, reinstall **both** the wrapper and
 `summarize_auth_events.sql` (this qube's half), then manually start the service

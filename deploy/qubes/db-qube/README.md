@@ -132,19 +132,18 @@ canonical definitions live in [`db/`](../../../db/) (`00-roles.sh`,
 `01-schema.sql`, …). Note `00-roles.sh` is shaped as a container
 init-entrypoint: it runs under the postgres Docker entrypoint and reads the
 `OPENBRAIN_*_PASSWORD` env vars, so on a native cluster don't run it as-is —
-export those vars first and pick Pattern A vs B, or apply the equivalent
-statements by hand. In broad strokes, once per cluster:
+export the corpus-role vars first, or apply the equivalent statements by hand.
+In broad strokes, once per cluster:
 
 ```bash
 # as the postgres superuser, over the loopback socket:
 sudo -u postgres psql -c "CREATE DATABASE openbrain;"
 sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
 # then create the openbrain_app / openbrain_readonly / openbrain_token_admin
-# roles — see db/00-roles.sh for the exact, up-to-date statements (Pattern A vs
-# B, passwords, grants; token admin may remain NOLOGIN). The optional ingester
-# and monitor roles belong on the ingress qube's LOCAL log sink, not here (see
-# db/log-sink/) — skip them unless you are running the single-app-qube on-ramp
-# with no separate ingress qube. Apply the SQL files in this order:
+# roles — see db/00-roles.sh for the exact, up-to-date statements (passwords and
+# grants; token admin may remain NOLOGIN). The ingester and monitor roles
+# belong on a LOCAL log sink, not here (see db/log-sink/) —
+# there is no Pattern B exception. Apply the SQL files in this order:
 #   db/01-schema.sql
 #   db/02-observability.sql
 #   db/04-sessions.sql
@@ -152,13 +151,14 @@ sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
 #   db/06-spaces.sql
 #   db/07-metadata-degradation.sql
 #   db/08-access-tokens.sql
+#   db/09-retire-corpus-funnel.sql
 #   db/03-grants-assertion.sql  # always last
 ```
 
 Do not load `db/*.sql` in filename order: `03-grants-assertion.sql` is a
 read-only completed-catalog check, not the third schema migration. Run it last
 during native provisioning, and rerun it after every later schema migration so
-new relations are covered by the monitor allowlist invariant.
+new relations, retired role names, and HBA topology are checked together.
 
 Apply `pg_hba.snippet.conf` and `postgresql.local.conf` after the roles exist —
 including the snippet header's removal of the stock broad loopback lines (first
@@ -257,10 +257,10 @@ tailnet path stays live as a fallback until the new one is verified.
 4. **App qube — repoint every DB client**: set `DB_HOST=<app-qube-ip>` in the
    compose `.env` and recreate `mcp`, and update **every other file that carries
    a `DB_HOST`** — the backup job's env and the rollup's
-   `~/.config/funnel-summary.env` are the easy ones to miss; a stale copy keeps
-   working over the tailnet until phase 2 silently breaks it. Then verify end to
-   end: a capture (pgvector write), a hybrid-search read, and a manual backup
-   run.
+   `~/.config/auth-events-summary.env` are the easy ones to miss; a stale copy
+   keeps working over the tailnet until phase 2 silently breaks it. Then verify
+   end to end: a capture (pgvector write), a hybrid-search read, and a manual
+   backup run.
 
 **Phase 2 — retire the tailnet path (only after phase 1 verifies):**
 
@@ -296,56 +296,103 @@ tailnet path stays live as a fallback until the new one is verified.
 
 ## Retiring the ingress qube's old access (existing installs)
 
-A deployment that predates the ingress qube's local log sink
-([ingress-qube/README.md § Local log sink](../ingress-qube/README.md#local-log-sink))
-still carries live corpus access for the retired edge roles, and appending the
-current `pg_hba.snippet.conf` cannot remove lines already present in the
-installed file. Retirement is an explicit one-time pass — run it after the
-ingress qube has cut over to its sink, from this qube's console (dom0 `qvm-run`)
-or the app qube's superuser psql:
+A deployment that predates Arc B may still contain frozen Funnel history, the
+two retired edge roles, or HBA rules naming them. The shipped corpus now rejects
+all three. Perform this one-time migration only after the ingress qube (or
+non-Qubes Pattern B stack) is healthy on its separate socket-only sink.
 
-1. **Remove the two retired host lines** — `openbrain_ingester` and
-   `openbrain_monitor` from the ingress qube's IP — from the installed
-   `/etc/postgresql/<ver>/main/pg_hba.conf`. Keep a dated backup, then reload (a
-   reload suffices for pg_hba):
-   `sudo -u postgres psql -Atc 'select pg_reload_conf();'`
-2. **Verify negatively** — the file still parses and no effective rule names
-   either role:
-   `sudo -u postgres psql -Atc "select count(*) from pg_hba_file_rules where error is not null or user_name::text ~ 'openbrain_(ingester|monitor)';"`
-   must print `0`.
-3. **Drop the corpus-side roles**, connected to the `openbrain` database — not
-   the `postgres` maintenance DB, because `DROP OWNED BY` only acts in the
-   database it runs in. Postgres does not let grants "die with" a role:
-   privileges granted TO a role are recorded as dependencies that BLOCK a bare
-   `DROP ROLE` (`privileges for table funnel_access_log`), so the revoke pass
-   comes first, and each step fails loudly:
-   1. Confirm neither role OWNS anything (`DROP OWNED BY` would drop it, not
-      just revoke):
-      `SELECT c.relname FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner WHERE r.rolname IN ('openbrain_ingester', 'openbrain_monitor');`
-      must return zero rows.
-   2. `DROP OWNED BY openbrain_ingester; DROP ROLE openbrain_ingester;` then
-      `DROP OWNED BY openbrain_monitor; DROP ROLE openbrain_monitor;`. (The
-      monitor role is optional — if it was never provisioned, its pair errors
-      with "role does not exist" and can be skipped.)
-   3. Confirm both are gone:
-      `SELECT count(*) FROM pg_roles WHERE rolname IN ('openbrain_ingester', 'openbrain_monitor');`
-      must print `0`.
+1. **Prove the new path first.** On the ingress host, confirm new
+   `funnel_access_log` rows land in `openbrain_logs`, then run the sink monitor
+   and summary once. Stop any old ingester/monitor process that still targets
+   this corpus. The migration refuses an active session under either retired
+   role, but a disconnected stale timer is still an operator concern.
+2. **Archive both corpus tables to trusted encrypted storage.** Use the same
+   encrypted destination and key hygiene as the nightly database backup. For
+   example, from the app qube's superuser connection:
 
-   [`db/03-grants-assertion.sql`](../../../db/03-grants-assertion.sql) treats
-   both roles as optional, so it still passes afterwards.
-4. **Remove the tailnet ACL grant** for ingress→db:5432 — capture the ACL as
-   actually deployed first (from the admin console, not a possibly-stale local
-   copy) — and drop the ingress qube from any per-peer nft scoping you added.
-5. **Never reuse the old passwords.** The sink reuses the role NAMES by design;
-   give it fresh values in the ingress qube's `.env`, so a credential that left
-   the edge before the cutover no longer opens anything.
-6. **Prove the negative from the ingress qube** — a TCP attempt at
-   `<db-qube-tailnet-ip>:5432` must now die at the wire (ACL/firewall timeout),
-   not at authentication.
-7. **Decide the legacy rows' fate** — nothing writes to or retention-prunes the
-   corpus's `funnel_access_log`/`funnel_access_summary` anymore; see the cutover
-   note in [app-qube/README.md](../app-qube/README.md) for the archive/truncate
-   step and its verification.
+   ```sh
+   pg_dump --format=custom --data-only \
+     --table=public.funnel_access_log \
+     --table=public.funnel_access_summary \
+     --host=<app-qube-own-IP> --username=postgres --dbname=openbrain \
+     | age -r "$BACKUP_RECIPIENT" \
+     > /trusted/path/corpus-funnel-before-arc-b.dump.age
+
+   age -d -i "$BACKUP_IDENTITY" \
+     /trusted/path/corpus-funnel-before-arc-b.dump.age \
+     | pg_restore --list \
+     | grep -E 'TABLE DATA public funnel_access_(log|summary)'
+   ```
+
+   Record the archive's checksum and row counts. A real restore into a throwaway
+   database is the strongest verification; listing the decrypted custom archive
+   is only the minimum structural check.
+3. **Empty both archived tables explicitly, as superuser.** This is the human
+   acknowledgement the migration requires:
+
+   ```sql
+   SELECT 'funnel_access_log', count(*) FROM public.funnel_access_log
+   UNION ALL
+   SELECT 'funnel_access_summary', count(*) FROM public.funnel_access_summary;
+
+   TRUNCATE TABLE public.funnel_access_log;
+   TRUNCATE TABLE public.funnel_access_summary;
+   ```
+
+   Do not skip the archive because the first table happens to be empty; the
+   frozen aggregate table is history too. `db/09-retire-corpus-funnel.sql`
+   aborts transactionally if either table still has even one row.
+4. **Remove every HBA entry naming `openbrain_ingester` or
+   `openbrain_monitor`.** Keep a dated copy of the installed file, reload, then
+   require this query to return zero:
+
+   ```sql
+   SELECT count(*)
+   FROM pg_hba_file_rules h
+   WHERE h.error IS NOT NULL
+      OR EXISTS (
+        SELECT 1
+        FROM unnest(coalesce(h.user_name, ARRAY[]::text[])) AS u(name)
+        WHERE ltrim(u.name, '+')
+              IN ('openbrain_ingester', 'openbrain_monitor')
+      );
+   ```
+
+5. **Apply the corpus half and guarded retirement in order**, connected to
+   `openbrain` as superuser:
+
+   ```sh
+   psql -X -v ON_ERROR_STOP=1 -f db/02-observability.sql
+   psql -X -v ON_ERROR_STOP=1 -f db/09-retire-corpus-funnel.sql
+   psql -X -v ON_ERROR_STOP=1 -f db/03-grants-assertion.sql
+   ```
+
+   Migration 09 uses no `CASCADE` and no `DROP OWNED`. A nonempty table, stale
+   HBA rule, active edge session, dependent relation, or unexpected role
+   dependency aborts and rolls the entire retirement back for inspection.
+6. **Verify the negative from the catalog:**
+
+   ```sql
+   SELECT to_regclass('public.funnel_access_log'),
+          to_regclass('public.funnel_access_summary');
+   SELECT rolname
+   FROM pg_roles
+   WHERE rolname IN ('openbrain_ingester', 'openbrain_monitor');
+   ```
+
+   Both queries must return only null/zero-row results. Re-running the final
+   grants assertion is the durable check; it also rejects a future accidental
+   resurrection during init or restore.
+7. **Remove the network residue.** Delete any tailnet ACL grant for
+   ingress→db:5432 and any peer-scoped nft rule, then prove from the ingress
+   qube that a TCP attempt at the db address dies at the wire (timeout, not an
+   authentication error). Never reuse the retired corpus-role passwords for the
+   sink roles.
+
+Rollback before step 5 is the verified archive plus the pre-window database
+snapshot. After step 5, rollback means restoring that snapshot and the matching
+old application/config as one unit; do not recreate only the edge roles in an
+otherwise Arc-B corpus.
 
 ## Template note
 

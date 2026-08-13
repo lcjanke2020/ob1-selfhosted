@@ -3,13 +3,15 @@
 -- Run last during init (the entrypoint sees it as 99-…), and re-run by hand
 -- after any change to 01-log-sink.sql. Counterpart to
 -- db/03-grants-assertion.sql on the corpus, but the claim here is stronger
--- and simpler to state: this cluster contains TWO relations and THREE roles;
+-- and simpler to state: this cluster contains TWO relations, TWO required
+-- roles, and at most one optional monitor role;
 -- every table, sequence, and column privilege those roles hold is exactly
 -- enumerated, grant options included (section 3), none of them holds a
 -- cluster-level privilege (section 1), none has a CREATE route into schema
 -- public or into this database (section 4), and the role set itself is
--- closed — nothing exists beyond the bootstrap superuser and the three
--- enumerated roles (section 5). Sections 6-9 close the indirect routes the
+-- closed — nothing exists beyond the bootstrap superuser, the two required
+-- roles, and the optional monitor (section 5). Sections 6-9 close the indirect
+-- routes the
 -- direct-ACL comparison cannot see: effective privileges arriving via role
 -- membership, memberships themselves, ownership, default ACLs, grants
 -- parked on a grantee outside the enumerated set, stray schemas, and stray
@@ -59,9 +61,8 @@ $$ LANGUAGE plpgsql;
 -- ---------- 2. Exactly two relations, with exactly these columns ----------
 -- The relation check keeps the corpus schema from ever being applied here by
 -- mistake (a `thoughts` table on the edge would be the failure this whole
--- topology exists to prevent). The column check is the drift guard against
--- db/02-observability.sql: db/summarize_funnel.sql runs against both
--- clusters, so the two definitions have to stay identical.
+-- topology exists to prevent). The column check pins the contract consumed by
+-- db/summarize_funnel.sql to the sole schema owner, 01-log-sink.sql.
 DO $$
 DECLARE
   actual   text;
@@ -87,7 +88,7 @@ BEGIN
            || 'user_agent,host_header,proto,tls_sni,caddy_logger,inserted_at';
   IF actual IS DISTINCT FROM expected THEN
     RAISE EXCEPTION
-      'log sink: funnel_access_log columns drifted from db/02-observability.sql; expected (%), found (%)',
+      'log sink: funnel_access_log columns drifted from db/log-sink/01-log-sink.sql; expected (%), found (%)',
       expected, actual;
   END IF;
 
@@ -98,7 +99,7 @@ BEGIN
            || 'duration_ms_p95,top_paths,top_user_agents,computed_at';
   IF actual IS DISTINCT FROM expected THEN
     RAISE EXCEPTION
-      'log sink: funnel_access_summary columns drifted from db/02-observability.sql; expected (%), found (%)',
+      'log sink: funnel_access_summary columns drifted from db/log-sink/01-log-sink.sql; expected (%), found (%)',
       expected, actual;
   END IF;
 END;
@@ -246,9 +247,10 @@ $$ LANGUAGE plpgsql;
 -- Sections 1 and 3 reason about roles they can NAME: 1 scans 'openbrain%',
 -- 3 compares the three enumerated. A role outside both patterns — created by
 -- the init-only superuser, or by drift nobody noticed — would pass every
--- check above while falsifying the header's "THREE roles". Two closures fix
--- that: exactly one superuser (the bootstrap role init connects as), and no
--- role at all beyond that superuser, the three enumerated, and PostgreSQL's
+-- check above while falsifying the header's closed role set. Three closures
+-- fix that: exactly one superuser (the bootstrap role init connects as), both
+-- required sink roles present and login-capable, and no role at all beyond the
+-- superuser, the enumerated sink roles, and PostgreSQL's
 -- predefined pg_* roles (the pg_ prefix is reserved by the server — even a
 -- superuser cannot CREATE ROLE under it, so the exclusion is not a loophole).
 --
@@ -259,12 +261,34 @@ DO $$
 DECLARE
   supers   int;
   offender text;
+  missing  text;
 BEGIN
   SELECT count(*) INTO supers FROM pg_roles WHERE rolsuper;
   IF supers <> 1 THEN
     RAISE EXCEPTION
       'log sink: expected exactly one superuser (the bootstrap role), found %',
       supers;
+  END IF;
+
+  SELECT string_agg(required_role, ', ' ORDER BY required_role) INTO missing
+  FROM unnest(ARRAY['openbrain_ingester', 'openbrain_logs_rollup']) AS wanted(required_role)
+  WHERE NOT EXISTS (
+    SELECT 1 FROM pg_roles WHERE rolname = wanted.required_role
+  );
+
+  IF missing IS NOT NULL THEN
+    RAISE EXCEPTION
+      'log sink: required role(s) % are missing', missing;
+  END IF;
+
+  SELECT string_agg(rolname, ', ' ORDER BY rolname) INTO offender
+  FROM pg_roles
+  WHERE rolname IN ('openbrain_ingester', 'openbrain_logs_rollup', 'openbrain_monitor')
+    AND NOT rolcanlogin;
+
+  IF offender IS NOT NULL THEN
+    RAISE EXCEPTION
+      'log sink: sink role(s) % cannot LOGIN', offender;
   END IF;
 
   SELECT string_agg(rolname, ', ' ORDER BY rolname) INTO offender

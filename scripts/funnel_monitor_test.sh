@@ -98,11 +98,12 @@ curl_calls() {
 
 make_home() {
   local home="$1" enabled="${2:-1}" threshold="${3:-5}"
+  local db_host="${4:-$home/sink-run}"
   mkdir -p "$home/.config/funnel-monitor"
   cat > "$home/.config/funnel-monitor.env" <<EOF
-DB_HOST=db.test.invalid
+DB_HOST=$db_host
 DB_PORT=5432
-POSTGRES_DB=openbrain
+LOG_SINK_DB=openbrain_logs
 OPENBRAIN_MONITOR_PASSWORD=monitor-test-secret
 VOLUME_THRESHOLD=200
 PUSHOVER_ENABLED=$enabled
@@ -129,6 +130,18 @@ run_monitor() {
 }
 
 export TEST_VOLUME=4 TEST_CURL_EXIT=0
+
+# A stale pre-breakout TCP target is rejected before psql gets a chance to
+# reconnect the edge monitor to a corpus endpoint.
+TCP_HOME="$TEST_ROOT/tcp-home"
+make_home "$TCP_HOME" 0 5 db.test.invalid
+tcp_psql_before=$(grep -c '^--END--$' "$TEST_PSQL_LOG" || true)
+run_monitor 1 "$TCP_HOME"
+tcp_psql_after=$(grep -c '^--END--$' "$TEST_PSQL_LOG" || true)
+assert_eq "$tcp_psql_before" "$tcp_psql_after" "TCP target query suppression"
+assert_contains "$TCP_HOME/funnel_monitor.log" \
+  "DB_HOST must be an absolute unix-socket directory" "TCP target rejection"
+
 MAIN_HOME="$TEST_ROOT/main-home"
 make_home "$MAIN_HOME"
 

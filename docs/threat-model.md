@@ -52,7 +52,7 @@ what backs it up.
 | Compromised public edge (Caddy or tailscaled process)                                                                                                        | On the Qubes path, a VM boundary: the ingress qube holds no memory store, no app credential, and no route to the database qube at all — its Funnel logs go to a local socket-only sink holding request metadata and nothing else                                                                                                                                                                                                                                                                                                                                                                      | [`three-qube-design.md`](../deploy/qubes/three-qube-design.md)                               |
 | LAN or tailnet attacker against the local single-box install                                                                                                 | Loopback-only binds — LAN exposure requires an explicit `tailscale serve` act; each native token is a database-password-equivalent bearer secret, independently revocable after detection                                                                                                                                                                                                                                                                                                                                                                                                             | [`native-access-tokens.md`](native-access-tokens.md)                                         |
 | Attacker replaying one stolen native token                                                                                                                   | The token works until the operator revokes its public prefix; then the next request fails because every request reads current revocation state. Its label identifies subsequent writes, while reads have no per-tool audit                                                                                                                                                                                                                                                                                                                                                                            | [`native-access-tokens.md`](native-access-tokens.md#issue-list-and-revoke)                   |
-| Log-line injection at the log-ingester (it parses attacker-influenced access-log lines)                                                                      | Its DB role can only INSERT into one table; it mounts Caddy's log volume read-only, so it can't tamper with the on-disk evidence either                                                                                                                                                                                                                                                                                                                                                                                                                                                               | [`security-model.md`](security-model.md#database-layer)                                      |
+| Log-line injection at the log-ingester (it parses attacker-influenced access-log lines)                                                                      | It has no network stack, reaches only the separate log sink's SCRAM unix socket, can only INSERT into one disposable table, and mounts Caddy's log volume read-only                                                                                                                                                                                                                                                                                                                                                                                                                                   | [`security-model.md`](security-model.md#database-layer)                                      |
 | Supply chain: a drifted base image, or a pull request attacking CI                                                                                           | Version-pinned images (with `pull: true` on the perimeter image), the `--allow-env` drift guard, the allowlist-presence guard, the leak-gate scan; workflows run with read-only tokens                                                                                                                                                                                                                                                                                                                                                                                                                | [`security-model.md`](security-model.md#supply-chain--process)                               |
 
 ## Trust boundaries by install path
@@ -63,7 +63,9 @@ what backs it up.
   workspace/project audiences. Personal visibility is disabled unless the
   operator binds every holder to one deployment-wide `MCP_ACCESS_KEY_PRINCIPAL`.
 - **Tailnet / Funnel** — the public door is allowlist-then-OAuth; the private
-  door is your tailnet plus the same JWT check. One host, so per-service
+  door is your tailnet plus the same JWT check. One host, so the corpus and sink
+  volumes share a host-root trust boundary, but the ingester itself is
+  networkless and Funnel rows live only in the socket-only sink. Per-service
   container hardening
   ([`security-model.md` § Container layer](security-model.md#container-layer))
   is the only intra-host boundary.
@@ -95,8 +97,8 @@ One line per layer; each links to its section of
 - [**Database**](security-model.md#database-layer) — six least-privilege roles
   plus forced RLS on memory rows; missing audience context matches nothing, the
   app cannot DELETE thoughts or mutate token lifecycle state, the token
-  administrator cannot read memories/hashes, and the ingester can only INSERT
-  into one observability table.
+  administrator cannot read memories/hashes, and the ingester exists only on a
+  separate log cluster where it can INSERT into one observability table.
 - [**Container**](security-model.md#container-layer) — the MCP server and
   log-ingester run non-root with `cap_drop: ALL` and a read-only rootfs; Caddy
   keeps the image's root user but runs with a genuinely empty capability set (a
@@ -178,6 +180,8 @@ configuration this project is built not to foreclose. The full comparison table
   ([#12](https://github.com/lcjanke2020/ob1-selfhosted/issues/12) resolved).
   Residual risk moves to that sink: popping the edge yields up to 30 days of
   request metadata, which is a subset of what owning the qube already gives.
+  Every Pattern B deployment uses this schema split; Qubes adds the stronger VM
+  boundary and removes the edge's OS-level route to the corpus as well.
   ([`three-qube-design.md` § Log-ingester placement](../deploy/qubes/three-qube-design.md#log-ingester-placement-settled-local-sink))
 - **A forgotten compose override can republish the backend's loopback port** — a
   container can't detect its own host-port mapping; consciously accepted.

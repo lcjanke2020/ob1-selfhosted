@@ -469,8 +469,7 @@ table grows without bound.**
 The companion half — `mcp_auth_events` retention and its report — runs on the
 [app qube](../app-qube/README.md) against the corpus, because that is where mcp
 writes it. Each qube runs the half that owns its tables; neither can see the
-other's. Single-host installs run both files in one session, which is the
-default.
+other's. Single-host Pattern B installs use the same two-target separation.
 
 Install (as the regular user, from the repo checkout):
 
@@ -479,7 +478,7 @@ mkdir -p ~/.config/systemd/user
 install -m 0755 scripts/funnel_daily_summary.sh ~/funnel_daily_summary.sh
 install -m 0644 db/summarize_funnel.sql          ~/summarize_funnel.sql
 install -m 0600 deploy/qubes/ingress-qube/funnel-summary.env.example ~/.config/funnel-summary.env
-$EDITOR ~/.config/funnel-summary.env     # DB_HOST = the socket dir, SUMMARY_ROLE_PASSWORD
+$EDITOR ~/.config/funnel-summary.env     # DB_HOST socket + OPENBRAIN_LOGS_ROLLUP_PASSWORD
 install -d -m 0700 ~/openbrain-funnel-summaries
 install -m 0644 deploy/qubes/ingress-qube/funnel-summary.service ~/.config/systemd/user/
 install -m 0644 deploy/qubes/ingress-qube/funnel-summary.timer   ~/.config/systemd/user/
@@ -494,9 +493,10 @@ systemctl --user enable --now funnel-summary.timer
 systemctl --user list-timers funnel-summary.timer --no-pager
 ```
 
-`SUMMARY_SQL_FILE` must name **only** `summarize_funnel.sql` here. Left unset it
-resolves to both shipped files, and the auth-events half would fail against a
-sink that has no `mcp_auth_events` table — correctly, but noisily, every night.
+`SUMMARY_TARGET=sink` pins this unit to `summarize_funnel.sql`,
+`openbrain_logs_rollup`, `openbrain_logs`, and an absolute socket host. The
+wrapper rejects the retired free-form SQL/role knobs and any TCP host before it
+starts `psql`.
 
 Reports contain request metadata, so they land in a mode-0700 local directory.
 Replicating them off this qube is a new outbound path from the perimeter; the

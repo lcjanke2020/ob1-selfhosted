@@ -89,6 +89,19 @@ for req in DB_HOST OPENBRAIN_MONITOR_PASSWORD; do
   fi
 done
 
+# The monitor is an edge-local sink reader, never a generic Postgres probe.
+# Requiring libpq's absolute socket-path form prevents a stale pre-split env
+# from reconnecting this process to a TCP corpus endpoint.
+if [[ "$DB_HOST" != /* ]]; then
+  local_alert "DB_HOST must be an absolute unix-socket directory for the local log sink: $DB_HOST"
+  exit 1
+fi
+if [[ -n "${POSTGRES_DB:-}" ]]; then
+  local_alert "POSTGRES_DB is retired for the monitor; use LOG_SINK_DB (default openbrain_logs)"
+  exit 1
+fi
+MONITOR_DB="${LOG_SINK_DB:-openbrain_logs}"
+
 VOLUME_THRESHOLD="${VOLUME_THRESHOLD:-200}"
 AUTH_FAILURE_BURST_THRESHOLD="${AUTH_FAILURE_BURST_THRESHOLD:-5}"
 PUSHOVER_ROLLUP_SECONDS="${PUSHOVER_ROLLUP_SECONDS:-1800}"
@@ -214,7 +227,7 @@ q() { # scalar query -> stdout; empty on failure (stderr -> ERRLOG)
   PGCONNECT_TIMEOUT=5 PGOPTIONS='-c statement_timeout=15s' \
   PGPASSWORD="$OPENBRAIN_MONITOR_PASSWORD" \
   psql -X -w -h "$DB_HOST" -p "${DB_PORT:-5432}" -U openbrain_monitor \
-       -d "${POSTGRES_DB:-openbrain}" -tA -v ON_ERROR_STOP=1 -c "$1" 2>>"$ERRLOG"
+       -d "$MONITOR_DB" -tA -v ON_ERROR_STOP=1 -c "$1" 2>>"$ERRLOG"
 }
 
 write_state() { # $1=last row id, $2=last push epoch, $3=pending count
@@ -299,7 +312,7 @@ reason=""
 auth_probe_ok=1
 if ! [[ "$volume" =~ $re ]]; then
   alert=1
-  reason="monitor probe FAILED (volume='${volume:-empty}') — db qube unreachable or role/creds broken; see $ERRLOG"
+  reason="monitor probe FAILED (volume='${volume:-empty}') — local log sink unreachable or role/creds broken; see $ERRLOG"
 elif (( volume > VOLUME_THRESHOLD )); then
   alert=1
   reason="funnel volume>$VOLUME_THRESHOLD in 5min ($volume)"

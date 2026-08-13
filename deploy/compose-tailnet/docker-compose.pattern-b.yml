@@ -2,9 +2,9 @@
 # is unreachable from the host. Caddy (running under the `pattern-b` profile)
 # is then the only entry point, reaching mcp over the docker network.
 #
-# Also brings up the log-ingester sidecar which tails Caddy's
-# JSON access logs and writes structured rows to Postgres. Only useful when
-# Caddy is running, so it's also profile-gated.
+# Also brings up a dedicated socket-only log sink and the log-ingester sidecar
+# that writes Caddy's structured request metadata into it. Funnel rows never
+# enter the corpus Postgres. Both services are profile-gated with Caddy.
 #
 # Usage (with the profile flag):
 #   docker compose --env-file .env --project-directory . \
@@ -48,12 +48,12 @@ services:
   # Caddy access log ingester.
   #
   # Tails /var/log/caddy/{funnel,tailnet}-access.log (shared volume with
-  # caddy) and inserts structured rows into the `funnel_access_log` table.
-  # See server/log_ingester.ts and db/02-observability.sql.
+  # caddy) and inserts structured rows into the dedicated log sink's
+  # `funnel_access_log` table. See server/log_ingester.ts and db/log-sink/.
   #
   # Profile-gated identically to caddy — Pattern A has no Caddy and so no
-  # logs to ingest. Pulls the same env vars as mcp so it shares the DB
-  # connection config (DB_HOST=postgres, DB_USER=openbrain_app, etc.).
+  # logs to ingest. It reaches only the sink's unix socket and has no network
+  # stack, so a parser compromise has no route toward the corpus service.
   log-ingester:
     build:
       context: ../../server
@@ -71,20 +71,21 @@ services:
       - /tmp:size=16M,mode=1777
     security_opt:
       - no-new-privileges:true
+    network_mode: none
     depends_on:
-      postgres:
+      log-sink:
         condition: service_healthy
     environment:
-      # Defaults to the in-compose `postgres` service; override DB_HOST in .env
-      # to point at an external Postgres (e.g. a dedicated DB qube). The
-      # log-ingester shares the mcp DB connection config.
-      DB_HOST: ${DB_HOST:-postgres}
-      DB_PORT: ${DB_PORT:-5432}
-      DB_NAME: ${POSTGRES_DB:-openbrain}
-      # Observability-only role with INSERT-only on
-      # funnel_access_log. `:?` (not plain ${VAR}) so a blank value after
+      # An absolute path selects the unix transport in log_ingester.ts and in
+      # the image's narrowed Deno --allow-net launcher. This is the fixed
+      # container-side path; LOG_SINK_SOCKET_DIR is the host-side bind.
+      DB_HOST: /var/run/postgresql
+      DB_PORT: 5432
+      DB_NAME: ${LOG_SINK_DB:-openbrain_logs}
+      # Sink-only role with INSERT-only on funnel_access_log. `:?` so a blank
+      # value after
       # `cp .env.example .env` fails at `docker compose config` time, not as a
-      # runtime DB-auth error. See db/00-roles.sh.
+      # runtime DB-auth error. See db/log-sink/00-log-sink-roles.sh.
       DB_USER: openbrain_ingester
       DB_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD:?set OPENBRAIN_INGESTER_PASSWORD (the log-ingester INSERT-only role) in .env for Pattern B}
       # Default 5s polling cadence is fine for personal traffic; bump via
@@ -103,5 +104,47 @@ services:
       # path that the ingester image pre-creates as part of the build.
       - caddy_logs:/var/log/caddy:ro
       - caddy_cursors:/var/lib/ingester/cursors
+      # Connecting to a unix socket needs write access to the socket node.
+      # Shared SELinux label because log-sink mounts the same host directory.
+      - ${LOG_SINK_SOCKET_DIR:?set LOG_SINK_SOCKET_DIR to a short absolute host path}:/var/run/postgresql:z
 
-# Reuse the volumes declared in the base file; nothing new to declare here.
+  # Funnel request-metadata cluster. It has only the two db/log-sink relations,
+  # no corpus schema or credential, no network, and no TCP listener even on lo.
+  log-sink:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    profiles:
+      - pattern-b
+    network_mode: none
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POSTGRES_DB: ${LOG_SINK_DB:-openbrain_logs}
+      POSTGRES_USER: ${LOG_SINK_SUPERUSER:-postgres}
+      POSTGRES_PASSWORD: ${LOG_SINK_SUPERUSER_PASSWORD:?set LOG_SINK_SUPERUSER_PASSWORD (the log sink's init-only superuser)}
+      # Stock local trust would erase the role boundary for every process that
+      # can reach the shared socket. Require SCRAM on unix sockets as well.
+      POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256
+      POSTGRES_HOST_AUTH_METHOD: reject
+      OPENBRAIN_INGESTER_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD:?set OPENBRAIN_INGESTER_PASSWORD (the log-ingester INSERT-only role)}
+      OPENBRAIN_LOGS_ROLLUP_PASSWORD: ${OPENBRAIN_LOGS_ROLLUP_PASSWORD:?set OPENBRAIN_LOGS_ROLLUP_PASSWORD (the sink summary/retention role)}
+      OPENBRAIN_MONITOR_PASSWORD: ${OPENBRAIN_MONITOR_PASSWORD:-}
+    entrypoint: ["docker-entrypoint.sh"]
+    command: ["postgres", "-c", "listen_addresses="]
+    volumes:
+      - log_sink_data:/var/lib/postgresql/data
+      - ${LOG_SINK_SOCKET_DIR:?set LOG_SINK_SOCKET_DIR to a short absolute host path}:/var/run/postgresql:z
+      - ../../db/log-sink/00-log-sink-roles.sh:/docker-entrypoint-initdb.d/00-log-sink-roles.sh:ro
+      - ../../db/log-sink/01-log-sink.sql:/docker-entrypoint-initdb.d/01-log-sink.sql:ro
+      - ../../db/log-sink/02-log-sink-assertion.sql:/docker-entrypoint-initdb.d/99-log-sink-assertion.sql:ro
+    healthcheck:
+      test: [
+        "CMD-SHELL",
+        "pg_isready -h /var/run/postgresql -U ${LOG_SINK_SUPERUSER:-postgres} -d ${LOG_SINK_DB:-openbrain_logs}",
+      ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  log_sink_data:

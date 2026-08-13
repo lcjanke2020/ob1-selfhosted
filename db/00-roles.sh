@@ -30,44 +30,6 @@ psql -v ON_ERROR_STOP=1 \
   CREATE ROLE openbrain_readonly LOGIN BYPASSRLS PASSWORD :'readonly_password';
 EOSQL
 
-# Pattern B observability-only role for the log-ingester sidecar.
-# Created conditionally so Pattern A operators (no ingester running) can
-# leave OPENBRAIN_INGESTER_PASSWORD unset; Pattern B operators set it in
-# .env and the role is created with INSERT-only privileges on
-# funnel_access_log (granted in 02-observability.sql). The split keeps
-# the ingester from sharing openbrain_app's DML on `thoughts` — the
-# ingester parses attacker-controlled Caddy JSON, so its blast radius
-# on compromise is bounded to one observability table.
-if [ -n "${OPENBRAIN_INGESTER_PASSWORD:-}" ]; then
-  psql -v ON_ERROR_STOP=1 \
-    --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
-    --set=ingester_password="$OPENBRAIN_INGESTER_PASSWORD" \
-    <<-'EOSQL'
-    CREATE ROLE openbrain_ingester LOGIN PASSWORD :'ingester_password';
-EOSQL
-else
-  echo "[00-roles] OPENBRAIN_INGESTER_PASSWORD not set; skipping openbrain_ingester (Pattern A)"
-fi
-
-# SELECT-only metadata role for the host-side funnel monitor
-# (scripts/funnel_monitor.sh, run from the ingress qube in the three-qube
-# split). Created conditionally like the ingester: set
-# OPENBRAIN_MONITOR_PASSWORD to create it; its sole table grant (SELECT on
-# funnel_access_log) lands in 02-observability.sql.
-# Deliberately not openbrain_readonly (SELECT on everything): this
-# credential sits on the internet-adjacent edge, so it may read request
-# metadata but must never be able to read a thought.
-if [ -n "${OPENBRAIN_MONITOR_PASSWORD:-}" ]; then
-  psql -v ON_ERROR_STOP=1 \
-    --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
-    --set=monitor_password="$OPENBRAIN_MONITOR_PASSWORD" \
-    <<-'EOSQL'
-    CREATE ROLE openbrain_monitor LOGIN PASSWORD :'monitor_password';
-EOSQL
-else
-  echo "[00-roles] OPENBRAIN_MONITOR_PASSWORD not set; skipping openbrain_monitor (no host-side funnel monitor)"
-fi
-
 # Dedicated native-token lifecycle role. It can list non-secret token metadata
 # and execute the reviewed register/revoke functions from db/08-access-tokens.sql,
 # but it cannot read token hashes or any memory relation. Public/OAuth-only

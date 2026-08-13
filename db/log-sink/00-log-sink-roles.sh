@@ -9,12 +9,12 @@
 # `openbrain_readonly`, because there is nothing here worth a read-everything
 # credential. Table grants land in 01-log-sink.sql.
 #
-#   openbrain_ingester      INSERT-only. Same name and job as on the corpus —
-#                           it is the same sidecar, now writing locally.
-#   openbrain_monitor       SELECT-only, one table. Same name and job.
+#   openbrain_ingester      INSERT-only. Historical name, now valid only here;
+#                           the corpus assertion rejects it entirely.
+#   openbrain_monitor       SELECT-only, one table. Likewise sink-only.
 #   openbrain_logs_rollup   DML on both observability tables, for the daily
-#                           summary + retention pass. On the corpus that work
-#                           runs as openbrain_app; deliberately NOT reusing
+#                           summary + retention pass. Corpus auth-event
+#                           retention runs as openbrain_app; deliberately not reusing
 #                           that name here, so no file on the internet-facing
 #                           qube ever holds a secret called
 #                           OPENBRAIN_APP_PASSWORD.
@@ -44,9 +44,9 @@ psql -v ON_ERROR_STOP=1 \
     NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD :'rollup_password';
 EOSQL
 
-# The host-side funnel monitor is optional in the same way it is on the
-# corpus: no monitor password, no monitor role, and 01-log-sink.sql skips its
-# grant. A sink with no monitor still ingests and still rolls up.
+# The host-side funnel monitor is optional: no monitor password means no
+# monitor role, and 01-log-sink.sql skips its grant. A sink with no monitor
+# still ingests and still rolls up.
 if [ -n "${OPENBRAIN_MONITOR_PASSWORD:-}" ]; then
   psql -v ON_ERROR_STOP=1 \
     --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
