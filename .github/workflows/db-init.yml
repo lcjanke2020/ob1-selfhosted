@@ -1294,8 +1294,8 @@ jobs:
               sinkci psql -h /var/run/postgresql -U openbrain_logs_rollup \
               -d "$POSTGRES_DB" -Atc "$1"
           }
-          test "$(q \"select count(*) from funnel_access_log where user_agent='ci';\")" = 1
-          test "$(q \"select count(*) from funnel_access_log where user_agent='ci' and ts < now() - interval '30 days';\")" = 0
+          test "$(q 'select count(*) from funnel_access_log where user_agent=$literal$ci$literal$;')" = 1
+          test "$(q 'select count(*) from funnel_access_log where user_agent=$literal$ci$literal$ and ts < now() - interval $literal$30 days$literal$;')" = 0
           test "$(q 'select count(*) from funnel_access_summary;')" -ge 1
           echo "sink target selected only the sink role, socket, SQL, database, and report"
 

@@ -123,7 +123,11 @@ EOF
 run_monitor() {
   local expected_rc="$1" home="$2" rc
   set +e
-  HOME="$home" "$MONITOR" > "$TEST_ROOT/stdout" 2> "$TEST_ROOT/stderr"
+  # A caller may have a corpus database name in its environment. The private
+  # monitor file is authoritative and must prevent that ambient value from
+  # poisoning an otherwise valid sink-only run.
+  POSTGRES_DB=ambient-corpus HOME="$home" "$MONITOR" \
+    > "$TEST_ROOT/stdout" 2> "$TEST_ROOT/stderr"
   rc=$?
   set -e
   assert_eq "$expected_rc" "$rc" "monitor exit code"
@@ -141,6 +145,19 @@ tcp_psql_after=$(grep -c '^--END--$' "$TEST_PSQL_LOG" || true)
 assert_eq "$tcp_psql_before" "$tcp_psql_after" "TCP target query suppression"
 assert_contains "$TCP_HOME/funnel_monitor.log" \
   "DB_HOST must be an absolute unix-socket directory" "TCP target rejection"
+
+# In contrast, the same retired key inside the authoritative monitor file is a
+# stale pre-Arc-B configuration and must fail before any query.
+STALE_DB_HOME="$TEST_ROOT/stale-db-home"
+make_home "$STALE_DB_HOME" 0
+printf 'POSTGRES_DB=openbrain_logs\n' >> "$STALE_DB_HOME/.config/funnel-monitor.env"
+stale_db_psql_before=$(grep -c '^--END--$' "$TEST_PSQL_LOG" || true)
+run_monitor 1 "$STALE_DB_HOME"
+stale_db_psql_after=$(grep -c '^--END--$' "$TEST_PSQL_LOG" || true)
+assert_eq "$stale_db_psql_before" "$stale_db_psql_after" \
+  "retired database knob query suppression"
+assert_contains "$STALE_DB_HOME/funnel_monitor.log" \
+  "POSTGRES_DB is retired for the monitor" "retired database knob rejection"
 
 MAIN_HOME="$TEST_ROOT/main-home"
 make_home "$MAIN_HOME"

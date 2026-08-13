@@ -17,6 +17,13 @@ umask 077
 # process can inherit it. The same guard runs after the env file is sourced.
 export -n OPENBRAIN_MONITOR_PASSWORD 2>/dev/null || true
 
+# This wrapper's private env file is the only accepted configuration source for
+# the database target. Ignore an ambient corpus POSTGRES_DB (for example from a
+# parent Compose/admin shell), then reject the retired key if the monitor file
+# itself restores it below. That preserves file-over-environment precedence
+# without letting a stale pre-Arc-B monitor file silently select a database.
+unset POSTGRES_DB
+
 LOG="$HOME/funnel_monitor.log"
 ERRLOG="$HOME/funnel_monitor.err"
 ENV_FILE="${FUNNEL_MONITOR_ENV_FILE:-$HOME/.config/funnel-monitor.env}"
@@ -96,7 +103,7 @@ if [[ "$DB_HOST" != /* ]]; then
   local_alert "DB_HOST must be an absolute unix-socket directory for the local log sink: $DB_HOST"
   exit 1
 fi
-if [[ -n "${POSTGRES_DB:-}" ]]; then
+if [[ -v POSTGRES_DB ]]; then
   local_alert "POSTGRES_DB is retired for the monitor; use LOG_SINK_DB (default openbrain_logs)"
   exit 1
 fi
