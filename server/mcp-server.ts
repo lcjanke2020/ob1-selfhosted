@@ -270,7 +270,8 @@ export function createMcpServer(
     // auth decision — admissions included — is enqueued best-effort to
     // mcp_auth_events with the verified identity, door, and path.
     // 1.21.0: branch lookup plus default and explicit last_update listing use
-    // effective freshness; all session orders resolve full ties by newest id.
+    // effective freshness; lookup and listing orders resolve full ties by
+    // newest id.
     version: "1.21.0",
   });
 
@@ -718,7 +719,7 @@ export function createMcpServer(
         readOnlyHint: false,
         openWorldHint: false,
         destructiveHint: false,
-        idempotentHint: true,
+        idempotentHint: false,
       },
       inputSchema: sessionUpdateStatusSchema,
     },

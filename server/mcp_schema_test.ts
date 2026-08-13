@@ -121,6 +121,11 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
         ),
         "session_update_status must publish its effective-freshness effect",
       );
+      assertEquals(
+        sessionUpdateStatus?.annotations?.idempotentHint,
+        false,
+        "session_update_status must not advertise retries as idempotent",
+      );
       const capture = listed.tools.find((tool) =>
         tool.name === "capture_thought"
       );
