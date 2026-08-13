@@ -149,6 +149,7 @@ services:
       CHAT_API_BASE: ${CHAT_API_BASE:-}
       CHAT_API_KEY: ${CHAT_API_KEY:-}
       CHAT_MODEL: ${CHAT_MODEL:-}
+      FETCH_TIMEOUT_MS: ${FETCH_TIMEOUT_MS:-15000}
       CHAT_TIMEOUT_MS: ${CHAT_TIMEOUT_MS:-60000}
       # Fallback chat endpoint — available only under an explicit alert/allow
       # policy, after the primary fails or as a fallback-only deployment.
