@@ -1156,11 +1156,15 @@ jobs:
           docker compose --project-directory "$adoption_root" \
             --env-file "$adoption_root/.env" \
             -f "$adoption_root/compose.yml" up -d log-sink
+          # pg_isready alone can see the init-phase temporary socket server.
+          # PID 1 becomes postgres only after initdb.d ends and the entrypoint
+          # execs the final server, eliminating the shutdown/startup gap.
           for i in $(seq 1 60); do
             if docker compose --project-directory "$adoption_root" \
               --env-file "$adoption_root/.env" -f "$adoption_root/compose.yml" \
-              exec -T log-sink pg_isready -h /var/run/postgresql \
-                -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; then
+              exec -T log-sink sh -c \
+                'test "$(cat /proc/1/comm)" = postgres && pg_isready -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+                >/dev/null 2>&1; then
               ready=1
               break
             fi
@@ -1224,7 +1228,7 @@ jobs:
               --env-file "$adoption_root/.env" \
               -f "$adoption_root/compose.yml" -f "$adoption_root/marker.yml" \
               exec -T log-sink sh -c \
-                'test -f "$PGDATA/.openbrain-log-sink-init-complete" && pg_isready -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+                'test "$(cat /proc/1/comm)" = postgres && test -f "$PGDATA/.openbrain-log-sink-init-complete" && pg_isready -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
                 >/dev/null 2>&1; then
               restarted=1
               break
