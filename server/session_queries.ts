@@ -23,6 +23,13 @@ import {
 // callers above it if they request more than 50 rows.
 const MIN_SESSION_HNSW_EF_SEARCH = 50;
 
+// Public "newest session" semantics. A client-authored timestamp is meaningful
+// when supplied; otherwise the server-maintained update time is the row's
+// freshness. Keep this as one shared clause so branch lookup and default list
+// ordering cannot drift apart again.
+const SESSION_EFFECTIVE_FRESHNESS_ORDER =
+  "COALESCE(last_update, updated_at) DESC, updated_at DESC, id DESC";
+
 export type SessionProvenance = {
   // Server-verified credential label: OAuth user ('funnel'), OAuth machine
   // ('service'), or shared x-brain-key ('tailnet'). This is not Caddy routing.
@@ -366,12 +373,11 @@ export async function resumeSession(
   if (!opts.branch) return null;
 
   const chosenId = await withScopeClient(pool, scope, async (client) => {
-    // Branch ties broken deterministically: newest last_update, then the
-    // server-managed updated_at, then id for total order.
+    // Use the same effective-freshness contract as default session listing.
     const r = await client.queryObject<{ id: bigint }>(
       `SELECT id FROM sessions.session
        WHERE branch = $1
-       ORDER BY last_update DESC NULLS LAST, updated_at DESC, id
+       ORDER BY ${SESSION_EFFECTIVE_FRESHNESS_ORDER}
        LIMIT 1`,
       [opts.branch],
     );
@@ -535,8 +541,13 @@ export async function listSessions(
     params.push(opts.until);
   }
   const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
-  // order_by is whitelisted (never interpolated untrusted).
+  // order_by is whitelisted (never interpolated untrusted). The public
+  // default is effective freshness; explicit alternate columns retain their
+  // ordinary descending semantics and deterministic server-time/id ties.
   const orderBy = normalizeOrderBy(opts.order_by);
+  const ordering = orderBy === "last_update"
+    ? SESSION_EFFECTIVE_FRESHNESS_ORDER
+    : `${orderBy} DESC NULLS LAST, updated_at DESC, id DESC`;
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
 
   return await withScopeClient(pool, scope, async (client) => {
@@ -547,7 +558,7 @@ export async function listSessions(
               workspace_id, project_id, visibility
        FROM sessions.session
        ${where}
-       ORDER BY ${orderBy} DESC NULLS LAST, updated_at DESC, id
+       ORDER BY ${ordering}
        LIMIT $${p}`,
       [...params, limit],
     );

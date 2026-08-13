@@ -297,8 +297,12 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
     await t.step(
       "GET /sessions/lookup?branch=main → newest match",
       async () => {
+        let lookupSql = "";
         const api = makeApi((sql) => {
-          if (sql.includes("WHERE branch = $1")) return { rows: [{ id: 9n }] };
+          if (sql.includes("WHERE branch = $1")) {
+            lookupSql = sql;
+            return { rows: [{ id: 9n }] };
+          }
           if (sql.includes("session_id, title")) {
             return { rows: [sessionRow(9n)] };
           }
@@ -308,6 +312,10 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
         const res = await api.request("/sessions/lookup?branch=main", authed());
         assertEquals(res.status, 200);
         assertEquals((await res.json()).id, 9);
+        assert(
+          /ORDER BY COALESCE\(last_update, updated_at\) DESC, updated_at DESC, id DESC/
+            .test(lookupSql),
+        );
       },
     );
 
@@ -335,8 +343,10 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
       "GET /sessions: filters + coerced limit flow into SQL",
       async () => {
         let captured: unknown[] = [];
+        let listSql = "";
         const api = makeApi((sql, params) => {
           if (sql.includes("FROM sessions.session")) {
+            listSql = sql;
             captured = params;
             return { rows: [] };
           }
@@ -349,6 +359,34 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
         assertEquals(res.status, 200);
         assertEquals(await res.json(), { sessions: [] });
         assertEquals(captured, ["awaiting_review", 10]);
+        assert(
+          /ORDER BY COALESCE\(last_update, updated_at\) DESC, updated_at DESC, id DESC/
+            .test(listSql),
+        );
+      },
+    );
+
+    await t.step(
+      "GET /sessions: explicit ordering stays deterministic",
+      async () => {
+        let listSql = "";
+        const api = makeApi((sql) => {
+          if (sql.includes("FROM sessions.session")) {
+            listSql = sql;
+            return { rows: [] };
+          }
+          return undefined;
+        });
+        const res = await api.request(
+          "/sessions?order_by=created_at",
+          authed(),
+        );
+        assertEquals(res.status, 200);
+        assert(
+          /ORDER BY created_at DESC NULLS LAST, updated_at DESC, id DESC/.test(
+            listSql,
+          ),
+        );
       },
     );
 

@@ -198,7 +198,7 @@ Deno.test("browserless client_credentials authenticates through MCP and REST ser
     assertEquals(success.code, 0, success.stderr);
     assertStringIncludes(
       success.stdout,
-      "OK: browserless client_credentials authenticated to open-brain-homelab 1.20.0",
+      "OK: browserless client_credentials authenticated to open-brain-homelab 1.21.0",
     );
     assertStringIncludes(
       success.stdout,
