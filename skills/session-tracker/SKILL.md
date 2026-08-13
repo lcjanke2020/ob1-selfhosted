@@ -134,25 +134,52 @@ a human re-open the _actual chat transcript_ later. It is **not** the key (the
 integer `id` is), it is free-form, and it is **nullable**: a session with no
 resumable transcript should carry no handle rather than a dead value.
 
-- **Where it comes from (Claude Code):** the running agent's conversation id is
-  exposed in the environment as `CLAUDE_CODE_SESSION_ID`. This is
+**Where it comes from is harness-specific.** The rule is the same everywhere —
+**only stamp an id you've confirmed is resumable, and let the transcript file be
+the authority** — but the id's source and the transcript's location differ per
+harness. Find your harness below; if it isn't listed, work out its own id +
+transcript pair rather than assuming another harness's env var applies.
+
+> ⚠️ **Absence of one harness's signal is not evidence of "no transcript."** An
+> agent that checks only `CLAUDE_CODE_SESSION_ID`, finds it unset, and concludes
+> the session is unresumable will silently drop a perfectly good handle when
+> running under a different harness. Check the harness you are actually in.
+
+**Claude Code**
+
+- **Id:** exposed in the environment as `CLAUDE_CODE_SESSION_ID`. This is
   harness-specific and may change in future Claude Code versions — treat it as
   advisory, not a contract. If it's unset, don't invent one; leave `session_id`
   out.
-- **Only stamp an id you've confirmed is resumable — the transcript file is the
-  authority.** Check for it by **glob**:
-  `~/.claude/projects/*/<session_id>.jsonl`. The id is unique, so this finds the
-  transcript no matter how Claude Code encodes the project-dir name (it folds
-  more than just `/` — `_`, `.`, etc. all become `-`, so don't try to
-  reconstruct the path by hand). If no file matches, **don't stamp** — an honest
-  "no transcript" beats an id that resolves to nothing. Treat
+- **Transcript:** check by **glob** — `~/.claude/projects/*/<session_id>.jsonl`.
+  The id is unique, so this finds the transcript no matter how Claude Code
+  encodes the project-dir name (it folds more than just `/` — `_`, `.`, etc. all
+  become `-`, so don't try to reconstruct the path by hand). Treat
   `CLAUDE_CODE_CHILD_SESSION=1` as a _caution_ that the id may be a sub-session
   rather than the top-level conversation (the two signals can disagree — a child
   env can still have a real transcript): let the glob decide, and when in doubt
   leave it out.
-- **Stamp `machine` and `working_dir` alongside it.** Transcripts are
-  _machine-local_, so the record must say **which host** (`machine`, e.g. the
-  box's hostname) and **which directory** (`working_dir`) the work happened in.
+
+**GitHub Copilot CLI**
+
+- **Id:** there is **no `CLAUDE_CODE_SESSION_ID`-style env var**. The
+  conversation id is the **session-state directory name**, surfaced to the agent
+  in its session context as the session folder —
+  `~/.copilot/session-state/<session_id>/`. It is a UUID.
+- **Transcript:** `~/.copilot/session-state/<session_id>/events.jsonl`. Confirm
+  it exists **and holds real turns** before stamping — a session dir can exist
+  with a near-empty log. A quick sanity check is that the file contains
+  `assistant.message` events, not just `hook.*` / lifecycle noise.
+
+If no file matches for your harness, **don't stamp** — an honest "no transcript"
+beats an id that resolves to nothing.
+
+**Regardless of harness:**
+
+- **Stamp `machine`, `working_dir`, and `harness` alongside it.** Transcripts
+  are _machine-local_, so the record must say **which host** (`machine`, e.g.
+  the box's hostname) and **which directory** (`working_dir`) the work happened
+  in — and **which harness** (`harness`), since that selects the resume command.
   See _Resuming the actual conversation from the CLI_ below for how the fields
   are used together.
 - **Refresh caveat:** on a re-capture (with `id`), the server
@@ -273,7 +300,8 @@ title = "Benchmark: sliding-window vs token-bucket"
    `repo_url`, `branch`, `head` from the actual checkout (`git rev-parse`,
    `git branch --show-current`), `machine` / `working_dir` from the host, and
    the resumable `session_id` per _The resumable handle_ above — not from memory
-   or a returned `raw_toml`.
+   or a returned `raw_toml`. Stamp `harness` too whenever you stamp
+   `session_id`: resume needs it to know which command reopens the transcript.
 
    A recapture (`id` present) is a full replacement of the authorable document
    and artifact set, not a patch. `title` remains required. Apart from
@@ -331,32 +359,44 @@ title = "Benchmark: sliding-window vs token-bucket"
 ### Resuming the actual conversation from the CLI
 
 `session_lookup` restores the _work-log_, not the chat. To get the original
-Claude Code **transcript** back you run `claude --resume` yourself — there is no
-resume wrapper, and the two ids are **different namespaces**:
+**transcript** back you run the harness's own resume command yourself — there is
+no resume wrapper, and the two ids are **different namespaces**:
 
-> ⚠️ **`claude --resume <ob-id>` does NOT work.** The OB integer `id` is the
-> record key; `claude --resume` wants the _harness conversation id_, which is
-> stored in the record's `session_id` field. Passing the OB `id` (or a session's
-> title) just errors with "No conversation found".
+> ⚠️ **Resuming with the OB `id` does NOT work.** The OB integer `id` is the
+> record key; a harness resume command wants the _harness conversation id_,
+> which is stored in the record's `session_id` field. Passing the OB `id` (or a
+> session's title) just errors — e.g. Claude Code reports "No conversation
+> found".
 
 Manual resume, search-driven:
 
 1. **Find it:** `session_search(query=…)` to discover, then
    `session_lookup(id=…)` for the full record — or `session_lookup(id=…)` /
    `session_lookup(branch=…)` directly if you already know it.
-2. **Read three fields** off the record: `machine` (which host), `working_dir`
-   (which directory), `session_id` (the harness conversation id).
-3. **On that `machine`**, run `claude --resume <session_id>` — it resolves the
-   transcript by id, so `cd` isn't required, but start from `working_dir` so the
-   resumed work lands in the right project. Transcripts are machine-local, so
-   this only works on the host that recorded it.
+2. **Read four fields** off the record: `machine` (which host), `working_dir`
+   (which directory), `harness` (which resume command to use), `session_id` (the
+   harness conversation id).
+3. **On that `machine`**, resume with the matching harness:
+
+   | `harness`          | Resume with                                            |
+   | ------------------ | ------------------------------------------------------ |
+   | Claude Code        | `claude --resume <session_id>` (shell command)         |
+   | GitHub Copilot CLI | `/resume <session_id>` (slash command, inside the CLI) |
+
+   Both resolve the transcript by id, so `cd` isn't required, but start from
+   `working_dir` so the resumed work lands in the right project. Transcripts are
+   machine-local, so this only works on the host that recorded it.
+
+> This is why `harness` is worth stamping on every capture: without it, a
+> resuming agent has to guess which command applies, and guessing wrong reads as
+> "not resumable."
 
 **No transcript available** — `session_id` is unset or empty, you're on a
 different machine, or it was pruned/compacted — means **there is no
-scrollback**. Start a fresh `claude` and rebuild from the work-log
-(`resume_context` + `next_actions` + `blockers`), checking out `repo_url` /
-`branch` / `head`. Say plainly that scrollback wasn't available and the context
-was reconstructed from the session record.
+scrollback**. Start a fresh session in the relevant harness and rebuild from the
+work-log (`resume_context` + `next_actions` + `blockers`), checking out
+`repo_url` / `branch` / `head`. Say plainly that scrollback wasn't available and
+the context was reconstructed from the session record.
 
 ## Searching & listing
 
@@ -402,9 +442,14 @@ pattern.
   server-issued `id`, re-send every field and artifact you intend to retain, and
   omit `status` unless intentionally changing it.
 - Don't omit `id` when re-capturing (you'll mint a duplicate).
-- Don't stamp `session_id` from `CLAUDE_CODE_SESSION_ID` unchecked — confirm a
-  `<session_id>.jsonl` transcript exists first (glob `~/.claude/projects/*/`);
-  an id with no transcript won't resume. Leave it unset rather than guess.
+- Don't stamp `session_id` unchecked — confirm the transcript exists first
+  (Claude Code: glob `~/.claude/projects/*/<session_id>.jsonl`; Copilot CLI:
+  `~/.copilot/session-state/<session_id>/events.jsonl`); an id with no
+  transcript won't resume. Leave it unset rather than guess.
+- Don't treat one harness's missing env var as proof there's no transcript —
+  `CLAUDE_CODE_SESSION_ID` is unset under Copilot CLI, which has its own id and
+  transcript. Check the harness you're actually running in before recording "no
+  resumable transcript".
 - Don't author nested `[identity]` / `[where]` / `[state_for_resuming]` blocks —
   the schema is flat.
 - Don't omit a non-default session's scope on lookup, refresh, or status update;
