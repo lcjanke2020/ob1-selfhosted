@@ -129,8 +129,10 @@ services:
       OPENBRAIN_INGESTER_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD:?set OPENBRAIN_INGESTER_PASSWORD (the log-ingester INSERT-only role)}
       OPENBRAIN_LOGS_ROLLUP_PASSWORD: ${OPENBRAIN_LOGS_ROLLUP_PASSWORD:?set OPENBRAIN_LOGS_ROLLUP_PASSWORD (the sink summary/retention role)}
       OPENBRAIN_MONITOR_PASSWORD: ${OPENBRAIN_MONITOR_PASSWORD:-}
-    # Refuse an existing PGDATA unless the lexically-last init script wrote its
-    # completion marker; restart must not bless a failed first init.
+    # Refuse an existing PGDATA unless fresh init or assertion-gated adoption
+    # wrote its completion marker; restart must not bless a failed first init.
+    # The Qubes pre-marker upgrade uses scripts/adopt-log-sink-marker.sh before
+    # recreate; the wrapper itself never auto-adopts an unmarked directory.
     entrypoint: ["/bin/sh", "/usr/local/bin/openbrain-log-sink-entrypoint.sh"]
     command: ["postgres", "-c", "listen_addresses="]
     volumes:

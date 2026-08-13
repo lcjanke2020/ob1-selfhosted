@@ -213,9 +213,12 @@ services:
     # that outlives init.)
     #
     # The checked-in wrapper still delegates to the image entrypoint, but first
-    # refuses an existing PGDATA unless the lexically-last init script wrote its
-    # completion marker. This keeps restart: unless-stopped from turning a
-    # failed first init into a running partial schema.
+    # refuses an existing PGDATA unless fresh init or assertion-gated adoption
+    # wrote its completion marker. This keeps restart: unless-stopped from
+    # turning a failed first init into a running partial schema. A healthy volume
+    # created before the marker existed must first pass
+    # scripts/adopt-log-sink-marker.sh while its old container is still running;
+    # the wrapper never auto-adopts.
     entrypoint: ["/bin/sh", "/usr/local/bin/openbrain-log-sink-entrypoint.sh"]
     command: ["postgres", "-c", "listen_addresses="]
     volumes:

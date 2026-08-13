@@ -26,6 +26,35 @@ cp .env.example .env && $EDITOR .env     # MCP_UPSTREAM (ConnectTCP forwarder), 
 docker compose up -d
 ```
 
+### Existing sink upgrade: adopt the pre-marker volume first
+
+This step applies only when `log_sink_data` was initialized by a release that
+predates `.openbrain-log-sink-init-complete`. **After updating the checkout but
+before any `docker compose up` that would recreate `log-sink`**, leave the old,
+healthy container running and execute:
+
+```sh
+../../../scripts/adopt-log-sink-marker.sh
+docker compose --env-file .env up -d --no-deps --force-recreate --wait log-sink
+```
+
+The helper does not trust the old container's init log or old mounted assertion.
+It streams the current
+[`02-log-sink-assertion.sql`](../../../db/log-sink/02-log-sink-assertion.sql)
+into that running container as the database superuser, verifies that the server
+behind its unix socket uses the same `PGDATA`, and creates the marker as the
+`postgres` OS user only after every current invariant passes. It makes no schema
+or row changes. A partial or drifted sink exits nonzero and remains unmarked, so
+the new entrypoint will continue to refuse it. Correct the drift and rerun the
+helper; never substitute `touch` or create the marker yourself.
+
+The helper defaults to this Compose directory and its `.env`. Set
+`COMPOSE_DIR=/absolute/path/to/the/running/project` only if the checkout and
+running project are deliberately elsewhere. If the marker-gated definition was
+already recreated and is refusing the old volume, do not delete the volume:
+restore/start the previous Compose definition against that same volume, run the
+helper while it is healthy, and then recreate with the current definition.
+
 There is no `DB_HOST` here any more: the Funnel access log is written to a
 [local sink](#local-log-sink) on this qube, so the internet-facing edge holds no
 address for — and no route to — the db qube.
@@ -268,7 +297,9 @@ this qube to the db qube, which is exactly the network path this design removes.
   `.openbrain-log-sink-init-complete` only after the final assertion, checks it
   in both the entrypoint and healthcheck, and refuses a pre-existing data
   directory without it. Inspect the first-init logs; never create the marker by
-  hand. For a genuinely new/disposable sink, remove and recreate only its
+  hand. The only supported exception is the assertion-gated adoption helper
+  above for a healthy volume created before the marker existed. For a genuinely
+  new/disposable sink whose first init failed, remove and recreate only its
   `log_sink_data` volume after correcting the cause.
 
 - **Keep the socket directory path short.** A unix socket path is capped at 107
@@ -518,8 +549,16 @@ docker compose config --services             # exactly: caddy, log-ingester, log
 docker compose up -d
 curl -s http://127.0.0.1:9787/caddy-health   # → ok
 
-# the sink came up clean, holds only what it should, and completed init
-docker compose logs log-sink | grep -E 'invariants OK|init completion marker written'
+# the sink is ready only with its durable completion marker
+docker compose exec -T log-sink \
+  sh -c 'test -f "$PGDATA/.openbrain-log-sink-init-complete"'
+
+# the current catalog still satisfies the assertion (fresh or adopted volume)
+docker compose exec -T --user postgres log-sink sh -eu -c '
+  PGPASSWORD="$POSTGRES_PASSWORD" exec psql -X -w \
+    -h /var/run/postgresql -U "${POSTGRES_USER:-postgres}" \
+    -d "${POSTGRES_DB:-openbrain_logs}" -v ON_ERROR_STOP=1 -f -
+' < ../../../db/log-sink/02-log-sink-assertion.sql
 ss -tlnp | grep 5432 || echo 'no TCP listener — correct'
 
 # a request actually lands
@@ -527,9 +566,19 @@ curl -s -o /dev/null http://127.0.0.1:9787/mcp && sleep 6
 docker compose logs --tail=3 log-ingester    # → "N/N rows inserted"
 ```
 
+On a brand-new volume, additionally prove that `initdb.d` reached the assertion
+and then its lexically-last marker script:
+
+```sh
+docker compose logs log-sink | grep -E 'invariants OK|init completion marker written'
+```
+
 `invariants OK` comes from
 [`db/log-sink/02-log-sink-assertion.sql`](../../../db/log-sink/02-log-sink-assertion.sql),
 which runs immediately before the marker script and **fails the init** if the
 sink ever holds a third relation, a role with cluster-level privileges, an
 unenumerated grant, or a `GRANT … TO PUBLIC`. The entrypoint refuses every later
-start unless both messages were reached; either message's absence is meaningful.
+start unless the marker exists. On a fresh volume, either log line's absence is
+meaningful. On an adopted volume, the helper's successful assertion and
+`pre-marker volume adopted after current invariants passed` line are the
+corresponding evidence; init scripts correctly do not rerun on recreation.
