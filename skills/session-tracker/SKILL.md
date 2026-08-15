@@ -134,11 +134,11 @@ a human re-open the _actual chat transcript_ later. It is **not** the key (the
 integer `id` is), it is free-form, and it is **nullable**: a session with no
 resumable transcript should carry no handle rather than a dead value.
 
-**Where it comes from is harness-specific.** The rule is the same everywhere —
-**only stamp an id you've confirmed is resumable, and let the transcript file be
-the authority** — but the id's source and the transcript's location differ per
-harness. Find your harness below; if it isn't listed, work out its own id +
-transcript pair rather than assuming another harness's env var applies.
+**Where it comes from is harness-specific.** The rule is the same everywhere:
+**only stamp an id confirmed resumable through a verified local transcript or
+the harness's supported remote route.** Id sources and verification paths differ
+by harness. For an unlisted harness, determine its own id and verification route
+rather than assuming another harness's env var or storage layout applies.
 
 > ⚠️ **Absence of one harness's signal is not evidence of "no transcript."** An
 > agent that checks only `CLAUDE_CODE_SESSION_ID`, finds it unset, and concludes
@@ -163,8 +163,9 @@ transcript pair rather than assuming another harness's env var applies.
 **GitHub Copilot CLI**
 
 - **Id:** there is **no `CLAUDE_CODE_SESSION_ID`-style env var**. Run `/session`
-  in the interactive CLI; the id is also displayed on exit and names the local
-  session-state directory. It is a UUID.
+  in the conversation being captured (rerun it after opening a remote result);
+  the id is also displayed on exit and names the local session-state directory.
+  It is a UUID.
 - **Local transcript:**
   `<copilot-config-dir>/session-state/<session_id>/events.jsonl`. Resolve the
   active config directory in precedence order: `--config-dir=DIRECTORY`
@@ -174,10 +175,11 @@ transcript pair rather than assuming another harness's env var applies.
   events, not just `hook.*` / lifecycle noise. If the active config directory is
   non-default, record the resolved transcript path in `resume_context`; there is
   no dedicated schema field for it.
-- **Remote availability:** Copilot syncs sessions to the user's GitHub account
-  by default, but users can opt out and organization policy can disable it. A
-  synced session may therefore resume on another machine; verify the session
-  picker's remote tab rather than assuming locality.
+- **Remote availability and data locality:** Copilot syncs sessions to GitHub by
+  default, enabling cross-machine resume and storing a copy off the originating
+  machine. Users can opt out with `"remoteExport": false`; organization policy
+  can disable sync. Check the interactive picker's remote tab (switch with
+  `Tab`) rather than assuming locality; if it cannot be checked, report that.
 
 Before stamping a new or replacement handle, verify either its matching local
 file (including substantive turns) or, for a harness with supported sync, that
@@ -189,14 +191,16 @@ refresh rule below.
 
 **Regardless of harness:**
 
-- **Stamp `machine`, `working_dir`, and `harness` alongside it.** `machine` and
-  `working_dir` record where the conversation originated; `harness` selects the
-  resume mechanism. Whether another machine can resume it is harness-specific.
-  For a listed harness, use the resume table's exact stored value:
-  `harness = "Claude Code"` or `harness = "GitHub Copilot CLI"`. These are
-  documentation conventions, not a schema-enforced enum; for an unlisted
-  harness, use its stable product name consistently. See _Resuming the actual
-  conversation from the CLI_ below for how the fields are used together.
+- **Stamp `harness` alongside it, plus known origin metadata.** `machine` and
+  `working_dir` record where the conversation originated; never substitute a
+  host that merely verified a remote handle. If the origin is unknown, omit
+  those fields and record the verification environment in `resume_context`.
+  `harness` selects the resume mechanism. For a listed harness, use the resume
+  table's exact stored value: `harness = "Claude Code"` or
+  `harness = "GitHub Copilot CLI"`. These are documentation conventions, not a
+  schema-enforced enum; for an unlisted harness, use its stable product name
+  consistently. See _Resuming the actual conversation from the CLI_ below for
+  how the fields are used together.
 - **Refresh caveat:** on a re-capture (with `id`), the server
   **COALESCE-preserves** `session_id` — omitting it **keeps** the stored handle,
   but does **not** preserve `harness`, `machine`, or `working_dir`; omitted
@@ -316,10 +320,11 @@ title = "Benchmark: sliding-window vs token-bucket"
 
 1. Populate `repo_url`, `branch`, and `head` from the **live checkout**
    (`git rev-parse`, `git branch --show-current`), not memory or returned
-   `raw_toml`. For a new record or replacement handle, take `machine`,
-   `working_dir`, `harness`, and `session_id` from the harness that owns that
-   transcript. When retaining a stored handle, re-send its stored resume
-   metadata as described above instead of substituting the current harness.
+   `raw_toml`. For a new record or replacement handle, take `harness`,
+   `session_id`, and any known origin `machine` / `working_dir` from the owning
+   transcript; never invent a remote origin. When retaining a stored handle,
+   re-send its stored resume metadata instead of substituting the current
+   harness.
 
    A recapture (`id` present) is a full replacement of the authorable document
    and artifact set, not a patch. `title` remains required. Apart from
@@ -393,11 +398,11 @@ Manual resume, search-driven:
 1. **Find it:** `session_search(query=…)` to discover, then
    `session_lookup(id=…)` for the full record — or `session_lookup(id=…)` /
    `session_lookup(branch=…)` directly if you already know it.
-2. **Read four fields** off the record: `machine` (which host), `working_dir`
-   (which directory), `harness` (which resume command to use), `session_id` (the
-   harness conversation id). For a legacy row with no `harness`, don't stop: use
-   `agent` as a hint, probe known local transcript paths and any supported
-   remote picker, and accept an inferred harness only when the handle resolves.
+2. **Read the resume fields:** `harness`, `session_id`, plus `machine` and
+   `working_dir` when known. The latter are origin metadata and may be unset for
+   a verified remote handle; don't invent them. For a legacy row with no
+   `harness`, use `agent` as a hint, probe known local transcript paths and any
+   supported remote picker, and infer a harness only when the handle resolves.
 3. **Resume with the matching harness:**
 
    | Stored `harness` value | Resume with                                                                  | Availability check                                     |
@@ -474,10 +479,11 @@ pattern.
   server-issued `id`, re-send every field and artifact you intend to retain, and
   omit `status` unless intentionally changing it.
 - Don't omit `id` when re-capturing (you'll mint a duplicate).
-- Don't stamp `session_id` unchecked — confirm the transcript exists first
+- Don't stamp `session_id` unchecked — verify a substantive local transcript
   (Claude Code: glob `~/.claude/projects/*/<session_id>.jsonl`; GitHub Copilot
-  CLI: check `<copilot-config-dir>/session-state/<session_id>/events.jsonl`); an
-  id with no transcript won't resume. Leave it unset rather than guess.
+  CLI: check `<copilot-config-dir>/session-state/<session_id>/events.jsonl`) or
+  a harness-supported remote session. Leave an unresolved id unset rather than
+  guess.
 - Don't treat one harness's missing env var as proof there's no transcript —
   `CLAUDE_CODE_SESSION_ID` is unset under GitHub Copilot CLI, which has its own
   id and transcript. Check the harness you're actually running in before
