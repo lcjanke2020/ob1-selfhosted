@@ -166,13 +166,14 @@ transcript pair rather than assuming another harness's env var applies.
   in the interactive CLI; the id is also displayed on exit and names the local
   session-state directory. It is a UUID.
 - **Local transcript:**
-  `<copilot-home>/session-state/<session_id>/events.jsonl`, where
-  `<copilot-home>` is `$COPILOT_HOME` when set and `~/.copilot` otherwise.
-  Confirm it exists **and holds real turns** before stamping — a session dir can
-  exist with a near-empty log. A quick sanity check is that the file contains
-  `assistant.message` events, not just `hook.*` / lifecycle noise. If
-  `$COPILOT_HOME` is non-default, record the resolved transcript path in
-  `resume_context`; there is no dedicated schema field for it.
+  `<copilot-config-dir>/session-state/<session_id>/events.jsonl`. Resolve the
+  active config directory in precedence order: `--config-dir=DIRECTORY`
+  (deprecated), `$COPILOT_HOME`, then `~/.copilot`. Confirm it exists **and
+  holds real turns** before stamping — a session dir can exist with a near-empty
+  log. A quick sanity check is that the file contains `assistant.message`
+  events, not just `hook.*` / lifecycle noise. If the active config directory is
+  non-default, record the resolved transcript path in `resume_context`; there is
+  no dedicated schema field for it.
 - **Remote availability:** Copilot syncs sessions to the user's GitHub account
   by default, but users can opt out and organization policy can disable it. A
   synced session may therefore resume on another machine; verify the session
@@ -475,8 +476,8 @@ pattern.
 - Don't omit `id` when re-capturing (you'll mint a duplicate).
 - Don't stamp `session_id` unchecked — confirm the transcript exists first
   (Claude Code: glob `~/.claude/projects/*/<session_id>.jsonl`; GitHub Copilot
-  CLI: check `<copilot-home>/session-state/<session_id>/events.jsonl`); an id
-  with no transcript won't resume. Leave it unset rather than guess.
+  CLI: check `<copilot-config-dir>/session-state/<session_id>/events.jsonl`); an
+  id with no transcript won't resume. Leave it unset rather than guess.
 - Don't treat one harness's missing env var as proof there's no transcript —
   `CLAUDE_CODE_SESSION_ID` is unset under GitHub Copilot CLI, which has its own
   id and transcript. Check the harness you're actually running in before
