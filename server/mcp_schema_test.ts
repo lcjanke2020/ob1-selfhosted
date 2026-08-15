@@ -95,9 +95,37 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
       await client.connect(clientTransport);
       assertEquals(client.getServerVersion(), {
         name: "open-brain-homelab",
-        version: "1.20.0",
+        version: "1.21.0",
       });
       const listed = await client.listTools();
+      const sessionLookup = listed.tools.find((tool) =>
+        tool.name === "session_lookup"
+      );
+      assert(
+        sessionLookup?.description?.includes("effective freshness"),
+        "session_lookup must publish the effective-freshness rule",
+      );
+      const sessionListTool = listed.tools.find((tool) =>
+        tool.name === "session_list"
+      );
+      assert(
+        sessionListTool?.description?.includes("effective freshness"),
+        "session_list must publish the effective-freshness rule",
+      );
+      const sessionUpdateStatus = listed.tools.find((tool) =>
+        tool.name === "session_update_status"
+      );
+      assert(
+        sessionUpdateStatus?.description?.includes(
+          "advances effective freshness",
+        ),
+        "session_update_status must publish its effective-freshness effect",
+      );
+      assertEquals(
+        sessionUpdateStatus?.annotations?.idempotentHint,
+        false,
+        "session_update_status must not advertise retries as idempotent",
+      );
       const capture = listed.tools.find((tool) =>
         tool.name === "capture_thought"
       );

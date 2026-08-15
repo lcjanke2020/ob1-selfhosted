@@ -60,12 +60,12 @@ function optionalInt(name: string, fallback: number): number {
   return n;
 }
 
-const DB_HOST = optional("DB_HOST", "postgres");
+const DB_HOST = required("DB_HOST");
 const DB_PORT = optionalInt("DB_PORT", 5432);
-const DB_NAME = optional("DB_NAME", "openbrain");
+const DB_NAME = optional("DB_NAME", "openbrain_logs");
 
 /**
- * Classify DB_HOST as a TCP hostname or a unix-socket DIRECTORY.
+ * Require DB_HOST to be the log sink's unix-socket DIRECTORY.
  *
  * An absolute path means the local log-sink deployment (ingress qube): the
  * database is a sibling container sharing a socket directory, with no TCP
@@ -87,14 +87,20 @@ const DB_NAME = optional("DB_NAME", "openbrain");
  * unix:…". Dockerfile.ingester's ENTRYPOINT derives all three from the same
  * leading-slash test used here — keep the two in step.
  *
- * Only the ingester has this branch. mcp keeps the TCP path: it is the one
- * client that never shares a host with its database (the app qube reaches the
- * db qube over qubes.ConnectTCP), and giving it socket support would mean
- * reworking server/Dockerfile's flat `--allow-read=/app` into the same
- * host-shape-dependent permission wrapper this image's ENTRYPOINT carries.
+ * Only the ingester has this socket-only contract. mcp keeps the TCP path: no
+ * supported deployment gives it the corpus cluster's unix-socket directory
+ * (the split app qube reaches the db qube over qubes.ConnectTCP), and giving it
+ * socket support would mean reworking server/Dockerfile's flat
+ * `--allow-read=/app` into the same host-shape-dependent permission wrapper
+ * this image's ENTRYPOINT carries.
  */
-export function dbHostType(host: string): "tcp" | "socket" {
-  return host.startsWith("/") ? "socket" : "tcp";
+export function dbHostType(host: string): "socket" {
+  if (!host.startsWith("/")) {
+    throw new Error(
+      "DB_HOST must be an absolute unix-socket directory for the local log sink",
+    );
+  }
+  return "socket";
 }
 // Default to the observability-only role. The compose env wires
 // this explicitly; the default is here so a direct `deno run` invocation

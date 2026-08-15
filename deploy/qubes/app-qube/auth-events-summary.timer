@@ -1,7 +1,7 @@
-# systemd USER unit — install at ~/.config/systemd/user/funnel-summary.timer on
+# systemd USER unit — install at ~/.config/systemd/user/auth-events-summary.timer on
 # the app qube. User lingering is required to run without an open login session.
 [Unit]
-Description=Run Open Brain Funnel summary daily
+Description=Run Open Brain auth-event summary daily
 
 [Timer]
 # UTC matches the SQL's day boundaries and leaves the prior day complete.

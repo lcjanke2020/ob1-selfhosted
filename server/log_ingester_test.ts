@@ -20,7 +20,12 @@ const ORIG_CURSOR_DIR = Deno.env.get("INGESTER_CURSOR_DIR");
 const CURSOR_TMP = await Deno.makeTempDir({ prefix: "log_ingester_cursors_" });
 Deno.env.set("INGESTER_CURSOR_DIR", CURSOR_TMP);
 
-import { assert, assertEquals, assertNotEquals } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertNotEquals,
+  assertThrows,
+} from "@std/assert";
 
 const ENV_KEYS = [
   "DB_HOST",
@@ -41,6 +46,7 @@ async function withIngesterEnv(
     ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
   );
   try {
+    Deno.env.set("DB_HOST", "/var/run/postgresql");
     Deno.env.set("DB_PASSWORD", "test-password");
     const mod = await import("./log_ingester.ts");
     await body(mod);
@@ -254,13 +260,11 @@ Deno.test("cursor files: JSON round-trip, legacy offset-only, and garbage fallba
   });
 });
 
-// The DB_HOST shape branch. Two consumers must agree on it or the ingester
-// fails at connect time: dbHostType() picks the driver transport, and
-// Dockerfile.ingester's ENTRYPOINT `case` picks the Deno permission set from
-// the SAME leading-slash rule. Anything not absolute stays TCP — including
-// bare IPv6 literals and relative paths, which are hostnames as far as both
-// sides are concerned.
-Deno.test("dbHostType: absolute paths are unix sockets, everything else is TCP", async () => {
+// The DB_HOST guard has two matching layers: dbHostType() picks the driver
+// transport, while Dockerfile.ingester's ENTRYPOINT derives the Deno
+// permission set from the same leading-slash rule. Anything non-absolute is a
+// stale TCP/relative shape and must fail before a connection attempt.
+Deno.test("dbHostType: only absolute sink socket paths are accepted", async () => {
   // Not `async`: every assertion here is synchronous, and `require-await`
   // rejects an async callback with no await. withIngesterEnv wants a promise,
   // so hand it a resolved one.
@@ -270,25 +274,23 @@ Deno.test("dbHostType: absolute paths are unix sockets, everything else is TCP",
     assertEquals(dbHostType("/tmp"), "socket");
     assertEquals(dbHostType("/"), "socket");
 
-    // Hostnames and IPv4 — the historical default, and the compose default.
-    // Literals come from the RFC 5737 / RFC 3849 documentation ranges: a
-    // tailnet-shaped address would trip the repo's leak guard, and the branch
-    // cannot tell one IPv4 from another anyway.
-    assertEquals(dbHostType("postgres"), "tcp");
-    assertEquals(dbHostType("192.0.2.10"), "tcp");
-    assertEquals(dbHostType("db.example.ts.net"), "tcp");
-
-    // IPv6 literals contain no leading slash, so they stay TCP; the
-    // ENTRYPOINT brackets them for --allow-net on the same branch.
-    assertEquals(dbHostType("::1"), "tcp");
-    assertEquals(dbHostType("2001:db8::1"), "tcp");
-
-    // A relative path is NOT promoted to a socket. The driver would reject
-    // it anyway (createParams resolves non-absolute socket hosts against
-    // Deno.mainModule), and silently reinterpreting it would diverge from
-    // the ENTRYPOINT's `/*` glob.
-    assertEquals(dbHostType("run/postgresql"), "tcp");
-    assertEquals(dbHostType("./run"), "tcp");
+    for (
+      const staleTcpOrRelativeHost of [
+        "postgres",
+        "192.0.2.10",
+        "db.example.ts.net",
+        "::1",
+        "2001:db8::1",
+        "run/postgresql",
+        "./run",
+      ]
+    ) {
+      assertThrows(
+        () => dbHostType(staleTcpOrRelativeHost),
+        Error,
+        "absolute unix-socket directory",
+      );
+    }
     return Promise.resolve();
   });
 });

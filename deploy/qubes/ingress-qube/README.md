@@ -26,6 +26,35 @@ cp .env.example .env && $EDITOR .env     # MCP_UPSTREAM (ConnectTCP forwarder), 
 docker compose up -d
 ```
 
+### Existing sink upgrade: adopt the pre-marker volume first
+
+This step applies only when `log_sink_data` was initialized by a release that
+predates `.openbrain-log-sink-init-complete`. **After updating the checkout but
+before any `docker compose up` that would recreate `log-sink`**, leave the old,
+healthy container running and execute:
+
+```sh
+../../../scripts/adopt-log-sink-marker.sh
+docker compose --env-file .env up -d --no-deps --force-recreate --wait log-sink
+```
+
+The helper does not trust the old container's init log or old mounted assertion.
+It streams the current
+[`02-log-sink-assertion.sql`](../../../db/log-sink/02-log-sink-assertion.sql)
+into that running container as the database superuser, verifies that the server
+behind its unix socket uses the same `PGDATA`, and creates the marker as the
+`postgres` OS user only after every current invariant passes. It makes no schema
+or row changes. A partial or drifted sink exits nonzero and remains unmarked, so
+the new entrypoint will continue to refuse it. Correct the drift and rerun the
+helper; never substitute `touch` or create the marker yourself.
+
+The helper defaults to this Compose directory and its `.env`. Set
+`COMPOSE_DIR=/absolute/path/to/the/running/project` only if the checkout and
+running project are deliberately elsewhere. If the marker-gated definition was
+already recreated and is refusing the old volume, do not delete the volume:
+restore/start the previous Compose definition against that same volume, run the
+helper while it is healthy, and then recreate with the current definition.
+
 There is no `DB_HOST` here any more: the Funnel access log is written to a
 [local sink](#local-log-sink) on this qube, so the internet-facing edge holds no
 address for — and no route to — the db qube.
@@ -221,9 +250,14 @@ the qube already gives them: Caddy's access logs are on the same disk.
 TCP socket; `network_mode: none` leaves both containers with only `lo`; and no
 port is published. The check that proves it is on the **host**:
 
-```sh
+```bash
 ss -tlnp | grep 5432          # → nothing
-docker inspect ingress-qube-log-sink-1 \
+log_sink_container="$(docker compose ps -q log-sink)"
+if [[ -z "$log_sink_container" || "$log_sink_container" == *$'\n'* ]]; then
+  echo "expected exactly one running log-sink container" >&2
+  exit 1
+fi
+docker inspect "$log_sink_container" \
   --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}'   # → none
 ```
 
@@ -256,6 +290,17 @@ this qube to the db qube, which is exactly the network path this design removes.
   PGPASSWORD=wrong psql -h ~/ob1-log-sink/run -U openbrain_monitor -d openbrain_logs -c 'select 1'
   # → FATAL: password authentication failed
   ```
+
+- **A failed first init stays failed.** The stock image writes `PG_VERSION`
+  before running `initdb.d`, so an ordinary restart can skip the script that
+  failed and start a partial schema. This deployment writes
+  `.openbrain-log-sink-init-complete` only after the final assertion, checks it
+  in both the entrypoint and healthcheck, and refuses a pre-existing data
+  directory without it. Inspect the first-init logs; never create the marker by
+  hand. The only supported exception is the assertion-gated adoption helper
+  above for a healthy volume created before the marker existed. For a genuinely
+  new/disposable sink whose first init failed, remove and recreate only its
+  `log_sink_data` volume after correcting the cause.
 
 - **Keep the socket directory path short.** A unix socket path is capped at 107
   bytes (`sun_path`), and it is the **host** path that counts for the host-side
@@ -464,8 +509,7 @@ table grows without bound.**
 The companion half — `mcp_auth_events` retention and its report — runs on the
 [app qube](../app-qube/README.md) against the corpus, because that is where mcp
 writes it. Each qube runs the half that owns its tables; neither can see the
-other's. Single-host installs run both files in one session, which is the
-default.
+other's. Single-host Pattern B installs use the same two-target separation.
 
 Install (as the regular user, from the repo checkout):
 
@@ -474,7 +518,7 @@ mkdir -p ~/.config/systemd/user
 install -m 0755 scripts/funnel_daily_summary.sh ~/funnel_daily_summary.sh
 install -m 0644 db/summarize_funnel.sql          ~/summarize_funnel.sql
 install -m 0600 deploy/qubes/ingress-qube/funnel-summary.env.example ~/.config/funnel-summary.env
-$EDITOR ~/.config/funnel-summary.env     # DB_HOST = the socket dir, SUMMARY_ROLE_PASSWORD
+$EDITOR ~/.config/funnel-summary.env     # DB_HOST socket + OPENBRAIN_LOGS_ROLLUP_PASSWORD
 install -d -m 0700 ~/openbrain-funnel-summaries
 install -m 0644 deploy/qubes/ingress-qube/funnel-summary.service ~/.config/systemd/user/
 install -m 0644 deploy/qubes/ingress-qube/funnel-summary.timer   ~/.config/systemd/user/
@@ -489,9 +533,10 @@ systemctl --user enable --now funnel-summary.timer
 systemctl --user list-timers funnel-summary.timer --no-pager
 ```
 
-`SUMMARY_SQL_FILE` must name **only** `summarize_funnel.sql` here. Left unset it
-resolves to both shipped files, and the auth-events half would fail against a
-sink that has no `mcp_auth_events` table — correctly, but noisily, every night.
+`SUMMARY_TARGET=sink` pins this unit to `summarize_funnel.sql`,
+`openbrain_logs_rollup`, `openbrain_logs`, and an absolute socket host. The
+wrapper rejects the retired free-form SQL/role knobs and any TCP host before it
+starts `psql`.
 
 Reports contain request metadata, so they land in a mode-0700 local directory.
 Replicating them off this qube is a new outbound path from the perimeter; the
@@ -504,8 +549,16 @@ docker compose config --services             # exactly: caddy, log-ingester, log
 docker compose up -d
 curl -s http://127.0.0.1:9787/caddy-health   # → ok
 
-# the sink came up clean and holds only what it should
-docker compose logs log-sink | grep 'invariants OK'
+# the sink is ready only with its durable completion marker
+docker compose exec -T log-sink \
+  sh -c 'test -f "$PGDATA/.openbrain-log-sink-init-complete"'
+
+# the current catalog still satisfies the assertion (fresh or adopted volume)
+docker compose exec -T --user postgres log-sink sh -eu -c '
+  PGPASSWORD="$POSTGRES_PASSWORD" exec psql -X -w \
+    -h /var/run/postgresql -U "${POSTGRES_USER:-postgres}" \
+    -d "${POSTGRES_DB:-openbrain_logs}" -v ON_ERROR_STOP=1 -f -
+' < ../../../db/log-sink/02-log-sink-assertion.sql
 ss -tlnp | grep 5432 || echo 'no TCP listener — correct'
 
 # a request actually lands
@@ -513,9 +566,19 @@ curl -s -o /dev/null http://127.0.0.1:9787/mcp && sleep 6
 docker compose logs --tail=3 log-ingester    # → "N/N rows inserted"
 ```
 
+On a brand-new volume, additionally prove that `initdb.d` reached the assertion
+and then its lexically-last marker script:
+
+```sh
+docker compose logs log-sink | grep -E 'invariants OK|init completion marker written'
+```
+
 `invariants OK` comes from
 [`db/log-sink/02-log-sink-assertion.sql`](../../../db/log-sink/02-log-sink-assertion.sql),
-which runs last during init and **fails the init** if the sink ever holds a
-third relation, a role with cluster-level privileges, an unenumerated grant, or
-a `GRANT … TO PUBLIC`. Its absence from the log is as meaningful as its
-presence.
+which runs immediately before the marker script and **fails the init** if the
+sink ever holds a third relation, a role with cluster-level privileges, an
+unenumerated grant, or a `GRANT … TO PUBLIC`. The entrypoint refuses every later
+start unless the marker exists. On a fresh volume, either log line's absence is
+meaningful. On an adopted volume, the helper's successful assertion and
+`pre-marker volume adopted after current invariants passed` line are the
+corresponding evidence; init scripts correctly do not rerun on recreation.

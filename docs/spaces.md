@@ -193,10 +193,10 @@ administration and `pg_dump`: PostgreSQL's dump client sets `row_security=off`
 and otherwise refuses to copy an RLS-protected table. It needs no permissive RLS
 policy and receives no DML. `openbrain_app` is explicitly required to be a
 standalone role with no memberships, superuser flag, or `BYPASSRLS`; this also
-closes inherited privileges and `SET ROLE` paths. `openbrain_monitor`,
-`openbrain_ingester`, and `openbrain_token_admin` receive no memory-space
-access. The grants assertion is the completed-catalog check for these
-invariants.
+closes inherited privileges and `SET ROLE` paths. `openbrain_token_admin`
+receives no memory-space access. The sink-only `openbrain_monitor` and
+`openbrain_ingester` roles do not exist in the corpus cluster at all. The grants
+assertion is the completed-catalog check for these invariants.
 
 ## Existing-database migration
 

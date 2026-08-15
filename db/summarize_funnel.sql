@@ -13,10 +13,9 @@
 -- by owning-table also means each half fails independently: a broken edge
 -- rollup can no longer stop the corpus side's auth-event retention.
 --
--- Single-host installs (compose-local / compose-tailnet) keep BOTH tables in
--- one database and should run BOTH files — which is the default:
--- scripts/funnel_daily_summary.sh's SUMMARY_SQL_FILE resolves to both, in
--- order, in one psql session and one report.
+-- Every Pattern B install now uses the separate sink, including single-host
+-- Compose. scripts/funnel_daily_summary.sh selects this file only when
+-- SUMMARY_TARGET=sink and pins the matching service, role, and transport.
 --
 -- Run by the host-side cron / systemd timer (see deploy/compose-tailnet/README.md §Observability).
 -- Wraps everything in a single transaction so partial failure leaves the
@@ -26,14 +25,16 @@
 -- deploy/compose-tailnet, invoked the way you start the stack there (its
 -- README §"Start the stack" gives both forms) — the exec has to resolve the
 -- same project as the running stack or it finds no container:
---   docker compose exec -T postgres psql -U openbrain_app -d openbrain \
+--   docker compose --env-file .env exec -T log-sink sh -eu -c \
+--     'PGPASSWORD="$OPENBRAIN_LOGS_ROLLUP_PASSWORD" exec psql -X -w \
+--        -h /var/run/postgresql -U openbrain_logs_rollup -d "$POSTGRES_DB"' \
 --     < ../../db/summarize_funnel.sql > /tmp/funnel.md
 -- The split Qubes deployment runs this file on the INGRESS qube against the
 -- local log sink over its unix socket, via scripts/funnel_daily_summary.sh's
 -- postgres backend and the shipped ingress-qube user timer.
 --
 -- The SELECT at the end emits a markdown report on stdout so the cron
--- wrapper can `tee` it to the summary directory .
+-- wrapper can `tee` it to the summary directory.
 
 \set ON_ERROR_STOP on
 

@@ -1,0 +1,54 @@
+# Render the canonical MCP deployment descriptors so an operator-facing env
+# knob cannot be documented yet silently dropped by Compose interpolation.
+
+name: Compose config
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - "deploy/compose-local/docker-compose.yml"
+      - "deploy/compose-local/.env.example"
+      - "deploy/compose-tailnet/docker-compose.pattern-b.yml"
+      - "deploy/qubes/docker-compose.external-db.yml"
+      - "deploy/qubes/app-qube/docker-compose.yml"
+      - "deploy/qubes/app-qube/.env.example"
+      - "deploy/qubes/ingress-qube/docker-compose.yml"
+      - "scripts/check_fetch_timeout_compose.nu"
+      - ".github/workflows/compose-config.yml"
+  push:
+    branches: [main]
+    paths:
+      - "deploy/compose-local/docker-compose.yml"
+      - "deploy/compose-local/.env.example"
+      - "deploy/compose-tailnet/docker-compose.pattern-b.yml"
+      - "deploy/qubes/docker-compose.external-db.yml"
+      - "deploy/qubes/app-qube/docker-compose.yml"
+      - "deploy/qubes/app-qube/.env.example"
+      - "deploy/qubes/ingress-qube/docker-compose.yml"
+      - "scripts/check_fetch_timeout_compose.nu"
+      - ".github/workflows/compose-config.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fetch-timeout:
+    name: FETCH_TIMEOUT_MS is forwarded
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head safely
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          fetch-depth: 1
+
+      - name: Setup Nushell
+        uses: hustcer/setup-nu@f3fd65374ffc4d60974c0dd2f7263c6c5c285f81 # v3
+        with:
+          version: "0.113.1"
+
+      - name: Verify rendered MCP environments
+        run: nu scripts/check_fetch_timeout_compose.nu

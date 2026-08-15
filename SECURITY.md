@@ -23,8 +23,9 @@ the _documented_ setup leads to an insecure default are very much in scope.
   IP-allowlist circumvention, or an `x-brain-key` being accepted on an
   OAuth-only deployment
 - Privilege escalation across the database roles (`openbrain_app` /
-  `openbrain_ingester` / `openbrain_monitor` / `openbrain_token_admin` /
-  `openbrain_readonly`), or any unintended path to the superuser
+  `openbrain_ingester` / `openbrain_monitor` / `openbrain_logs_rollup` /
+  `openbrain_token_admin` / `openbrain_readonly`), cross-cluster access between
+  the Funnel sink and corpus, or any unintended path to the superuser
 - Credential leakage into logs, error responses, or the observability tables
 - CI workflows exploitable from a pull request
 - Secrets accidentally committed to the repo

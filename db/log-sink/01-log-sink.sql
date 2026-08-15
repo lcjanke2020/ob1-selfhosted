@@ -12,14 +12,10 @@
 -- already yields — Caddy's access logs are on the same disk — which is the
 -- whole argument for putting the sink here rather than reaching across.
 --
--- ┌─ KEEP IN SYNC ────────────────────────────────────────────────────────┐
--- │ The two table definitions below are byte-equivalent to the ones in    │
--- │ db/02-observability.sql, because db/summarize_funnel.sql runs against │
--- │ EITHER cluster and db/log-sink/02-log-sink-assertion.sql pins the     │
--- │ column set. Change a column here and you must change it there.        │
--- │ CI catches real drift: the db-init workflow builds this schema and    │
--- │ runs the rollup against it, which fails on any column mismatch.       │
--- └───────────────────────────────────────────────────────────────────────┘
+-- This file is the SOLE schema owner for Funnel request metadata. The corpus
+-- schema deliberately has no copy; db/03-grants-assertion.sql rejects one.
+-- db/log-sink/02-log-sink-assertion.sql pins this sink's exact relation and
+-- column set, while CI runs every Funnel rollup regression against this schema.
 --
 -- Idempotent (IF NOT EXISTS throughout), so it is safe to re-run by hand
 -- against an existing sink. The docker entrypoint only runs
@@ -121,7 +117,8 @@ CREATE INDEX IF NOT EXISTS idx_funnel_access_summary_day ON funnel_access_summar
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO openbrain_ingester, openbrain_logs_rollup;
 
--- openbrain_ingester: INSERT-only on the raw table, exactly as on the corpus.
+-- openbrain_ingester: INSERT-only on the raw table. This role is sink-only;
+-- the corpus assertion rejects the role name and has no matching relation.
 -- The ingester parses attacker-controlled Caddy JSON, so it gets no SELECT
 -- (it never reads back), no UPDATE, and no DELETE — a compromised ingester
 -- can add noise to the log but cannot read or erase what is already there.
@@ -137,8 +134,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE         ON funnel_access_summary TO openbra
 
 -- openbrain_monitor: SELECT-only on the one table scripts/funnel_monitor.sh
 -- probes. Optional role — created by 00-log-sink-roles.sh only when
--- OPENBRAIN_MONITOR_PASSWORD is set — so the grant is wrapped, matching the
--- corpus-side pattern in db/02-observability.sql.
+-- OPENBRAIN_MONITOR_PASSWORD is set — so the grant is wrapped around the
+-- sink-local role rather than making monitoring a prerequisite for startup.
 --
 -- It deliberately gets NO access to funnel_access_summary. The monitor's two
 -- probes both scan the raw table; reading the aggregate would widen an

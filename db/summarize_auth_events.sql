@@ -13,8 +13,8 @@
 -- In the three-qube topology this half runs on the APP qube against the
 -- canonical corpus on the DB qube, because that is where mcp writes. The
 -- Funnel access half runs on the INGRESS qube against its local log sink.
--- Single-host installs run both files in one session (the default resolution
--- of SUMMARY_SQL_FILE in scripts/funnel_daily_summary.sh).
+-- scripts/funnel_daily_summary.sh selects this file only when
+-- SUMMARY_TARGET=corpus and pins the matching service, role, and transport.
 --
 -- There is no aggregate table here on purpose. The denied side is
 -- low-cardinality reason codes on a short window; the allowed side and the
@@ -24,28 +24,28 @@
 -- Generating a long-horizon row requires a tenant-minted Bearer, which
 -- bounds who can write them (not how many rows one credential can produce —
 -- the horizon below is the operator's size lever). A rollup would buy
--- nothing but another relation in the monitor allowlist that
--- db/03-grants-assertion.sql has to reason about.
+-- nothing but another corpus relation and another grant surface for
+-- db/03-grants-assertion.sql to reason about.
 --
 -- Manual invocation, single-host compose (from deploy/compose-tailnet,
 -- invoked the way you start the stack there — the exec has to resolve the
 -- same project as the running stack or it finds no container):
---   docker compose exec -T postgres psql -U openbrain_app -d openbrain \
+--   docker compose --env-file .env exec -T postgres \
+--     psql -U openbrain_app -d openbrain \
 --     < ../../db/summarize_auth_events.sql
 --
--- Runs under the same least-privilege role as the funnel half: the DELETE and
--- the SELECT are both covered by openbrain_app's grants in
--- db/02-observability.sql. No superuser, no schema modification.
+-- Runs as the corpus-local openbrain_app role: the DELETE and SELECT are both
+-- covered by its grants in db/02-observability.sql. The Funnel half instead
+-- runs as openbrain_logs_rollup inside the sink. Neither needs a superuser or
+-- schema modification.
 
 \set ON_ERROR_STOP on
 
 -- ---------- 1. Retention: identity-keyed horizons -------------------------
 -- Short horizon (30 days): denied rows EXCEPT `subject_not_allowed` —
--- scanner noise and credential fumbles, matched to `funnel_access_log`'s
--- horizon so the two observability records age out together: a 401 in the
--- audit and the request that produced it in the access log disappear on the
--- same day, which keeps "correlate these two by timestamp" honest right up
--- to the edge of the window.
+-- scanner noise and credential fumbles. This uses the same nominal horizon as
+-- the sink's `funnel_access_log`; the two independent jobs can lag separately,
+-- but neither class is intended as long-term anonymous-request history.
 --
 -- Long horizon (365 days): allowed rows AND `subject_not_allowed` denials —
 -- every row that names a verified identity. The admission record is the one
@@ -78,10 +78,9 @@ WHERE (outcome = 'allowed' OR reason = 'subject_not_allowed')
   AND ts < now() - interval '365 days';
 
 -- ---------- 2. Markdown report (stdout) ----------------------------------
--- The wrapper captures this output in its configured summary directory.
--- Format matches db/summarize_funnel.sql so a single-host run — which
--- concatenates both files into one psql session — produces one continuous
--- report rather than two differently-shaped ones.
+-- The wrapper captures this output in its configured summary directory. Its
+-- shape remains consistent with the sink report, but Arc B runs the two
+-- target-pinned jobs independently because the relations share no cluster.
 
 \pset format unaligned
 \pset fieldsep ' | '

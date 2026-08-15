@@ -98,25 +98,50 @@ generic subject mapping, and a browserless verification command are covered in
 ### Start the stack
 
 Copy your filled-in `.env` into this directory (including the required
-`METADATA_FALLBACK_POLICY`; Pattern B also needs the `AUTH0_*` trio and
-`OPENBRAIN_INGESTER_PASSWORD`), then either run with explicit flags:
+`METADATA_FALLBACK_POLICY`; Pattern B also needs the `AUTH0_*` trio,
+`OPENBRAIN_INGESTER_PASSWORD`, `LOG_SINK_SUPERUSER_PASSWORD`,
+`OPENBRAIN_LOGS_ROLLUP_PASSWORD`, and an absolute `LOG_SINK_SOCKET_DIR`) and
+uncomment `COMPOSE_FILE` + `COMPOSE_PROFILES` at its bottom. Then either run
+with explicit flags:
 
 ```bash
 cd deploy/compose-tailnet
-docker compose --project-directory . \
+docker compose --env-file .env \
+               --project-directory . \
                -f ../compose-local/docker-compose.yml \
                -f docker-compose.pattern-b.yml \
                --profile pattern-b up -d
 ```
 
-…or uncomment `COMPOSE_FILE` + `COMPOSE_PROFILES` at the bottom of the `.env` so
-a bare `docker compose up -d` from this directory does the same thing. The two
-forms are equivalent on both axes that matter: paths resolve per-file (both
-forms are exercised by `docker compose config` in CI-less smoke tests), and
-project identity is pinned by `COMPOSE_PROJECT_NAME` in the `.env` — so later
-`exec`/`logs`/`ps`/`down` commands resolve the running stack whichever form
-started it. A `.env` that predates the pin doesn't get that guarantee — see
-§"Upgrading an existing deployment" before crossing forms.
+…or let those two `.env` settings select the files and profile:
+
+```bash
+docker compose --env-file .env up -d
+```
+
+The two supported forms agree on file paths (resolved per-file), project
+identity (pinned by `COMPOSE_PROJECT_NAME`), and interpolation source (the
+explicit `.env`) — so later `exec`/`logs`/`ps`/`down` commands resolve the
+running stack whichever form started it.
+
+**The `--env-file .env` flag is load-bearing whenever Compose renders the model
+(including `config`, `up`, and `build`). Do not shorten form 2 to a bare
+`docker compose up -d`.** Without an explicit env file, `COMPOSE_FILE` makes
+Compose resolve its _project directory_ to `deploy/compose-local` (the first
+file's directory), then load that directory's `.env` as a second,
+lower-precedence source. Any key absent from this directory can then silently
+inherit the local install's value — including a future `:?`-guarded setting an
+older tailnet `.env` does not know about. Naming the env file explicitly
+suppresses that fallback: an absent or empty required value stays absent or
+empty and fails closed. Running-project commands such as `exec`, `ps`, `logs`,
+and `restart` do not interpolate service variables; they keep the flag as a
+uniform convention, while this directory's `.env` supplies `COMPOSE_FILE` and
+`COMPOSE_PROJECT_NAME` so they find the same stack.
+
+A `.env` that predates the `COMPOSE_PROJECT_NAME` pin doesn't get the
+project-identity guarantee: form 1 falls back to `compose-tailnet`, while form 2
+falls back to `compose-local`. See §"Upgrading an existing deployment" before
+crossing forms.
 
 ### Wire Tailscale
 
@@ -147,7 +172,7 @@ Controls → the `funnel` node attribute). Verify with `tailscale funnel status`
 > way into the funnel branch because the funnel header itself is injected by
 > `tailscaled`, not the client). If Anthropic announces additional ranges,
 > extend the `client_ip` matcher in the `Caddyfile` (space-separated CIDRs) and
-> `docker compose restart caddy`.
+> `docker compose --env-file .env restart caddy`.
 
 ### Verify the OAuth door + allowlist
 
@@ -196,91 +221,73 @@ interactive user writes remain `door = 'funnel'`.
 ## Observability (Pattern B)
 
 Once Funnel is live, the box has a public surface for the first time — this
-stack measures it instead of guessing.
+stack measures it without giving an edge parser a route to the corpus.
 
-**What's logged**
+**Two clusters, no shared Funnel schema**
 
-- **Caddy JSON access logs** — every request to `:9787` lands in
-  `funnel-access.log` or `tailnet-access.log` (named volume), rolled at 10 MB ×
-  5 with a 30-day age cap.
-- **`funnel_access_log`** — the log-ingester sidecar inserts one structured row
-  per request (timestamp, socket, client IP, method, path, status, latency,
-  size, truncated UA, host, protocol).
-- **`mcp_auth_events`** — one row per auth decision the MCP server makes,
-  enqueued best-effort (under backpressure either outcome can drop — counted and
-  warned; see the security model's audit contract). Denied rows carry a stable
-  `reason` code (`invalid_brain_key`, `token_validation_failed`,
-  `subject_not_allowed`, `invalid_credentials`, `missing_credentials`) — the
-  only way to tell "legitimate client, wrong credentials" from "blind scanner".
-  Allowed rows carry the verified identity (`subject` / `token_label`), door,
-  and path — the local answer to "who accessed this server", kept 365 days (as
-  are `subject_not_allowed` denials, the identity-carrying refusals; anonymous
-  denials keep 30).
-- **`funnel_access_summary`** — daily rollup: requests, unique IPs, p50/p95
-  latency, top paths and user agents per `(day, socket, status_class)`, retained
-  365 days.
+- **Corpus `postgres`** holds memories, sessions, and `mcp_auth_events`. It
+  deliberately has no `funnel_access_*` relation and rejects the
+  `openbrain_ingester` / `openbrain_monitor` role names.
+- **`log-sink`** is plain `postgres:17-alpine` with exactly `funnel_access_log`
+  and `funnel_access_summary`. It uses `network_mode: none`,
+  `listen_addresses=`, no published port, and SCRAM on its shared unix socket.
+  The ingester also has `network_mode: none` and reaches only that socket.
+- Caddy JSON access logs still roll at 10 MB × 5 with a 30-day age cap.
+  `mcp_auth_events` records the application-side auth decision separately,
+  including verified identities on admitted requests.
+
+The sink is intentionally disposable request metadata: raw rows retain 30 days
+and daily aggregates 365. It has its own init-only superuser, INSERT-only
+ingester, DML rollup, and optional one-table monitor credentials. None is passed
+to the corpus container. Create the configured `LOG_SINK_SOCKET_DIR` before
+first start and keep its absolute path short enough for a unix socket.
 
 **What's NOT logged:** no `Authorization`/`x-brain-key`/`Cookie` values
-(redacted by Caddy's `format filter` — if you ever see them on disk, the
-Caddyfile has drifted), no request bodies, no query strings, no JWT contents.
+(redacted by Caddy's `format filter`), no request bodies, no query strings, and
+no JWT contents.
 
-**Daily summary.** `scripts/funnel_daily_summary.sh` rolls up completed days,
-enforces retention, and atomically writes a fenced-markdown report to
-`SUMMARY_DIR` (default `~/openbrain-funnel-summaries`; point it at a trusted
-directory you replicate off-box for a backup of the trail). When using
-Syncthing, add `/.funnel-summary-*` to the folder's `.stignore` so a staging
-file left by a hard kill or host crash never replicates. Its default
-`SUMMARY_BACKEND=compose` runs `psql` inside this single-host stack's Postgres
-container. Run it from cron or a systemd timer:
+**Daily summaries.** The wrapper requires one explicit target; the target fixes
+the SQL, role, database, Compose service, report prefix, and transport together:
 
-```ini
-# /etc/systemd/system/funnel-summary.service
-[Unit]
-Description=OB1 funnel observability daily summary
-After=docker.service
-Requires=docker.service
+```sh
+# Funnel rows + 30d/365d sink retention
+SUMMARY_TARGET=sink ../../scripts/funnel_daily_summary.sh
 
-[Service]
-Type=oneshot
-WorkingDirectory=/path/to/repo/deploy/compose-tailnet
-ExecStart=/path/to/repo/scripts/funnel_daily_summary.sh
-
-# /etc/systemd/system/funnel-summary.timer
-[Timer]
-OnCalendar=*-*-* 00:30:00 UTC
-Persistent=true
-
-[Install]
-WantedBy=timers.target
+# Auth decisions + corpus retention
+SUMMARY_TARGET=corpus ../../scripts/funnel_daily_summary.sh
 ```
 
-The three-qube deployment has no Postgres container on its app qube. It instead
-ships a user service, timer, scoped environment template, and direct-Postgres
-installation recipe in
-[`deploy/qubes/app-qube/`](../qubes/app-qube/README.md#daily-funnel-rollup-and-retention-host-side).
+Run them as separate cron/systemd jobs so one cluster's outage does not suppress
+the other's retention pass. `SUMMARY_BACKEND=compose` is the default and enters
+`log-sink` or `postgres` respectively. Reports land under `SUMMARY_DIR` (default
+`~/openbrain-funnel-summaries`) as `funnel-summary-YYYYMMDD.md` and
+`auth-events-summary-YYYYMMDD.md`. Exclude both hidden staging prefixes
+(`/.funnel-summary-*` and `/.auth-events-summary-*`) from replication; final
+reports have no leading dot. The Qubes split ships separate user units and
+scoped env files in `deploy/qubes/{ingress-qube,app-qube}/`.
 
-**Ad-hoc queries** (the `openbrain_readonly` role can read all three tables):
+When `deploy/qubes/docker-compose.external-db.yml` parks the bundled corpus
+service, keep the sink job on `SUMMARY_BACKEND=compose`, but configure the
+corpus job with `SUMMARY_BACKEND=postgres`, the external `DB_HOST`, and its
+scoped `OPENBRAIN_APP_PASSWORD`. There is intentionally no local `postgres`
+container for the corpus target to enter in that overlay.
 
-```sql
--- What's hitting the funnel in the last hour?
-SELECT host(client_ip) AS ip, status, path, COUNT(*) AS hits
-FROM funnel_access_log
-WHERE socket = 'funnel' AND ts > now() - interval '1 hour'
-GROUP BY ip, status, path ORDER BY hits DESC LIMIT 20;
+**Ad-hoc queries use the owning cluster.** For Funnel rows, enter the sink with
+its rollup or monitor role:
 
--- Why are we returning 401s today?
-SELECT reason, middleware, COUNT(*) AS n
-FROM mcp_auth_events
-WHERE outcome = 'denied' AND ts > (now() AT TIME ZONE 'UTC')::date
-GROUP BY reason, middleware ORDER BY n DESC;
-
--- Who was admitted today, through which door?
-SELECT door, COALESCE(subject, token_label, '(static shared key)') AS identity,
-       COUNT(*) AS n
-FROM mcp_auth_events
-WHERE outcome = 'allowed' AND ts > (now() AT TIME ZONE 'UTC')::date
-GROUP BY door, identity ORDER BY n DESC;
+```sh
+docker compose --env-file .env exec -T log-sink sh -c \
+  'PGPASSWORD="$OPENBRAIN_LOGS_ROLLUP_PASSWORD" exec psql -w -h /var/run/postgresql -U openbrain_logs_rollup -d "$POSTGRES_DB"'
 ```
+
+Then query `funnel_access_log` / `funnel_access_summary`. Query
+`mcp_auth_events` through the corpus's `openbrain_readonly` or app role. There
+is no role that can join Funnel metadata to thoughts because no cluster contains
+both relation sets.
+
+The Caddy field discipline and report contents are detailed in
+[Funnel MCP perimeter](../../docs/funnel-mcp-perimeter.md); the role and
+transport boundary is in [Security model](../../docs/security-model.md).
 
 ## Upgrading an existing deployment
 
@@ -298,7 +305,7 @@ the MCP container against an existing data directory, check the installed
 extension version:
 
 ```bash
-docker compose exec -T postgres \
+docker compose --env-file .env exec -T postgres \
   psql -U postgres -d openbrain -tAc \
   "SELECT extversion FROM pg_extension WHERE extname = 'vector';"
 ```
@@ -308,31 +315,68 @@ Postgres image so it provides a current extension, then upgrade and verify the
 database extension before restarting MCP:
 
 ```bash
-docker compose exec -T postgres \
+docker compose --env-file .env exec -T postgres \
   psql -U postgres -d openbrain -c "ALTER EXTENSION vector UPDATE;"
-docker compose exec -T postgres \
+docker compose --env-file .env exec -T postgres \
   psql -U postgres -d openbrain -tAc \
   "SELECT extversion FROM pg_extension WHERE extname = 'vector';"
 ```
 
-**New schema files** (observability, sessions, hybrid search, spaces, metadata
-degradation audit, native-token storage) apply cleanly and are idempotent. Run
-the block below from this directory with the running stack's `.env` present —
-that `.env` is what lets each `docker compose exec` resolve the running project
-(§"Start the stack"). The spaces migration is not a cheap no-op on
-reapplication; it rebuilds its fingerprint index each time:
+**New schema files** (corpus observability, sessions, hybrid search, spaces,
+metadata degradation audit, native-token storage) apply cleanly and are
+idempotent. Arc B's `09` is intentionally different: it permanently removes the
+legacy Funnel shape and refuses to run while either old table is nonempty.
+
+For a pre-Arc-B Pattern B stack, first add fresh values for
+`LOG_SINK_SUPERUSER_PASSWORD` and `OPENBRAIN_LOGS_ROLLUP_PASSWORD`, choose a
+short absolute `LOG_SINK_SOCKET_DIR`, and keep/set fresh sink-only ingester and
+optional monitor passwords. Then:
+
+1. Stop the old log-ingester, build its new socket-only image, create the socket
+   directory, start `log-sink`, recreate the ingester, and verify a new request
+   row lands in `openbrain_logs`. The durable Caddy log plus existing cursor
+   bridges the short cutover; the new sink does not replay already-consumed
+   historical files. The sink becomes healthy only after its final assertion
+   writes the durable init-completion marker.
+
+   ```sh
+   docker compose --env-file .env stop log-ingester
+   docker compose --env-file .env build log-ingester
+   mkdir -p /the/exact/absolute/path/set-as-LOG_SINK_SOCKET_DIR
+   docker compose --env-file .env --profile pattern-b up -d --wait log-sink
+   docker compose --env-file .env logs log-sink | grep -E 'invariants OK|init completion marker written'
+   docker compose --env-file .env --profile pattern-b up -d --no-deps log-ingester
+   ```
+
+2. Export **both** corpus tables to trusted encrypted storage, record their row
+   counts/checksum, and verify the archive (prefer a scratch restore). Follow
+   the concrete archive procedure in
+   [db-qube/README.md](../qubes/db-qube/README.md#retiring-the-ingress-qubes-old-access-existing-installs),
+   substituting this container-local superuser path.
+3. Explicitly `TRUNCATE public.funnel_access_log` and
+   `public.funnel_access_summary` in the corpus. Do not skip the frozen summary
+   just because the raw table is empty. Replace/update both
+   `~/.config/funnel-summary.env` and `~/.config/funnel-monitor.env` for the new
+   target/socket configuration before enabling their next timer occurrence; the
+   retired knobs deliberately make stale files fail closed.
+
+Now run the block below from this directory with the running stack's `.env`
+present — its `COMPOSE_FILE` and `COMPOSE_PROJECT_NAME` values let each
+migration command resolve the running project (§"Start the stack"). The flag
+stays on those commands for invocation consistency; it becomes load-bearing on
+the final `build` and `up`, which render the model. The spaces migration is not
+a cheap no-op on reapplication; it rebuilds its fingerprint index each time:
 
 ```bash
-# Set OPENBRAIN_INGESTER_PASSWORD in .env first (openssl rand -hex 24), then:
-bash ../../scripts/upgrade-add-ingester-role.sh
-docker compose exec -T postgres psql -U postgres -d openbrain < ../../db/02-observability.sql
-docker compose exec -T postgres psql -U postgres -d openbrain < ../../db/04-sessions.sql
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/05-hybrid-search.sql
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/06-spaces.sql
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/07-metadata-degradation.sql
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/08-access-tokens.sql
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
-docker compose build mcp && docker compose up -d
+docker compose --env-file .env exec -T postgres psql -U postgres -d openbrain < ../../db/02-observability.sql
+docker compose --env-file .env exec -T postgres psql -U postgres -d openbrain < ../../db/04-sessions.sql
+docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/05-hybrid-search.sql
+docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/06-spaces.sql
+docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/07-metadata-degradation.sql
+docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/08-access-tokens.sql
+docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/09-retire-corpus-funnel.sql
+docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
+docker compose --env-file .env build mcp log-ingester && docker compose --env-file .env up -d
 ```
 
 Upgrading to **1.20.0+**: `02-observability.sql` in the block above now also
@@ -373,34 +417,37 @@ so every `x-brain-key` remains rejected. Its dedicated administrator role may
 remain `NOLOGIN` on this OAuth-only deployment. See
 [Native access tokens](../../docs/native-access-tokens.md#existing-database-upgrade).
 
-Optional: the SELECT-only role for the host-side funnel monitor follows the same
-shape — set `OPENBRAIN_MONITOR_PASSWORD` in `.env`, run
-`bash ../../scripts/upgrade-add-monitor-role.sh`, then re-apply
-`db/02-observability.sql` as above for its grants and run
-`db/03-grants-assertion.sql` last to verify the completed catalog.
+The two old role-upgrade helper names remain only as fail-closed tombstones.
+Never run them to provision the corpus: sink roles are created exclusively by
+`db/log-sink/00-log-sink-roles.sh` on a fresh `log-sink` data volume.
 
 The full `up -d` matters on the upgrade path: it creates services newly defined
 since the last deploy (e.g. `log-ingester`) as well as recreating changed ones.
 
-For an MCP code-only rollout with no schema or edge change, run
-`docker compose build mcp && docker compose up -d --no-deps mcp` instead. This
-recreates the MCP container without restarting Postgres, Ollama, Caddy, or the
-log ingester.
+For an MCP code-only rollout with no schema or edge change, run:
+
+```bash
+docker compose --env-file .env build mcp && \
+  docker compose --env-file .env up -d --no-deps mcp
+```
+
+This recreates the MCP container without restarting Postgres, Ollama, Caddy, or
+the log ingester.
 
 **Edits to existing init files** (a tightened grant, a new role) silently
 _don't_ reach an already-initialized DB. The drift check is read-only and safe
-to run any time:
+to run any time as a database superuser (needed for HBA-file inspection):
 
 ```bash
-docker compose exec -T postgres \
+docker compose --env-file .env exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
 ```
 
 A non-zero exit means a grant drifted. Prefer a targeted fix (e.g.
 `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). To re-sync wholesale,
 re-apply `01-schema.sql` → `02-observability.sql`, apply any pending later
-schema migrations (`04`, `05`, `06`, `07`, `08`, and future files), then run
-`03-grants-assertion.sql` **last** — never `01` alone, since its REVOKE-all
+schema migrations (`04`, `05`, `06`, `07`, `08`, `09`, and future files), then
+run `03-grants-assertion.sql` **last** — never `01` alone, since its REVOKE-all
 block strips observability grants until `02` restores them.
 
 To retire the unused historical thought-search RPC without a full schema replay,

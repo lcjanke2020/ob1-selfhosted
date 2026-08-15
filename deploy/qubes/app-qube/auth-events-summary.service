@@ -1,20 +1,20 @@
-# systemd USER unit — install at ~/.config/systemd/user/funnel-summary.service
-# on the app qube. The wrapper loads ~/.config/funnel-summary.env itself so the
-# same command works both under systemd and during manual verification.
+# systemd USER unit — install at ~/.config/systemd/user/auth-events-summary.service
+# on the app qube. This unit selects ~/.config/auth-events-summary.env through
+# FUNNEL_SUMMARY_ENV_FILE; use the same variable for an equivalent manual run.
 [Unit]
-Description=Open Brain daily Funnel summary and retention
+Description=Open Brain daily auth-event summary and retention
 # Bound one initial attempt plus two retries so a transient tailnet startup race
 # does not consume the timer occurrence, while a bad config cannot loop forever.
 StartLimitIntervalSec=2h
 StartLimitBurst=3
-# A silent failure leaves raw-log retention inactive until a later successful
+# A silent failure leaves auth-event retention inactive until a later successful
 # run. Install a user notify-failure@.service and uncomment this hook, or monitor
 # `systemctl --user --failed` and this unit's journal.
 # OnFailure=notify-failure@%n.service
 
 [Service]
 Type=oneshot
-Environment=FUNNEL_SUMMARY_ENV_FILE=%h/.config/funnel-summary.env
+Environment=FUNNEL_SUMMARY_ENV_FILE=%h/.config/auth-events-summary.env
 ExecStart=/usr/bin/bash %h/funnel_daily_summary.sh
 UMask=0077
 Restart=on-failure

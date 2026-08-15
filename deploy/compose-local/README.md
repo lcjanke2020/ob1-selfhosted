@@ -85,7 +85,7 @@ docker compose logs -f mcp
 ```
 
 You should see `open-brain-homelab listening on :8787`. The Postgres init
-scripts (roles, pgvector schema, observability tables, sessions schema,
+scripts (corpus roles, pgvector schema, auth-event observability, sessions,
 hybrid-search indexes, fail-closed spaces/RLS, and hash-only token storage) run
 on the first startup only.
 
@@ -224,10 +224,22 @@ docker compose exec -T postgres \
   < ../../db/08-access-tokens.sql
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/09-retire-corpus-funnel.sql
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/03-grants-assertion.sql
 docker compose build mcp
 docker compose up -d --no-deps mcp
 ```
+
+Migration 09 is the Arc B corpus boundary. On an older data directory it refuses
+to drop either legacy Funnel table while it contains a row. If this database
+ever ran Pattern B, follow the archive, verified-restore, explicit truncate, and
+sink-cutover procedure in
+[`compose-tailnet/README.md`](../compose-tailnet/README.md#upgrading-an-existing-deployment)
+before this block. Even a pure local install must inspect both tables rather
+than bypass the guard; the final assertion rejects the old relations and edge
+role names entirely.
 
 > **Upgrading to 1.20.0+ with the OAuth door enabled?** Set
 > `OAUTH_ALLOWED_SUBJECTS` in `.env` **before** the `up -d` roll — the new

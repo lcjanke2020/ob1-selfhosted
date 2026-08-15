@@ -1,6 +1,7 @@
 # Open Brain — Homelab + Tailscale stack.
 #
-# Four services (caddy is gated by the `pattern-b` compose profile):
+# Four base services (caddy is gated by `pattern-b`; the Pattern B override adds
+# a networkless log-ingester and socket-only log-sink):
 #   postgres  — Postgres 16 + pgvector, with init scripts that create the
 #               openbrain_app and openbrain_readonly roles + schema.
 #   mcp       — The Open Brain MCP server (Deno + Hono). Bound to 127.0.0.1
@@ -25,9 +26,8 @@
 #    Caddy is not started (gated by the pattern-b profile).
 #
 # B. Tailnet + Funnel with OAuth (Auth0 RS256 — recommended for public access):
-#      docker compose -f docker-compose.yml -f docker-compose.pattern-b.yml \
-#                     --profile pattern-b up -d
-#    (or set COMPOSE_FILE / COMPOSE_PROFILES in .env — see .env.example).
+#    Start from deploy/compose-tailnet with an explicit `--env-file .env`;
+#    its README §"Start the stack" gives both supported invocation forms.
 #    1. Set AUTH0_ISSUER / AUTH0_JWKS_URI / AUTH0_AUDIENCE in .env.
 #    2. The pattern-b.yml override REMOVES mcp's host port mapping. The raw
 #       mcp port is unreachable from the host; caddy is the only entry point
@@ -66,12 +66,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       OPENBRAIN_APP_PASSWORD: ${OPENBRAIN_APP_PASSWORD}
       OPENBRAIN_READONLY_PASSWORD: ${OPENBRAIN_READONLY_PASSWORD}
-      # Optional Pattern B role for the log-ingester sidecar.
-      # Empty for Pattern A; 00-roles.sh skips role creation when unset.
-      OPENBRAIN_INGESTER_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD:-}
-      # Optional SELECT-only role for the host-side funnel monitor
-      # (scripts/funnel_monitor.sh). Same contract: empty → skipped.
-      OPENBRAIN_MONITOR_PASSWORD: ${OPENBRAIN_MONITOR_PASSWORD:-}
       # Dedicated lifecycle role for native access tokens. Empty creates a
       # NOLOGIN role; set before first init to use the token-admin profile.
       OPENBRAIN_TOKEN_ADMIN_PASSWORD: ${OPENBRAIN_TOKEN_ADMIN_PASSWORD:-}
@@ -89,8 +83,12 @@ services:
       - ../../db/06-spaces.sql:/docker-entrypoint-initdb.d/06-spaces.sql:ro
       - ../../db/07-metadata-degradation.sql:/docker-entrypoint-initdb.d/07-metadata-degradation.sql:ro
       - ../../db/08-access-tokens.sql:/docker-entrypoint-initdb.d/08-access-tokens.sql:ro
+      # A fresh volume runs this idempotent no-op during init. Existing volumes
+      # never rerun initdb.d; upgrades invoke this source file manually as the
+      # guarded, archive-gated drop of the former corpus Funnel relations.
+      - ../../db/09-retire-corpus-funnel.sql:/docker-entrypoint-initdb.d/09-retire-corpus-funnel.sql:ro
       # Keep the stable source filename, but run the catalog assertion last so
-      # later/future schemas are covered by its monitor relation allowlist.
+      # later/future schemas and topology invariants are covered.
       - ../../db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro
     # Bind to localhost only by default; expose to the tailnet only via the
     # mcp service. If you want DBeaver/TablePlus to reach Postgres directly
@@ -150,6 +148,7 @@ services:
       CHAT_API_BASE: ${CHAT_API_BASE:-}
       CHAT_API_KEY: ${CHAT_API_KEY:-}
       CHAT_MODEL: ${CHAT_MODEL:-}
+      FETCH_TIMEOUT_MS: ${FETCH_TIMEOUT_MS:-15000}
       CHAT_TIMEOUT_MS: ${CHAT_TIMEOUT_MS:-60000}
       # Fallback chat endpoint — available only under an explicit alert/allow
       # policy, after the primary fails or as a fallback-only deployment.

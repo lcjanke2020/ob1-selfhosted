@@ -291,9 +291,9 @@ sequenceDiagram
 ├── server/                    Deno + Hono server: MCP (11 tools) + REST gateway
 │                              (/api/v1), unit tests, Dockerfiles for mcp and
 │                              the log-ingester sidecar
-├── db/                        Postgres init: roles, pgvector + lexical-search schema,
-│                              observability, sessions, fail-closed spaces,
-│                              hash-only token storage, grants assertion, daily rollup
+├── db/                        Corpus + separate Funnel-log-sink schemas, migrations,
+│                              pgvector/search, sessions, fail-closed spaces,
+│                              hash-only tokens, assertions, and daily rollups
 ├── deploy/
 │   ├── compose-local/         Install path 1 — base docker-compose.yml + .env.example
 │   ├── compose-tailnet/       Install path 2 — Pattern B overlay, Caddyfile, caddy image
@@ -488,9 +488,12 @@ labels, machine JWTs as `service`, and user JWTs as `funnel`; these are
 credential/provenance labels, not Caddy route evidence. The Anthropic-egress IP
 allowlist still restricts the public door before auth. Thought `author` /
 `agent` / `repo` / `branch` provenance remains a caller assertion, not
-authenticated identity. The longer version is in
-[`docs/security-model.md`](docs/security-model.md), with the scope contract in
-[`docs/spaces.md`](docs/spaces.md).
+authenticated identity. Every Pattern B install writes Caddy request metadata to
+a separate socket-only log cluster; the corpus schema rejects those tables and
+edge roles. On one host that is a container/process boundary, while the Qubes
+shape adds a VM boundary and removes the edge's OS-level route to the corpus.
+The longer version is in [`docs/security-model.md`](docs/security-model.md),
+with the scope contract in [`docs/spaces.md`](docs/spaces.md).
 
 ## Status & roadmap
 
