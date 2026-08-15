@@ -176,10 +176,9 @@ beats an id that resolves to nothing.
 
 **Regardless of harness:**
 
-- **Stamp `machine`, `working_dir`, and `harness` alongside it.** Transcripts
-  are _machine-local_, so the record must say **which host** (`machine`, e.g.
-  the box's hostname) and **which directory** (`working_dir`) the work happened
-  in — and **which harness** (`harness`), since that selects the resume command.
+- **Stamp `machine`, `working_dir`, and `harness` alongside it.** `machine` and
+  `working_dir` record where the conversation originated; `harness` selects the
+  resume mechanism. Whether another machine can resume it is harness-specific.
   For a listed harness, use the resume table's exact stored value:
   `harness = "Claude Code"` or `harness = "GitHub Copilot CLI"`. These are
   documentation conventions, not a schema-enforced enum; for an unlisted
@@ -187,13 +186,13 @@ beats an id that resolves to nothing.
   conversation from the CLI_ below for how the fields are used together.
 - **Refresh caveat:** on a re-capture (with `id`), the server
   **COALESCE-preserves** `session_id` — omitting it **keeps** the stored handle,
-  and **TOML capture has no way to reset it to SQL `NULL`**. To point at a
-  different conversation, write the new value; to retire a dead one, set
-  `session_id = ""` — note this stores an **empty string**, not `NULL`. Treat
-  empty the same as unset everywhere: the resume glob can't match it, so it's
-  functionally "no handle". Rarely needed anyway — the resume step re-globs for
-  the transcript before trusting any handle, so a stale handle never yields a
-  false resume.
+  but does **not** preserve `harness`, `machine`, or `working_dir`; omitted
+  ordinary fields become `NULL`. Treat a non-empty handle and that resume
+  metadata as a unit. When retaining a handle, re-send its stored values from
+  `session_lookup`; when replacing it, replace them with values matching the new
+  handle. Never attach the current harness to a preserved foreign handle. TOML
+  capture cannot reset the handle to SQL `NULL`; retire one with
+  `session_id = ""`, which is functionally "no handle".
 
 ### Minimal example (verified round-trip)
 
@@ -299,12 +298,12 @@ title = "Benchmark: sliding-window vs token-bucket"
 
 ## Capturing a session
 
-1. Populate the front matter from the **live working context** — read
-   `repo_url`, `branch`, `head` from the actual checkout (`git rev-parse`,
-   `git branch --show-current`), `machine` / `working_dir` from the host, and
-   the resumable `session_id` per _The resumable handle_ above — not from memory
-   or a returned `raw_toml`. Stamp `harness` too whenever you stamp
-   `session_id`: resume needs it to know which command reopens the transcript.
+1. Populate `repo_url`, `branch`, and `head` from the **live checkout**
+   (`git rev-parse`, `git branch --show-current`), not memory or returned
+   `raw_toml`. For a new record or replacement handle, take `machine`,
+   `working_dir`, `harness`, and `session_id` from the harness that owns that
+   transcript. When retaining a stored handle, re-send its stored resume
+   metadata as described above instead of substituting the current harness.
 
    A recapture (`id` present) is a full replacement of the authorable document
    and artifact set, not a patch. `title` remains required. Apart from
