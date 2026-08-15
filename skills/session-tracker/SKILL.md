@@ -180,8 +180,11 @@ beats an id that resolves to nothing.
   are _machine-local_, so the record must say **which host** (`machine`, e.g.
   the box's hostname) and **which directory** (`working_dir`) the work happened
   in — and **which harness** (`harness`), since that selects the resume command.
-  See _Resuming the actual conversation from the CLI_ below for how the fields
-  are used together.
+  For a listed harness, use the resume table's exact stored value:
+  `harness = "Claude Code"` or `harness = "GitHub Copilot CLI"`. These are
+  documentation conventions, not a schema-enforced enum; for an unlisted
+  harness, use its stable product name consistently. See _Resuming the actual
+  conversation from the CLI_ below for how the fields are used together.
 - **Refresh caveat:** on a re-capture (with `id`), the server
   **COALESCE-preserves** `session_id` — omitting it **keeps** the stored handle,
   and **TOML capture has no way to reset it to SQL `NULL`**. To point at a
@@ -380,10 +383,10 @@ Manual resume, search-driven:
    harness conversation id).
 3. **On that `machine`**, resume with the matching harness:
 
-   | `harness`          | Resume with                                            |
-   | ------------------ | ------------------------------------------------------ |
-   | Claude Code        | `claude --resume <session_id>` (shell command)         |
-   | GitHub Copilot CLI | `/resume <session_id>` (slash command, inside the CLI) |
+   | Stored `harness` value | Resume with                                            |
+   | ---------------------- | ------------------------------------------------------ |
+   | `"Claude Code"`        | `claude --resume <session_id>` (shell command)         |
+   | `"GitHub Copilot CLI"` | `/resume <session_id>` (slash command, inside the CLI) |
 
    Both resolve the transcript by id, so `cd` isn't required, but start from
    `working_dir` so the resumed work lands in the right project. Transcripts are
@@ -448,13 +451,13 @@ pattern.
   omit `status` unless intentionally changing it.
 - Don't omit `id` when re-capturing (you'll mint a duplicate).
 - Don't stamp `session_id` unchecked — confirm the transcript exists first
-  (Claude Code: glob `~/.claude/projects/*/<session_id>.jsonl`; Copilot CLI:
-  `~/.copilot/session-state/<session_id>/events.jsonl`); an id with no
+  (Claude Code: glob `~/.claude/projects/*/<session_id>.jsonl`; GitHub Copilot
+  CLI: `~/.copilot/session-state/<session_id>/events.jsonl`); an id with no
   transcript won't resume. Leave it unset rather than guess.
 - Don't treat one harness's missing env var as proof there's no transcript —
-  `CLAUDE_CODE_SESSION_ID` is unset under Copilot CLI, which has its own id and
-  transcript. Check the harness you're actually running in before recording "no
-  resumable transcript".
+  `CLAUDE_CODE_SESSION_ID` is unset under GitHub Copilot CLI, which has its own
+  id and transcript. Check the harness you're actually running in before
+  recording "no resumable transcript".
 - Don't author nested `[identity]` / `[where]` / `[state_for_resuming]` blocks —
   the schema is flat.
 - Don't omit a non-default session's scope on lookup, refresh, or status update;
