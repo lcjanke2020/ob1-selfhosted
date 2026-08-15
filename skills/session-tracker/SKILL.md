@@ -134,36 +134,85 @@ a human re-open the _actual chat transcript_ later. It is **not** the key (the
 integer `id` is), it is free-form, and it is **nullable**: a session with no
 resumable transcript should carry no handle rather than a dead value.
 
-- **Where it comes from (Claude Code):** the running agent's conversation id is
-  exposed in the environment as `CLAUDE_CODE_SESSION_ID`. This is
+**Where it comes from is harness-specific.** The rule is the same everywhere:
+**only stamp an id confirmed resumable through a verified local transcript or
+the harness's supported remote route.** Id sources and verification paths differ
+by harness. For an unlisted harness, determine its own id and verification route
+rather than assuming another harness's env var or storage layout applies.
+
+> ⚠️ **Absence of one harness's signal is not evidence of "no transcript."** An
+> agent that checks only `CLAUDE_CODE_SESSION_ID`, finds it unset, and concludes
+> the session is unresumable will silently drop a perfectly good handle when
+> running under a different harness. Check the harness you are actually in.
+
+**Claude Code**
+
+- **Id:** exposed in the environment as `CLAUDE_CODE_SESSION_ID`. This is
   harness-specific and may change in future Claude Code versions — treat it as
   advisory, not a contract. If it's unset, don't invent one; leave `session_id`
   out.
-- **Only stamp an id you've confirmed is resumable — the transcript file is the
-  authority.** Check for it by **glob**:
-  `~/.claude/projects/*/<session_id>.jsonl`. The id is unique, so this finds the
-  transcript no matter how Claude Code encodes the project-dir name (it folds
-  more than just `/` — `_`, `.`, etc. all become `-`, so don't try to
-  reconstruct the path by hand). If no file matches, **don't stamp** — an honest
-  "no transcript" beats an id that resolves to nothing. Treat
+- **Transcript:** check by **glob** — `~/.claude/projects/*/<session_id>.jsonl`.
+  The id is unique, so this finds the transcript no matter how Claude Code
+  encodes the project-dir name (it folds more than just `/` — `_`, `.`, etc. all
+  become `-`, so don't try to reconstruct the path by hand). Treat
   `CLAUDE_CODE_CHILD_SESSION=1` as a _caution_ that the id may be a sub-session
   rather than the top-level conversation (the two signals can disagree — a child
   env can still have a real transcript): let the glob decide, and when in doubt
   leave it out.
-- **Stamp `machine` and `working_dir` alongside it.** Transcripts are
-  _machine-local_, so the record must say **which host** (`machine`, e.g. the
-  box's hostname) and **which directory** (`working_dir`) the work happened in.
-  See _Resuming the actual conversation from the CLI_ below for how the fields
-  are used together.
+
+**GitHub Copilot CLI**
+
+- **Id:** there is **no `CLAUDE_CODE_SESSION_ID`-style env var**. Run `/session`
+  in the conversation being captured (rerun it after opening a remote result);
+  the id is also displayed on exit and names the local session-state directory.
+  It is a UUID.
+- **Local transcript:**
+  `<copilot-config-dir>/session-state/<session_id>/events.jsonl`. Resolve the
+  active config directory in precedence order: `--config-dir=DIRECTORY`
+  (deprecated), `$COPILOT_HOME`, then `~/.copilot`. Confirm it exists **and
+  holds real turns** before stamping — a session dir can exist with a near-empty
+  log. A quick sanity check is that the file contains `assistant.message`
+  events, not just `hook.*` / lifecycle noise. If the active config directory is
+  non-default, record the resolved transcript path in `resume_context`; there is
+  no dedicated schema field for it.
+- **Remote availability and data locality:** Copilot syncs sessions to GitHub by
+  default, enabling cross-machine resume and storing a copy off the originating
+  machine. Users can opt out with `"remoteExport": false`; organization policy
+  can disable sync. Check the interactive picker's remote tab (switch with
+  `Tab`) rather than assuming locality; if it cannot be checked, report that.
+
+Before stamping a new or replacement handle, verify either its matching local
+file (including substantive turns) or, for a harness with supported sync, that
+the remote session resolves in its picker. Record non-default transcript paths
+and remote-only verification in `resume_context`; an honest "no transcript"
+beats an id that resolves to nothing. This does not retire a previously verified
+handle merely because a later refresh cannot see its origin file; use the
+refresh rule below.
+
+**Regardless of harness:**
+
+- **Stamp `harness` alongside it, plus known origin metadata.** `machine` and
+  `working_dir` record where the conversation originated; never substitute a
+  host that merely verified a remote handle. If the origin is unknown, omit
+  those fields and record the verification environment in `resume_context`.
+  `harness` selects the resume mechanism. For a listed harness, use the resume
+  table's exact stored value: `harness = "Claude Code"` or
+  `harness = "GitHub Copilot CLI"`. These are documentation conventions, not a
+  schema-enforced enum; for an unlisted harness, use its stable product name
+  consistently. See _Resuming the actual conversation from the CLI_ below for
+  how the fields are used together.
 - **Refresh caveat:** on a re-capture (with `id`), the server
   **COALESCE-preserves** `session_id` — omitting it **keeps** the stored handle,
-  and **TOML capture has no way to reset it to SQL `NULL`**. To point at a
-  different conversation, write the new value; to retire a dead one, set
-  `session_id = ""` — note this stores an **empty string**, not `NULL`. Treat
-  empty the same as unset everywhere: the resume glob can't match it, so it's
-  functionally "no handle". Rarely needed anyway — the resume step re-globs for
-  the transcript before trusting any handle, so a stale handle never yields a
-  false resume.
+  but does **not** preserve `harness`, `machine`, or `working_dir`; omitted
+  ordinary fields become `NULL`. A refresh may omit `session_id` to retain a
+  previously verified handle without re-verifying it; preservation is not proof
+  of current availability. Even then, re-send its stored resume metadata from
+  `session_lookup`, and retain any handle-specific locator or verification note
+  in `resume_context` (such as a non-default Copilot transcript path) while
+  updating the rest of the work-log. When replacing the handle, replace that
+  metadata with values matching the new one. Never attach the current harness to
+  a preserved foreign handle. TOML capture cannot reset the handle to SQL
+  `NULL`; retire one with `session_id = ""`, which is functionally "no handle".
 
 ### Minimal example (verified round-trip)
 
@@ -269,11 +318,13 @@ title = "Benchmark: sliding-window vs token-bucket"
 
 ## Capturing a session
 
-1. Populate the front matter from the **live working context** — read
-   `repo_url`, `branch`, `head` from the actual checkout (`git rev-parse`,
-   `git branch --show-current`), `machine` / `working_dir` from the host, and
-   the resumable `session_id` per _The resumable handle_ above — not from memory
-   or a returned `raw_toml`.
+1. Populate `repo_url`, `branch`, and `head` from the **live checkout**
+   (`git rev-parse`, `git branch --show-current`), not memory or returned
+   `raw_toml`. For a new record or replacement handle, take `harness`,
+   `session_id`, and any known origin `machine` / `working_dir` from the owning
+   transcript; never invent a remote origin. When retaining a stored handle,
+   re-send its stored resume metadata instead of substituting the current
+   harness.
 
    A recapture (`id` present) is a full replacement of the authorable document
    and artifact set, not a patch. `title` remains required. Apart from
@@ -333,32 +384,52 @@ title = "Benchmark: sliding-window vs token-bucket"
 ### Resuming the actual conversation from the CLI
 
 `session_lookup` restores the _work-log_, not the chat. To get the original
-Claude Code **transcript** back you run `claude --resume` yourself — there is no
-resume wrapper, and the two ids are **different namespaces**:
+**transcript** back you run the harness's own resume command yourself — there is
+no resume wrapper, and the two ids are **different namespaces**:
 
-> ⚠️ **`claude --resume <ob-id>` does NOT work.** The OB integer `id` is the
-> record key; `claude --resume` wants the _harness conversation id_, which is
-> stored in the record's `session_id` field. Passing the OB `id` (or a session's
-> title) just errors with "No conversation found".
+> ⚠️ **Resuming with the OB `id` does NOT work.** The OB integer `id` is the
+> record key; a harness resume command wants the _harness conversation id_,
+> which is stored in the record's `session_id` field. Passing the OB `id` (or a
+> session's title) just errors — e.g. Claude Code reports "No conversation
+> found".
 
 Manual resume, search-driven:
 
 1. **Find it:** `session_search(query=…)` to discover, then
    `session_lookup(id=…)` for the full record — or `session_lookup(id=…)` /
    `session_lookup(branch=…)` directly if you already know it.
-2. **Read three fields** off the record: `machine` (which host), `working_dir`
-   (which directory), `session_id` (the harness conversation id).
-3. **On that `machine`**, run `claude --resume <session_id>` — it resolves the
-   transcript by id, so `cd` isn't required, but start from `working_dir` so the
-   resumed work lands in the right project. Transcripts are machine-local, so
-   this only works on the host that recorded it.
+2. **Read the resume fields:** `harness`, `session_id`, plus `machine` and
+   `working_dir` when known. The latter are origin metadata and may be unset for
+   a verified remote handle; don't invent them. For a legacy row with no
+   `harness`, use `agent` as a hint, probe known local transcript paths and any
+   supported remote picker, and infer a harness only when the handle resolves.
+3. **Resume with the matching harness:**
 
-**No transcript available** — `session_id` is unset or empty, you're on a
-different machine, or it was pruned/compacted — means **there is no
-scrollback**. Start a fresh `claude` and rebuild from the work-log
-(`resume_context` + `next_actions` + `blockers`), checking out `repo_url` /
-`branch` / `head`. Say plainly that scrollback wasn't available and the context
-was reconstructed from the session record.
+   | Stored `harness` value | Resume with                                                                  | Availability check                                     |
+   | ---------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------ |
+   | `"Claude Code"`        | `claude --resume <session_id>`                                               | Recorded machine; confirm the local transcript glob    |
+   | `"GitHub Copilot CLI"` | `copilot --resume <session_id>`; `/resume <session_id>` inside an active CLI | Check both local and remote tabs in the session picker |
+
+   On the origin machine, start from `working_dir`. Elsewhere, use the
+   equivalent checkout identified by `repo_url`, `branch`, and `head`; the
+   recorded path may not exist. `machine` records the origin and is an access
+   requirement for local-only transcripts, not for a Copilot session confirmed
+   remotely.
+
+> This is why `harness` is worth stamping on every capture: without it, a
+> resuming agent has to guess which command applies, and guessing wrong reads as
+> "not resumable."
+
+**No transcript available** means `session_id` is unset or empty, or **every
+applicable resolution route has failed**: the current machine, the harness's
+supported remote listing, and the recorded origin machine when reachable. If a
+route could not be checked, report only the narrower failure (for example,
+"absent locally and remotely; origin not checked"), not a categorical "no
+scrollback." Once every applicable route has failed, start a fresh session in
+the relevant harness and rebuild from the work-log (`resume_context` +
+`next_actions` + `blockers`), checking out `repo_url` / `branch` / `head`. Say
+plainly that scrollback wasn't available and context came from the session
+record.
 
 ## Searching & listing
 
@@ -391,10 +462,11 @@ pattern.
   paper over it.
 - **Don't fabricate** `id`s, statuses, or artifact refs — report only what the
   tools return (don't claim an artifact landed unless the capture succeeded).
-- **Don't claim a conversation is resumable** unless `session_id` is set
-  (non-empty) _and_ its transcript exists on this machine. Report what's
-  actually known — host, dir, and `session_id` (or "no resumable transcript
-  recorded") — and let the human resume.
+- **Don't claim a conversation is resumable** unless `session_id` is non-empty
+  and the matching harness resolves a verified local transcript or supported
+  remote session. Report what's actually known — origin host, directory, and
+  `session_id` (or "no resumable transcript recorded") — and let the human
+  resume.
 
 ## Anti-patterns
 
@@ -407,9 +479,15 @@ pattern.
   server-issued `id`, re-send every field and artifact you intend to retain, and
   omit `status` unless intentionally changing it.
 - Don't omit `id` when re-capturing (you'll mint a duplicate).
-- Don't stamp `session_id` from `CLAUDE_CODE_SESSION_ID` unchecked — confirm a
-  `<session_id>.jsonl` transcript exists first (glob `~/.claude/projects/*/`);
-  an id with no transcript won't resume. Leave it unset rather than guess.
+- Don't stamp `session_id` unchecked — verify a substantive local transcript
+  (Claude Code: glob `~/.claude/projects/*/<session_id>.jsonl`; GitHub Copilot
+  CLI: check `<copilot-config-dir>/session-state/<session_id>/events.jsonl`) or
+  a harness-supported remote session. Leave an unresolved id unset rather than
+  guess.
+- Don't treat one harness's missing env var as proof there's no transcript —
+  `CLAUDE_CODE_SESSION_ID` is unset under GitHub Copilot CLI, which has its own
+  id and transcript. Check the harness you're actually running in before
+  recording "no resumable transcript".
 - Don't author nested `[identity]` / `[where]` / `[state_for_resuming]` blocks —
   the schema is flat.
 - Don't omit a non-default session's scope on lookup, refresh, or status update;
