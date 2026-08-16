@@ -3,12 +3,14 @@ Description=OB1 encrypted off-box DB backup (daily)
 
 [Timer]
 # Daily, early morning, with jitter so it doesn't stampede other timers. An idle
-# Qubes app qube gets suspended; Persistent=true runs a missed backup on wake so
-# a suspended-overnight qube still produces a daily artifact.
-# Across a qube REBOOT that only holds if /var/lib/systemd/timers (where systemd
-# keeps the stamp it compares against) is bind-dir'd — on the volatile root the
-# stamp is recreated empty at boot and the missed run is silently skipped, with
-# no failure for OnFailure= to report. See ../../README.md § Bind-dirs.
+# Qubes app qube gets suspended; the active OnCalendar= timer fires a slept-
+# through occurrence late on wake, so a suspended-overnight qube still produces
+# a daily artifact. Persistent=true covers the case the timer was INACTIVE — a
+# qube reboot — via a stamp under /var/lib/systemd/timers, which on a Qubes
+# AppVM only survives reboot if that directory is bind-dir'd; on the volatile
+# root the stamp is recreated empty at boot and the missed run is silently
+# skipped, with no failure for OnFailure= to report. See ../../README.md
+# § Bind-dirs.
 OnCalendar=*-*-* 03:30:00
 RandomizedDelaySec=900
 Persistent=true

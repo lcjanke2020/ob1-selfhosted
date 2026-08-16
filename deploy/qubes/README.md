@@ -168,32 +168,40 @@ systemctl enable --now ob1-db-backup.timer
 
 User units under `~/.config/systemd/user/` live in the persistent home and do
 not need that `rc.local` copy. The app qube's shipped
-[daily-summary timer](app-qube/README.md#daily-funnel-rollup-and-retention-host-side)
-is one. Two extra Qubes-isms apply: idle app qubes get suspended
-(`Persistent=true` runs a missed calendar occurrence after wake), and user units
-only run without an open shell session if linger is on —
-`sudo loginctl enable-linger user`, persisted across reboots by the
+[daily-summary timer](app-qube/README.md#daily-auth-event-rollup-and-retention-host-side)
+is one. Two extra Qubes-isms apply: idle app qubes get suspended (an active
+`OnCalendar=` timer fires a slept-through occurrence late on wake — no stamp
+involved), and user units only run without an open shell session if linger is on
+— `sudo loginctl enable-linger user`, persisted across reboots by the
 `/var/lib/systemd/linger` bind-dir
 ([§ Rootless docker](#rootless-docker-the-deployed-engine-posture) — the flag
 file lives on the volatile root, so without the bind-dir it lasts exactly one
 boot). If a timer stopped firing, check `loginctl show-user user | grep Linger`
 and `systemctl --user is-enabled <timer>` before suspecting the script.
 
-`Persistent=true` has the same volatile-root trap for **system** timers. systemd
-decides whether an occurrence was missed by comparing the calendar against a
-stamp file, `/var/lib/systemd/timers/stamp-<unit>.timer`, and that directory is
-on the AppVM's volatile root. A suspend/resume keeps it (RAM survives), but a
-qube **reboot** — a host power-off, a template update, a `qvm-shutdown` — starts
-the timer with a fresh, empty stamp, so systemd schedules the _next_ occurrence
-and never runs the missed one. Nothing fails, so `OnFailure=` never fires: the
-day's backup is silently skipped. The `/var/lib/systemd/timers` bind-dir in
+`Persistent=true` has the same volatile-root trap for **system** timers. Two
+distinct mechanisms cover missed occurrences: an _active_ `OnCalendar=` timer
+fires a slept-through occurrence late from the manager's in-memory state (that
+is the suspend/resume case above), while `Persistent=` covers periods when the
+timer unit itself was **inactive** — a reboot — by comparing the calendar
+against a stamp file, `/var/lib/systemd/timers/stamp-<unit>.timer`. That
+directory is on the AppVM's volatile root, so a qube **reboot** — a host
+power-off, a template update, a `qvm-shutdown` — starts the timer with a fresh,
+empty stamp, and systemd schedules the _next_ occurrence and never runs the
+missed one. Nothing fails, so `OnFailure=` never fires: the day's backup is
+silently skipped. The `/var/lib/systemd/timers` bind-dir in
 [§ Bind-dirs](#bind-dirs-what-must-persist) is what makes the catch-up run
-actually happen after a reboot; with it, the db-forwarder readiness gate in the
-app qube's [`rc.local`](app-qube/rc.local) is what makes that immediate catch-up
-safe. User timers keep their stamps under `~/.local/share/systemd/timers/` in
-the persistent home and are not affected. Symptom to recognise:
-`systemctl list-timers` shows `LAST -` after a boot that should have caught up,
-and the stamp file's mtime equals the boot time.
+actually happen after a reboot. Note what the app qube's
+[`rc.local`](app-qube/rc.local) forwarder gate does and does not buy that
+catch-up: it keeps the run from being dispatched at a dead _local_ listener; it
+does not wait for the db qube itself (that hop is `autostart=no`), so a
+cold-boot catch-up that beats the db qube's Postgres fails once, loudly
+(`OnFailure=`), consumes the occurrence, and the day then needs the manual
+`systemctl start` described in the app-qube README. Silent-skip → loud-fail is
+still the right trade. User timers keep their stamps under
+`~/.local/share/systemd/timers/` in the persistent home and are not affected.
+Symptom to recognise: `systemctl list-timers` shows `LAST -` after a boot that
+should have caught up, and the stamp file's mtime equals the boot time.
 
 ## Networking posture
 
