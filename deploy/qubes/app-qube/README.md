@@ -140,7 +140,7 @@ still restricted by memory-space RLS) — see
 [`../db-qube/README.md`](../db-qube/README.md) and
 [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15)). At runtime the
 app qube also connects as `openbrain_app` (mcp writes thoughts; the
-[daily rollup](#daily-funnel-rollup-and-retention-host-side) summarizes and
+[daily rollup](#daily-auth-event-rollup-and-retention-host-side) summarizes and
 retires observability rows) and `openbrain_readonly` (the backup job). It does
 **not** carry the log-ingester credential — that lives only on the ingress qube.
 
@@ -422,13 +422,17 @@ systemctl --user enable --now auth-events-summary.timer
 systemctl --user list-timers auth-events-summary.timer --no-pager
 ```
 
-The timer runs at 00:30 UTC, matching the SQL's UTC day boundaries.
-`Persistent=true` causes one missed occurrence to run after a suspended app qube
-wakes; the service makes up to two additional attempts at two-minute intervals
-so a transient tailnet startup race does not consume that occurrence. User
-lingering keeps the unit eligible when no shell is open. Reports default to the
-local, mode-0700 `~/openbrain-funnel-summaries` directory because they contain
-verified identity metadata. To retain an off-box copy, set `SUMMARY_DIR` in
+The timer runs at 00:30 UTC, matching the SQL's UTC day boundaries. An active
+`OnCalendar=` timer fires a slept-through occurrence late when a suspended app
+qube wakes, and `Persistent=true` extends that across a reboot (this is a user
+timer, so its stamp lives in the persistent home — unlike the system backup
+timer, see
+[§ Missed runs](#missed-runs-what-the-timer-catches-up-and-what-it-cannot-see));
+the service makes up to two additional attempts at two-minute intervals so a
+transient tailnet startup race does not consume that occurrence. User lingering
+keeps the unit eligible when no shell is open. Reports default to the local,
+mode-0700 `~/openbrain-funnel-summaries` directory because they contain verified
+identity metadata. To retain an off-box copy, set `SUMMARY_DIR` in
 `~/.config/auth-events-summary.env` to a trusted replicated directory and
 protect that destination accordingly. For Syncthing, add
 `/.auth-events-summary-*` to the folder's `.stignore`; final reports have no
@@ -543,6 +547,44 @@ sudo systemctl start ob1-db-backup.service
 systemctl show ob1-db-backup.service -p Result -p ExecMainStatus
 journalctl -u ob1-db-backup.service -n 50 --no-pager
 ```
+
+### Missed runs: what the timer catches up, and what it cannot see
+
+A 03:30 occurrence slept through by a suspended qube fires late on wake — that
+is the active `OnCalendar=` timer's own doing, no stamp involved. Across a qube
+**reboot** the timer unit was inactive, and only `Persistent=true` can catch up:
+it compares the calendar against a stamp file, and that stamp lives on the
+volatile root unless `/var/lib/systemd/timers` is bind-dir'd (see
+[`../README.md` § Bind-dirs](../README.md#bind-dirs-what-must-persist)). Without
+the bind-dir, after a host power-off or `qvm-shutdown` the timer starts with an
+empty stamp, schedules tomorrow's run, and quietly drops today's. Nothing fails,
+so the `OnFailure=` notifier stays silent. The tell is `LAST -` in
+`systemctl list-timers ob1-db-backup.timer` on a boot that should have caught
+up. With the bind-dir, the catch-up is dispatched as soon as `rc.local` enables
+the timer (plus `RandomizedDelaySec`); the forwarder gate there only proves the
+local listener, not the db qube, so a cold boot of both qubes can race — the
+catch-up then fails once, loudly, and consumes the occurrence. To close either
+kind of gap by hand, start the service (above) rather than invoking the script
+directly, so the run keeps the unit's sandbox and its failure hook.
+
+Because `OnFailure=` can only ever report "ran and failed", pair it with a
+freshness check on the **receiving** host — the one place that can see "never
+ran". A cron/launchd job on the private-key host that alerts when the newest
+`db-*.sql.gz.gpg` in the replicated folder is older than about 26 hours (24 h
+cadence + `RandomizedDelaySec` + replication lag) turns a silent gap into a
+signal, whichever hop swallowed the artifact. For a host that routinely sleeps
+across 03:30 and catches up on wake, add the longest sleep you consider normal
+to that window (or run the check once a day, after the expected catch-up), so
+the ordinary case does not alarm:
+
+```sh
+# on the receiving host, e.g. hourly
+newest=$(ls -t "$RECV_DIR"/db-*.sql.gz.gpg 2>/dev/null | head -1)
+[ -n "$newest" ] && [ $(( $(date +%s) - $(stat -c %Y "$newest") )) -lt $((26*3600)) ] \
+  || your-alert "no fresh encrypted DB backup in $RECV_DIR"
+```
+
+(On macOS use `stat -f %m`.)
 
 ## Verify
 

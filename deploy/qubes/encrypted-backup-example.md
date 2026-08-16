@@ -120,8 +120,12 @@ is used directly.
 
 A daily job that fails silently becomes an incident the day you need a restore.
 Wire the unit with `OnFailure=` (or a cron wrapper that mails/logs) so a broken
-pipeline is noticed. If `OUT_DIR` is a Syncthing folder, add the staging temp to
-`.stignore` so peers never see a partial:
+pipeline is noticed. `OnFailure=` only sees a run that started and failed; a run
+that never started (host was off, timer stamp lost, unit not enabled) is
+invisible to it — so also put a freshness check on the _receiving_ host that
+alerts when the newest artifact is older than a day plus slack. If `OUT_DIR` is
+a Syncthing folder, add the staging temp to `.stignore` so peers never see a
+partial:
 
 ```
 /.db-*
