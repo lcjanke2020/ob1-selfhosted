@@ -43,6 +43,7 @@ services this stack depends on keep state elsewhere — bind-dir each of these (
 binds+=( '/etc/ssh' )                   # SSH host keys
 binds+=( '/var/lib/tailscale' )         # Tailscale node identity
 binds+=( '/var/lib/systemd/linger' )    # rootless-docker autostart flag — see § Rootless docker
+binds+=( '/var/lib/systemd/timers' )    # system-timer Persistent=true stamps — see § Persisting systemd units
 binds+=( '/var/lib/docker' )            # ROOTFUL docker only — see note
 binds+=( '/var/lib/containerd' )        # ROOTFUL docker only; easy to miss — see below
 ```
@@ -177,6 +178,23 @@ only run without an open shell session if linger is on —
 file lives on the volatile root, so without the bind-dir it lasts exactly one
 boot). If a timer stopped firing, check `loginctl show-user user | grep Linger`
 and `systemctl --user is-enabled <timer>` before suspecting the script.
+
+`Persistent=true` has the same volatile-root trap for **system** timers.
+systemd decides whether an occurrence was missed by comparing the calendar
+against a stamp file, `/var/lib/systemd/timers/stamp-<unit>.timer`, and that
+directory is on the AppVM's volatile root. A suspend/resume keeps it (RAM
+survives), but a qube **reboot** — a host power-off, a template update, a
+`qvm-shutdown` — starts the timer with a fresh, empty stamp, so systemd
+schedules the *next* occurrence and never runs the missed one. Nothing fails,
+so `OnFailure=` never fires: the day's backup is silently skipped. The
+`/var/lib/systemd/timers` bind-dir in [§ Bind-dirs](#bind-dirs-what-must-persist)
+is what makes the catch-up run actually happen after a reboot; with it, the
+db-forwarder readiness gate in the app qube's
+[`rc.local`](app-qube/rc.local) is what makes that immediate catch-up safe.
+User timers keep their stamps under
+`~/.local/share/systemd/timers/` in the persistent home and are not affected.
+Symptom to recognise: `systemctl list-timers` shows `LAST -` after a boot that
+should have caught up, and the stamp file's mtime equals the boot time.
 
 ## Networking posture
 

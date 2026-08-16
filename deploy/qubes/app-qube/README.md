@@ -424,7 +424,10 @@ systemctl --user list-timers auth-events-summary.timer --no-pager
 
 The timer runs at 00:30 UTC, matching the SQL's UTC day boundaries.
 `Persistent=true` causes one missed occurrence to run after a suspended app qube
-wakes; the service makes up to two additional attempts at two-minute intervals
+wakes (and, because a user timer's stamp lives in the persistent home, after a
+reboot too — unlike the system backup timer, see
+[§ Missed runs](#missed-runs-what-the-timer-catches-up-and-what-it-cannot-see));
+the service makes up to two additional attempts at two-minute intervals
 so a transient tailnet startup race does not consume that occurrence. User
 lingering keeps the unit eligible when no shell is open. Reports default to the
 local, mode-0700 `~/openbrain-funnel-summaries` directory because they contain
@@ -543,6 +546,36 @@ sudo systemctl start ob1-db-backup.service
 systemctl show ob1-db-backup.service -p Result -p ExecMainStatus
 journalctl -u ob1-db-backup.service -n 50 --no-pager
 ```
+
+### Missed runs: what the timer catches up, and what it cannot see
+
+The timer's `Persistent=true` re-runs a missed 03:30 occurrence when a
+suspended qube wakes. It does **not** do so across a qube reboot unless
+`/var/lib/systemd/timers` is bind-dir'd (see
+[`../README.md` § Bind-dirs](../README.md#bind-dirs-what-must-persist)): the
+stamp systemd compares against lives on the volatile root, so after a host
+power-off or `qvm-shutdown` the timer starts with an empty stamp, schedules
+tomorrow's run, and quietly drops today's. Nothing fails, so the `OnFailure=`
+notifier stays silent. `systemctl list-timers ob1-db-backup.timer` showing
+`LAST -` on a boot that should have caught up is the tell. To close such a gap
+by hand, start the service (above) rather than invoking the script directly, so
+the run keeps the unit's sandbox and its failure hook.
+
+Because `OnFailure=` can only ever report "ran and failed", pair it with a
+freshness check on the **receiving** host — the one place that can see "never
+ran". A cron/launchd job on the private-key host that alerts when the newest
+`db-*.sql.gz.gpg` in the replicated folder is older than about 26 hours (24 h
+cadence + `RandomizedDelaySec` + replication lag) turns a silent gap into a
+signal, whichever hop swallowed the artifact:
+
+```sh
+# on the receiving host, e.g. hourly
+newest=$(ls -t "$RECV_DIR"/db-*.sql.gz.gpg 2>/dev/null | head -1)
+[ -n "$newest" ] && [ $(( $(date +%s) - $(stat -c %Y "$newest") )) -lt $((26*3600)) ] \
+  || your-alert "no fresh encrypted DB backup in $RECV_DIR"
+```
+
+(On macOS use `stat -f %m`.)
 
 ## Verify
 

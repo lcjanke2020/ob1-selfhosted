@@ -122,6 +122,10 @@ if [ -d /rw/config/openbrain-units ]; then
 	# fails once with no retry — the day's backup is burned. Skipped instead,
 	# the occurrence stays owed and fires when the operator fixes the
 	# forwarder and enables the timer (or reboots into a healthy gate).
+	# "Owed" across a REBOOT only if /var/lib/systemd/timers is bind-dir'd
+	# (../README.md § Bind-dirs): the stamp Persistent=true compares against
+	# lives on the volatile root, and a fresh empty stamp at boot means the
+	# missed occurrence is silently dropped rather than dispatched.
 	if [ -n "${fwd_ok:-}" ]; then
 		systemctl enable --now ob1-db-backup.timer 2>/dev/null
 	else
