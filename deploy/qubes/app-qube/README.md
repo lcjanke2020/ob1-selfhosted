@@ -427,11 +427,11 @@ The timer runs at 00:30 UTC, matching the SQL's UTC day boundaries.
 wakes (and, because a user timer's stamp lives in the persistent home, after a
 reboot too — unlike the system backup timer, see
 [§ Missed runs](#missed-runs-what-the-timer-catches-up-and-what-it-cannot-see));
-the service makes up to two additional attempts at two-minute intervals
-so a transient tailnet startup race does not consume that occurrence. User
-lingering keeps the unit eligible when no shell is open. Reports default to the
-local, mode-0700 `~/openbrain-funnel-summaries` directory because they contain
-verified identity metadata. To retain an off-box copy, set `SUMMARY_DIR` in
+the service makes up to two additional attempts at two-minute intervals so a
+transient tailnet startup race does not consume that occurrence. User lingering
+keeps the unit eligible when no shell is open. Reports default to the local,
+mode-0700 `~/openbrain-funnel-summaries` directory because they contain verified
+identity metadata. To retain an off-box copy, set `SUMMARY_DIR` in
 `~/.config/auth-events-summary.env` to a trusted replicated directory and
 protect that destination accordingly. For Syncthing, add
 `/.auth-events-summary-*` to the folder's `.stignore`; final reports have no
@@ -549,8 +549,8 @@ journalctl -u ob1-db-backup.service -n 50 --no-pager
 
 ### Missed runs: what the timer catches up, and what it cannot see
 
-The timer's `Persistent=true` re-runs a missed 03:30 occurrence when a
-suspended qube wakes. It does **not** do so across a qube reboot unless
+The timer's `Persistent=true` re-runs a missed 03:30 occurrence when a suspended
+qube wakes. It does **not** do so across a qube reboot unless
 `/var/lib/systemd/timers` is bind-dir'd (see
 [`../README.md` § Bind-dirs](../README.md#bind-dirs-what-must-persist)): the
 stamp systemd compares against lives on the volatile root, so after a host
