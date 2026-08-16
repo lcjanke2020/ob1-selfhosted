@@ -11,8 +11,11 @@ Description=Run Open Brain Funnel summary daily (local log sink)
 # distinguishable timestamps and a shared-host review reads in order.
 OnCalendar=*-*-* 00:40:00 UTC
 AccuracySec=1min
-# Qubes may suspend an idle app qube. Run one missed occurrence after wake so a
-# suspended night does not become an unbounded retention gap.
+# A suspended qube fires a slept-through occurrence late on wake on its own (the
+# active OnCalendar= timer, no stamp involved). Persistent=true covers the case
+# the timer was INACTIVE — a qube reboot — so a rebooted night does not become
+# an unbounded retention gap; as a USER unit its stamp lives in the persistent
+# home, so this works across reboots without any bind-dir.
 Persistent=true
 
 [Install]
