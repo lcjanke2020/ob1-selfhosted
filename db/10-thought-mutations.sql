@@ -36,9 +36,11 @@
 --      rows, and a personal target is owned by the transaction-local principal
 --      — never by a caller-supplied subject. Content-fingerprint deduplication
 --      is preserved by refusing to move a thought onto identical content that
---      already exists in the target audience — a collision found by the
---      pre-check AND one that lands between the pre-check and the write are
---      both reported as the `conflict` outcome, never as an index error.
+--      already exists in the target audience — whether the resident row's
+--      fingerprint is stored or (legacy) derived from its content — and a
+--      collision found by the pre-check AND one that lands between the
+--      pre-check and the write are both reported as the `conflict` outcome,
+--      never as an index error.
 --
 -- Content updates need no privileged path: the application role updates the
 -- content columns inside its own audience under forced RLS (server/queries.ts).
@@ -46,9 +48,13 @@
 -- Legacy rows with a NULL content_fingerprint (captured before fingerprints,
 -- or restored from such a dump) are not backfilled here: a blanket backfill
 -- would rewrite the table and could itself collide on pre-existing duplicates.
--- Instead the fingerprint is healed lazily with the capture expression the
--- first time such a row is moved (this function derives it, dedupes on it, and
--- persists it) or has its content corrected (server/queries.ts recomputes it).
+-- Instead every dedupe decision treats such a row by the fingerprint derived
+-- from its content — as the moving head AND as a resident of the target
+-- audience — and the fingerprint is healed lazily with the capture expression
+-- the first time such a row is moved (this function derives it, dedupes on it,
+-- and persists it) or has its content corrected (server/queries.ts recomputes
+-- it). Only pre-existing duplicates that were already side by side before this
+-- migration remain as they were.
 --
 -- Apply after 06-spaces.sql, 07-metadata-degradation.sql, and
 -- 08-access-tokens.sql; then run the stable 03-grants-assertion.sql source
@@ -303,15 +309,34 @@ BEGIN
   -- The audience-aware fingerprint index would reject the move; report the
   -- collision as an outcome instead of aborting the transaction. Both rows
   -- are readable by the caller: the head by the visibility check above, the
-  -- other because it lives in the audience the caller is moving into.
+  -- other because it lives in the audience the caller is moving into. A
+  -- resident legacy row with no stored fingerprint is compared on the value
+  -- derived from its content — the partial index never sees such a row, so
+  -- this probe is the only thing standing between it and a duplicate.
   SELECT t.id INTO existing_id
   FROM public.thoughts AS t
   WHERE t.workspace_id = new_workspace_id
     AND t.project_id IS NOT DISTINCT FROM new_project_id
     AND t.visibility = new_visibility
     AND t.owner_subject IS NOT DISTINCT FROM new_owner_subject
-    AND t.content_fingerprint = effective_fingerprint
     AND t.id <> head.id
+    AND (
+      t.content_fingerprint = effective_fingerprint
+      OR (
+        t.content_fingerprint IS NULL
+        AND pg_catalog.encode(
+          pg_catalog.sha256(
+            pg_catalog.convert_to(
+              pg_catalog.lower(pg_catalog.btrim(
+                pg_catalog.regexp_replace(t.content, '\s+', ' ', 'g')
+              )),
+              'UTF8'
+            )
+          ),
+          'hex'
+        ) = effective_fingerprint
+      )
+    )
   LIMIT 1;
   IF FOUND THEN
     RETURN QUERY
@@ -359,14 +384,33 @@ BEGIN
         content_fingerprint = effective_fingerprint
     WHERE t.id = head.id;
   EXCEPTION WHEN unique_violation THEN
+    -- Only a stored fingerprint can have raised the index; the derived
+    -- comparison is kept for symmetry with the pre-check so the two probes
+    -- cannot drift.
     SELECT t.id INTO existing_id
     FROM public.thoughts AS t
     WHERE t.workspace_id = new_workspace_id
       AND t.project_id IS NOT DISTINCT FROM new_project_id
       AND t.visibility = new_visibility
       AND t.owner_subject IS NOT DISTINCT FROM new_owner_subject
-      AND t.content_fingerprint = effective_fingerprint
       AND t.id <> head.id
+      AND (
+        t.content_fingerprint = effective_fingerprint
+        OR (
+          t.content_fingerprint IS NULL
+          AND pg_catalog.encode(
+            pg_catalog.sha256(
+              pg_catalog.convert_to(
+                pg_catalog.lower(pg_catalog.btrim(
+                  pg_catalog.regexp_replace(t.content, '\s+', ' ', 'g')
+                )),
+                'UTF8'
+              )
+            ),
+            'hex'
+          ) = effective_fingerprint
+        )
+      )
     LIMIT 1;
     IF NOT FOUND THEN
       -- Not the fingerprint index (or the competitor vanished again): this

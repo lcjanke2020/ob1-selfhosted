@@ -473,56 +473,113 @@ const FINGERPRINT_SQL = (contentParam: string) =>
 // lands between that pre-check and the write surfaces as a unique violation on
 // the audience-aware fingerprint index; the write runs inside a savepoint so
 // it is rolled back and re-probed into the same ConflictError.
+// Locks the head under the caller's audience (forced RLS: an invisible row is
+// simply absent) and computes the fingerprint of the incoming content in the
+// same statement. Both mutation entry points start here so no-op detection,
+// collision probing, and the rewrite all see one locked tuple.
+async function lockThoughtHead(
+  client: PoolClient,
+  id: string,
+  content: string,
+): Promise<ThoughtHeadRow | null> {
+  const head = await client.queryObject<ThoughtHeadRow>(
+    `SELECT id, content, metadata, workspace_id, project_id, visibility,
+            owner_subject, content_fingerprint,
+            ${FINGERPRINT_SQL("$2")} AS new_fingerprint
+     FROM thoughts WHERE id = $1
+     FOR UPDATE`,
+    [id, content],
+  );
+  return head.rows[0] ?? null;
+}
+
+// The head as the caller sees it plus its history depth, read while the row
+// lock from lockThoughtHead is held, so the pair describes one atomic state.
+async function unchangedOutcome(
+  client: PoolClient,
+  current: ThoughtHeadRow,
+): Promise<UpdateThoughtOutcome> {
+  const count = await client.queryObject<{ revision: number }>(
+    `SELECT count(*)::int AS revision
+     FROM thought_revisions WHERE thought_id = $1`,
+    [current.id],
+  );
+  const unchanged = await client.queryObject<ThoughtRecord>(
+    `SELECT id, content, metadata, workspace_id, project_id, visibility,
+            created_at, updated_at
+     FROM thoughts WHERE id = $1`,
+    [current.id],
+  );
+  const row = unchanged.rows[0];
+  if (!row) throw new Error("thought vanished under its own row lock");
+  return {
+    ...row,
+    outcome: "unchanged",
+    revision: count.rows[0]?.revision ?? 0,
+  };
+}
+
+export type ThoughtNoOpProbe =
+  | { state: "invisible" }
+  | { state: "unchanged"; outcome: UpdateThoughtOutcome }
+  | { state: "changed" };
+
+// The service's no-op decision, taken under the head's row lock in one
+// transaction: an invisible id, identical content (returned with the head and
+// history depth as they are at lock time — an in-flight writer is waited out,
+// and PostgreSQL re-fetches the latest committed tuple), or changed content,
+// which the caller then embeds/classifies before updateThoughtContent takes
+// the lock again for the write.
+export async function probeThoughtUnchanged(
+  pool: Pool,
+  input: { id: string; content: string; scope: ResolvedReadScope },
+): Promise<ThoughtNoOpProbe> {
+  return await withScopeClient(pool, input.scope, async (client) => {
+    const current = await lockThoughtHead(client, input.id, input.content);
+    if (!current) return { state: "invisible" };
+    if (current.content === input.content) {
+      return {
+        state: "unchanged",
+        outcome: await unchangedOutcome(client, current),
+      };
+    }
+    return { state: "changed" };
+  });
+}
+
 export async function updateThoughtContent(
   pool: Pool,
   input: UpdateThoughtInput,
 ): Promise<UpdateThoughtOutcome | null> {
   const embStr = toVectorLiteral(input.embedding);
   return await withScopeClient(pool, input.scope, async (client) => {
-    const head = await client.queryObject<ThoughtHeadRow>(
-      `SELECT id, content, metadata, workspace_id, project_id, visibility,
-              owner_subject, content_fingerprint,
-              ${FINGERPRINT_SQL("$2")} AS new_fingerprint
-       FROM thoughts WHERE id = $1
-       FOR UPDATE`,
-      [input.id, input.content],
-    );
-    const current = head.rows[0];
+    const current = await lockThoughtHead(client, input.id, input.content);
     if (!current) return null;
 
     if (current.content === input.content) {
-      const count = await client.queryObject<{ revision: number }>(
-        `SELECT count(*)::int AS revision
-         FROM thought_revisions WHERE thought_id = $1`,
-        [current.id],
-      );
-      const unchanged = await client.queryObject<ThoughtRecord>(
-        `SELECT id, content, metadata, workspace_id, project_id, visibility,
-                created_at, updated_at
-         FROM thoughts WHERE id = $1`,
-        [current.id],
-      );
-      const row = unchanged.rows[0];
-      if (!row) throw new Error("thought vanished under its own row lock");
-      return {
-        ...row,
-        outcome: "unchanged",
-        revision: count.rows[0]?.revision ?? 0,
-      };
+      return await unchangedOutcome(client, current);
     }
 
     // Same-audience collision probe. Both rows are readable under the
     // installed scope (the head by the lock above, the other because it shares
     // the head's exact audience), so naming the colliding id leaks nothing.
+    // A legacy row without a stored fingerprint is compared on the fingerprint
+    // derived from its content, so it cannot hide behind the partial index.
     const probeCollision = async (): Promise<string | null> => {
       const collision = await client.queryObject<{ id: string }>(
-        `SELECT id FROM thoughts
-         WHERE content_fingerprint = $1
-           AND workspace_id = $2
-           AND project_id IS NOT DISTINCT FROM $3
-           AND visibility = $4::memory_scope.visibility
-           AND owner_subject IS NOT DISTINCT FROM $5
-           AND id <> $6
+        `SELECT id FROM thoughts AS t
+         WHERE t.workspace_id = $2
+           AND t.project_id IS NOT DISTINCT FROM $3
+           AND t.visibility = $4::memory_scope.visibility
+           AND t.owner_subject IS NOT DISTINCT FROM $5
+           AND t.id <> $6
+           AND (
+             t.content_fingerprint = $1
+             OR (
+               t.content_fingerprint IS NULL
+               AND ${FINGERPRINT_SQL("t.content")} = $1
+             )
+           )
          LIMIT 1`,
         [
           current.new_fingerprint,
@@ -535,11 +592,9 @@ export async function updateThoughtContent(
       );
       return collision.rows[0]?.id ?? null;
     };
-    const conflictError = (id: string | null) =>
+    const conflictError = (id: string) =>
       new ConflictError(
-        id
-          ? `A thought with identical content already exists in this audience (id: ${id}).`
-          : "A thought with identical content already exists in this audience.",
+        `A thought with identical content already exists in this audience (id: ${id}).`,
       );
 
     const colliding = await probeCollision();
@@ -550,7 +605,9 @@ export async function updateThoughtContent(
     // audience-aware fingerprint index (after waiting out the in-flight
     // competitor). Roll both statements back — the head's row lock survives
     // the savepoint — and re-probe so the now-visible collision is reported
-    // exactly like the pre-check would have. Anything else propagates.
+    // exactly like the pre-check would have. A unique violation the re-probe
+    // cannot attribute to a colliding thought is not a dedupe conflict and is
+    // rethrown as-is; anything else propagates untouched.
     await client.queryArray("SAVEPOINT thought_mutation");
     let revisionNumber = 1;
     let row: ThoughtRecord | undefined;
@@ -612,7 +669,9 @@ export async function updateThoughtContent(
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
       await client.queryArray("ROLLBACK TO SAVEPOINT thought_mutation");
-      throw conflictError(await probeCollision());
+      const competitor = await probeCollision();
+      if (!competitor) throw error;
+      throw conflictError(competitor);
     }
     await client.queryArray("RELEASE SAVEPOINT thought_mutation");
     if (!row) throw new Error("thought update returned no row");
@@ -624,23 +683,6 @@ export async function updateThoughtContent(
       outcome: "updated",
       revision: revisionNumber,
     };
-  });
-}
-
-// Number of revision rows on record for a head the caller can read (forced
-// RLS on thought_revisions gates on the head; an invisible head counts 0).
-export async function countThoughtRevisions(
-  pool: Pool,
-  id: string,
-  scope: ResolvedReadScope,
-): Promise<number> {
-  return await withScopeClient(pool, scope, async (client) => {
-    const result = await client.queryObject<{ revision: number }>(
-      `SELECT count(*)::int AS revision
-       FROM thought_revisions WHERE thought_id = $1`,
-      [id],
-    );
-    return result.rows[0]?.revision ?? 0;
   });
 }
 

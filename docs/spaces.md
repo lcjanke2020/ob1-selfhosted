@@ -90,10 +90,11 @@ personal-to-you and nobody else. The seeded `sensitive` workspace accepts only
 personal targets. Moving a thought onto identical content already present in the
 target audience is refused as a conflict; moving it to the audience it is
 already in is a no-op. A legacy row captured before content fingerprints existed
-(`content_fingerprint IS NULL`) is deduplicated on the fingerprint the move
-derives from its content, and gains that fingerprint when it moves — or when its
-content is corrected; migration 10 deliberately does not backfill such rows in
-bulk.
+(`content_fingerprint IS NULL`) is deduplicated on the fingerprint derived from
+its content — whether it is the row being moved or corrected, or an existing
+resident of the target audience — and gains that fingerprint when it moves or
+when its content is corrected; migration 10 deliberately does not backfill such
+rows in bulk.
 
 Both tools apply the same fail-closed rules as capture and recall: the caller
 must be able to read the row under the requested current scope (otherwise it is

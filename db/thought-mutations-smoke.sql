@@ -92,6 +92,42 @@ INSERT INTO public.thoughts (
     '{"_mut_smoke_fixture":true}'::jsonb,
     NULL,
     '__mut_smoke_team', NULL, 'personal', 'auth0|alice'
+  ),
+  -- T8 (legacy, NO fingerprint, resident in team/workspace) + T9 (alice's
+  -- personal copy WITH a canonical fingerprint): moving T9 onto T8's audience
+  -- must conflict even though T8 is invisible to the partial unique index.
+  (
+    '00000000-0000-0000-0000-000000001008',
+    'mutation smoke legacy resident text',
+    '{"_mut_smoke_fixture":true}'::jsonb,
+    NULL,
+    '__mut_smoke_team', NULL, 'workspace', NULL
+  ),
+  (
+    '00000000-0000-0000-0000-000000001009',
+    'mutation smoke legacy resident text',
+    '{"_mut_smoke_fixture":true}'::jsonb,
+    encode(sha256(convert_to(lower(trim(regexp_replace(
+      'mutation smoke legacy resident text', '\s+', ' ', 'g'
+    ))), 'UTF8')), 'hex'),
+    '__mut_smoke_team', NULL, 'personal', 'auth0|alice'
+  ),
+  -- T10 + T11: BOTH legacy (no fingerprint), identical text, distinct
+  -- audiences — the pre-migration duplicate pair; moving one onto the other
+  -- must still conflict.
+  (
+    '00000000-0000-0000-0000-000000001010',
+    'mutation smoke legacy pair text',
+    '{"_mut_smoke_fixture":true}'::jsonb,
+    NULL,
+    '__mut_smoke_team', 'alpha', 'project', NULL
+  ),
+  (
+    '00000000-0000-0000-0000-000000001011',
+    'mutation smoke legacy pair text',
+    '{"_mut_smoke_fixture":true}'::jsonb,
+    NULL,
+    '__mut_smoke_team', NULL, 'personal', 'auth0|alice'
   );
 
 SET ROLE openbrain_app;
@@ -498,6 +534,46 @@ END;
 $$;
 COMMIT;
 
+-- A resident legacy row (no stored fingerprint) in the TARGET audience is
+-- deduplicated on the fingerprint derived from its content — for a
+-- fingerprinted mover and for a legacy mover alike.
+BEGIN;
+SELECT
+  set_config('openbrain.workspace_id', '__mut_smoke_team', true),
+  set_config('openbrain.project_id', 'alpha', true),
+  set_config('openbrain.principal', 'auth0|alice', true),
+  set_config('openbrain.visibilities', 'personal,project,workspace', true);
+DO $$
+DECLARE r record; n integer;
+BEGIN
+  SELECT * INTO r FROM memory_scope.move_thought(
+    '00000000-0000-0000-0000-000000001009',
+    '__mut_smoke_team', NULL, 'workspace', 'funnel', NULL
+  );
+  IF r.outcome <> 'conflict'
+     OR r.conflict_thought_id <> '00000000-0000-0000-0000-000000001008' THEN
+    RAISE EXCEPTION 'move onto a legacy NULL-fingerprint resident slipped past dedupe: %', r;
+  END IF;
+  SELECT * INTO r FROM memory_scope.move_thought(
+    '00000000-0000-0000-0000-000000001011',
+    '__mut_smoke_team', 'alpha', 'project', 'funnel', NULL
+  );
+  IF r.outcome <> 'conflict'
+     OR r.conflict_thought_id <> '00000000-0000-0000-0000-000000001010' THEN
+    RAISE EXCEPTION 'legacy→legacy identical move slipped past dedupe: %', r;
+  END IF;
+  SELECT count(*) INTO n FROM public.thoughts
+  WHERE id IN (
+    '00000000-0000-0000-0000-000000001009',
+    '00000000-0000-0000-0000-000000001011'
+  ) AND visibility = 'personal' AND owner_subject = 'auth0|alice';
+  IF n <> 2 THEN
+    RAISE EXCEPTION 'a conflicting move mutated its head (% still personal)', n;
+  END IF;
+END;
+$$;
+ROLLBACK;
+
 -- ---------- Column-scoped UPDATE: audience columns are off-limits ---------
 -- Under the union read scope the RLS policy alone would admit an in-workspace
 -- re-scope; the column-scoped grant is what makes the helper the only path.
@@ -688,7 +764,11 @@ BEGIN
     '00000000-0000-0000-0000-000000001004',
     '00000000-0000-0000-0000-000000001005',
     '00000000-0000-0000-0000-000000001006',
-    '00000000-0000-0000-0000-000000001007'
+    '00000000-0000-0000-0000-000000001007',
+    '00000000-0000-0000-0000-000000001008',
+    '00000000-0000-0000-0000-000000001009',
+    '00000000-0000-0000-0000-000000001010',
+    '00000000-0000-0000-0000-000000001011'
   );
   IF n <> 4 THEN
     RAISE EXCEPTION 'expected 4 revision rows across the fixtures, found %', n;

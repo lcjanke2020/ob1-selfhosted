@@ -383,7 +383,7 @@ Deno.test("thought mutations (services + MCP)", async (t) => {
     );
 
     await t.step(
-      "update: identical content is a no-op — no embed, no classify, no writes",
+      "update: identical content is a no-op decided under the row lock — no embed, no classify, no writes",
       async () => {
         const { calls, handler } = updateScript({
           currentContent: "already correct",
@@ -399,14 +399,42 @@ Deno.test("thought mutations (services + MCP)", async (t) => {
         assertEquals(out.revision, 2);
         assertEquals(deps.embedCalls, []);
         assertEquals(deps.extractCalls, []);
+        // The decision is taken on the LOCKED head (one FOR UPDATE), and the
+        // head + revision count are read in that same transaction — never a
+        // separate unlocked fetch.
+        const sqls = calls.map((c) => c.sql);
+        assertEquals(sqls.filter((q) => q.includes("FOR UPDATE")).length, 1);
         assertEquals(
-          calls.some((c) =>
-            c.sql.includes("FOR UPDATE") ||
-            c.sql.includes("UPDATE thoughts") ||
-            c.sql.includes("INSERT INTO thought_revisions")
+          sqls.some((q) => q.includes("FROM thoughts WHERE id = $1 LIMIT 1")),
+          false,
+          "no unlocked pre-fetch",
+        );
+        assertEquals(
+          sqls.some((q) =>
+            q.includes("UPDATE thoughts") ||
+            q.includes("INSERT INTO thought_revisions")
           ),
           false,
         );
+      },
+    );
+
+    await t.step(
+      "update: the locked probe sees changed content and falls through to the write path",
+      async () => {
+        // The lock is taken twice: once by the probe (content differs → fall
+        // through), once by updateThoughtContent for the write.
+        const { calls, handler } = updateScript();
+        const deps = makeDeps();
+        const out = await updateThoughtInScope(
+          asPool(new FakePool(handler)),
+          { id: THOUGHT_ID, content: "corrected", auth: OAUTH_AUTH },
+          deps,
+        );
+        assertEquals(out?.outcome, "updated");
+        const sqls = calls.map((c) => c.sql);
+        assertEquals(sqls.filter((q) => q.includes("FOR UPDATE")).length, 2);
+        assertEquals(deps.embedCalls, ["corrected"]);
       },
     );
 
@@ -481,6 +509,49 @@ Deno.test("thought mutations (services + MCP)", async (t) => {
         assertEquals(
           sqls.some((q) => q.startsWith("RELEASE SAVEPOINT")),
           false,
+        );
+      },
+    );
+
+    await t.step(
+      "update: a unique violation the re-probe cannot attribute is rethrown, not relabelled",
+      async () => {
+        const base = updateScript();
+        const calls = base.calls;
+        let probes = 0;
+        const handler: QueryHandler = (sql, params) => {
+          if (sql.includes("id <> $6")) {
+            calls.push({ sql, params });
+            probes += 1;
+            return { rows: [] };
+          }
+          if (sql.includes("INSERT INTO thought_revisions")) {
+            calls.push({ sql, params });
+            throw Object.assign(
+              new Error(
+                'duplicate key value violates unique constraint "thought_revisions_pkey"',
+              ),
+              { fields: { code: "23505" } },
+            );
+          }
+          return base.handler(sql, params);
+        };
+        const err = await assertRejects(
+          () =>
+            updateThoughtInScope(
+              asPool(new FakePool(handler)),
+              { id: THOUGHT_ID, content: "raced text", auth: OAUTH_AUTH },
+              makeDeps(),
+            ),
+          Error,
+          "thought_revisions_pkey",
+        );
+        assert(!(err instanceof ConflictError));
+        assertEquals(probes, 2, "must re-probe after the rollback");
+        assert(
+          calls.some((c) =>
+            c.sql.startsWith("ROLLBACK TO SAVEPOINT thought_mutation")
+          ),
         );
       },
     );

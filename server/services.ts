@@ -29,13 +29,13 @@ import type { MetadataExtractionResult } from "./metadata.ts";
 import {
   type CaptureOutcome,
   captureThought,
-  countThoughtRevisions,
   fetchThought,
   getStats,
   type ListOptions,
   listThoughts,
   moveThought,
   type MoveThoughtOutcome,
+  probeThoughtUnchanged,
   searchThoughts,
   type Stats,
   type ThoughtMutationActor,
@@ -383,13 +383,15 @@ export async function getThoughtStatsInScope(
   return await getStats(pool, scope);
 }
 
-// Replace a thought's content in place inside its CURRENT audience: same
-// visibility rule as fetch (an id outside the caller's scope is null), then
-// re-embed and re-classify exactly like a capture, then a single locked
+// Replace a thought's content in place inside its CURRENT audience: a locked
+// probe first (same visibility rule as fetch — an id outside the caller's
+// scope is null — and identical content is a no-op decided under the head's
+// row lock, so the returned head and history depth are one atomic state),
+// then re-embed and re-classify exactly like a capture, then a single locked
 // transaction that snapshots the prior state to thought_revisions and rewrites
 // the head. Original capture stamps (source/door/sub/token_label/provenance)
-// survive; classifier fields are replaced by the fresh extraction. Identical
-// content is a no-op.
+// survive; classifier fields are replaced by the fresh extraction. Content
+// never reaches the embedder or the classifier for a no-op or an invisible id.
 export async function updateThoughtInScope(
   pool: Pool,
   input: {
@@ -407,20 +409,18 @@ export async function updateThoughtInScope(
     validateMemoryScope(input.scope),
     input.auth,
   );
-  // An invisible or unknown id fails HERE, before content reaches the embedder
-  // or the classifier — the same fail-fast order as a session refresh.
-  const existing = await fetchThought(pool, thoughtId, scope);
-  if (!existing) return null;
-  // Identical content is a no-op: do not replay the text to the embedder or a
-  // possibly off-box classifier for nothing. (The query layer re-checks under
-  // the row lock, so a concurrent edit between here and there is still safe.)
-  if (existing.content === content) {
-    return {
-      ...existing,
-      outcome: "unchanged",
-      revision: await countThoughtRevisions(pool, thoughtId, scope),
-    };
-  }
+  // Invisible/unknown ids and identical content are decided HERE, under the
+  // head's row lock, before content reaches the embedder or a possibly
+  // off-box classifier. Changed content falls through; updateThoughtContent
+  // re-locks and re-checks, so a concurrent edit in between is still safe
+  // (its own locked no-op branch answers if the texts have converged).
+  const probe = await probeThoughtUnchanged(pool, {
+    id: thoughtId,
+    content,
+    scope,
+  });
+  if (probe.state === "invisible") return null;
+  if (probe.state === "unchanged") return probe.outcome;
   const [embedding, extraction] = await Promise.all([
     embedOrUpstreamError(deps.embed, content),
     deps.extractMetadata(content),

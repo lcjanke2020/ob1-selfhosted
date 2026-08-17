@@ -32,6 +32,7 @@ Deno.env.set("MCP_ACCESS_KEY", "thought-mutations-smoke-key".repeat(4));
 Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 
 const { moveThought, updateThoughtContent } = await import("./queries.ts");
+const { updateThoughtInScope } = await import("./services.ts");
 const { ConflictError } = await import("./errors.ts");
 
 const database = "openbrain";
@@ -251,6 +252,38 @@ try {
       }),
       dense: await insertThought(client, {
         content: "db smoke: dense revisions head",
+        workspaceId: "default",
+        projectId: null,
+        visibility: "workspace",
+        ownerSubject: null,
+      }),
+      // Legacy NULL-fingerprint RESIDENT of the team workspace audience: a
+      // fingerprinted mover and a content update onto its text must conflict.
+      legacyResident: await insertThought(client, {
+        content: "db smoke: legacy resident text",
+        workspaceId: WORKSPACE,
+        projectId: null,
+        visibility: "workspace",
+        ownerSubject: null,
+        nullFingerprint: true,
+      }),
+      residentMover: await insertThought(client, {
+        content: "db smoke: legacy resident text",
+        workspaceId: WORKSPACE,
+        projectId: null,
+        visibility: "personal",
+        ownerSubject: ALICE,
+      }),
+      residentUpdater: await insertThought(client, {
+        content: "db smoke: will be corrected onto the resident",
+        workspaceId: WORKSPACE,
+        projectId: null,
+        visibility: "workspace",
+        ownerSubject: null,
+      }),
+      // Head for the service-level locked no-op probe.
+      probeHead: await insertThought(client, {
+        content: "db smoke: probe head original",
         workspaceId: "default",
         projectId: null,
         visibility: "workspace",
@@ -780,8 +813,226 @@ try {
     });
   }
 
+  // ---- legacy NULL fingerprint on the TARGET side, both paths -----------
+  const teamAliceUnion = scope(WORKSPACE, ALICE, ["personal", "workspace"]);
+  const residentMove = await moveThought(appPool, {
+    id: ids.residentMover,
+    target: {
+      workspaceId: WORKSPACE,
+      projectId: null,
+      visibility: "workspace",
+    },
+    actor: actor(ALICE),
+    scope: teamAliceUnion,
+  });
+  assertEquals(residentMove?.outcome, "conflict");
+  assertEquals(residentMove?.conflict_thought_id, ids.legacyResident);
+  const residentUpdate = await assertRejects(
+    () =>
+      updateThoughtContent(appPool, {
+        id: ids.residentUpdater,
+        content: "db smoke: legacy resident text",
+        embedding: ONE_VECTOR,
+        freshMetadata: {},
+        degradationEvents: [],
+        actor: actor(null, "tailnet"),
+        scope: scope(WORKSPACE, null, ["workspace"]),
+      }),
+    ConflictError,
+  );
+  assert(residentUpdate.message.includes(ids.legacyResident));
+  await withAdmin(async (client) => {
+    const r = await client.queryObject<{ n: bigint }>(
+      `SELECT count(*) AS n FROM public.thoughts
+       WHERE workspace_id = $1 AND visibility = 'workspace'
+         AND content = 'db smoke: legacy resident text'`,
+      [WORKSPACE],
+    );
+    assertEquals(
+      Number(r.rows[0].n),
+      1,
+      "the legacy resident must remain the only copy in its audience",
+    );
+  });
+
+  // ---- service no-op probe is a single locked decision -----------------
+  // A competitor holds a content rewrite of the head uncommitted. The service
+  // must wait it out (row lock), then decide against the LATEST tuple:
+  // (a) the request carrying the competitor's new text is a no-op reported
+  //     with revision 1 — the head and history depth as one atomic state;
+  // (b) the request carrying the ORIGINAL text is NOT a no-op: it falls
+  //     through to embed/classify and writes revision 2 restoring the text.
+  {
+    // Recording fakes for the service's embed/classify seam (real vector width
+    // so the write path can persist what the fake returns).
+    const embedCalls: string[] = [];
+    const extractCalls: string[] = [];
+    const deps = {
+      embed: (text: string) => {
+        embedCalls.push(text);
+        return Promise.resolve([...ONE_VECTOR]);
+      },
+      extractMetadata: (text: string) => {
+        extractCalls.push(text);
+        return Promise.resolve({
+          metadata: { type: "observation" },
+          classifier: { schema_version: 1 as const, endpoint: "stub" as const },
+          degradation_events: [],
+        });
+      },
+    };
+    const auth = { door: "tailnet" as const, sub: null, tokenLabel: null };
+    const held = await adminPool.connect();
+    try {
+      await held.queryArray("BEGIN");
+      await held.queryArray(
+        `SELECT set_config('openbrain.workspace_id', 'default', true),
+                set_config('openbrain.project_id', '', true),
+                set_config('openbrain.principal', '', true),
+                set_config('openbrain.visibilities', 'workspace', true)`,
+      );
+      // The competitor is the production update path on another connection.
+      await held.queryArray(
+        `SELECT id FROM public.thoughts WHERE id = $1 FOR UPDATE`,
+        [ids.probeHead],
+      );
+      await held.queryArray(
+        `INSERT INTO public.thought_revisions (
+           thought_id, revision, change_kind, prior_content, prior_metadata,
+           prior_workspace_id, prior_project_id, prior_visibility,
+           prior_owner_subject, changed_by_subject, changed_by_door
+         ) VALUES ($1, 1, 'content', 'db smoke: probe head original', '{}',
+                   'default', NULL, 'workspace', NULL, NULL, 'tailnet')`,
+        [ids.probeHead],
+      );
+      await held.queryArray(
+        `UPDATE public.thoughts SET content = 'db smoke: probe head competitor',
+           content_fingerprint = ${CANONICAL_FINGERPRINT_SQL}
+         WHERE id = $2`,
+        ["db smoke: probe head competitor", ids.probeHead],
+      );
+      const started = performance.now();
+      const racing = updateThoughtInScope(
+        appPool,
+        { id: ids.probeHead, content: "db smoke: probe head competitor", auth },
+        deps,
+      );
+      await sleep(HOLD_MS);
+      await held.queryArray("COMMIT");
+      const outcome = await racing;
+      const elapsed = performance.now() - started;
+      assert(outcome);
+      assertEquals(outcome.outcome, "unchanged");
+      assertEquals(outcome.content, "db smoke: probe head competitor");
+      assertEquals(
+        outcome.revision,
+        1,
+        "history depth must match the head returned",
+      );
+      assert(
+        elapsed >= HOLD_MS * 0.9,
+        `no-op probe must have waited on the row lock (${
+          elapsed.toFixed(0)
+        }ms)`,
+      );
+      assertEquals(embedCalls, [], "a no-op must not embed");
+      assertEquals(extractCalls, [], "a no-op must not classify");
+    } finally {
+      held.release();
+    }
+    const restored = await updateThoughtInScope(
+      appPool,
+      { id: ids.probeHead, content: "db smoke: probe head original", auth },
+      deps,
+    );
+    assert(restored);
+    assertEquals(restored.outcome, "updated");
+    assertEquals(restored.revision, 2);
+    assertEquals(embedCalls, ["db smoke: probe head original"]);
+    assertEquals(extractCalls, ["db smoke: probe head original"]);
+  }
+
+  // ---- a unique violation that is NOT a dedupe collision is rethrown -----
+  // Misalign the history identity sequence so the revision insert collides on
+  // thought_revisions_pkey: the savepoint rolls back, the re-probe finds no
+  // colliding thought, and the ORIGINAL database error must surface — not a
+  // fabricated content conflict. The head stays untouched.
+  {
+    const seq = await withAdmin(async (client) => {
+      const r = await client.queryObject<{ seq: string; max_id: bigint }>(
+        `SELECT pg_get_serial_sequence('public.thought_revisions', 'id') AS seq,
+                max(id) AS max_id
+         FROM public.thought_revisions`,
+      );
+      const { seq, max_id } = r.rows[0];
+      assert(seq && max_id !== null);
+      await client.queryArray(`SELECT setval($1, $2::bigint - 1, true)`, [
+        seq,
+        max_id,
+      ]);
+      return { seq, maxId: max_id };
+    });
+    try {
+      const err = await assertRejects(() =>
+        updateThoughtContent(appPool, {
+          id: ids.dense,
+          content: "db smoke: dense revisions head after pkey clash",
+          embedding: ONE_VECTOR,
+          freshMetadata: {},
+          degradationEvents: [],
+          actor: actor(ALICE),
+          scope: defaultAlice,
+        })
+      );
+      assert(
+        !(err instanceof ConflictError),
+        "an unattributable unique violation must not become a content conflict",
+      );
+      assert(
+        String((err as Error).message).includes("thought_revisions_pkey"),
+        (err as Error).message,
+      );
+    } finally {
+      await withAdmin(async (client) => {
+        await client.queryArray(`SELECT setval($1, $2::bigint, true)`, [
+          seq.seq,
+          seq.maxId,
+        ]);
+      });
+    }
+    await withAdmin(async (client) => {
+      const r = await client.queryObject<{ content: string; n: bigint }>(
+        `SELECT content,
+                (SELECT count(*) FROM public.thought_revisions WHERE thought_id = t.id) AS n
+         FROM public.thoughts t WHERE id = $1`,
+        [ids.dense],
+      );
+      assertEquals(
+        r.rows[0].content.startsWith("db smoke: dense revisions head v"),
+        true,
+      );
+      assertEquals(
+        Number(r.rows[0].n),
+        N,
+        "the failed write must leave history intact",
+      );
+    });
+    // The pool connection is healthy afterwards.
+    const after = await updateThoughtContent(appPool, {
+      id: ids.dense,
+      content: "db smoke: dense revisions head after recovery",
+      embedding: ONE_VECTOR,
+      freshMetadata: {},
+      degradationEvents: [],
+      actor: actor(ALICE),
+      scope: defaultAlice,
+    });
+    assertEquals(after?.outcome, "updated");
+    assertEquals(after?.revision, N + 1);
+  }
+
   console.log(
-    "thought mutation query path: invisible→null, unchanged, conflict, update (re-embed, fingerprint, tsvector, stamps kept, history), move (owner-stamped, history follows head, dedupe conflict, explicit widening), legacy NULL fingerprint (conflict + heal), dense concurrent revisions, and race-to-conflict on both paths passed",
+    "thought mutation query path: invisible→null, unchanged, conflict, update (re-embed, fingerprint, tsvector, stamps kept, history), move (owner-stamped, history follows head, dedupe conflict, explicit widening), legacy NULL fingerprint (source: conflict + heal; target: conflict on both paths), dense concurrent revisions, race-to-conflict on both paths, locked service no-op probe, and unattributable unique-violation rethrow passed",
   );
 } finally {
   await cleanFixture();

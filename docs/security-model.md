@@ -281,13 +281,14 @@ caller must already see the row under the installed audience (an invisible row
 returns nothing rather than an error), the target must be a registered,
 shape-valid audience, personal-only workspaces accept only personal rows, and a
 personal owner is stamped from the transaction-local principal, never from an
-argument. Deduplication is enforced on the canonical fingerprint (derived and
-persisted for legacy rows without one), and a collision — found up front or
-landing between the check and the write — is reported as an outcome, never as an
-index error. Content updates use no privileged path at all. Both write the prior
-state to `public.thought_revisions`, which is append-only to the application
-role and readable only when the head thought is readable, so a thought moved to
-a narrower audience takes its history with it. The grants assertion pins the
+argument. Deduplication is enforced on the canonical fingerprint — derived on
+the fly for legacy rows without one, on both sides of the comparison, and
+persisted on the row that moves — and a collision, found up front or landing
+between the check and the write, is reported as an outcome, never as an index
+error. Content updates use no privileged path at all. Both write the prior state
+to `public.thought_revisions`, which is append-only to the application role and
+readable only when the head thought is readable, so a thought moved to a
+narrower audience takes its history with it. The grants assertion pins the
 column-scoped grant, the function's definer/owner/config shape and grantee set,
 and the history table's grants and forced policy; the boot probe requires the
 function and the table.
