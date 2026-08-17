@@ -54,9 +54,12 @@
 -- the first time such a row is moved (this function derives it, dedupes on it,
 -- and persists it) or has its content corrected (server/queries.ts recomputes
 -- it). Only pre-existing duplicates that were already side by side before this
--- migration remain as they were. New NULL-fingerprint rows cannot arise through
--- the application role — its only INSERT path always stores a fingerprint — so
--- the class is bounded to administrative inserts and restores of old dumps.
+-- migration remain as they were. The shipped capture path (server/queries.ts)
+-- always stores a fingerprint, so the server itself does not create new
+-- NULL-fingerprint rows; the column stays nullable and openbrain_app holds
+-- table-wide INSERT, so direct or misbehaving app-role SQL, administrative
+-- inserts, and restores of old dumps still can. Every dedupe decision above
+-- treats such a row by its derived fingerprint regardless of how it arose.
 --
 -- Apply after 06-spaces.sql, 07-metadata-degradation.sql, and
 -- 08-access-tokens.sql; then run the stable 03-grants-assertion.sql source
