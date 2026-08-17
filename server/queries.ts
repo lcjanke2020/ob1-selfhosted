@@ -447,6 +447,13 @@ type ThoughtHeadRow = {
   new_fingerprint: string;
 };
 
+// deno-postgres surfaces server errors as PostgresError with the SQLSTATE in
+// fields.code; duck-typed so hermetic fakes can raise the same shape.
+function isUniqueViolation(error: unknown): boolean {
+  return (error as { fields?: { code?: unknown } } | null)?.fields?.code ===
+    "23505";
+}
+
 // The same fingerprint expression captureThought uses inline, kept adjacent so
 // the two cannot drift: an update must dedupe exactly like a capture.
 const FINGERPRINT_SQL = (contentParam: string) =>
@@ -462,9 +469,10 @@ const FINGERPRINT_SQL = (contentParam: string) =>
 // it, and the head row is locked so revision numbering and concurrent edits
 // serialize. Identical content is a no-op that writes nothing. Content whose
 // fingerprint already exists in the same audience is a ConflictError naming
-// the colliding row (visible to the caller by construction), so the
-// audience-aware fingerprint index is never hit for the common case; a race
-// still surfaces as a unique-violation from PostgreSQL.
+// the colliding row (visible to the caller by construction). A collision that
+// lands between that pre-check and the write surfaces as a unique violation on
+// the audience-aware fingerprint index; the write runs inside a savepoint so
+// it is rolled back and re-probed into the same ConflictError.
 export async function updateThoughtContent(
   pool: Pool,
   input: UpdateThoughtInput,
@@ -503,84 +511,110 @@ export async function updateThoughtContent(
       };
     }
 
-    const collision = await client.queryObject<{ id: string }>(
-      `SELECT id FROM thoughts
-       WHERE content_fingerprint = $1
-         AND workspace_id = $2
-         AND project_id IS NOT DISTINCT FROM $3
-         AND visibility = $4::memory_scope.visibility
-         AND owner_subject IS NOT DISTINCT FROM $5
-         AND id <> $6
-       LIMIT 1`,
-      [
-        current.new_fingerprint,
-        current.workspace_id,
-        current.project_id,
-        current.visibility,
-        current.owner_subject,
-        current.id,
-      ],
-    );
-    const colliding = collision.rows[0];
-    if (colliding) {
-      throw new ConflictError(
-        `A thought with identical content already exists in this audience (id: ${colliding.id}).`,
+    // Same-audience collision probe. Both rows are readable under the
+    // installed scope (the head by the lock above, the other because it shares
+    // the head's exact audience), so naming the colliding id leaks nothing.
+    const probeCollision = async (): Promise<string | null> => {
+      const collision = await client.queryObject<{ id: string }>(
+        `SELECT id FROM thoughts
+         WHERE content_fingerprint = $1
+           AND workspace_id = $2
+           AND project_id IS NOT DISTINCT FROM $3
+           AND visibility = $4::memory_scope.visibility
+           AND owner_subject IS NOT DISTINCT FROM $5
+           AND id <> $6
+         LIMIT 1`,
+        [
+          current.new_fingerprint,
+          current.workspace_id,
+          current.project_id,
+          current.visibility,
+          current.owner_subject,
+          current.id,
+        ],
       );
+      return collision.rows[0]?.id ?? null;
+    };
+    const conflictError = (id: string | null) =>
+      new ConflictError(
+        id
+          ? `A thought with identical content already exists in this audience (id: ${id}).`
+          : "A thought with identical content already exists in this audience.",
+      );
+
+    const colliding = await probeCollision();
+    if (colliding) throw conflictError(colliding);
+
+    // History first, then the head, inside one savepoint: a collision that
+    // committed between the probe and the write fails the head rewrite on the
+    // audience-aware fingerprint index (after waiting out the in-flight
+    // competitor). Roll both statements back — the head's row lock survives
+    // the savepoint — and re-probe so the now-visible collision is reported
+    // exactly like the pre-check would have. Anything else propagates.
+    await client.queryArray("SAVEPOINT thought_mutation");
+    let revisionNumber = 1;
+    let row: ThoughtRecord | undefined;
+    try {
+      const revision = await client.queryObject<{ revision: number }>(
+        `INSERT INTO thought_revisions (
+           thought_id, revision, change_kind,
+           prior_content, prior_metadata,
+           prior_workspace_id, prior_project_id, prior_visibility,
+           prior_owner_subject,
+           changed_by_subject, changed_by_door, changed_by_token_label
+         )
+         SELECT $1, COALESCE(max(revision), 0) + 1, 'content',
+                $2, $3::jsonb,
+                $4, $5, $6::memory_scope.visibility, $7,
+                $8, $9, $10
+         FROM thought_revisions WHERE thought_id = $1
+         RETURNING revision`,
+        [
+          current.id,
+          current.content,
+          JSON.stringify(current.metadata),
+          current.workspace_id,
+          current.project_id,
+          current.visibility,
+          current.owner_subject,
+          input.actor.subject,
+          input.actor.door,
+          input.actor.tokenLabel,
+        ],
+      );
+      revisionNumber = revision.rows[0]?.revision ?? 1;
+
+      const updated = await client.queryObject<ThoughtRecord>(
+        `UPDATE thoughts
+         SET content = $2,
+             embedding = $3::vector,
+             content_fingerprint = ${FINGERPRINT_SQL("$2")},
+             metadata = $4::jsonb || COALESCE(
+               (
+                 SELECT jsonb_object_agg(preserved.key, preserved.value)
+                 FROM jsonb_each(thoughts.metadata) AS preserved
+                 WHERE preserved.key = ANY ($5::text[])
+               ),
+               '{}'::jsonb
+             )
+         WHERE id = $1
+         RETURNING id, content, metadata, workspace_id, project_id, visibility,
+                   created_at, updated_at`,
+        [
+          current.id,
+          input.content,
+          embStr,
+          JSON.stringify(input.freshMetadata),
+          [...PRESERVED_METADATA_KEYS_ON_UPDATE],
+        ],
+      );
+      row = updated.rows[0];
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      await client.queryArray("ROLLBACK TO SAVEPOINT thought_mutation");
+      throw conflictError(await probeCollision());
     }
-
-    const revision = await client.queryObject<{ revision: number }>(
-      `INSERT INTO thought_revisions (
-         thought_id, revision, change_kind,
-         prior_content, prior_metadata,
-         prior_workspace_id, prior_project_id, prior_visibility,
-         prior_owner_subject,
-         changed_by_subject, changed_by_door, changed_by_token_label
-       )
-       SELECT $1, COALESCE(max(revision), 0) + 1, 'content',
-              $2, $3::jsonb,
-              $4, $5, $6::memory_scope.visibility, $7,
-              $8, $9, $10
-       FROM thought_revisions WHERE thought_id = $1
-       RETURNING revision`,
-      [
-        current.id,
-        current.content,
-        JSON.stringify(current.metadata),
-        current.workspace_id,
-        current.project_id,
-        current.visibility,
-        current.owner_subject,
-        input.actor.subject,
-        input.actor.door,
-        input.actor.tokenLabel,
-      ],
-    );
-
-    const updated = await client.queryObject<ThoughtRecord>(
-      `UPDATE thoughts
-       SET content = $2,
-           embedding = $3::vector,
-           content_fingerprint = ${FINGERPRINT_SQL("$2")},
-           metadata = $4::jsonb || COALESCE(
-             (
-               SELECT jsonb_object_agg(preserved.key, preserved.value)
-               FROM jsonb_each(thoughts.metadata) AS preserved
-               WHERE preserved.key = ANY ($5::text[])
-             ),
-             '{}'::jsonb
-           )
-       WHERE id = $1
-       RETURNING id, content, metadata, workspace_id, project_id, visibility,
-                 created_at, updated_at`,
-      [
-        current.id,
-        input.content,
-        embStr,
-        JSON.stringify(input.freshMetadata),
-        [...PRESERVED_METADATA_KEYS_ON_UPDATE],
-      ],
-    );
-    const row = updated.rows[0];
+    await client.queryArray("RELEASE SAVEPOINT thought_mutation");
     if (!row) throw new Error("thought update returned no row");
 
     await recordDegradationEvents(client, row.id, input.degradationEvents);
@@ -588,7 +622,7 @@ export async function updateThoughtContent(
     return {
       ...row,
       outcome: "updated",
-      revision: revision.rows[0]?.revision ?? 1,
+      revision: revisionNumber,
     };
   });
 }

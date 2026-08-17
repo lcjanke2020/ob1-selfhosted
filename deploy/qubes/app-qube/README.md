@@ -274,15 +274,15 @@ before the relations it asserts on exist. The db qube records the same canonical
 order
 ([First boot / provisioning](../db-qube/README.md#first-boot--provisioning)).
 
-| Server | Migration                                                                  | Additional requirement                                                                             |
-| ------ | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| 1.7.0  | `db/05-hybrid-search.sql`                                                  | pgvector 0.8.0+ (filtered iterative scans)                                                         |
-| 1.9.0  | `db/06-spaces.sql`                                                         | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner                                        |
-| 1.16.0 | `db/07-metadata-degradation.sql`                                           | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env`                                      |
-| 1.19.0 | `db/08-access-tokens.sql`                                                  | —                                                                                                  |
-| 1.20.0 | `db/02-observability.sql` (re-apply; converges `mcp_auth_events` in place) | `OAUTH_ALLOWED_SUBJECTS` in `.env` **before** the container roll — fail-closed                     |
-| Arc B  | `db/02-observability.sql`, then `db/09-retire-corpus-funnel.sql`           | sink cutover complete; both legacy tables archived, verified, and empty; retired HBA rules removed |
-| 1.22.0 | `db/10-thought-mutations.sql`                                              | superuser (creates a table-owner SECURITY DEFINER helper); rerun `03-grants-assertion.sql` after   |
+| Server | Migration                                                                  | Additional requirement                                                                                                                       |
+| ------ | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.7.0  | `db/05-hybrid-search.sql`                                                  | pgvector 0.8.0+ (filtered iterative scans)                                                                                                   |
+| 1.9.0  | `db/06-spaces.sql`                                                         | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner                                                                                  |
+| 1.16.0 | `db/07-metadata-degradation.sql`                                           | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env`                                                                                |
+| 1.19.0 | `db/08-access-tokens.sql`                                                  | —                                                                                                                                            |
+| 1.20.0 | `db/02-observability.sql` (re-apply; converges `mcp_auth_events` in place) | `OAUTH_ALLOWED_SUBJECTS` in `.env` **before** the container roll — fail-closed                                                               |
+| Arc B  | `db/02-observability.sql`, then `db/09-retire-corpus-funnel.sql`           | sink cutover complete; both legacy tables archived, verified, and empty; retired HBA rules removed                                           |
+| 1.22.0 | `db/10-thought-mutations.sql`                                              | superuser (table-owner SECURITY DEFINER helper; narrows the app's thoughts UPDATE to content columns); rerun `03-grants-assertion.sql` after |
 
 Migration 08 is required by 1.19.0 **even when native tokens are disabled**.
 `ENABLE_NATIVE_TOKENS` gates the credential door, not the schema: the server's

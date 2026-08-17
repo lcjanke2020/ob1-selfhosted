@@ -435,6 +435,82 @@ Deno.test("thought mutations (services + MCP)", async (t) => {
     );
 
     await t.step(
+      "update: a collision that lands at write time is rolled back to the savepoint and reported as the same ConflictError",
+      async () => {
+        // The pre-check sees nothing; the head rewrite then fails on the
+        // fingerprint index (a competitor committed in between). The savepoint
+        // is rolled back, the probe re-run, and the now-visible row named.
+        let probes = 0;
+        const base = updateScript();
+        const calls = base.calls;
+        const handler: QueryHandler = (sql, params) => {
+          if (sql.includes("id <> $6")) {
+            calls.push({ sql, params });
+            probes += 1;
+            return { rows: probes === 1 ? [] : [{ id: OTHER_ID }] };
+          }
+          if (sql.includes("UPDATE thoughts")) {
+            calls.push({ sql, params });
+            throw Object.assign(new Error("duplicate key value"), {
+              fields: { code: "23505" },
+            });
+          }
+          return base.handler(sql, params);
+        };
+        const err = await assertRejects(
+          () =>
+            updateThoughtInScope(
+              asPool(new FakePool(handler)),
+              { id: THOUGHT_ID, content: "raced text", auth: OAUTH_AUTH },
+              makeDeps(),
+            ),
+          ConflictError,
+        );
+        assert(err.message.includes(OTHER_ID), err.message);
+        const sqls = calls.map((c) => c.sql);
+        const savepointAt = sqls.findIndex((q) =>
+          q.startsWith("SAVEPOINT thought_mutation")
+        );
+        const updateAt = sqls.findIndex((q) => q.includes("UPDATE thoughts"));
+        const rollbackAt = sqls.findIndex((q) =>
+          q.startsWith("ROLLBACK TO SAVEPOINT thought_mutation")
+        );
+        assert(savepointAt >= 0 && savepointAt < updateAt);
+        assert(rollbackAt > updateAt, "must roll back to the savepoint");
+        assertEquals(probes, 2, "must re-probe after the rollback");
+        assertEquals(
+          sqls.some((q) => q.startsWith("RELEASE SAVEPOINT")),
+          false,
+        );
+      },
+    );
+
+    await t.step(
+      "update: a non-collision write failure propagates unchanged",
+      async () => {
+        const base = updateScript();
+        const handler: QueryHandler = (sql, params) => {
+          if (sql.includes("UPDATE thoughts")) {
+            throw Object.assign(new Error("deadlock detected"), {
+              fields: { code: "40P01" },
+            });
+          }
+          return base.handler(sql, params);
+        };
+        await assertRejects(
+          () =>
+            updateThoughtInScope(
+              asPool(new FakePool(handler)),
+              { id: THOUGHT_ID, content: "raced text", auth: OAUTH_AUTH },
+              makeDeps(),
+            ),
+          Error,
+          "deadlock detected",
+        );
+      },
+    );
+
+    await t.step(
       "update: static key without a configured principal records a null subject",
       async () => {
         const { calls, handler } = updateScript();

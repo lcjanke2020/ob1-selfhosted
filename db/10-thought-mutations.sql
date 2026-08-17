@@ -17,31 +17,59 @@
 --      text is no longer visible to the audience it was moved out of.
 --
 --   2. `memory_scope.move_thought(...)` — a narrowly granted SECURITY DEFINER
---      function that changes a thought's workspace/project/visibility in place.
---      The single `thoughts_app_audience` policy evaluates USING (old row) and
---      WITH CHECK (new row) against the same transaction-local settings, and
---      `openbrain.workspace_id` is single-valued, so an ordinary app-role
---      UPDATE cannot cross an audience. The function reproduces the policy's
---      guarantees explicitly: the caller must already see the row under the
---      installed audience (otherwise it is indistinguishable from an unknown
---      id), the target must be a registered, shape-valid audience, a
---      personal-only workspace only accepts personal rows, and a personal
---      target is owned by the transaction-local principal — never by a
---      caller-supplied subject. Content-fingerprint deduplication is preserved
---      by refusing to move a thought onto identical content that already
---      exists in the target audience.
+--      function that changes a thought's workspace/project/visibility in place,
+--      and — by grant — the ONLY application path that can. The single
+--      `thoughts_app_audience` policy evaluates USING (old row) and WITH CHECK
+--      (new row) against the same transaction-local settings, so an ordinary
+--      app-role UPDATE can never cross a workspace, and cannot change
+--      visibility under a single-visibility scope; under the union read scope
+--      the server installs it could, however, re-scope a row inside one
+--      workspace. This migration therefore narrows the application role's
+--      UPDATE on public.thoughts to the content columns (content, embedding,
+--      content_fingerprint, metadata, updated_at): the four audience columns
+--      are not updatable by openbrain_app at all, RLS or not, and every
+--      audience change goes through this function and writes history. The
+--      function reproduces the policy's guarantees explicitly: the caller must
+--      already see the row under the installed audience (otherwise it is
+--      indistinguishable from an unknown id), the target must be a registered,
+--      shape-valid audience, a personal-only workspace only accepts personal
+--      rows, and a personal target is owned by the transaction-local principal
+--      — never by a caller-supplied subject. Content-fingerprint deduplication
+--      is preserved by refusing to move a thought onto identical content that
+--      already exists in the target audience — a collision found by the
+--      pre-check AND one that lands between the pre-check and the write are
+--      both reported as the `conflict` outcome, never as an index error.
 --
 -- Content updates need no privileged path: the application role updates the
--- row inside its own audience under forced RLS (server/queries.ts).
+-- content columns inside its own audience under forced RLS (server/queries.ts).
+--
+-- Legacy rows with a NULL content_fingerprint (captured before fingerprints,
+-- or restored from such a dump) are not backfilled here: a blanket backfill
+-- would rewrite the table and could itself collide on pre-existing duplicates.
+-- Instead the fingerprint is healed lazily with the capture expression the
+-- first time such a row is moved (this function derives it, dedupes on it, and
+-- persists it) or has its content corrected (server/queries.ts recomputes it).
 --
 -- Apply after 06-spaces.sql, 07-metadata-degradation.sql, and
 -- 08-access-tokens.sql; then run the stable 03-grants-assertion.sql source
 -- last. Requires a PostgreSQL superuser (normally `postgres`) because it
 -- creates a SECURITY DEFINER function owned by the table owner. Idempotent.
--- Adding the history table takes only brief catalog locks; no thought rows are
--- rewritten.
+-- Adding the history table and re-scoping the grant take only brief locks; no
+-- thought rows are rewritten.
 
 BEGIN;
+
+-- ---------- Application UPDATE is column-scoped -----------------------------
+--
+-- Converge an existing deployment (01-schema.sql historically granted
+-- table-wide UPDATE) to the same column-scoped grant a fresh init now applies:
+-- the app can rewrite a thought's content, embedding, fingerprint, metadata,
+-- and updated_at, but never its workspace_id/project_id/visibility/
+-- owner_subject. SELECT ... FOR UPDATE needs UPDATE on at least one column,
+-- which this preserves. Idempotent; the grants assertion pins it.
+REVOKE UPDATE ON public.thoughts FROM openbrain_app;
+GRANT UPDATE (content, embedding, content_fingerprint, metadata, updated_at)
+  ON public.thoughts TO openbrain_app;
 
 -- ---------- Revision history -------------------------------------------------
 
@@ -165,6 +193,11 @@ DECLARE
   new_owner_subject TEXT;
   next_revision INTEGER;
   existing_id UUID;
+  -- The fingerprint the dedupe decision and the moved row use. Legacy rows
+  -- may carry NULL; derive it with the capture expression so such a row cannot
+  -- slip past the partial unique index (WHERE content_fingerprint IS NOT NULL)
+  -- and is healed by the move.
+  effective_fingerprint TEXT;
 BEGIN
   IF target_thought_id IS NULL OR new_workspace_id IS NULL
      OR new_visibility IS NULL OR actor_door IS NULL THEN
@@ -252,56 +285,103 @@ BEGIN
     RETURN;
   END IF;
 
+  effective_fingerprint := COALESCE(
+    head.content_fingerprint,
+    pg_catalog.encode(
+      pg_catalog.sha256(
+        pg_catalog.convert_to(
+          pg_catalog.lower(pg_catalog.btrim(
+            pg_catalog.regexp_replace(head.content, '\s+', ' ', 'g')
+          )),
+          'UTF8'
+        )
+      ),
+      'hex'
+    )
+  );
+
   -- The audience-aware fingerprint index would reject the move; report the
   -- collision as an outcome instead of aborting the transaction. Both rows
   -- are readable by the caller: the head by the visibility check above, the
   -- other because it lives in the audience the caller is moving into.
-  IF head.content_fingerprint IS NOT NULL THEN
-    SELECT t.id INTO existing_id
-    FROM public.thoughts AS t
-    WHERE t.workspace_id = new_workspace_id
-      AND t.project_id IS NOT DISTINCT FROM new_project_id
-      AND t.visibility = new_visibility
-      AND t.owner_subject IS NOT DISTINCT FROM new_owner_subject
-      AND t.content_fingerprint = head.content_fingerprint
-      AND t.id <> head.id
-    LIMIT 1;
-    IF FOUND THEN
-      RETURN QUERY
-        SELECT 'conflict'::text,
-               existing_id,
-               NULL::integer,
-               head.workspace_id,
-               head.project_id,
-               head.visibility;
-      RETURN;
-    END IF;
+  SELECT t.id INTO existing_id
+  FROM public.thoughts AS t
+  WHERE t.workspace_id = new_workspace_id
+    AND t.project_id IS NOT DISTINCT FROM new_project_id
+    AND t.visibility = new_visibility
+    AND t.owner_subject IS NOT DISTINCT FROM new_owner_subject
+    AND t.content_fingerprint = effective_fingerprint
+    AND t.id <> head.id
+  LIMIT 1;
+  IF FOUND THEN
+    RETURN QUERY
+      SELECT 'conflict'::text,
+             existing_id,
+             NULL::integer,
+             head.workspace_id,
+             head.project_id,
+             head.visibility;
+    RETURN;
   END IF;
 
   SELECT COALESCE(max(r.revision), 0) + 1 INTO next_revision
   FROM public.thought_revisions AS r
   WHERE r.thought_id = head.id;
 
-  INSERT INTO public.thought_revisions (
-    thought_id, revision, change_kind,
-    prior_content, prior_metadata,
-    prior_workspace_id, prior_project_id, prior_visibility, prior_owner_subject,
-    changed_by_subject, changed_by_door, changed_by_token_label
-  ) VALUES (
-    head.id, next_revision, 'scope',
-    head.content, head.metadata,
-    head.workspace_id, head.project_id, head.visibility, head.owner_subject,
-    principal, actor_door, actor_token_label
-  );
+  -- History first, then the head, inside one subtransaction: a collision that
+  -- committed between the pre-check above and this write surfaces here as a
+  -- unique violation on idx_thoughts_fingerprint (the write waits for the
+  -- in-flight competitor, then fails). Roll both statements back and report
+  -- the now-visible collision as the same `conflict` outcome the pre-check
+  -- would have produced. Anything else propagates unchanged.
+  BEGIN
+    INSERT INTO public.thought_revisions (
+      thought_id, revision, change_kind,
+      prior_content, prior_metadata,
+      prior_workspace_id, prior_project_id, prior_visibility,
+      prior_owner_subject,
+      changed_by_subject, changed_by_door, changed_by_token_label
+    ) VALUES (
+      head.id, next_revision, 'scope',
+      head.content, head.metadata,
+      head.workspace_id, head.project_id, head.visibility, head.owner_subject,
+      principal, actor_door, actor_token_label
+    );
 
-  -- Content, embedding, fingerprint, and created_at are untouched; the
-  -- thoughts_updated_at trigger advances updated_at.
-  UPDATE public.thoughts AS t
-  SET workspace_id = new_workspace_id,
-      project_id = new_project_id,
-      visibility = new_visibility,
-      owner_subject = new_owner_subject
-  WHERE t.id = head.id;
+    -- Content, embedding, and created_at are untouched; a legacy NULL
+    -- fingerprint is healed to the canonical value the dedupe decision used;
+    -- the thoughts_updated_at trigger advances updated_at.
+    UPDATE public.thoughts AS t
+    SET workspace_id = new_workspace_id,
+        project_id = new_project_id,
+        visibility = new_visibility,
+        owner_subject = new_owner_subject,
+        content_fingerprint = effective_fingerprint
+    WHERE t.id = head.id;
+  EXCEPTION WHEN unique_violation THEN
+    SELECT t.id INTO existing_id
+    FROM public.thoughts AS t
+    WHERE t.workspace_id = new_workspace_id
+      AND t.project_id IS NOT DISTINCT FROM new_project_id
+      AND t.visibility = new_visibility
+      AND t.owner_subject IS NOT DISTINCT FROM new_owner_subject
+      AND t.content_fingerprint = effective_fingerprint
+      AND t.id <> head.id
+    LIMIT 1;
+    IF NOT FOUND THEN
+      -- Not the fingerprint index (or the competitor vanished again): this
+      -- is not a dedupe conflict we can name, so surface the real error.
+      RAISE;
+    END IF;
+    RETURN QUERY
+      SELECT 'conflict'::text,
+             existing_id,
+             NULL::integer,
+             head.workspace_id,
+             head.project_id,
+             head.visibility;
+    RETURN;
+  END;
 
   RETURN QUERY
     SELECT 'moved'::text,

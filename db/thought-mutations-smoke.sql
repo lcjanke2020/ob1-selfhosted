@@ -65,6 +65,33 @@ INSERT INTO public.thoughts (
     '{"_mut_smoke_fixture":true}'::jsonb,
     'mut-smoke-fp-3',
     'default', NULL, 'personal', 'auth0|alice'
+  ),
+  -- T5: a legacy row with NO fingerprint whose text is byte-identical to a
+  -- canonically fingerprinted workspace row (T6, below) — the null-fingerprint
+  -- move-dedupe case. Its owner (alice) will try to move it onto T6.
+  (
+    '00000000-0000-0000-0000-000000001005',
+    'mutation smoke legacy text',
+    '{"_mut_smoke_fixture":true}'::jsonb,
+    NULL,
+    '__mut_smoke_team', NULL, 'personal', 'auth0|alice'
+  ),
+  (
+    '00000000-0000-0000-0000-000000001006',
+    'mutation smoke legacy text',
+    '{"_mut_smoke_fixture":true}'::jsonb,
+    encode(sha256(convert_to(lower(trim(regexp_replace(
+      'mutation smoke legacy text', '\s+', ' ', 'g'
+    ))), 'UTF8')), 'hex'),
+    '__mut_smoke_team', NULL, 'workspace', NULL
+  ),
+  -- T7: a legacy NULL-fingerprint row with unique text — a move must heal it.
+  (
+    '00000000-0000-0000-0000-000000001007',
+    'mutation smoke lonely legacy text',
+    '{"_mut_smoke_fixture":true}'::jsonb,
+    NULL,
+    '__mut_smoke_team', NULL, 'personal', 'auth0|alice'
   );
 
 SET ROLE openbrain_app;
@@ -425,6 +452,99 @@ END;
 $$;
 ROLLBACK;
 
+-- ---------- Move: legacy NULL fingerprint ---------------------------------
+-- The partial unique index ignores NULL fingerprints, so the helper derives
+-- the canonical fingerprint itself: a legacy row cannot land beside identical
+-- content (conflict), and a legacy row that does move is healed.
+
+BEGIN;
+SELECT
+  set_config('openbrain.workspace_id', '__mut_smoke_team', true),
+  set_config('openbrain.project_id', '', true),
+  set_config('openbrain.principal', 'auth0|alice', true),
+  set_config('openbrain.visibilities', 'personal,workspace', true);
+DO $$
+DECLARE r record; fp text;
+BEGIN
+  SELECT * INTO r FROM memory_scope.move_thought(
+    '00000000-0000-0000-0000-000000001005',
+    '__mut_smoke_team', NULL, 'workspace', 'funnel', NULL
+  );
+  IF r.outcome <> 'conflict'
+     OR r.conflict_thought_id <> '00000000-0000-0000-0000-000000001006' THEN
+    RAISE EXCEPTION 'null-fingerprint move slipped past dedupe: %', r;
+  END IF;
+  SELECT * INTO r FROM public.thoughts
+  WHERE id = '00000000-0000-0000-0000-000000001005';
+  IF r.visibility <> 'personal' OR r.content_fingerprint IS NOT NULL THEN
+    RAISE EXCEPTION 'conflicting null-fingerprint move mutated the head: %', r;
+  END IF;
+
+  SELECT * INTO r FROM memory_scope.move_thought(
+    '00000000-0000-0000-0000-000000001007',
+    '__mut_smoke_team', NULL, 'workspace', 'funnel', NULL
+  );
+  IF r.outcome <> 'moved' THEN
+    RAISE EXCEPTION 'lonely legacy move failed: %', r;
+  END IF;
+  SELECT content_fingerprint INTO fp FROM public.thoughts
+  WHERE id = '00000000-0000-0000-0000-000000001007';
+  IF fp IS DISTINCT FROM encode(sha256(convert_to(lower(trim(regexp_replace(
+       'mutation smoke lonely legacy text', '\s+', ' ', 'g'
+     ))), 'UTF8')), 'hex') THEN
+    RAISE EXCEPTION 'move did not heal the legacy fingerprint (got %)', fp;
+  END IF;
+END;
+$$;
+COMMIT;
+
+-- ---------- Column-scoped UPDATE: audience columns are off-limits ---------
+-- Under the union read scope the RLS policy alone would admit an in-workspace
+-- re-scope; the column-scoped grant is what makes the helper the only path.
+
+BEGIN;
+SELECT
+  set_config('openbrain.workspace_id', '__mut_smoke_team', true),
+  set_config('openbrain.project_id', '', true),
+  set_config('openbrain.principal', 'auth0|alice', true),
+  set_config('openbrain.visibilities', 'personal,workspace', true);
+DO $$
+DECLARE r record;
+BEGIN
+  BEGIN
+    UPDATE public.thoughts
+    SET visibility = 'personal', owner_subject = 'auth0|alice'
+    WHERE id = '00000000-0000-0000-0000-000000001006';
+    RAISE EXCEPTION 'app role rewrote audience columns directly';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    UPDATE public.thoughts
+    SET workspace_id = 'default'
+    WHERE id = '00000000-0000-0000-0000-000000001006';
+    RAISE EXCEPTION 'app role rewrote workspace_id directly';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    UPDATE public.thoughts
+    SET project_id = 'alpha'
+    WHERE id = '00000000-0000-0000-0000-000000001006';
+    RAISE EXCEPTION 'app role rewrote project_id directly';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  -- Content columns remain updatable (the update path depends on it) and the
+  -- head lock still works with column-scoped UPDATE.
+  SELECT * INTO r FROM public.thoughts
+  WHERE id = '00000000-0000-0000-0000-000000001006' FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'column-scoped UPDATE broke SELECT ... FOR UPDATE';
+  END IF;
+  UPDATE public.thoughts SET metadata = metadata || '{"touched":true}'::jsonb
+  WHERE id = '00000000-0000-0000-0000-000000001006';
+END;
+$$;
+ROLLBACK;
+
 -- ---------- Update path (app role, forced RLS) -----------------------------
 -- The exact statement sequence server/queries.ts updateThoughtContent issues:
 -- locked head read (RLS), same-audience collision probe, revision snapshot,
@@ -558,16 +678,20 @@ RESET ROLE;
 DO $$
 DECLARE n integer;
 BEGIN
-  -- Two thoughts changed: T1 (1 scope revision), T2 (1 scope + 1 content).
+  -- Three thoughts changed: T1 (1 scope), T2 (1 scope + 1 content), T7 (1
+  -- scope); the conflicting/rejected attempts on T3, T4, T5, T6 wrote nothing.
   SELECT count(*) INTO n FROM public.thought_revisions
   WHERE thought_id IN (
     '00000000-0000-0000-0000-000000001001',
     '00000000-0000-0000-0000-000000001002',
     '00000000-0000-0000-0000-000000001003',
-    '00000000-0000-0000-0000-000000001004'
+    '00000000-0000-0000-0000-000000001004',
+    '00000000-0000-0000-0000-000000001005',
+    '00000000-0000-0000-0000-000000001006',
+    '00000000-0000-0000-0000-000000001007'
   );
-  IF n <> 3 THEN
-    RAISE EXCEPTION 'expected 3 revision rows across the fixtures, found %', n;
+  IF n <> 4 THEN
+    RAISE EXCEPTION 'expected 4 revision rows across the fixtures, found %', n;
   END IF;
 END;
 $$;

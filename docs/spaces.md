@@ -89,7 +89,11 @@ principal — never a caller-supplied subject — so a thought can be made
 personal-to-you and nobody else. The seeded `sensitive` workspace accepts only
 personal targets. Moving a thought onto identical content already present in the
 target audience is refused as a conflict; moving it to the audience it is
-already in is a no-op.
+already in is a no-op. A legacy row captured before content fingerprints existed
+(`content_fingerprint IS NULL`) is deduplicated on the fingerprint the move
+derives from its content, and gains that fingerprint when it moves — or when its
+content is corrected; migration 10 deliberately does not backfill such rows in
+bulk.
 
 Both tools apply the same fail-closed rules as capture and recall: the caller
 must be able to read the row under the requested current scope (otherwise it is
@@ -108,16 +112,22 @@ visible to the audience it left. `fetch` and search return heads only; the
 history is an audit trail, not a second recall surface. There is no soft-delete
 yet; that remains follow-up work.
 
-Under the hood, an update is an ordinary application-role `UPDATE` inside the
-row's own audience under forced RLS. A move cannot be: the single audience
-policy evaluates the old and new row against the same transaction-local
-settings, so crossing an audience is done by a narrowly granted
-`SECURITY DEFINER` function, `memory_scope.move_thought`, that re-checks source
-visibility under those settings, validates the target against the registry and
-the audience-shape rules, stamps the owner from the transaction- local
-principal, and reports dedupe conflicts as an outcome. Its owner, fixed
-`search_path`, and app-only execute grant are pinned by the grants assertion and
-required by the boot probe.
+Under the hood, an update is an ordinary application-role `UPDATE` of the
+content columns inside the row's own audience under forced RLS. A move is not:
+the application role's `UPDATE` privilege on `thoughts` is column-scoped
+(`content`, `embedding`, `content_fingerprint`, `metadata`, `updated_at`) and
+excludes the four audience columns outright, so — independent of RLS, which by
+itself would still admit an in-workspace re-scope under the union read scope —
+crossing an audience is possible only through the narrowly granted
+`SECURITY DEFINER` function `memory_scope.move_thought`. It re-checks source
+visibility under the transaction-local settings, validates the target against
+the registry and the audience-shape rules, stamps the owner from the
+transaction-local principal, dedupes on the canonical fingerprint (deriving and
+persisting it for a legacy row that has none), and reports a collision as an
+outcome whether the pre-check found it or it landed between the pre-check and
+the write. Its owner, fixed `search_path`, and app-only execute grant, and the
+column-scoped table grant, are pinned by the grants assertion; the boot probe
+requires the function and the history table.
 
 ## The seeded `sensitive` space
 

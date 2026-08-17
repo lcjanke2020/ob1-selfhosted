@@ -46,6 +46,8 @@ const adminPool = new Pool(
   { hostname: host, port, database, user: "postgres", password: adminPassword },
   1,
 );
+// Sized for the concurrency probes below: several production calls must be
+// in flight against one head at the same time to contend for its row lock.
 const appPool = new Pool(
   {
     hostname: host,
@@ -54,8 +56,23 @@ const appPool = new Pool(
     user: "openbrain_app",
     password: appPassword,
   },
-  1,
+  8,
 );
+
+const CANONICAL_FINGERPRINT_SQL =
+  "encode(sha256(convert_to(lower(trim(regexp_replace($1, '\\s+', ' ', 'g'))), 'UTF8')), 'hex')";
+
+async function fingerprintOf(text: string): Promise<string> {
+  return await withAdmin(async (client) => {
+    const r = await client.queryObject<{ fp: string }>(
+      `SELECT ${CANONICAL_FINGERPRINT_SQL} AS fp`,
+      [text],
+    );
+    return r.rows[0].fp;
+  });
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function withAdmin<T>(
   operation: (client: PoolClient) => Promise<T>,
@@ -99,6 +116,8 @@ async function insertThought(
     visibility: "personal" | "project" | "workspace";
     ownerSubject: string | null;
     metadata?: Record<string, unknown>;
+    // Legacy rows captured before fingerprints carry NULL.
+    nullFingerprint?: boolean;
   },
 ): Promise<string> {
   const result = await client.queryObject<{ id: string }>(
@@ -107,7 +126,7 @@ async function insertThought(
        workspace_id, project_id, visibility, owner_subject
      ) VALUES (
        $1, $2::vector, $3::jsonb,
-       encode(sha256(convert_to(lower(trim(regexp_replace($1, '\\s+', ' ', 'g'))), 'UTF8')), 'hex'),
+       CASE WHEN $8::boolean THEN NULL ELSE ${CANONICAL_FINGERPRINT_SQL} END,
        $4, $5, $6::memory_scope.visibility, $7
      ) RETURNING id`,
     [
@@ -118,6 +137,7 @@ async function insertThought(
       row.projectId,
       row.visibility,
       row.ownerSubject,
+      row.nullFingerprint === true,
     ],
   );
   return result.rows[0].id;
@@ -191,6 +211,47 @@ try {
       teamCopy: await insertThought(client, {
         content: "db smoke: shared text",
         workspaceId: WORKSPACE,
+        projectId: null,
+        visibility: "workspace",
+        ownerSubject: null,
+      }),
+      // Legacy NULL-fingerprint personal row whose text equals teamCopy's:
+      // moving it into the team workspace must conflict, not duplicate.
+      legacyDuplicate: await insertThought(client, {
+        content: "db smoke: shared text",
+        workspaceId: WORKSPACE,
+        projectId: null,
+        visibility: "personal",
+        ownerSubject: BOB,
+        nullFingerprint: true,
+      }),
+      // Legacy NULL-fingerprint row with unique text: a move must heal it.
+      legacyLonely: await insertThought(client, {
+        content: "db smoke: lonely legacy text",
+        workspaceId: WORKSPACE,
+        projectId: null,
+        visibility: "personal",
+        ownerSubject: BOB,
+        nullFingerprint: true,
+      }),
+      // Two workspace heads for the concurrency probes.
+      raceA: await insertThought(client, {
+        content: "db smoke: race head A",
+        workspaceId: "default",
+        projectId: null,
+        visibility: "workspace",
+        ownerSubject: null,
+      }),
+      raceB: await insertThought(client, {
+        content: "db smoke: race head B",
+        workspaceId: "default",
+        projectId: null,
+        visibility: "workspace",
+        ownerSubject: null,
+      }),
+      dense: await insertThought(client, {
+        content: "db smoke: dense revisions head",
+        workspaceId: "default",
         projectId: null,
         visibility: "workspace",
         ownerSubject: null,
@@ -483,8 +544,244 @@ try {
   assertEquals(projectRead?.outcome, "unchanged");
   assertEquals(projectRead?.revision, 1);
 
+  // ---- move: legacy NULL fingerprint — dedupe on the derived value ------
+  const teamBobPersonal = scope(WORKSPACE, BOB, ["personal"]);
+  const legacyConflict = await moveThought(appPool, {
+    id: ids.legacyDuplicate,
+    target: {
+      workspaceId: WORKSPACE,
+      projectId: null,
+      visibility: "workspace",
+    },
+    actor: actor(BOB),
+    scope: teamBobPersonal,
+  });
+  assertEquals(legacyConflict?.outcome, "conflict");
+  assertEquals(legacyConflict?.conflict_thought_id, ids.teamCopy);
+  const legacyHealed = await moveThought(appPool, {
+    id: ids.legacyLonely,
+    target: {
+      workspaceId: WORKSPACE,
+      projectId: null,
+      visibility: "workspace",
+    },
+    actor: actor(BOB),
+    scope: teamBobPersonal,
+  });
+  assertEquals(legacyHealed?.outcome, "moved");
+  const lonelyFingerprint = await fingerprintOf("db smoke: lonely legacy text");
+  await withAdmin(async (client) => {
+    const rows = await client.queryObject<{ id: string; fp: string | null }>(
+      `SELECT id, content_fingerprint AS fp FROM public.thoughts
+       WHERE id = ANY ($1::uuid[])`,
+      [[ids.legacyDuplicate, ids.legacyLonely]],
+    );
+    const byId = new Map(rows.rows.map((r) => [r.id, r.fp]));
+    assertEquals(
+      byId.get(ids.legacyDuplicate),
+      null,
+      "a conflicting legacy move must leave the row untouched",
+    );
+    assertEquals(
+      byId.get(ids.legacyLonely),
+      lonelyFingerprint,
+      "a successful move must heal a legacy NULL fingerprint",
+    );
+  });
+
+  // ---- concurrency: N updates on one head → dense revisions 1..N -------
+  const N = 6;
+  const dense = await Promise.all(
+    Array.from({ length: N }, (_, i) =>
+      updateThoughtContent(appPool, {
+        id: ids.dense,
+        content: `db smoke: dense revisions head v${i + 1}`,
+        embedding: ONE_VECTOR,
+        freshMetadata: { type: "observation" },
+        degradationEvents: [],
+        actor: actor(ALICE),
+        scope: defaultAlice,
+      })),
+  );
+  assertEquals(dense.filter(Boolean).length, N, "every writer must succeed");
+  assertEquals(
+    dense.map((r) => r!.revision).sort((a, b) => a - b),
+    Array.from({ length: N }, (_, i) => i + 1),
+    "revision numbers must be dense under contention",
+  );
+  await withAdmin(async (client) => {
+    const r = await client.queryObject<{ revisions: bigint }>(
+      `SELECT count(*) AS revisions FROM public.thought_revisions
+       WHERE thought_id = $1`,
+      [ids.dense],
+    );
+    assertEquals(Number(r.rows[0].revisions), N);
+  });
+
+  // ---- concurrency: two heads converging on one target audience --------
+  // A competitor commits an identical fingerprint into the target audience
+  // AFTER our pre-check but BEFORE our write. Deterministic reproduction: an
+  // uncommitted admin transaction already holds that index entry, so the
+  // production write blocks on the unique index until the competitor commits,
+  // then fails with 23505 — which must surface as the documented conflict
+  // naming the competitor, not as an internal error. The elapsed time proves
+  // the write path (not the pre-check) produced the outcome.
+  const HOLD_MS = 1200;
+  await withAdmin(async (client) => {
+    // Identical text in two distinct audiences: raceA default/workspace,
+    // raceB alice's default/personal. Both are about to converge on
+    // team/alpha/project.
+    await client.queryArray(
+      `UPDATE public.thoughts SET workspace_id = 'default', project_id = NULL,
+         visibility = 'workspace', owner_subject = NULL,
+         content = $1, content_fingerprint = ${CANONICAL_FINGERPRINT_SQL}
+       WHERE id = $2`,
+      ["db smoke: converging text", ids.raceA],
+    );
+    await client.queryArray(
+      `UPDATE public.thoughts SET workspace_id = 'default', project_id = NULL,
+         visibility = 'personal', owner_subject = $3,
+         content = $1, content_fingerprint = ${CANONICAL_FINGERPRINT_SQL}
+       WHERE id = $2`,
+      ["db smoke: converging text", ids.raceB, ALICE],
+    );
+  });
+  {
+    const held = await adminPool.connect();
+    try {
+      await held.queryArray("BEGIN");
+      await held.queryArray(
+        `UPDATE public.thoughts
+         SET workspace_id = $2, project_id = 'alpha', visibility = 'project',
+             owner_subject = NULL
+         WHERE id = $1`,
+        [ids.raceB, WORKSPACE],
+      );
+      const started = performance.now();
+      const racing = moveThought(appPool, {
+        id: ids.raceA,
+        target: {
+          workspaceId: WORKSPACE,
+          projectId: "alpha",
+          visibility: "project",
+        },
+        actor: actor(ALICE),
+        scope: defaultAlice,
+      });
+      await sleep(HOLD_MS);
+      await held.queryArray("COMMIT");
+      const outcome = await racing;
+      const elapsed = performance.now() - started;
+      assertEquals(outcome?.outcome, "conflict", JSON.stringify(outcome));
+      assertEquals(outcome?.conflict_thought_id, ids.raceB);
+      assert(
+        elapsed >= HOLD_MS * 0.9,
+        `move must have waited on the index (${elapsed.toFixed(0)}ms)`,
+      );
+    } finally {
+      held.release();
+    }
+    await withAdmin(async (client) => {
+      const r = await client.queryObject<{
+        visibility: string;
+        revisions: bigint;
+      }>(
+        `SELECT visibility::text,
+                (SELECT count(*) FROM public.thought_revisions WHERE thought_id = t.id) AS revisions
+         FROM public.thoughts t WHERE id = $1`,
+        [ids.raceA],
+      );
+      assertEquals(
+        r.rows[0].visibility,
+        "workspace",
+        "conflicting move must not move",
+      );
+      assertEquals(
+        Number(r.rows[0].revisions),
+        0,
+        "conflicting move must write no history",
+      );
+    });
+  }
+  // The update path has the same check-then-write shape: a competitor's
+  // uncommitted fingerprint in the same audience must yield ConflictError
+  // naming it, after the savepoint rollback, with the head untouched.
+  {
+    const held = await adminPool.connect();
+    try {
+      // raceB is now team/alpha/project with "converging text"; give raceA the
+      // same audience but different text, then have the competitor (raceB)
+      // rewrite its fingerprint to the value raceA's update will compute.
+      await held.queryArray(
+        `UPDATE public.thoughts SET workspace_id = $2, project_id = 'alpha',
+           visibility = 'project', owner_subject = NULL,
+           content = 'db smoke: race head A again',
+           content_fingerprint = ${CANONICAL_FINGERPRINT_SQL}
+         WHERE id = $3`,
+        ["db smoke: race head A again", WORKSPACE, ids.raceA],
+      );
+      await held.queryArray("BEGIN");
+      await held.queryArray(
+        `UPDATE public.thoughts
+         SET content = 'db smoke: the winning text',
+             content_fingerprint = ${CANONICAL_FINGERPRINT_SQL}
+         WHERE id = $2`,
+        ["db smoke: the winning text", ids.raceB],
+      );
+      const started = performance.now();
+      const racing = updateThoughtContent(appPool, {
+        id: ids.raceA,
+        content: "db smoke: the winning text",
+        embedding: ONE_VECTOR,
+        freshMetadata: { type: "observation" },
+        degradationEvents: [],
+        actor: actor(null, "tailnet"),
+        scope: scope(WORKSPACE, null, ["project"], "alpha"),
+      }).then(
+        (r) => ({ ok: r }),
+        (e: unknown) => ({ err: e }),
+      );
+      await sleep(HOLD_MS);
+      await held.queryArray("COMMIT");
+      const settled = await racing;
+      const elapsed = performance.now() - started;
+      assert("err" in settled, "update onto a competing fingerprint must fail");
+      assert(
+        settled.err instanceof ConflictError,
+        `expected ConflictError, got ${String(settled.err)}`,
+      );
+      assert(
+        (settled.err as Error).message.includes(ids.raceB),
+        (settled.err as Error).message,
+      );
+      assert(
+        elapsed >= HOLD_MS * 0.9,
+        `update must have waited on the index (${elapsed.toFixed(0)}ms)`,
+      );
+    } finally {
+      held.release();
+    }
+    await withAdmin(async (client) => {
+      const r = await client.queryObject<{
+        content: string;
+        revisions: bigint;
+      }>(
+        `SELECT content,
+                (SELECT count(*) FROM public.thought_revisions WHERE thought_id = t.id) AS revisions
+         FROM public.thoughts t WHERE id = $1`,
+        [ids.raceA],
+      );
+      assertEquals(r.rows[0].content, "db smoke: race head A again");
+      assertEquals(
+        Number(r.rows[0].revisions),
+        0,
+        "the savepoint must roll the revision row back with the head rewrite",
+      );
+    });
+  }
+
   console.log(
-    "thought mutation query path: invisible→null, unchanged, conflict, update (re-embed, fingerprint, tsvector, stamps kept, history), move (owner-stamped, history follows head, dedupe conflict, explicit widening) passed",
+    "thought mutation query path: invisible→null, unchanged, conflict, update (re-embed, fingerprint, tsvector, stamps kept, history), move (owner-stamped, history follows head, dedupe conflict, explicit widening), legacy NULL fingerprint (conflict + heal), dense concurrent revisions, and race-to-conflict on both paths passed",
   );
 } finally {
   await cleanFixture();

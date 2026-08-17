@@ -124,8 +124,8 @@ old readers continue to interpret every existing key correctly.
   provenance: the caller-asserted claims object and the `source`/`door`/`sub`/
   `token_label` capture stamps survive the update, while classifier fields are
   replaced by the fresh extraction. The correcting identity is recorded on the
-  thought's revision row instead
-  ([Correcting and moving thoughts](spaces.md#correcting-and-moving-thoughts)).
+  thought's revision row instead. See
+  [Correcting and moving thoughts](spaces.md#correcting-and-moving-thoughts).
 
 The claims are not promoted to columns. Consumers that inspect metadata directly
 should treat a missing `provenance` key as "unclaimed/legacy", never as a match

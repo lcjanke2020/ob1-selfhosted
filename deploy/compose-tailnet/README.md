@@ -383,7 +383,9 @@ docker compose --env-file .env build mcp log-ingester && docker compose --env-fi
 Upgrading to **1.22.0+**: `10-thought-mutations.sql` (superuser) adds the
 append-only `thought_revisions` history and the `memory_scope.move_thought`
 helper behind the new `update_thought` / `move_thought` tools and their REST
-routes; the server's boot probe refuses to start without it. See
+routes, and narrows `openbrain_app`'s `UPDATE` on `thoughts` to the content
+columns (the grants assertion now rejects the old table-wide grant); the
+server's boot probe refuses to start without it. See
 [Memory spaces](../../docs/spaces.md#correcting-and-moving-thoughts).
 
 Upgrading to **1.20.0+**: `02-observability.sql` in the block above now also

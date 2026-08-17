@@ -111,7 +111,7 @@ flowchart TB
     CL -- "HTTPS :443 via Funnel relay" --> TS
     CD -. "WireGuard (tailnet)" .-> TS
     CA -- "qubes.ConnectTCP (dom0-gated)<br/>Bearer JWT forwarded" --> MCP
-    MCP -- "qubes.ConnectTCP (dom0-gated)<br/>openbrain_app role:<br/>SELECT / INSERT / UPDATE —<br/>no DELETE on thoughts" --> PG
+    MCP -- "qubes.ConnectTCP (dom0-gated)<br/>openbrain_app role:<br/>SELECT / INSERT / column-scoped UPDATE —<br/>no DELETE, no audience columns" --> PG
     LI -. "openbrain_ingester role:<br/>INSERT-only, unix socket<br/>(funnel_access_log)" .-> SK
 
     style ING fill:#d777571a,stroke:#d77757
@@ -293,7 +293,7 @@ sequenceDiagram
 
 ```
 .
-├── server/                    Deno + Hono server: MCP (11 tools) + REST gateway
+├── server/                    Deno + Hono server: MCP (13 tools) + REST gateway
 │                              (/api/v1), unit tests, Dockerfiles for mcp and
 │                              the log-ingester sidecar
 ├── db/                        Corpus + separate Funnel-log-sink schemas, migrations,

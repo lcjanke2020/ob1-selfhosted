@@ -34,8 +34,10 @@
 --   (a) `openbrain_app` must have no role memberships and must not be a
 --       superuser or hold BYPASSRLS directly.
 --   (b) `openbrain_app` must NOT have DELETE on `public.thoughts`.
---   (c) `openbrain_app` MUST have SELECT, INSERT, UPDATE on
---       `public.thoughts`.
+--   (c) `openbrain_app` MUST have SELECT and INSERT on `public.thoughts`,
+--       plus UPDATE on its content columns only — and no UPDATE (table-wide or
+--       per column) on workspace_id/project_id/visibility/owner_subject, so the
+--       audience-move helper is the sole application audience-change path.
 --   (d) the app may read but not mutate the memory-space registry, and only
 --       it may execute the two reviewed memory_scope helpers (never PUBLIC).
 --   (e) metadata degradation history is append-only to the app; its pending-
@@ -107,10 +109,37 @@ BEGIN
       'A migration drifted; revoke before deploying.';
   END IF;
   IF NOT (has_table_privilege('openbrain_app', 'public.thoughts', 'SELECT')
-      AND has_table_privilege('openbrain_app', 'public.thoughts', 'INSERT')
-      AND has_table_privilege('openbrain_app', 'public.thoughts', 'UPDATE')) THEN
+      AND has_table_privilege('openbrain_app', 'public.thoughts', 'INSERT')) THEN
     RAISE EXCEPTION
-      'grants assertion failed: openbrain_app missing required SELECT/INSERT/UPDATE on public.thoughts.';
+      'grants assertion failed: openbrain_app missing required SELECT/INSERT on public.thoughts.';
+  END IF;
+  -- UPDATE must be column-scoped: table-wide UPDATE would let the app role
+  -- rewrite audience columns under the union read scope it installs, bypassing
+  -- memory_scope.move_thought and its revision history. has_table_privilege
+  -- reports only table-level UPDATE; the per-column negatives cover a
+  -- column grant that drifted onto an audience column.
+  IF has_table_privilege('openbrain_app', 'public.thoughts', 'UPDATE') THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_app has table-wide UPDATE on public.thoughts; it must be column-scoped (content, embedding, content_fingerprint, metadata, updated_at). Apply db/10-thought-mutations.sql.';
+  END IF;
+  IF NOT (
+       has_column_privilege('openbrain_app', 'public.thoughts', 'content', 'UPDATE')
+       AND has_column_privilege('openbrain_app', 'public.thoughts', 'embedding', 'UPDATE')
+       AND has_column_privilege('openbrain_app', 'public.thoughts', 'content_fingerprint', 'UPDATE')
+       AND has_column_privilege('openbrain_app', 'public.thoughts', 'metadata', 'UPDATE')
+       AND has_column_privilege('openbrain_app', 'public.thoughts', 'updated_at', 'UPDATE')
+     ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_app is missing column UPDATE on a thoughts content column (content, embedding, content_fingerprint, metadata, updated_at).';
+  END IF;
+  IF has_column_privilege('openbrain_app', 'public.thoughts', 'workspace_id', 'UPDATE')
+     OR has_column_privilege('openbrain_app', 'public.thoughts', 'project_id', 'UPDATE')
+     OR has_column_privilege('openbrain_app', 'public.thoughts', 'visibility', 'UPDATE')
+     OR has_column_privilege('openbrain_app', 'public.thoughts', 'owner_subject', 'UPDATE')
+     OR has_column_privilege('openbrain_app', 'public.thoughts', 'id', 'UPDATE')
+     OR has_column_privilege('openbrain_app', 'public.thoughts', 'created_at', 'UPDATE') THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_app can UPDATE a thoughts audience/identity column (workspace_id, project_id, visibility, owner_subject, id, created_at); only memory_scope.move_thought may change audience.';
   END IF;
 
   IF to_regclass('public.metadata_degradation_events') IS NULL
