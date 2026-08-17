@@ -56,7 +56,7 @@ try {
     defaultWorkspaceId: DEFAULT_WORKSPACE_ID,
   });
   console.log(
-    `[db] postgres reachable; hybrid-search + fail-closed spaces + metadata audit + native-token + auth-audit schema ready at ${DB_HOST}:${DB_PORT}`,
+    `[db] postgres reachable; hybrid-search + fail-closed spaces + metadata audit + native-token + auth-audit + thought-mutation schema ready at ${DB_HOST}:${DB_PORT}`,
   );
 } catch (e) {
   console.error(e instanceof Error ? e.message : String(e));

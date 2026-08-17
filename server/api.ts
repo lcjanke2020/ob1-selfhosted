@@ -25,6 +25,7 @@ import {
   captureThoughtBody,
   listSessionsQuery,
   listThoughtsQuery,
+  moveThoughtBody,
   scopeQuery,
   searchThoughtsBody,
   sessionCaptureBody,
@@ -33,11 +34,13 @@ import {
   sessionSearchBody,
   sessionUpdateStatusBody,
   thoughtIdParam,
+  updateThoughtBody,
 } from "./schemas.ts";
 import {
   type AuthContext,
   captureSessionFromToml,
   captureThoughtWithMetadata,
+  ConflictError,
   defaultDeps,
   fetchThoughtInScope,
   getSessionInScope,
@@ -45,11 +48,13 @@ import {
   listSessionsInScope,
   listThoughtsInScope,
   lookupSessionInScope,
+  moveThoughtInScope,
   NotFoundError,
   searchSessionsByQuery,
   searchThoughtsByQuery,
   type ServiceDeps,
   updateSessionStatusInScope,
+  updateThoughtInScope,
   UpstreamError,
   ValidationError,
 } from "./services.ts";
@@ -186,6 +191,12 @@ export function createApiRouter(
     if (e instanceof NotFoundError) {
       return errorJson(c, 404, "not_found", e.message);
     }
+    if (e instanceof ConflictError) {
+      // The colliding id named in the message is, by construction, a row the
+      // caller can already read (same audience as the edited row, or the
+      // audience being moved into).
+      return errorJson(c, 409, "conflict", e.message);
+    }
     if (e instanceof UpstreamError) {
       // Embedding backend (Ollama) unreachable/failed — same message text
       // the MCP tools surface, so nothing new is leaked.
@@ -263,6 +274,42 @@ export function createApiRouter(
     });
     if (!t) throw new NotFoundError(`No thought found for ID ${id}.`);
     return c.json(t);
+  });
+
+  // Full replacement of content, not a patch (PATCH because the row's other
+  // fields are untouched). The body carries the row's CURRENT scope like the
+  // GET; the id outside that scope 404s exactly like a fetch.
+  api.patch("/thoughts/:id", async (c) => {
+    const id = parseOr400(thoughtIdParam, c.req.param("id"));
+    const { content, scope } = parseOr400(
+      updateThoughtBody,
+      await readJsonBody(c),
+    );
+    const res = await updateThoughtInScope(
+      pool,
+      { id, content, scope, auth: authOr500(c) },
+      deps,
+    );
+    if (!res) throw new NotFoundError(`No thought found for ID ${id}.`);
+    return c.json(res);
+  });
+
+  // A move is an action on the resource, not a representation of it, hence
+  // POST to a sub-resource rather than PATCH of the audience fields.
+  api.post("/thoughts/:id/move", async (c) => {
+    const id = parseOr400(thoughtIdParam, c.req.param("id"));
+    const { target, scope } = parseOr400(
+      moveThoughtBody,
+      await readJsonBody(c),
+    );
+    const res = await moveThoughtInScope(pool, {
+      id,
+      target,
+      scope,
+      auth: authOr500(c),
+    });
+    if (!res) throw new NotFoundError(`No thought found for ID ${id}.`);
+    return c.json({ id, ...res });
   });
 
   // ---- sessions -------------------------------------------------------

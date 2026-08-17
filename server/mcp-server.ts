@@ -22,6 +22,7 @@ import {
   fetchThoughtSchema,
   listThoughtsSchema,
   type MemoryScopeInput,
+  moveThoughtSchema,
   searchThoughtsSchema,
   sessionCaptureSchema,
   sessionListSchema,
@@ -29,6 +30,7 @@ import {
   sessionSearchSchema,
   sessionUpdateStatusSchema,
   thoughtStatsSchema,
+  updateThoughtSchema,
 } from "./schemas.ts";
 import {
   captureSessionFromToml,
@@ -39,10 +41,12 @@ import {
   listSessionsInScope,
   listThoughtsInScope,
   lookupSessionInScope,
+  moveThoughtInScope,
   searchSessionsByQuery,
   searchThoughtsByQuery,
   type ServiceDeps,
   updateSessionStatusInScope,
+  updateThoughtInScope,
 } from "./services.ts";
 
 function thoughtTitle(content: string, createdAt?: string): string {
@@ -272,7 +276,12 @@ export function createMcpServer(
     // 1.21.0: branch lookup plus default and explicit last_update listing use
     // effective freshness; lookup and listing orders resolve full ties by
     // newest id.
-    version: "1.21.0",
+    // 1.22.0: update_thought corrects a thought's content in place (re-embed +
+    // re-classify, capture stamps preserved) and move_thought re-scopes it to
+    // an explicit workspace/project/visibility (personal owner = the caller's
+    // own verified principal); both snapshot the prior state to the
+    // head-gated thought_revisions history. Requires db/10-thought-mutations.sql.
+    version: "1.22.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -545,6 +554,86 @@ export function createMcpServer(
         );
         parts.push(`(id: ${id})`);
         return text(parts.join(" "));
+      } catch (e) {
+        return err((e as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    "update_thought",
+    {
+      title: "Update Thought",
+      description:
+        "Correct an existing thought's content in place — for a factually wrong or mis-dictated capture. Send the FULL replacement text (not a patch); it is re-embedded and re-classified, the thought keeps its id, audience, and created_at, and the prior content is retained in revision history. Address the thought through its CURRENT scope, exactly like fetch: an id outside that scope reads as not found. Identical content is a no-op; content identical to another thought in the same audience is a conflict.",
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+        // The head content that recall returns is overwritten; the prior
+        // text lives on in thought_revisions as history, not as an undo.
+        destructiveHint: true,
+        idempotentHint: true,
+      },
+      inputSchema: updateThoughtSchema,
+    },
+    async ({ id, content, scope }) => {
+      try {
+        const res = await updateThoughtInScope(
+          pool,
+          { id, content, scope, auth },
+          deps,
+        );
+        if (!res) return err(`No thought found for ID ${id}.`);
+        const meta = res.metadata ?? {};
+        return text(JSON.stringify({
+          id: res.id,
+          outcome: res.outcome,
+          revision: res.revision,
+          workspace_id: res.workspace_id,
+          project_id: res.project_id,
+          visibility: res.visibility,
+          updated_at: res.updated_at,
+          type: meta.type ?? null,
+          topics: Array.isArray(meta.topics) ? meta.topics : [],
+        }));
+      } catch (e) {
+        return err((e as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    "move_thought",
+    {
+      title: "Move Thought",
+      description:
+        "Move an existing thought to another fail-closed workspace/project/visibility audience in place — for a capture that landed in the wrong space. The thought keeps its id, content, embedding, and created_at; only its audience changes, and the prior audience is retained in revision history. Every target field is explicit (no defaults). A personal target is owned by YOUR verified principal — you can only make a thought personal-to-you — and the seeded sensitive workspace accepts only personal. Address the thought through its CURRENT scope, exactly like fetch: an id outside that scope reads as not found. Moving to the audience it is already in is a no-op; identical content already present in the target audience is a conflict.",
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+        // A move REPLACES the head's workspace/project/visibility/owner: the
+        // old audience loses current access, and an explicit personal →
+        // project/workspace move widens who can read it. That is not an
+        // additive update in the MCP sense, and moving back is not guaranteed
+        // (identical content in the former audience conflicts), so history is
+        // an audit trail, not an undo. Repeating the same move is a no-op.
+        destructiveHint: true,
+        idempotentHint: true,
+      },
+      inputSchema: moveThoughtSchema,
+    },
+    async ({ id, target, scope }) => {
+      try {
+        const res = await moveThoughtInScope(pool, { id, target, scope, auth });
+        if (!res) return err(`No thought found for ID ${id}.`);
+        return text(JSON.stringify({
+          id,
+          outcome: res.outcome,
+          revision: res.revision,
+          workspace_id: res.workspace_id,
+          project_id: res.project_id,
+          visibility: res.visibility,
+        }));
       } catch (e) {
         return err((e as Error).message);
       }

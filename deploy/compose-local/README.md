@@ -227,6 +227,9 @@ docker compose exec -T postgres \
   < ../../db/09-retire-corpus-funnel.sql
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/10-thought-mutations.sql
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/03-grants-assertion.sql
 docker compose build mcp
 docker compose up -d --no-deps mcp

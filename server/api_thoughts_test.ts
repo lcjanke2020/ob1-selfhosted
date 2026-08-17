@@ -544,6 +544,248 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
       assertEquals((await res.json()).error.code, "not_found");
     });
 
+    // ─── PATCH /thoughts/:id (update) + POST /thoughts/:id/move ───────
+    // The orchestration itself is covered in thought_mutations_test.ts; these
+    // steps pin the REST envelope: status codes, body shapes, and the 409.
+    const MUTATION_ID = "6f6c0d3a-9a0b-4e3e-8f4a-2d1c5b7e9a01";
+    const headRow = {
+      id: MUTATION_ID,
+      content: "old text",
+      metadata: { type: "observation", source: "rest", door: "tailnet" },
+      workspace_id: "default",
+      project_id: null,
+      visibility: "workspace",
+      owner_subject: null,
+      content_fingerprint: "old-fp",
+      new_fingerprint: "new-fp",
+      created_at: "2026-08-10T00:00:00Z",
+      updated_at: null,
+    };
+    const updateHandler =
+      (colliding: string | null = null): QueryHandler => (sql, params) => {
+        if (sql.includes("FROM thoughts WHERE id = $1")) {
+          return { rows: [headRow] };
+        }
+        if (sql.includes("id <> $6")) {
+          return { rows: colliding ? [{ id: colliding }] : [] };
+        }
+        if (sql.includes("INSERT INTO thought_revisions")) {
+          return { rows: [{ revision: 3 }] };
+        }
+        if (sql.includes("UPDATE thoughts")) {
+          return {
+            rows: [{
+              id: MUTATION_ID,
+              content: params[1],
+              metadata: { ...JSON.parse(params[3] as string), source: "rest" },
+              workspace_id: "default",
+              project_id: null,
+              visibility: "workspace",
+              created_at: "2026-08-10T00:00:00Z",
+              updated_at: "2026-08-17T00:00:00Z",
+            }],
+          };
+        }
+        return undefined;
+      };
+
+    await t.step("PATCH /thoughts/:id → 200 with the updated row", async () => {
+      const api = makeApi(updateHandler());
+      const res = await api.request(
+        `/thoughts/${MUTATION_ID}`,
+        authed({
+          method: "PATCH",
+          body: JSON.stringify({ content: "corrected text" }),
+        }),
+      );
+      assertEquals(res.status, 200);
+      const body = await res.json();
+      assertEquals(body.id, MUTATION_ID);
+      assertEquals(body.outcome, "updated");
+      assertEquals(body.revision, 3);
+      assertEquals(body.content, "corrected text");
+      assertEquals(body.metadata.source, "rest");
+      assertEquals(body.metadata.topics, ["testing"]);
+    });
+
+    await t.step("PATCH /thoughts/:id → 404 when not visible", async () => {
+      const api = makeApi((sql) =>
+        sql.includes("FROM thoughts WHERE id = $1") ? { rows: [] } : undefined
+      );
+      const res = await api.request(
+        `/thoughts/${MUTATION_ID}`,
+        authed({ method: "PATCH", body: JSON.stringify({ content: "x" }) }),
+      );
+      assertEquals(res.status, 404);
+      assertEquals((await res.json()).error.code, "not_found");
+    });
+
+    await t.step(
+      "PATCH /thoughts/:id → 409 conflict naming the colliding row",
+      async () => {
+        const other = "0b3d2c1a-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+        const api = makeApi(updateHandler(other));
+        const res = await api.request(
+          `/thoughts/${MUTATION_ID}`,
+          authed({
+            method: "PATCH",
+            body: JSON.stringify({ content: "duplicate text" }),
+          }),
+        );
+        assertEquals(res.status, 409);
+        const body = await res.json();
+        assertEquals(body.error.code, "conflict");
+        assert(body.error.message.includes(other));
+      },
+    );
+
+    await t.step(
+      "PATCH /thoughts/:id → 400 on empty content, unknown body key, or bad id",
+      async () => {
+        const api = makeApi(() => undefined);
+        for (
+          const [path, body] of [
+            [`/thoughts/${MUTATION_ID}`, { content: "" }],
+            [`/thoughts/${MUTATION_ID}`, { content: "x", extra: true }],
+            [`/thoughts/${MUTATION_ID}`, { text: "x" }],
+            ["/thoughts/not-a-uuid", { content: "x" }],
+          ] as const
+        ) {
+          const res = await api.request(
+            path,
+            authed({ method: "PATCH", body: JSON.stringify(body) }),
+          );
+          assertEquals(res.status, 400, `${path} ${JSON.stringify(body)}`);
+          assertEquals((await res.json()).error.code, "validation_error");
+        }
+      },
+    );
+
+    await t.step(
+      "PATCH /thoughts/:id → 502 when the embedder is down",
+      async () => {
+        const { deps } = makeEmbedDownDeps();
+        const api = makeApi(updateHandler(), deps);
+        const res = await api.request(
+          `/thoughts/${MUTATION_ID}`,
+          authed({ method: "PATCH", body: JSON.stringify({ content: "x" }) }),
+        );
+        assertEquals(res.status, 502);
+        assertEquals((await res.json()).error.code, "upstream_error");
+      },
+    );
+
+    const moveHandler =
+      (outcome: string | null, conflict: string | null = null): QueryHandler =>
+      (sql, params) => {
+        if (sql.includes("memory_scope.move_thought(")) {
+          return {
+            rows: outcome === null ? [] : [{
+              outcome,
+              conflict_thought_id: conflict,
+              revision: outcome === "moved" ? 1 : null,
+              workspace_id: params[1],
+              project_id: params[2],
+              visibility: params[3],
+            }],
+          };
+        }
+        return undefined;
+      };
+
+    await t.step(
+      "POST /thoughts/:id/move → 200 with the new audience",
+      async () => {
+        // MCP_ACCESS_KEY_PRINCIPAL is unset in this suite, so a personal target
+        // would fail validation; a workspace→workspace move exercises the path.
+        const api = makeApi(moveHandler("moved"));
+        const res = await api.request(
+          `/thoughts/${MUTATION_ID}/move`,
+          authed({
+            method: "POST",
+            body: JSON.stringify({
+              target: { workspace_id: "default", visibility: "workspace" },
+            }),
+          }),
+        );
+        assertEquals(res.status, 200);
+        assertEquals(await res.json(), {
+          id: MUTATION_ID,
+          outcome: "moved",
+          conflict_thought_id: null,
+          revision: 1,
+          workspace_id: "default",
+          project_id: null,
+          visibility: "workspace",
+        });
+      },
+    );
+
+    await t.step("POST /thoughts/:id/move → 404 when not visible", async () => {
+      const api = makeApi(moveHandler(null));
+      const res = await api.request(
+        `/thoughts/${MUTATION_ID}/move`,
+        authed({
+          method: "POST",
+          body: JSON.stringify({
+            target: { workspace_id: "default", visibility: "workspace" },
+          }),
+        }),
+      );
+      assertEquals(res.status, 404);
+    });
+
+    await t.step(
+      "POST /thoughts/:id/move → 409 on a target-audience collision",
+      async () => {
+        const other = "0b3d2c1a-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+        const api = makeApi(moveHandler("conflict", other));
+        const res = await api.request(
+          `/thoughts/${MUTATION_ID}/move`,
+          authed({
+            method: "POST",
+            body: JSON.stringify({
+              target: { workspace_id: "default", visibility: "workspace" },
+            }),
+          }),
+        );
+        assertEquals(res.status, 409);
+        const body = await res.json();
+        assertEquals(body.error.code, "conflict");
+        assert(body.error.message.includes(other));
+      },
+    );
+
+    await t.step(
+      "POST /thoughts/:id/move → 400 when the target is defaulted, mis-shaped, or personal without a principal",
+      async () => {
+        const api = makeApi(moveHandler("moved"));
+        for (
+          const body of [
+            { target: { workspace_id: "default" } },
+            { target: { visibility: "workspace" } },
+            { target: { workspace_id: "default", visibility: "project" } },
+            {
+              target: {
+                workspace_id: "default",
+                project_id: "alpha",
+                visibility: "workspace",
+              },
+            },
+            { target: { workspace_id: "default", visibility: "personal" } },
+            { scope: { workspace_id: "default" } },
+          ]
+        ) {
+          const res = await api.request(
+            `/thoughts/${MUTATION_ID}/move`,
+            authed({ method: "POST", body: JSON.stringify(body) }),
+          );
+          assertEquals(res.status, 400, JSON.stringify(body));
+          assertEquals((await res.json()).error.code, "validation_error");
+        }
+      },
+    );
+
     await t.step(
       "unknown path (authed) → 404 with the JSON error shape",
       async () => {

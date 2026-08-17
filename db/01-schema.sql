@@ -77,9 +77,12 @@ DROP FUNCTION IF EXISTS match_thoughts(
 
 -- ---------- Grants ---------------------------------------------------------
 -- Tightened from "full DML on the whole public schema" to the
--- minimum the application actually uses: SELECT/INSERT/UPDATE on
--- `public.thoughts`. An audit confirmed zero DELETE statements in queries.ts,
--- so DELETE is dropped too. Sequence USAGE and function EXECUTE on the
+-- minimum the application actually uses: SELECT/INSERT on `public.thoughts`
+-- plus UPDATE of its content columns only (content, embedding,
+-- content_fingerprint, metadata, updated_at) — never the four audience columns,
+-- which change only through the reviewed SECURITY DEFINER helper in
+-- 10-thought-mutations.sql. An audit confirmed zero DELETE statements in
+-- queries.ts, so DELETE is dropped too. Sequence USAGE and function EXECUTE on the
 -- whole schema are also revoked; `thoughts.id` is UUID (no sequence) and
 -- pgcrypto/pgvector built-ins are PUBLIC-executable by default, so the
 -- application path keeps working without them. ALTER DEFAULT PRIVILEGES
@@ -103,8 +106,15 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
   REVOKE ALL ON FUNCTIONS FROM openbrain_app;
 
 -- Application role: only what the MCP server exercises against `thoughts`.
+-- UPDATE is column-scoped so that workspace_id/project_id/visibility/
+-- owner_subject cannot be rewritten by the app role at all (RLS or not);
+-- SELECT ... FOR UPDATE only needs UPDATE on at least one column, which this
+-- keeps. 10-thought-mutations.sql converges an existing deployment to the same
+-- grant, and 03-grants-assertion.sql pins it.
 GRANT USAGE ON SCHEMA public TO openbrain_app;
-GRANT SELECT, INSERT, UPDATE ON thoughts TO openbrain_app;
+GRANT SELECT, INSERT ON thoughts TO openbrain_app;
+GRANT UPDATE (content, embedding, content_fingerprint, metadata, updated_at)
+  ON thoughts TO openbrain_app;
 
 -- Read-only role: SELECT-only on the whole corpus public schema is intentional
 -- for ad-hoc DBeaver/psql exploration and complete backups. Funnel request

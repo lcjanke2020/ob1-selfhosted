@@ -230,6 +230,65 @@ export const thoughtStatsShape = {
   scope: memoryScopeSchema.optional(),
 };
 
+// ---- thought mutations -------------------------------------------------
+
+// A move target is deliberately NOT memoryScopeSchema: nothing about the
+// destination may be implicit. workspace_id and visibility are required (no
+// fall-through to the configured default workspace or the workspace's default
+// visibility), and project_id is required exactly when visibility is
+// `project`. The row's CURRENT audience is still addressed through the
+// optional read `scope`, like fetch — an id outside that scope is
+// indistinguishable from an unknown id.
+export const moveThoughtTargetSchema = z.object({
+  workspace_id: scopeId("workspace_id").describe(
+    "Registered destination workspace (required; never defaulted)",
+  ),
+  project_id: scopeId("project_id").nullable().optional().describe(
+    "Destination project registered inside workspace_id; required for project visibility, forbidden otherwise",
+  ),
+  visibility: z.enum(MEMORY_VISIBILITIES).describe(
+    "Destination audience (required; never defaulted). personal stamps the caller's own verified principal as owner.",
+  ),
+}).strict().superRefine((target, ctx) => {
+  const hasProject = target.project_id != null;
+  if (target.visibility === "project" && !hasProject) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["project_id"],
+      message: "project visibility requires project_id",
+    });
+  }
+  if (target.visibility !== "project" && hasProject) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["project_id"],
+      message: `${target.visibility} visibility stores no project_id`,
+    });
+  }
+});
+
+export type MoveThoughtTarget = z.infer<typeof moveThoughtTargetSchema>;
+
+export const updateThoughtShape = {
+  id: thoughtIdSchema.describe("The thought ID to correct in place"),
+  content: boundedUtf8String("content").describe(
+    "The full replacement text. This is not a patch: the stored content becomes exactly this value, is re-embedded, and is re-classified.",
+  ),
+  scope: memoryScopeSchema.optional().describe(
+    "The thought's CURRENT workspace/project/visibility. Omitted means the configured default workspace; an id outside this scope reads as not found.",
+  ),
+};
+
+export const moveThoughtShape = {
+  id: thoughtIdSchema.describe("The thought ID to move"),
+  target: moveThoughtTargetSchema.describe(
+    "Destination audience. Every field is explicit; personal targets are owned by the caller's own verified principal.",
+  ),
+  scope: memoryScopeSchema.optional().describe(
+    "The thought's CURRENT workspace/project/visibility. Omitted means the configured default workspace; an id outside this scope reads as not found.",
+  ),
+};
+
 // ---- sessions ---------------------------------------------------------
 
 export const sessionCaptureShape = {
@@ -300,6 +359,8 @@ export const captureThoughtSchema = z.object(captureThoughtShape).strict();
 export const listThoughtsSchema = z.object(listThoughtsShape).strict();
 export const fetchThoughtSchema = z.object(fetchThoughtShape).strict();
 export const thoughtStatsSchema = z.object(thoughtStatsShape).strict();
+export const updateThoughtSchema = z.object(updateThoughtShape).strict();
+export const moveThoughtSchema = z.object(moveThoughtShape).strict();
 export const sessionCaptureSchema = z.object(sessionCaptureShape).strict();
 export const sessionLookupSchema = z.object(sessionLookupShape).strict();
 export const sessionSearchSchema = z.object(sessionSearchShape).strict();
@@ -318,6 +379,16 @@ export const compatibilitySearchSchema = z.object({
 // call cannot drift apart in what they accept.
 
 export const captureThoughtBody = captureThoughtSchema;
+// The thought id arrives via the URL path on REST (PATCH /thoughts/:id and
+// POST /thoughts/:id/move), so the bodies carry everything but the id.
+export const updateThoughtBody = z.object({
+  content: updateThoughtShape.content,
+  scope: memoryScopeSchema.optional(),
+}).strict();
+export const moveThoughtBody = z.object({
+  target: moveThoughtTargetSchema,
+  scope: memoryScopeSchema.optional(),
+}).strict();
 // Search filters narrow or exclude returned memory, so a misspelled envelope
 // key must fail visibly instead of being stripped into an unfiltered search.
 export const searchThoughtsBody = searchThoughtsSchema;

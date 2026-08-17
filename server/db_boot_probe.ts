@@ -89,6 +89,7 @@ export async function probeDbAtBoot(
         boolean,
         boolean,
         boolean,
+        boolean,
       ]>(
         `SELECT
            to_regclass('public.idx_thoughts_content_tsv') IS NOT NULL,
@@ -268,6 +269,22 @@ export async function probeDbAtBoot(
                SELECT 1 FROM pg_constraint
                WHERE conrelid = to_regclass('public.mcp_auth_events')
                  AND conname = 'mcp_auth_events_outcome_shape_check'
+             ),
+           to_regclass('public.thought_revisions') IS NOT NULL
+             AND to_regprocedure(
+               'memory_scope.move_thought(uuid,text,text,memory_scope.visibility,text,text)'
+             ) IS NOT NULL
+             AND EXISTS (
+               SELECT 1
+               FROM pg_class revisions
+               WHERE revisions.oid = to_regclass('public.thought_revisions')
+                 AND revisions.relrowsecurity
+                 AND revisions.relforcerowsecurity
+                 AND EXISTS (
+                   SELECT 1 FROM pg_policy
+                   WHERE polrelid = revisions.oid
+                     AND polname = 'thought_revisions_app_head'
+                 )
              )`,
       );
       const [
@@ -282,7 +299,9 @@ export async function probeDbAtBoot(
         hasMetadataDegradationSchema,
         hasNativeAccessTokenSchema,
         hasAuthAuditSchema,
+        hasThoughtMutationSchema,
       ] = schema.rows[0] ?? [
+        false,
         false,
         false,
         false,
@@ -355,6 +374,19 @@ export async function probeDbAtBoot(
             `shape on mcp_auth_events (outcome/door/subject/token_label + the ` +
             `row-shape constraint). Re-apply db/02-observability.sql (idempotent; ` +
             `it converges the table in place) before starting this server version.`,
+        );
+      }
+      // update_thought/move_thought (1.22.0) need the revision-history table
+      // under forced head-gated RLS and the SECURITY DEFINER move helper. Gate
+      // at boot like the other schemas: without it the two mutation tools would
+      // fail per call against an otherwise healthy server.
+      if (!hasThoughtMutationSchema) {
+        throw new RequiredSchemaError(
+          `[db] Postgres at ${target} is missing the thought-mutation schema ` +
+            `(public.thought_revisions under forced RLS and ` +
+            `memory_scope.move_thought). Apply db/10-thought-mutations.sql as a ` +
+            `PostgreSQL superuser (for example, postgres), then run ` +
+            `db/03-grants-assertion.sql before starting this server version.`,
         );
       }
       // Only reference the ledger after to_regclass proved it exists. Putting

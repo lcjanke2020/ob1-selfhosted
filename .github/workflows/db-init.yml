@@ -53,6 +53,7 @@ on:
       - "server/auth_audit.ts"
       - "server/session_search_db_smoke.ts"
       - "server/session_ordering_db_smoke.ts"
+      - "server/thought_mutations_db_smoke.ts"
       - "server/scoped_db.ts"
       - "server/scope_contract.ts"
       - "server/db_pool.ts"
@@ -100,6 +101,7 @@ on:
       - "server/auth_audit.ts"
       - "server/session_search_db_smoke.ts"
       - "server/session_ordering_db_smoke.ts"
+      - "server/thought_mutations_db_smoke.ts"
       - "server/scoped_db.ts"
       - "server/scope_contract.ts"
       - "server/db_pool.ts"
@@ -196,6 +198,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/db/07-metadata-degradation.sql:/docker-entrypoint-initdb.d/07-metadata-degradation.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/08-access-tokens.sql:/docker-entrypoint-initdb.d/08-access-tokens.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/09-retire-corpus-funnel.sql:/docker-entrypoint-initdb.d/09-retire-corpus-funnel.sql:ro" \
+            -v "$GITHUB_WORKSPACE/db/10-thought-mutations.sql:/docker-entrypoint-initdb.d/10-thought-mutations.sql:ro" \
             -v "$GITHUB_WORKSPACE/db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro" \
             "$PG_IMAGE"
 
@@ -710,6 +713,31 @@ jobs:
             psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
             -v ON_ERROR_STOP=1 < db/spaces-smoke.sql >/dev/null
           echo "spaces RLS, sensitive ownership, dedupe, artifacts, and GUC reuse passed"
+
+      - name: Smoke test — thought mutations stay inside the caller's audience
+        run: |
+          # Reapply the migration first (idempotent upgrade path on a live
+          # volume), re-run the completed-catalog assertion so the new
+          # SECURITY DEFINER helper and append-only history are pinned, then
+          # exercise the move helper + app-role update path as the real roles.
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/10-thought-mutations.sql >/dev/null
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/03-grants-assertion.sql >/dev/null
+          docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" pgci \
+            psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -v ON_ERROR_STOP=1 < db/thought-mutations-smoke.sql >/dev/null
+          echo "move helper source/target checks, principal-stamped ownership, dedupe conflicts, head-gated append-only history, and the RLS-confined update path passed"
+          # Then the production query path itself (queries.ts
+          # updateThoughtContent/moveThought) as the forced-RLS app role: the
+          # exact bound statements, jsonb stamp merge, recomputed fingerprint,
+          # generated tsvector, degradation-event enqueue, and outcomes.
+          deno run --config server/deno.json --frozen \
+            --allow-env \
+            --allow-net=127.0.0.1:55439 \
+            server/thought_mutations_db_smoke.ts
 
       - name: Smoke test — session HNSW survives audience and residual filters
         env:
