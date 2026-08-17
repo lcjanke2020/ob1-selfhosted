@@ -843,7 +843,8 @@ Deno.test("thought mutations (services + MCP)", async (t) => {
           >).target;
           assertEquals(target.required, ["workspace_id", "visibility"]);
           assertEquals(target.additionalProperties, false);
-          assertEquals(moveTool.annotations?.destructiveHint, false);
+          // A move replaces the audience (and can widen it): not additive.
+          assertEquals(moveTool.annotations?.destructiveHint, true);
           assertEquals(moveTool.annotations?.idempotentHint, true);
           assert(moveTool.description?.includes("YOUR verified principal"));
 

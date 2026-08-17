@@ -611,9 +611,13 @@ export function createMcpServer(
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
-        // Nothing is overwritten: content and id are untouched, and a move is
-        // reversed by moving back. Repeating the same move is a no-op.
-        destructiveHint: false,
+        // A move REPLACES the head's workspace/project/visibility/owner: the
+        // old audience loses current access, and an explicit personal →
+        // project/workspace move widens who can read it. That is not an
+        // additive update in the MCP sense, and moving back is not guaranteed
+        // (identical content in the former audience conflicts), so history is
+        // an audit trail, not an undo. Repeating the same move is a no-op.
+        destructiveHint: true,
         idempotentHint: true,
       },
       inputSchema: moveThoughtSchema,
