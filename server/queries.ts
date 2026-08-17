@@ -1,10 +1,11 @@
 // Pure SQL business logic. No HTTP concerns. A future REST gateway, CLI, or
 // scheduled job can call these same functions without touching the MCP layer.
 
-import { Pool } from "postgres";
+import type { Pool, PoolClient } from "postgres";
 import { getClient } from "./db_pool.ts";
 import type { ThoughtMatch, ThoughtRecord } from "./db.ts";
 import { toVectorLiteral } from "./embeddings.ts";
+import { ConflictError } from "./errors.ts";
 import type { MetadataDegradationEvent } from "./metadata.ts";
 import { withScopeClient } from "./scoped_db.ts";
 import {
@@ -340,47 +341,323 @@ export async function captureThought(
       throw new Error("thought upsert returned no row");
     }
 
-    if (input.degradationEvents.length > 0) {
-      // One UUID groups every event emitted by this capture attempt. The
-      // thought upsert, immutable history, and pending-delivery outbox enqueue
-      // share withScopeClient's transaction. The outbox makes notification
-      // claiming commit-safe when BIGSERIAL ids commit out of order.
-      await client.queryArray(
-        `WITH inserted_events AS (
-           INSERT INTO metadata_degradation_events (
-             thought_id, capture_id, event_type, endpoint_role,
-             failure_reason, http_status, endpoint_model, endpoint_base_url
-           )
-           SELECT
-             $1::uuid,
-             $2::uuid,
-             event_type,
-             endpoint_role,
-             failure_reason,
-             http_status,
-             endpoint_model,
-             endpoint_base_url
-           FROM jsonb_to_recordset($3::jsonb) AS event(
-             event_type text,
-             endpoint_role text,
-             failure_reason text,
-             http_status integer,
-             endpoint_model text,
-             endpoint_base_url text
-           )
-           RETURNING id
-         )
-         INSERT INTO metadata_degradation_outbox (event_id)
-         SELECT id FROM inserted_events`,
-        [
-          persisted.id,
-          crypto.randomUUID(),
-          JSON.stringify(input.degradationEvents),
-        ],
+    await recordDegradationEvents(
+      client,
+      persisted.id,
+      input.degradationEvents,
+    );
+
+    return persisted;
+  });
+}
+
+// One UUID groups every event emitted by one capture/update attempt. The
+// thought write, immutable history, and pending-delivery outbox enqueue share
+// withScopeClient's transaction. The outbox makes notification claiming
+// commit-safe when BIGSERIAL ids commit out of order.
+async function recordDegradationEvents(
+  client: PoolClient,
+  thoughtId: string,
+  events: MetadataDegradationEvent[],
+): Promise<void> {
+  if (events.length === 0) return;
+  await client.queryArray(
+    `WITH inserted_events AS (
+       INSERT INTO metadata_degradation_events (
+         thought_id, capture_id, event_type, endpoint_role,
+         failure_reason, http_status, endpoint_model, endpoint_base_url
+       )
+       SELECT
+         $1::uuid,
+         $2::uuid,
+         event_type,
+         endpoint_role,
+         failure_reason,
+         http_status,
+         endpoint_model,
+         endpoint_base_url
+       FROM jsonb_to_recordset($3::jsonb) AS event(
+         event_type text,
+         endpoint_role text,
+         failure_reason text,
+         http_status integer,
+         endpoint_model text,
+         endpoint_base_url text
+       )
+       RETURNING id
+     )
+     INSERT INTO metadata_degradation_outbox (event_id)
+     SELECT id FROM inserted_events`,
+    [thoughtId, crypto.randomUUID(), JSON.stringify(events)],
+  );
+}
+
+// ---- thought mutations -------------------------------------------------
+
+// Server-verified identity recorded on every revision row. `subject` is the
+// trusted principal (OAuth sub, or the configured shared-key principal) —
+// the same value RLS compares personal rows against — never a caller claim.
+export type ThoughtMutationActor = {
+  subject: string | null;
+  door: string;
+  tokenLabel: string | null;
+};
+
+// Metadata keys that survive a content update unchanged. They record the
+// ORIGINAL capture (transport identity + caller-asserted provenance); the
+// editing identity is recorded on the revision row instead. Every other key
+// is classifier output and is replaced by the fresh extraction, together with
+// the fresh `metadata_extraction` stamp.
+export const PRESERVED_METADATA_KEYS_ON_UPDATE = [
+  "provenance",
+  "source",
+  "door",
+  "sub",
+  "token_label",
+] as const;
+
+export type UpdateThoughtInput = {
+  id: string;
+  content: string;
+  embedding: number[];
+  // Fresh classifier output plus the new metadata_extraction stamp; the
+  // preserved capture keys are merged in SQL from the row's current state so a
+  // concurrent edit cannot be clobbered by a stale read.
+  freshMetadata: Record<string, unknown>;
+  degradationEvents: MetadataDegradationEvent[];
+  actor: ThoughtMutationActor;
+  scope: ResolvedReadScope;
+};
+
+export type UpdateThoughtOutcome = ThoughtRecord & {
+  outcome: "updated" | "unchanged";
+  // Number of revision rows on record after this call.
+  revision: number;
+};
+
+type ThoughtHeadRow = {
+  id: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  workspace_id: string;
+  project_id: string | null;
+  visibility: ThoughtRecord["visibility"];
+  owner_subject: string | null;
+  content_fingerprint: string | null;
+  new_fingerprint: string;
+};
+
+// The same fingerprint expression captureThought uses inline, kept adjacent so
+// the two cannot drift: an update must dedupe exactly like a capture.
+const FINGERPRINT_SQL = (contentParam: string) =>
+  `encode(
+     sha256(
+       convert_to(lower(trim(regexp_replace(${contentParam}, '\\s+', ' ', 'g'))), 'UTF8')
+     ),
+     'hex'
+   )`;
+
+// Replaces a thought's content in place inside its CURRENT audience. Forced
+// RLS makes the row invisible (null) when the caller's scope does not admit
+// it, and the head row is locked so revision numbering and concurrent edits
+// serialize. Identical content is a no-op that writes nothing. Content whose
+// fingerprint already exists in the same audience is a ConflictError naming
+// the colliding row (visible to the caller by construction), so the
+// audience-aware fingerprint index is never hit for the common case; a race
+// still surfaces as a unique-violation from PostgreSQL.
+export async function updateThoughtContent(
+  pool: Pool,
+  input: UpdateThoughtInput,
+): Promise<UpdateThoughtOutcome | null> {
+  const embStr = toVectorLiteral(input.embedding);
+  return await withScopeClient(pool, input.scope, async (client) => {
+    const head = await client.queryObject<ThoughtHeadRow>(
+      `SELECT id, content, metadata, workspace_id, project_id, visibility,
+              owner_subject, content_fingerprint,
+              ${FINGERPRINT_SQL("$2")} AS new_fingerprint
+       FROM thoughts WHERE id = $1
+       FOR UPDATE`,
+      [input.id, input.content],
+    );
+    const current = head.rows[0];
+    if (!current) return null;
+
+    if (current.content === input.content) {
+      const count = await client.queryObject<{ revision: number }>(
+        `SELECT count(*)::int AS revision
+         FROM thought_revisions WHERE thought_id = $1`,
+        [current.id],
+      );
+      const unchanged = await client.queryObject<ThoughtRecord>(
+        `SELECT id, content, metadata, workspace_id, project_id, visibility,
+                created_at, updated_at
+         FROM thoughts WHERE id = $1`,
+        [current.id],
+      );
+      const row = unchanged.rows[0];
+      if (!row) throw new Error("thought vanished under its own row lock");
+      return {
+        ...row,
+        outcome: "unchanged",
+        revision: count.rows[0]?.revision ?? 0,
+      };
+    }
+
+    const collision = await client.queryObject<{ id: string }>(
+      `SELECT id FROM thoughts
+       WHERE content_fingerprint = $1
+         AND workspace_id = $2
+         AND project_id IS NOT DISTINCT FROM $3
+         AND visibility = $4::memory_scope.visibility
+         AND owner_subject IS NOT DISTINCT FROM $5
+         AND id <> $6
+       LIMIT 1`,
+      [
+        current.new_fingerprint,
+        current.workspace_id,
+        current.project_id,
+        current.visibility,
+        current.owner_subject,
+        current.id,
+      ],
+    );
+    const colliding = collision.rows[0];
+    if (colliding) {
+      throw new ConflictError(
+        `A thought with identical content already exists in this audience (id: ${colliding.id}).`,
       );
     }
 
-    return persisted;
+    const revision = await client.queryObject<{ revision: number }>(
+      `INSERT INTO thought_revisions (
+         thought_id, revision, change_kind,
+         prior_content, prior_metadata,
+         prior_workspace_id, prior_project_id, prior_visibility,
+         prior_owner_subject,
+         changed_by_subject, changed_by_door, changed_by_token_label
+       )
+       SELECT $1, COALESCE(max(revision), 0) + 1, 'content',
+              $2, $3::jsonb,
+              $4, $5, $6::memory_scope.visibility, $7,
+              $8, $9, $10
+       FROM thought_revisions WHERE thought_id = $1
+       RETURNING revision`,
+      [
+        current.id,
+        current.content,
+        JSON.stringify(current.metadata),
+        current.workspace_id,
+        current.project_id,
+        current.visibility,
+        current.owner_subject,
+        input.actor.subject,
+        input.actor.door,
+        input.actor.tokenLabel,
+      ],
+    );
+
+    const updated = await client.queryObject<ThoughtRecord>(
+      `UPDATE thoughts
+       SET content = $2,
+           embedding = $3::vector,
+           content_fingerprint = ${FINGERPRINT_SQL("$2")},
+           metadata = $4::jsonb || COALESCE(
+             (
+               SELECT jsonb_object_agg(preserved.key, preserved.value)
+               FROM jsonb_each(thoughts.metadata) AS preserved
+               WHERE preserved.key = ANY ($5::text[])
+             ),
+             '{}'::jsonb
+           )
+       WHERE id = $1
+       RETURNING id, content, metadata, workspace_id, project_id, visibility,
+                 created_at, updated_at`,
+      [
+        current.id,
+        input.content,
+        embStr,
+        JSON.stringify(input.freshMetadata),
+        [...PRESERVED_METADATA_KEYS_ON_UPDATE],
+      ],
+    );
+    const row = updated.rows[0];
+    if (!row) throw new Error("thought update returned no row");
+
+    await recordDegradationEvents(client, row.id, input.degradationEvents);
+
+    return {
+      ...row,
+      outcome: "updated",
+      revision: revision.rows[0]?.revision ?? 1,
+    };
+  });
+}
+
+// Number of revision rows on record for a head the caller can read (forced
+// RLS on thought_revisions gates on the head; an invisible head counts 0).
+export async function countThoughtRevisions(
+  pool: Pool,
+  id: string,
+  scope: ResolvedReadScope,
+): Promise<number> {
+  return await withScopeClient(pool, scope, async (client) => {
+    const result = await client.queryObject<{ revision: number }>(
+      `SELECT count(*)::int AS revision
+       FROM thought_revisions WHERE thought_id = $1`,
+      [id],
+    );
+    return result.rows[0]?.revision ?? 0;
+  });
+}
+
+export type MoveThoughtTargetAudience = {
+  workspaceId: string;
+  projectId: string | null;
+  visibility: ThoughtRecord["visibility"];
+};
+
+export type MoveThoughtOutcome = {
+  outcome: "moved" | "unchanged" | "conflict";
+  conflict_thought_id: string | null;
+  revision: number | null;
+  workspace_id: string;
+  project_id: string | null;
+  visibility: ThoughtRecord["visibility"];
+};
+
+// Delegates to memory_scope.move_thought (db/10-thought-mutations.sql), the
+// SECURITY DEFINER helper that bridges the single-audience RLS policy. The
+// caller's CURRENT audience is installed as usual; the function itself
+// re-checks source visibility under those settings, validates the target, and
+// stamps a personal owner from the transaction-local principal — so this
+// wrapper deliberately passes no subject argument. Null means not visible.
+export async function moveThought(
+  pool: Pool,
+  input: {
+    id: string;
+    target: MoveThoughtTargetAudience;
+    actor: ThoughtMutationActor;
+    scope: ResolvedReadScope;
+  },
+): Promise<MoveThoughtOutcome | null> {
+  return await withScopeClient(pool, input.scope, async (client) => {
+    const result = await client.queryObject<MoveThoughtOutcome>(
+      `SELECT outcome, conflict_thought_id, revision,
+              workspace_id, project_id, visibility
+       FROM memory_scope.move_thought(
+         $1::uuid, $2::text, $3::text, $4::memory_scope.visibility,
+         $5::text, $6::text
+       )`,
+      [
+        input.id,
+        input.target.workspaceId,
+        input.target.projectId,
+        input.target.visibility,
+        input.actor.door,
+        input.actor.tokenLabel,
+      ],
+    );
+    return result.rows[0] ?? null;
   });
 }
 

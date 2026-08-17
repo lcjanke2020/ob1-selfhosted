@@ -18,7 +18,7 @@
 -- Putting the assertion in its own file solves both cases:
 --   1. Fresh init: the Compose/CI paths mount this source file as
 --      99-grants-assertion.sql, after every schema migration. Native
---      provisioning applies 01-, 02-, 04-, 05-, 06-, 07-, 08-, and 09-, then invokes
+--      provisioning applies 01-, 02-, 04-, 05-, 06-, 07-, 08-, 09-, and 10-, then invokes
 --      this stable source path last. In both cases the assertion sees the
 --      completed catalog, so an init file that widens a protected role fails
 --      loudly.
@@ -44,6 +44,10 @@
 --   (f) PUBLIC has no standing default table/sequence grant, and Funnel
 --       relations, sink-only roles, and matching/unprovable HBA user tokens
 --       are absent from the corpus.
+--   (g) thought revision history is append-only (SELECT/INSERT) to the app,
+--       dumpable by the read-only role, under forced head-gated RLS, and the
+--       audience-move helper is a table-owner-owned, fixed-search-path
+--       SECURITY DEFINER function executable only by the app.
 --
 -- The openbrain_app check is deliberately scoped to thoughts:
 -- 02-observability.sql and 04-sessions.sql legitimately grant it access to
@@ -521,9 +525,83 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Spaces add a registry plus two privileged helper functions. The app may
+-- Thought revision history (10-thought-mutations.sql) is the audit trail for
+-- content updates and audience moves. The app appends and reads it but can
+-- never rewrite or erase it; the read-only role dumps it (table + identity
+-- sequence); PUBLIC gets nothing; and forced RLS gates every row on its head
+-- thought being visible, so a moved thought's earlier text follows the head.
+DO $$
+DECLARE
+  revisions oid := to_regclass('public.thought_revisions');
+  revisions_seq oid := to_regclass('public.thought_revisions_id_seq');
+BEGIN
+  IF revisions IS NULL OR revisions_seq IS NULL THEN
+    RAISE EXCEPTION
+      'grants assertion failed: public.thought_revisions or its identity sequence is missing; apply db/10-thought-mutations.sql first.';
+  END IF;
+
+  IF NOT (
+       has_table_privilege('openbrain_app', revisions, 'SELECT')
+       AND has_table_privilege('openbrain_app', revisions, 'INSERT')
+     ) OR has_table_privilege(
+       'openbrain_app', revisions,
+       'UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+     ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_app thought revision history must be SELECT/INSERT-only.';
+  END IF;
+
+  IF NOT has_table_privilege('openbrain_readonly', revisions, 'SELECT')
+     OR has_table_privilege(
+       'openbrain_readonly', revisions,
+       'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'
+     )
+     OR NOT has_sequence_privilege('openbrain_readonly', revisions_seq, 'SELECT')
+     OR has_sequence_privilege('openbrain_readonly', revisions_seq, 'USAGE, UPDATE')
+  THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_readonly cannot safely dump thought revision history.';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM pg_class relation
+    CROSS JOIN LATERAL aclexplode(
+      COALESCE(
+        relation.relacl,
+        acldefault(
+          (CASE WHEN relation.relkind = 'S' THEN 'S' ELSE 'r' END)::"char",
+          relation.relowner
+        )
+      )
+    ) acl
+    WHERE relation.oid = ANY (ARRAY[revisions, revisions_seq])
+      AND acl.grantee = 0
+  ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: PUBLIC can access thought revision history.';
+  END IF;
+
+  IF NOT COALESCE((
+       SELECT relrowsecurity AND relforcerowsecurity
+       FROM pg_class WHERE oid = revisions
+     ), false)
+     OR NOT EXISTS (
+       SELECT 1 FROM pg_policy
+       WHERE polrelid = revisions AND polname = 'thought_revisions_app_head'
+     ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: public.thought_revisions must be under forced RLS with the thought_revisions_app_head policy.';
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Spaces add a registry plus three privileged helper functions. The app may
 -- read (not administer) the registry and execute exactly the helpers it needs;
--- neither function may retain PostgreSQL's default PUBLIC execute grant.
+-- no function may retain PostgreSQL's default PUBLIC execute grant. The
+-- audience-move helper additionally bridges the single-audience RLS policy as
+-- the table owner, so its definer/owner/search_path shape is pinned exactly
+-- like the native-auth lifecycle functions.
 DO $$
 DECLARE
   audience_fn oid := to_regprocedure(
@@ -532,11 +610,43 @@ DECLARE
   search_fn oid := to_regprocedure(
     'memory_scope.search_thought_candidates(vector,double precision,text,text,boolean,jsonb,jsonb,integer)'
   );
+  move_fn oid := to_regprocedure(
+    'memory_scope.move_thought(uuid,text,text,memory_scope.visibility,text,text)'
+  );
+  thoughts_owner oid;
   fn oid;
 BEGIN
   IF audience_fn IS NULL OR search_fn IS NULL THEN
     RAISE EXCEPTION
       'grants assertion failed: memory_scope helper functions are missing; apply db/06-spaces.sql first.';
+  END IF;
+  IF move_fn IS NULL THEN
+    RAISE EXCEPTION
+      'grants assertion failed: memory_scope.move_thought is missing; apply db/10-thought-mutations.sql first.';
+  END IF;
+
+  SELECT relowner INTO thoughts_owner
+  FROM pg_class WHERE oid = 'public.thoughts'::regclass;
+  IF NOT COALESCE((
+       SELECT prosecdef
+         AND proowner = thoughts_owner
+         AND COALESCE(proconfig, ARRAY[]::text[])
+               @> ARRAY['search_path=pg_catalog']
+       FROM pg_proc WHERE oid = move_fn
+     ), false) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: memory_scope.move_thought must be SECURITY DEFINER, owned by the thoughts table owner, with search_path pinned to pg_catalog.';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_proc p
+    CROSS JOIN LATERAL aclexplode(p.proacl) acl
+    WHERE p.oid = move_fn
+      AND acl.grantee <> p.proowner
+      AND acl.grantee <> to_regrole('openbrain_app')
+  ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: memory_scope.move_thought is executable by a role other than openbrain_app.';
   END IF;
 
   IF NOT has_schema_privilege('openbrain_app', 'memory_scope', 'USAGE')
@@ -561,7 +671,7 @@ BEGIN
       'grants assertion failed: openbrain_app can mutate the memory_scope registry.';
   END IF;
 
-  FOREACH fn IN ARRAY ARRAY[audience_fn, search_fn] LOOP
+  FOREACH fn IN ARRAY ARRAY[audience_fn, search_fn, move_fn] LOOP
     IF NOT has_function_privilege('openbrain_app', fn, 'EXECUTE') THEN
       RAISE EXCEPTION
         'grants assertion failed: openbrain_app cannot execute required function %.',

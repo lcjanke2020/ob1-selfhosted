@@ -282,6 +282,7 @@ order
 | 1.19.0 | `db/08-access-tokens.sql`                                                  | —                                                                                                  |
 | 1.20.0 | `db/02-observability.sql` (re-apply; converges `mcp_auth_events` in place) | `OAUTH_ALLOWED_SUBJECTS` in `.env` **before** the container roll — fail-closed                     |
 | Arc B  | `db/02-observability.sql`, then `db/09-retire-corpus-funnel.sql`           | sink cutover complete; both legacy tables archived, verified, and empty; retired HBA rules removed |
+| 1.22.0 | `db/10-thought-mutations.sql`                                              | superuser (creates a table-owner SECURITY DEFINER helper); rerun `03-grants-assertion.sql` after   |
 
 Migration 08 is required by 1.19.0 **even when native tokens are disabled**.
 `ENABLE_NATIVE_TOKENS` gates the credential door, not the schema: the server's

@@ -87,6 +87,7 @@ services:
       # never rerun initdb.d; upgrades invoke this source file manually as the
       # guarded, archive-gated drop of the former corpus Funnel relations.
       - ../../db/09-retire-corpus-funnel.sql:/docker-entrypoint-initdb.d/09-retire-corpus-funnel.sql:ro
+      - ../../db/10-thought-mutations.sql:/docker-entrypoint-initdb.d/10-thought-mutations.sql:ro
       # Keep the stable source filename, but run the catalog assertion last so
       # later/future schemas and topology invariants are covered.
       - ../../db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro

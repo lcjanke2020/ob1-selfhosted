@@ -144,7 +144,12 @@ detail — both auth branches, step by step — is in
   plus a [versioned provenance contract](docs/thought-provenance.md) for
   caller-asserted author/agent/repo/branch context that stays visibly separate
   from server-verified transport identity. Both search legs can require or
-  exclude those claims in the same call.
+  exclude those claims in the same call. Two mutation tools correct the corpus
+  in place: `update_thought` replaces a wrong thought's text (re-embedded,
+  re-classified, id and audience kept) and `move_thought` re-scopes one to an
+  explicit workspace/project/visibility; both snapshot the prior state to an
+  append-only, head-gated revision history. See
+  [Correcting and moving thoughts](docs/spaces.md#correcting-and-moving-thoughts).
 - **Fail-closed memory spaces** — thoughts and sessions carry a registered
   workspace, optional project, and `personal | project | workspace` visibility
   enforced by PostgreSQL RLS. Omitted scope selects one configured default,
@@ -324,8 +329,9 @@ that don't speak MCP (shell scripts, cron jobs, dashboards). Same auth doors
 100 000-UTF-8-byte content cap), same orchestration code path — but responses
 are always structured JSON, never prose. Errors are
 `{"error": {"code", "message", "details"?}}` with conventional status codes (400
-validation, 401 auth, 404 not found, 413 body over 1 MiB, 502 embedding backend
-down).
+validation, 401 auth, 404 not found, 409 an update or move would collide with
+identical content already in the target audience, 413 body over 1 MiB, 502
+embedding backend down).
 
 **Where it exists:** opt-in via `ENABLE_REST_API` (server default **off**). The
 docker-compose installs enable it; the Qubes install deliberately does not (its
@@ -333,25 +339,30 @@ posture is minimum attack surface — when the flag is unset the router is never
 mounted, so the paths 404). On the Funnel deployment Caddy 404s `/api/v1*` on
 the public branch, so REST is reachable from the tailnet only.
 
-| Method | Path                          | Body / query                                                                       | Success                                                        |
-| ------ | ----------------------------- | ---------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| POST   | `/api/v1/thoughts`            | `{content, provenance?: {...}, scope?: {workspace_id?, project_id?, visibility?}}` | 201 `{id, metadata, workspace_id, project_id, visibility}`     |
-| POST   | `/api/v1/thoughts/search`     | `{query, limit?, threshold?, filter?: {...}, scope?: {...}}`                       | 200 `{results}` ordered by `rrf_score` (`similarity` retained) |
-| GET    | `/api/v1/thoughts`            | `?limit&type&topic&person&days&workspace_id&project_id&visibility`                 | 200 `{thoughts}`                                               |
-| GET    | `/api/v1/thoughts/stats`      | `?workspace_id&project_id&visibility`                                              | 200 stats                                                      |
-| GET    | `/api/v1/thoughts/:id`        | UUID path param + optional scope query                                             | 200 thought                                                    |
-| POST   | `/api/v1/sessions`            | `{toml_text}` (session TOML)                                                       | 201 created / 200 updated                                      |
-| POST   | `/api/v1/sessions/search`     | `{query, limit?, threshold?, status?, repo_url?, tag?, scope?: {...}}`             | 200 `{results}`                                                |
-| GET    | `/api/v1/sessions`            | filters plus optional `workspace_id`, `project_id`, `visibility`                   | 200 `{sessions}`                                               |
-| GET    | `/api/v1/sessions/lookup`     | `?id` or `?branch`, plus optional scope                                            | 200 session record                                             |
-| GET    | `/api/v1/sessions/:id`        | integer path param + optional scope query                                          | 200 session record                                             |
-| PATCH  | `/api/v1/sessions/:id/status` | `{status, scope?: {...}}`                                                          | 200 `{id, status}`                                             |
+| Method | Path                          | Body / query                                                                        | Success                                                             |
+| ------ | ----------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| POST   | `/api/v1/thoughts`            | `{content, provenance?: {...}, scope?: {workspace_id?, project_id?, visibility?}}`  | 201 `{id, metadata, workspace_id, project_id, visibility}`          |
+| POST   | `/api/v1/thoughts/search`     | `{query, limit?, threshold?, filter?: {...}, scope?: {...}}`                        | 200 `{results}` ordered by `rrf_score` (`similarity` retained)      |
+| GET    | `/api/v1/thoughts`            | `?limit&type&topic&person&days&workspace_id&project_id&visibility`                  | 200 `{thoughts}`                                                    |
+| GET    | `/api/v1/thoughts/stats`      | `?workspace_id&project_id&visibility`                                               | 200 stats                                                           |
+| GET    | `/api/v1/thoughts/:id`        | UUID path param + optional scope query                                              | 200 thought                                                         |
+| PATCH  | `/api/v1/thoughts/:id`        | `{content, scope?: {...}}` — full replacement text; `scope` is the CURRENT audience | 200 updated thought + `{outcome, revision}`                         |
+| POST   | `/api/v1/thoughts/:id/move`   | `{target: {workspace_id, project_id?, visibility}, scope?: {...}}` — all explicit   | 200 `{id, outcome, revision, workspace_id, project_id, visibility}` |
+| POST   | `/api/v1/sessions`            | `{toml_text}` (session TOML)                                                        | 201 created / 200 updated                                           |
+| POST   | `/api/v1/sessions/search`     | `{query, limit?, threshold?, status?, repo_url?, tag?, scope?: {...}}`              | 200 `{results}`                                                     |
+| GET    | `/api/v1/sessions`            | filters plus optional `workspace_id`, `project_id`, `visibility`                    | 200 `{sessions}`                                                    |
+| GET    | `/api/v1/sessions/lookup`     | `?id` or `?branch`, plus optional scope                                             | 200 session record                                                  |
+| GET    | `/api/v1/sessions/:id`        | integer path param + optional scope query                                           | 200 session record                                                  |
+| PATCH  | `/api/v1/sessions/:id/status` | `{status, scope?: {...}}`                                                           | 200 `{id, status}`                                                  |
 
 Notes: thought capture upserts by content fingerprint, so re-posting identical
 content returns the existing id (still 201) only inside the same exact audience.
-POST/PATCH bodies use a nested `scope`; GET routes use the three flat query
-parameters. Omitted scope selects `DEFAULT_WORKSPACE_ID`, never all workspaces.
-The complete union, principal, and seeded `sensitive` semantics are in
+`PATCH /thoughts/:id` and `POST /thoughts/:id/move` address the row through its
+CURRENT scope (an id outside it 404s like a GET), never widen anything
+implicitly, and keep the prior state in revision history. POST/PATCH bodies use
+a nested `scope`; GET routes use the three flat query parameters. Omitted scope
+selects `DEFAULT_WORKSPACE_ID`, never all workspaces. The complete union,
+principal, and seeded `sensitive` semantics are in
 [Memory spaces](docs/spaces.md).
 
 Compatibility note for server 1.9.0: REST request bodies and query envelopes are

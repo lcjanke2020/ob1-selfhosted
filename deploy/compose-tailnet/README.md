@@ -375,9 +375,16 @@ docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postg
 docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/07-metadata-degradation.sql
 docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/08-access-tokens.sql
 docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/09-retire-corpus-funnel.sql
+docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/10-thought-mutations.sql
 docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
 docker compose --env-file .env build mcp log-ingester && docker compose --env-file .env up -d
 ```
+
+Upgrading to **1.22.0+**: `10-thought-mutations.sql` (superuser) adds the
+append-only `thought_revisions` history and the `memory_scope.move_thought`
+helper behind the new `update_thought` / `move_thought` tools and their REST
+routes; the server's boot probe refuses to start without it. See
+[Memory spaces](../../docs/spaces.md#correcting-and-moving-thoughts).
 
 Upgrading to **1.20.0+**: `02-observability.sql` in the block above now also
 converges `mcp_auth_events` to the allowed+denied audit shape in place (the new

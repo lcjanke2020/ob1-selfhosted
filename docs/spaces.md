@@ -51,13 +51,73 @@ Thought deduplication follows the same audience. Identical content deduplicates
 inside one exact workspace/project/visibility/owner tuple but remains distinct
 across audiences.
 
-Audience is immutable through the normal application APIs. A session recapture
-or status update must use the row's stored scope; supplying another scope gets
-the same not-found result as an unknown ID. Thoughts have no application-level
-move or delete operation. Moving one currently means capturing it into the new
-audience and having an administrator delete the old row. A safe transactional
-reclassification tool that preserves deduplication and session-artifact
-semantics is tracked as follow-up work.
+Every operation addresses a row through its stored scope. A session recapture or
+status update, and a thought update or move, must name the row's CURRENT
+audience; supplying another scope gets the same not-found result as an unknown
+ID. Session audience is immutable through the application APIs; thoughts can be
+corrected and re-scoped in place — see
+[Correcting and moving thoughts](#correcting-and-moving-thoughts). There is no
+application-level delete for either.
+
+## Correcting and moving thoughts
+
+Two mutation tools (server 1.22.0+; MCP `update_thought` / `move_thought`, REST
+`PATCH /api/v1/thoughts/:id` / `POST /api/v1/thoughts/:id/move`) exist for the
+two ways a capture goes wrong: the text is wrong, or it landed in the wrong
+space. Both keep the thought's id, so citations, `fetch`, and the
+metadata-degradation history keep pointing at the same row, and both preserve
+`created_at`.
+
+**`update_thought(id, content, scope?)`** replaces the content in full (it is
+not a patch), re-embeds it, and re-runs metadata extraction so recall reflects
+the corrected text. The fresh classifier output replaces the old; the original
+capture stamps (`source`, `door`, `sub`, `token_label`) and the caller-asserted
+[provenance](thought-provenance.md) survive unchanged, because they describe who
+captured the thought, not who corrected it. Content identical to the stored text
+is a no-op. Content whose fingerprint already exists in the same audience is
+refused as a conflict (REST 409) naming the existing row, so deduplication holds
+through edits.
+
+**`move_thought(id, target, scope?)`** changes only the audience. `target` is
+deliberately not the ordinary `scope` object: `workspace_id` and `visibility`
+are required, `project_id` is required exactly for `project` visibility and
+forbidden otherwise, and nothing falls through to the configured default
+workspace or the workspace's default visibility. A move never widens implicitly;
+a personal → project or personal → workspace move happens only because the owner
+spelled it out. A `personal` target is owned by the caller's own verified
+principal — never a caller-supplied subject — so a thought can be made
+personal-to-you and nobody else. The seeded `sensitive` workspace accepts only
+personal targets. Moving a thought onto identical content already present in the
+target audience is refused as a conflict; moving it to the audience it is
+already in is a no-op.
+
+Both tools apply the same fail-closed rules as capture and recall: the caller
+must be able to read the row under the requested current scope (otherwise it is
+indistinguishable from an unknown id), personal targets need a trusted
+principal, and unknown workspaces or projects fail validation before any
+embedding work.
+
+**Revision history.** Every update and move first snapshots the prior state —
+content, metadata, workspace/project/visibility/owner, plus the verified
+subject, door, and token label that made the change — into
+`public.thought_revisions` (`db/10-thought-mutations.sql`). The application role
+can append and read that history but never rewrite or erase it. Revision rows
+are readable exactly when their head thought is readable, so once a misfiled
+thought has been moved to a narrower audience its earlier text is no longer
+visible to the audience it left. `fetch` and search return heads only; the
+history is an audit trail, not a second recall surface. There is no soft-delete
+yet; that remains follow-up work.
+
+Under the hood, an update is an ordinary application-role `UPDATE` inside the
+row's own audience under forced RLS. A move cannot be: the single audience
+policy evaluates the old and new row against the same transaction-local
+settings, so crossing an audience is done by a narrowly granted
+`SECURITY DEFINER` function, `memory_scope.move_thought`, that re-checks source
+visibility under those settings, validates the target against the registry and
+the audience-shape rules, stamps the owner from the transaction- local
+principal, and reports dedupe conflicts as an outcome. Its owner, fixed
+`search_path`, and app-only execute grant are pinned by the grants assertion and
+required by the boot probe.
 
 ## The seeded `sensitive` space
 
@@ -226,14 +286,21 @@ docker compose exec -T postgres \
   < ../../db/08-access-tokens.sql
 docker compose exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/10-thought-mutations.sql
+docker compose exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/03-grants-assertion.sql
 ```
 
-Migrations 07 and 08 are the next required server schemas and are included here
-so the completed-catalog grant assertion remains last. Neither extends or
-weakens the space boundary; see
+Migrations 07, 08, and 10 are the next required server schemas and are included
+here so the completed-catalog grant assertion remains last. 07 and 08 neither
+extend nor weaken the space boundary; see
 [Metadata degradation monitoring](metadata-degradation-monitoring.md) and
-[Native access tokens](native-access-tokens.md).
+[Native access tokens](native-access-tokens.md). 10 adds the head-gated revision
+history and the audience-move helper described in
+[Correcting and moving thoughts](#correcting-and-moving-thoughts); it also
+requires a superuser because the helper is a table-owner `SECURITY DEFINER`
+function.
 
 The migration backfills existing thoughts and sessions into the `default`
 workspace at workspace visibility. It takes table locks while adding and

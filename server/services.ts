@@ -12,23 +12,41 @@ import type { Pool } from "postgres";
 import type { AuthContext } from "./auth_context.ts";
 import type { ThoughtMatch, ThoughtRecord } from "./db.ts";
 import { embed as defaultEmbed } from "./embeddings.ts";
-export { NotFoundError, UpstreamError, ValidationError } from "./errors.ts";
-import { NotFoundError, UpstreamError, ValidationError } from "./errors.ts";
+export {
+  ConflictError,
+  NotFoundError,
+  UpstreamError,
+  ValidationError,
+} from "./errors.ts";
+import {
+  ConflictError,
+  NotFoundError,
+  UpstreamError,
+  ValidationError,
+} from "./errors.ts";
 import { extractMetadata as defaultExtractMetadata } from "./metadata.ts";
 import type { MetadataExtractionResult } from "./metadata.ts";
 import {
   type CaptureOutcome,
   captureThought,
+  countThoughtRevisions,
   fetchThought,
   getStats,
   type ListOptions,
   listThoughts,
+  moveThought,
+  type MoveThoughtOutcome,
   searchThoughts,
   type Stats,
+  type ThoughtMutationActor,
+  updateThoughtContent,
+  type UpdateThoughtOutcome,
 } from "./queries.ts";
 import {
   type MemoryScopeInput,
   memoryScopeSchema,
+  type MoveThoughtTarget,
+  moveThoughtTargetSchema,
   searchQuerySchema,
   similarityThresholdSchema,
   THOUGHT_PROVENANCE_SCHEMA_VERSION,
@@ -37,6 +55,7 @@ import {
   thoughtProvenanceClaimsSchema,
   type ThoughtSearchFilter,
   thoughtSearchFilterSchema,
+  updateThoughtShape,
 } from "./schemas.ts";
 import {
   getSession,
@@ -51,7 +70,11 @@ import {
   type UpsertOutcome,
   upsertSession,
 } from "./session_queries.ts";
-import { resolveReadScope, resolveWriteScope } from "./scope.ts";
+import {
+  resolveReadScope,
+  resolveWriteScope,
+  trustedPrincipal,
+} from "./scope.ts";
 import {
   computeContentHash,
   embedSource,
@@ -132,6 +155,62 @@ function validateThoughtId(id: string): string {
   return parsed.data;
 }
 
+function validateUpdateContent(content: string): string {
+  const parsed = updateThoughtShape.content.safeParse(content);
+  if (!parsed.success) {
+    throw new ValidationError(
+      `content: ${
+        parsed.error.issues.map((issue) => issue.message).join("; ")
+      }`,
+    );
+  }
+  return parsed.data;
+}
+
+function validateMoveTarget(target: MoveThoughtTarget): MoveThoughtTarget {
+  const parsed = moveThoughtTargetSchema.safeParse(target);
+  if (!parsed.success) {
+    throw new ValidationError(
+      `target: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
+    );
+  }
+  return parsed.data;
+}
+
+// The identity written on revision rows. `subject` is the trusted principal
+// (what RLS compares personal rows against), so an OAuth caller's sub, the
+// configured shared-key principal, or null — never a caller-asserted claim.
+function mutationActor(auth: AuthContext): ThoughtMutationActor {
+  return {
+    subject: trustedPrincipal(auth),
+    door: auth.door,
+    tokenLabel: auth.tokenLabel,
+  };
+}
+
+// Treat these keys as reserved even though metadata.ts's strict runtime schema
+// already excludes them. This defense keeps injected test/custom extractors
+// from impersonating server stamps or caller claims — on capture and again on
+// update, where the fresh classifier output replaces the old.
+const RESERVED_METADATA_KEYS = [
+  "source",
+  "door",
+  "sub",
+  "token_label",
+  "provenance",
+  "metadata_extraction",
+] as const;
+
+function classifiedMetadata(
+  extraction: MetadataExtractionResult,
+): Record<string, unknown> {
+  const classified = { ...extraction.metadata };
+  for (const reserved of RESERVED_METADATA_KEYS) {
+    delete classified[reserved];
+  }
+  return classified;
+}
+
 function validateMemoryScope(
   scope: MemoryScopeInput | undefined,
 ): MemoryScopeInput | undefined {
@@ -193,22 +272,7 @@ export async function captureThoughtWithMetadata(
     embedOrUpstreamError(deps.embed, input.content),
     deps.extractMetadata(input.content),
   ]);
-  // Treat these keys as reserved even though metadata.ts's strict runtime
-  // schema already excludes them. This defense keeps injected test/custom
-  // extractors from impersonating server stamps or caller claims.
-  const classified = { ...extraction.metadata };
-  for (
-    const reserved of [
-      "source",
-      "door",
-      "sub",
-      "token_label",
-      "provenance",
-      "metadata_extraction",
-    ]
-  ) {
-    delete classified[reserved];
-  }
+  const classified = classifiedMetadata(extraction);
 
   // `provenance` is deliberately emitted only when the caller supplied at
   // least one validated claim. On a content-fingerprint conflict, queries.ts
@@ -317,6 +381,115 @@ export async function getThoughtStatsInScope(
     input.auth,
   );
   return await getStats(pool, scope);
+}
+
+// Replace a thought's content in place inside its CURRENT audience: same
+// visibility rule as fetch (an id outside the caller's scope is null), then
+// re-embed and re-classify exactly like a capture, then a single locked
+// transaction that snapshots the prior state to thought_revisions and rewrites
+// the head. Original capture stamps (source/door/sub/token_label/provenance)
+// survive; classifier fields are replaced by the fresh extraction. Identical
+// content is a no-op.
+export async function updateThoughtInScope(
+  pool: Pool,
+  input: {
+    id: string;
+    content: string;
+    scope?: MemoryScopeInput;
+    auth: AuthContext;
+  },
+  deps: ServiceDeps = defaultDeps,
+): Promise<UpdateThoughtOutcome | null> {
+  const thoughtId = validateThoughtId(input.id);
+  const content = validateUpdateContent(input.content);
+  const scope = await resolveReadScope(
+    pool,
+    validateMemoryScope(input.scope),
+    input.auth,
+  );
+  // An invisible or unknown id fails HERE, before content reaches the embedder
+  // or the classifier — the same fail-fast order as a session refresh.
+  const existing = await fetchThought(pool, thoughtId, scope);
+  if (!existing) return null;
+  // Identical content is a no-op: do not replay the text to the embedder or a
+  // possibly off-box classifier for nothing. (The query layer re-checks under
+  // the row lock, so a concurrent edit between here and there is still safe.)
+  if (existing.content === content) {
+    return {
+      ...existing,
+      outcome: "unchanged",
+      revision: await countThoughtRevisions(pool, thoughtId, scope),
+    };
+  }
+  const [embedding, extraction] = await Promise.all([
+    embedOrUpstreamError(deps.embed, content),
+    deps.extractMetadata(content),
+  ]);
+  return await updateThoughtContent(pool, {
+    id: thoughtId,
+    content,
+    embedding,
+    freshMetadata: {
+      ...classifiedMetadata(extraction),
+      metadata_extraction: extraction.classifier,
+    },
+    degradationEvents: extraction.degradation_events,
+    actor: mutationActor(input.auth),
+    scope,
+  });
+}
+
+// Move a thought to another audience in place (same id, content, embedding,
+// created_at). The CURRENT audience is addressed through `scope` like fetch;
+// the destination is resolved with the same fail-closed rules as a capture —
+// registered workspace/project, personal-only workspaces accept only personal,
+// personal requires a trusted principal — and then the SECURITY DEFINER
+// helper re-checks source visibility, validates the target again, snapshots
+// the prior state, and stamps a personal owner from the transaction-local
+// principal. Widening (personal → project/workspace) is allowed only because
+// every target field is explicit; nothing about the destination is defaulted.
+export async function moveThoughtInScope(
+  pool: Pool,
+  input: {
+    id: string;
+    target: MoveThoughtTarget;
+    scope?: MemoryScopeInput;
+    auth: AuthContext;
+  },
+): Promise<MoveThoughtOutcome | null> {
+  const thoughtId = validateThoughtId(input.id);
+  const target = validateMoveTarget(input.target);
+  const scope = await resolveReadScope(
+    pool,
+    validateMemoryScope(input.scope),
+    input.auth,
+  );
+  const destination = await resolveWriteScope(
+    pool,
+    {
+      workspace_id: target.workspace_id,
+      project_id: target.project_id ?? null,
+      visibility: target.visibility,
+    },
+    input.auth,
+  );
+  const outcome = await moveThought(pool, {
+    id: thoughtId,
+    target: {
+      workspaceId: destination.workspaceId,
+      projectId: destination.projectId,
+      visibility: destination.visibility,
+    },
+    actor: mutationActor(input.auth),
+    scope,
+  });
+  if (!outcome) return null;
+  if (outcome.outcome === "conflict") {
+    throw new ConflictError(
+      `A thought with identical content already exists in the target audience (id: ${outcome.conflict_thought_id}).`,
+    );
+  }
+  return outcome;
 }
 
 export async function searchSessionsByQuery(

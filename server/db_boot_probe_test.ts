@@ -71,7 +71,9 @@ class FakeClient {
       boolean,
       boolean,
       boolean,
+      boolean,
     ] = [
+      true,
       true,
       true,
       true,
@@ -127,6 +129,13 @@ Deno.test("probeDbAtBoot: success path validates connectivity and hybrid schema"
   assert(client.queryCalls[1].includes("native_auth.access_token"));
   assert(client.queryCalls[1].includes("mcp_auth_events"));
   assert(client.queryCalls[1].includes("mcp_auth_events_outcome_shape_check"));
+  assert(client.queryCalls[1].includes("public.thought_revisions"));
+  assert(client.queryCalls[1].includes("thought_revisions_app_head"));
+  assert(
+    client.queryCalls[1].includes(
+      "memory_scope.move_thought(uuid,text,text,memory_scope.visibility,text,text)",
+    ),
+  );
   assert(
     client.queryCalls[1].includes(
       "metadata_degradation_failed_channels_shape",
@@ -143,6 +152,7 @@ Deno.test("probeDbAtBoot: missing hybrid schema rejects with migration guidance"
   const client = new FakeClient([
     true,
     false,
+    true,
     true,
     true,
     true,
@@ -179,6 +189,7 @@ Deno.test("probeDbAtBoot: missing spaces schema rejects with migration guidance"
     true,
     true,
     true,
+    true,
   ]);
   const fakePool = {
     connect: () => Promise.resolve(client),
@@ -202,6 +213,7 @@ Deno.test("probeDbAtBoot: missing audience indexes rejects before serving", asyn
     true,
     true,
     false,
+    true,
     true,
     true,
     true,
@@ -234,6 +246,7 @@ Deno.test("probeDbAtBoot: missing native token schema rejects with migration gui
     true,
     false,
     true,
+    true,
   ]);
   const fakePool = {
     connect: () => Promise.resolve(client),
@@ -265,6 +278,7 @@ Deno.test("probeDbAtBoot: pre-1.20 auth-audit table shape rejects with migration
     true,
     true,
     false,
+    true,
   ]);
   const fakePool = {
     connect: () => Promise.resolve(client),
@@ -279,6 +293,37 @@ Deno.test("probeDbAtBoot: pre-1.20 auth-audit table shape rejects with migration
   assertEquals(client.releaseCalls, 1);
 });
 
+Deno.test("probeDbAtBoot: missing thought-mutation schema rejects with migration guidance", async () => {
+  // update_thought/move_thought would otherwise fail per call against an
+  // otherwise healthy 1.22.0 server; the gate names the migration to apply.
+  const client = new FakeClient([
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    false,
+  ]);
+  const fakePool = {
+    connect: () => Promise.resolve(client),
+  } as unknown as Pool;
+
+  const err = await assertRejects(
+    () => probeDbAtBoot(fakePool, "db:5432"),
+    Error,
+  );
+  assertStringIncludes(err.message, "thought_revisions");
+  assertStringIncludes(err.message, "memory_scope.move_thought");
+  assertStringIncludes(err.message, "db/10-thought-mutations.sql");
+  assertEquals(client.releaseCalls, 1);
+});
+
 Deno.test("probeDbAtBoot: missing or incomplete metadata audit schema rejects with migration guidance", async () => {
   const client = new FakeClient([
     true,
@@ -290,6 +335,7 @@ Deno.test("probeDbAtBoot: missing or incomplete metadata audit schema rejects wi
     true,
     true,
     false,
+    true,
     true,
     true,
   ]);
@@ -309,7 +355,7 @@ Deno.test("probeDbAtBoot: missing or incomplete metadata audit schema rejects wi
 
 Deno.test("probeDbAtBoot: missing metadata notification singleton rejects with migration guidance", async () => {
   const client = new FakeClient(
-    [true, true, true, true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true, true, true, true, true],
     true,
     false,
   );
@@ -328,7 +374,7 @@ Deno.test("probeDbAtBoot: missing metadata notification singleton rejects with m
 
 Deno.test("probeDbAtBoot: unknown configured workspace rejects before serving", async () => {
   const client = new FakeClient(
-    [true, true, true, true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true, true, true, true, true],
     false,
   );
   const fakePool = {
