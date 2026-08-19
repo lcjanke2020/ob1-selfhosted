@@ -1,4 +1,4 @@
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   auditExampleEnvironment,
   auditServerEnvironment,
@@ -192,6 +192,39 @@ Deno.test("example inventory observes export and lowercase dotenv assignments", 
   assertEquals(issues.length, 2);
   assertStringIncludes(issues.join("\n"), "lowercase_extra");
   assertStringIncludes(issues.join("\n"), "EXPORTED_EXTRA");
+});
+
+Deno.test("example inventory fails closed on unsupported dotenv forms", () => {
+  for (const line of ["BARE_EXTRA", "colon_extra: value"]) {
+    assertThrows(
+      () => parseExampleEnvironment(`EXPECTED=value\n${line}\n`),
+      Error,
+      "unsupported dotenv syntax",
+    );
+  }
+});
+
+Deno.test("literal pins reject conditional interpolation", () => {
+  const issues = auditServerEnvironment(
+    "conditional-literal",
+    new Set(["FIRST"]),
+    snapshot(["FIRST"], {
+      environment: { FIRST: "fixed" },
+      rawEnvironment: { FIRST: "${FIRST:+fixed}" },
+    }),
+    undefined,
+    {
+      pins: {
+        FIRST: {
+          value: "fixed",
+          rationale: "This value must not depend on operator input.",
+        },
+      },
+    },
+  );
+
+  assertEquals(issues.length, 1);
+  assertStringIncludes(issues[0], "must be a literal");
 });
 
 Deno.test("server placement follows launcher identity rather than service name", () => {

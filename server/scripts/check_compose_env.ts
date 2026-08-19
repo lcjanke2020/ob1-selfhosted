@@ -499,6 +499,14 @@ export function auditServerEnvironment(
           }; got ${JSON.stringify(actual)}`,
         );
       }
+      const raw = snapshot.rawEnvironment[key];
+      if (rawKeys.has(key) && !Object.is(raw, rule.value)) {
+        issues.push(
+          `${name}: ${key} must be a literal ${
+            JSON.stringify(rule.value)
+          } in un-interpolated Compose; got ${JSON.stringify(raw)}`,
+        );
+      }
       continue;
     }
 
@@ -581,12 +589,11 @@ export function parseExampleEnvironment(content: string): ExampleEnvironment {
     );
     if (!match) {
       const candidate = line.trim();
-      if (
-        candidate.length > 0 && !candidate.startsWith("#") &&
-        candidate.includes("=")
-      ) {
+      // Keep this inventory parser deliberately narrow, but never let valid or
+      // invalid active dotenv syntax disappear from the parity contract.
+      if (candidate.length > 0 && !candidate.startsWith("#")) {
         throw new Error(
-          `.env.example:${index + 1}: unsupported assignment syntax`,
+          `.env.example:${index + 1}: unsupported dotenv syntax; use KEY=value`,
         );
       }
       continue;
