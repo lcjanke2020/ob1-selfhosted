@@ -77,17 +77,35 @@ server's supported keys from the same AST analysis as the launcher guard, then
 uses `docker compose config` to render every canonical deployment with unique
 sentinels. It rejects missing forwarding, unsupported extras, unreviewed
 required/default changes, and drift between Compose's own variable inventory and
-each `.env.example`. The small policy in that file is the reviewed boundary:
-database credential aliases, fixed role/pool/port choices, Pattern B auth pins,
-the OAuth-only Qubes omissions, and example-only host/Compose variables. Every
-exception carries a rationale and stale exceptions fail.
+each `.env.example`.
+[`compose_deployments.ts`](server/scripts/compose_deployments.ts) is the one
+typed manifest for Compose files, documented stacks, active profiles, example
+groups, capabilities, and reviewed exceptions;
+[`compose_env_audit.ts`](server/scripts/compose_env_audit.ts) contains only pure
+policy checks. The allow-env guard deliberately expands the three local overlays
+to all eight syntactically supported subsets, while parity checks only the six
+documented local stacks plus the two standalone Qubes stacks. Every exception
+carries a rationale, and unknown, conflicting, empty, or stale policy fails.
 
-The two example files deliberately differ on `METADATA_FALLBACK_POLICY`: the
-single-host quickstart preselects strict `off`, while the security-separated
-Qubes app requires an explicit operator choice. The parity check pins both
-values. Pattern B's separate sink/socket topology is checked independently by
+The local and Qubes app examples deliberately differ on
+`METADATA_FALLBACK_POLICY`: the single-host quickstart preselects strict `off`,
+while the security-separated Qubes app requires an explicit operator choice. The
+parity check pins both values. Pattern B's separate sink/socket topology is
+checked independently by
 [`check_pattern_b_compose.nu`](scripts/check_pattern_b_compose.nu), keeping that
-security contract out of the environment-parity policy.
+security contract — including the ingester's socket and INSERT-only role — out
+of generic environment policy. Its OAuth trio is render-time required because
+Pattern B disables every non-OAuth credential door. The `tools` profile remains
+a one-shot operator command rather than a deployment shape; Compose's
+un-interpolated model retains it for allow-env analysis, and a regression test
+pins that oracle behavior.
+
+The supported Compose floor is **2.38.2**, retained as the older compatibility
+lane that exposed the original required-variable and rendered-mount metadata
+differences. The current supported line is pinned at **5.3.1**. CI downloads and
+checksum-verifies both exact Linux plugin binaries and runs the same parity,
+launcher-permission, and Pattern B contracts in each matrix lane; it never
+relies on the runner's floating preinstalled Compose version.
 
 CI cannot inspect a systemd unit maintained only on a deployment host. Before
 restarting such a unit, load the same environment file the unit uses and

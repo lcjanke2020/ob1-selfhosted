@@ -138,6 +138,9 @@ def assert-pattern-b-sink [name: string, rendered: record] {
     if $ingester.environment.DB_HOST != "/var/run/postgresql" {
         error make { msg: $"($name): log-ingester DB_HOST escaped the sink socket" }
     }
+    if $ingester.environment.DB_USER != "openbrain_ingester" {
+        error make { msg: $"($name): log-ingester escaped its INSERT-only database role" }
+    }
     assert-socket-bind $name "log-ingester" $ingester
     assert-socket-bind $name "log-sink" $sink
     if "log-sink" not-in ($ingester.depends_on | columns) {

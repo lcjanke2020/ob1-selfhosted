@@ -61,7 +61,8 @@ The `caddy` service itself lives in the base compose file, gated behind the
 ### OAuth provider setup (Auth0 shown; any RS256 issuer works)
 
 All three of `AUTH0_ISSUER`, `AUTH0_JWKS_URI`, `AUTH0_AUDIENCE` must be set —
-partial config throws at boot. The dashboard steps live in
+the Pattern B override rejects a missing or blank value during Compose
+rendering, before any server restart loop. The dashboard steps live in
 `../compose-local/.env.example` next to the variables. The one irreversible
 decision:
 
