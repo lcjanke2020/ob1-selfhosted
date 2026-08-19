@@ -11,6 +11,8 @@
 #
 # Deno version pinned to match server/Dockerfile (FROM denoland/deno:2.9.4)
 # so the CI runtime matches what ships.
+# The allow-env job also uses the runner's Docker Compose installation as the
+# parser and merge oracle for every supported checked-in stack.
 
 name: CI
 

@@ -1,16 +1,25 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { fromFileUrl } from "@std/path";
+import { parse as parseYaml } from "@std/yaml";
 import {
   analyzeTarget,
   type CheckTarget,
   DENO_POSTGRES_ALLOW_ENV,
   dependencyEnvForEntrypoint,
   findEnvReads,
-  parseComposeStackTargets,
-  parseComposeTargets,
   parseDockerfile,
+  parseRenderedComposeTargets,
+  renderComposeStackTargets,
   TOKEN_ADMIN_ALLOW_ENV,
 } from "./check_allow_env.ts";
+
+// Most cases below characterize launcher parsing after Compose has rendered a
+// service. Parse their compact YAML fixtures without attempting to emulate
+// multi-file Compose merging; the dedicated renderer tests exercise that
+// integration against the real `docker compose config` implementation.
+function parseComposeTargets(content: string, source: string): CheckTarget[] {
+  return parseRenderedComposeTargets(parseYaml(content), source);
+}
 
 function onlyTarget(content: string): CheckTarget {
   const targets = parseComposeTargets(content, "compose.yml");
@@ -81,43 +90,49 @@ services:
   assertEquals([...target.allowEnv], ["FOO"]);
 });
 
-Deno.test("Compose override stacks audit inherited Deno launchers", () => {
-  const base = `
-services:
-  tool:
-    entrypoint: [deno]
-    command: [run, --allow-env=SAFE, /app/tool.ts]
-`;
-  const bounded = parseComposeStackTargets([
-    { content: base, source: "base.yml" },
-    {
-      content: `
-services:
-  tool:
-    command: [run, --allow-env=OVERRIDE, /app/tool.ts]
-`,
-      source: "override.yml",
-    },
-  ]);
-  assertEquals(bounded.length, 1);
-  assertEquals([...bounded[0].allowEnv], ["OVERRIDE"]);
+Deno.test("Compose renders override stacks before launcher audit", async () => {
+  const directory = await Deno.makeTempDir();
+  const basePath = `${directory}/base.yml`;
+  const overridePath = `${directory}/override.yml`;
+  try {
+    await Deno.writeTextFile(
+      basePath,
+      "services:\n  tool:\n    image: denoland/deno:2.9.4\n" +
+        "    entrypoint: [deno]\n" +
+        "    command: [run, --allow-env=SAFE, /app/tool.ts]\n",
+    );
+    await Deno.writeTextFile(
+      overridePath,
+      "services:\n  tool:\n" +
+        "    command: [run, --allow-env=OVERRIDE, /app/tool.ts]\n",
+    );
+    const bounded = renderComposeStackTargets([basePath, overridePath]);
+    assertEquals(bounded.length, 1);
+    assertEquals([...bounded[0].allowEnv], ["OVERRIDE"]);
 
-  assertThrows(
-    () =>
-      parseComposeStackTargets([
-        { content: base, source: "base.yml" },
-        {
-          content: `
-services:
-  tool:
-    command: [run, --allow-env, /app/tool.ts]
-`,
-          source: "override.yml",
-        },
-      ]),
-    Error,
-    "bare -E/--allow-env grants the entire environment",
-  );
+    await Deno.writeTextFile(
+      overridePath,
+      "services:\n  tool:\n" +
+        "    command: [run, --allow-env, /app/tool.ts]\n",
+    );
+    assertThrows(
+      () => renderComposeStackTargets([basePath, overridePath]),
+      Error,
+      "bare -E/--allow-env grants the entire environment",
+    );
+
+    await Deno.writeTextFile(
+      overridePath,
+      'services:\n  tool:\n    entrypoint: "${TOOL_ENTRYPOINT:-deno}"\n',
+    );
+    assertThrows(
+      () => renderComposeStackTargets([basePath, overridePath]),
+      Error,
+      "interpolated entrypoint cannot be audited",
+    );
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
 });
 
 Deno.test("Compose command overrides inherit built image launchers", async () => {
@@ -135,16 +150,17 @@ CMD ["safe.ts"]
       'export const value = Deno.env.get("IMAGE_DEFAULT_ONLY");\n',
     );
 
-    const targets = parseComposeStackTargets([
-      {
-        content: `services:\n  tool:\n    build:\n      context: .\n`,
-        source: `${directory}/compose.yml`,
-      },
-      {
-        content: `services:\n  tool:\n    command: [actual.ts]\n`,
-        source: `${directory}/override.yml`,
-      },
-    ]);
+    const composePath = `${directory}/compose.yml`;
+    const overridePath = `${directory}/override.yml`;
+    await Deno.writeTextFile(
+      composePath,
+      "services:\n  tool:\n    build:\n      context: .\n",
+    );
+    await Deno.writeTextFile(
+      overridePath,
+      "services:\n  tool:\n    command: [actual.ts]\n",
+    );
+    const targets = renderComposeStackTargets([composePath, overridePath]);
 
     assertEquals(targets.length, 1);
     assertEquals(targets[0].entrypoint, "actual.ts");
@@ -176,21 +192,6 @@ Deno.test("image-only Compose services fail closed on unresolved launchers", () 
         `services:\n  bypass:\n    image: example.invalid/tool:1\n`,
         "compose.yml",
       ),
-    Error,
-    "image launcher defaults for example.invalid/tool:1 cannot be resolved",
-  );
-  assertThrows(
-    () =>
-      parseComposeStackTargets([
-        {
-          content: `services:\n  bypass:\n    image: example.invalid/tool:1\n`,
-          source: "base.yml",
-        },
-        {
-          content: `services:\n  bypass:\n    restart: always\n`,
-          source: "override.yml",
-        },
-      ]),
     Error,
     "image launcher defaults for example.invalid/tool:1 cannot be resolved",
   );
@@ -229,188 +230,61 @@ Deno.test("reviewed non-Deno images pass only on their unmodified defaults", () 
   );
 });
 
-Deno.test("Compose merge tags on launcher-relevant fields fail closed", () => {
-  assertThrows(
-    () =>
-      parseComposeStackTargets([
-        {
-          content: "services:\n  tool:\n    build:\n      context: ./actual\n" +
-            "      dockerfile: Dockerfile.safe\n",
-          source: "base.yml",
-        },
-        {
-          content:
-            "services:\n  tool:\n    build: !override\n      context: ./actual\n",
-          source: "override.yml",
-        },
-      ]),
-    Error,
-    "Compose merge tag on build cannot be audited",
-  );
-
-  const rejected: [string, string][] = [
-    [
-      "entrypoint: !override [deno, run, --allow-env=FOO, /app/tool.ts]",
-      "entrypoint",
-    ],
-    ["command: !reset null", "command"],
-    ["image: !override example.invalid/tool:1", "image"],
-  ];
-  for (const [line, field] of rejected) {
-    assertThrows(
-      () =>
-        parseComposeTargets(`services:\n  tool:\n    ${line}\n`, "compose.yml"),
-      Error,
-      `Compose merge tag on ${field} cannot be audited`,
-    );
-  }
-  assertThrows(
-    () =>
-      parseComposeTargets(
-        "services:\n  tool:\n    build:\n      dockerfile: !override Dockerfile.evil\n",
-        "compose.yml",
-      ),
-    Error,
-    "Compose merge tag on dockerfile cannot be audited",
-  );
-  assertThrows(
-    () =>
-      parseComposeTargets(
-        "services:\n  tool: !override\n    image: example.invalid/tool:1\n",
-        "compose.yml",
-      ),
-    Error,
-    "Compose merge tag on tool cannot be audited",
-  );
-  assertThrows(
-    () =>
-      parseComposeTargets(
-        "services:\n  tool:\n    entrypoint:\n      - !reset deno\n",
-        "compose.yml",
-      ),
-    Error,
-    "Compose merge tag on an unrecognised position cannot be audited",
-  );
-});
-
-Deno.test("Compose null overrides follow field-dependent merge semantics", async () => {
+Deno.test("Compose owns merge tags, nulls, and anchor resolution", async () => {
   const directory = await Deno.makeTempDir();
+  const basePath = `${directory}/base.yml`;
+  const overridePath = `${directory}/override.yml`;
   try {
     await Deno.writeTextFile(
       `${directory}/Dockerfile`,
       `FROM denoland/deno:2.9.4
-ENTRYPOINT ["deno", "run", "--no-config", "--allow-env=SAFE"]
-CMD ["actual.ts"]
+ENTRYPOINT ["deno", "run", "--no-config", "--allow-env=IMAGE"]
+CMD ["image.ts"]
 `,
     );
-    const base = {
-      content: "services:\n  tool:\n    build:\n      context: .\n",
-      source: `${directory}/base.yml`,
-    };
-    // A null service override (including the bare `tool:` stub) and null
-    // build/image retain the accumulated launcher, matching rendered Compose.
+    await Deno.writeTextFile(
+      basePath,
+      "x-build: &tool-build\n  context: .\n" +
+        "services:\n  tool:\n    build: *tool-build\n" +
+        '    command: [base.ts]\n    ports: ["127.0.0.1:8787:8787"]\n',
+    );
+    await Deno.writeTextFile(
+      overridePath,
+      "services:\n  tool:\n    command: !override [override.ts]\n" +
+        "    ports: !reset []\n",
+    );
+    const overridden = renderComposeStackTargets([basePath, overridePath]);
+    assertEquals(overridden.length, 1);
+    assertEquals(overridden[0].entrypoint, "override.ts");
+    assertEquals([...overridden[0].allowEnv], ["IMAGE"]);
+
+    // Null command resets to the built image's CMD; null service/build retain
+    // the accumulated service. These assertions exercise Compose's
+    // rendered model rather than duplicating its field-specific rules here.
+    await Deno.writeTextFile(
+      overridePath,
+      "services:\n  tool:\n    command: null\n",
+    );
+    const reset = renderComposeStackTargets([basePath, overridePath]);
+    assertEquals(reset.length, 1);
+    assertEquals(reset[0].entrypoint, "image.ts");
+
     for (
       const override of [
         "services:\n  tool: null\n",
         "services:\n  tool:\n",
         "services:\n  tool:\n    build: null\n",
-        "services:\n  tool:\n    image: null\n",
       ]
     ) {
-      const targets = parseComposeStackTargets([
-        base,
-        { content: override, source: `${directory}/override.yml` },
-      ]);
+      await Deno.writeTextFile(overridePath, override);
+      const targets = renderComposeStackTargets([basePath, overridePath]);
       assertEquals(targets.length, 1);
-      assertEquals(targets[0].entrypoint, "actual.ts");
-      assertEquals([...targets[0].allowEnv], ["SAFE"]);
+      assertEquals(targets[0].entrypoint, "base.ts");
+      assertEquals([...targets[0].allowEnv], ["IMAGE"]);
     }
-    // Null entrypoint/command reset instead of retaining: the base launcher
-    // is dropped and the override command is audited on its own.
-    const reset = parseComposeStackTargets([
-      {
-        content: "services:\n  tool:\n    entrypoint: " +
-          '[deno, run, "--allow-env=BASE_ONLY", /app/base.ts]\n',
-        source: `${directory}/base.yml`,
-      },
-      {
-        content: "services:\n  tool:\n    entrypoint: null\n    command: " +
-          '[deno, run, "--allow-env=FOO", /app/tool.ts]\n',
-        source: `${directory}/override.yml`,
-      },
-    ]);
-    assertEquals(reset.length, 1);
-    assertEquals(reset[0].entrypoint, "tool.ts");
-    assertEquals([...reset[0].allowEnv], ["FOO"]);
-    // image: null is "unset" in a single file too: a command-only service
-    // with a null image audits its command instead of failing the
-    // literal-image check.
-    const single = parseComposeTargets(
-      "services:\n  tool:\n    image: null\n    command: " +
-        '[deno, run, "--allow-env=FOO", /app/tool.ts]\n',
-      "compose.yml",
-    );
-    assertEquals(single.length, 1);
-    assertEquals([...single[0].allowEnv], ["FOO"]);
   } finally {
     await Deno.remove(directory, { recursive: true });
   }
-});
-
-Deno.test("tagged anchored Compose nodes fail closed", () => {
-  assertThrows(
-    () =>
-      parseComposeStackTargets([
-        {
-          content: "services:\n  tool:\n    build:\n      context: .\n" +
-            "      dockerfile: Dockerfile.safe\n",
-          source: "base.yml",
-        },
-        {
-          content: "services:\n  tool:\n    ports: !override &replacement\n" +
-            "      context: .\n    build: *replacement\n",
-          source: "override.yml",
-        },
-      ]),
-    Error,
-    "carries a YAML anchor",
-  );
-  // Anchor-before-tag is already rejected as an unrecognised position.
-  assertThrows(
-    () =>
-      parseComposeTargets(
-        "services:\n  tool:\n    ports: &replacement !override null\n",
-        "compose.yml",
-      ),
-    Error,
-    "Compose merge tag on an unrecognised position cannot be audited",
-  );
-  // Plain untagged anchor reuse remains auditable.
-  const target = onlyTarget(`
-x-launcher: &launcher [deno, run, "--allow-env=FOO", /app/tool.ts]
-services:
-  tool:
-    entrypoint: *launcher
-`);
-  assertEquals(target.entrypoint, "tool.ts");
-  assertEquals([...target.allowEnv], ["FOO"]);
-});
-
-Deno.test("Compose merge tags on reviewed non-launcher fields stay auditable", () => {
-  const target = onlyTarget(`
-services:
-  tool:
-    # comments may mention the tag, like pattern-b's ports: !reset
-    ports: !reset null
-    depends_on: !reset null
-    deploy:
-      resources:
-        reservations:
-          devices: !reset []
-    entrypoint: [deno, run, "--allow-env=FOO", /app/tool.ts]
-`);
-  assertEquals(target.entrypoint, "tool.ts");
-  assertEquals([...target.allowEnv], ["FOO"]);
 });
 
 Deno.test("Compose builds fail closed on unresolved launcher defaults", async () => {
@@ -754,21 +628,6 @@ services:
 
   assertEquals(target.entrypoint, "tool.ts");
   assertEquals([...target.allowEnv], ["FOO"]);
-});
-
-Deno.test("external Compose inheritance mechanisms fail closed", () => {
-  for (
-    const content of [
-      `include: [other.yml]\nservices: {}\n`,
-      `services:\n  tool:\n    extends:\n      file: other.yml\n      service: tool\n`,
-    ]
-  ) {
-    assertThrows(
-      () => parseComposeTargets(content, "compose.yml"),
-      Error,
-      "cannot be audited",
-    );
-  }
 });
 
 Deno.test("Compose interpolated entrypoints fail closed", () => {
