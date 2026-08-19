@@ -313,7 +313,7 @@ sequenceDiagram
 ├── docs/                      Memory spaces, threat/security models, Funnel-as-MCP-
 │                              perimeter guide, "why not Cloudflare?" rationale,
 │                              OAuth user + service-account client setup
-└── .github/workflows/         CI (deno tests, --allow-env drift guard) + leak gate
+└── .github/workflows/         CI (Deno tests, launcher/env drift guards) + leak gate
 ```
 
 The `queries.ts` / `mcp-server.ts` / `index.ts` split keeps all SQL in a pure,

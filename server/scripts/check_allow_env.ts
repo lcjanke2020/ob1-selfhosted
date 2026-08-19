@@ -102,7 +102,7 @@ export interface TargetAnalysis {
   missing: string[];
 }
 
-type UnknownRecord = Record<string, unknown>;
+export type UnknownRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -910,22 +910,45 @@ function composeStackSource(files: readonly string[]): string {
     .join(" + ");
 }
 
-function renderComposeDocument(files: readonly string[]): UnknownRecord {
+export interface ComposeConfigOptions {
+  environment?: Readonly<Record<string, string>>;
+  interpolate?: boolean;
+  profiles?: readonly string[];
+  variables?: boolean;
+}
+
+export function renderComposeConfig(
+  files: readonly string[],
+  options: ComposeConfigOptions = {},
+): UnknownRecord {
   if (files.length === 0) {
     throw new Error("Compose stack must contain at least one file");
   }
+  if (options.variables && options.interpolate) {
+    throw new Error(
+      "Compose variable inventory and interpolated rendering are separate modes",
+    );
+  }
   const source = composeStackSource(files);
   const args = ["compose", "--env-file", EMPTY_COMPOSE_ENV_FILE];
+  for (const profile of options.profiles ?? []) {
+    args.push("--profile", profile);
+  }
   for (const path of files) args.push("-f", resolve(path));
-  // Interpolation stays disabled so a launcher controlled by runtime env is
-  // still rejected by literalArguments(). Merge/override/tag/null semantics
-  // are nevertheless resolved by Compose itself.
-  args.push("config", "--no-interpolate", "--format", "json");
+  args.push("config");
+  if (options.variables) args.push("--variables");
+  // The launcher audit defaults to no interpolation so a launcher controlled
+  // by runtime env is still rejected by literalArguments(). Callers that need
+  // to prove forwarding may opt into interpolation with controlled sentinels;
+  // both modes use this one real-Compose path.
+  else if (!options.interpolate) args.push("--no-interpolate");
+  args.push("--format", "json");
 
   let output: Deno.CommandOutput;
   try {
     output = new Deno.Command("docker", {
       args,
+      env: options.environment ? { ...options.environment } : undefined,
       stdout: "piped",
       stderr: "piped",
     }).outputSync();
@@ -983,7 +1006,7 @@ export function renderComposeStackTargets(
 ): CheckTarget[] {
   const source = composeStackSource(files);
   return parseRenderedComposeTargets(
-    renderComposeDocument(files),
+    renderComposeConfig(files),
     source,
     dirname(resolve(files[0])),
   );
