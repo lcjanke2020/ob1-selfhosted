@@ -1,14 +1,11 @@
-# Render each canonical MCP deployment and verify FETCH_TIMEOUT_MS survives
-# Compose interpolation. Parsing `docker compose config --format json` keeps
-# this regression structural: unrelated YAML formatting cannot make it pass.
+# Render each canonical MCP deployment and verify FETCH_TIMEOUT_MS plus the
+# Pattern B socket-bind invariants survive Compose interpolation. Parsing
+# `docker compose config --format json` keeps these regressions structural:
+# unrelated YAML formatting cannot make them pass.
 
-def render-compose [files: list<string>] {
+def render-compose [files: list<string>, profiles: list<string>] {
     let file_args = ($files | each {|file| ["-f" $file] } | flatten)
-    let profile_args = if ($files | any {|file| $file | str ends-with "docker-compose.pattern-b.yml" }) {
-        ["--profile" "pattern-b"]
-    } else {
-        []
-    }
+    let profile_args = ($profiles | each {|profile| ["--profile" $profile] } | flatten)
     let result = (
         ^docker compose --env-file /dev/null ...$profile_args ...$file_args config --format json
         | complete
@@ -21,7 +18,11 @@ def render-compose [files: list<string>] {
     $result.stdout | from json
 }
 
-def render-with-timeout [files: list<string>, timeout?: string] {
+def render-with-timeout [
+    files: list<string>
+    profiles: list<string>
+    timeout?: string
+] {
     let required = {
         POSTGRES_PASSWORD: "compose-render-superuser"
         OPENBRAIN_APP_PASSWORD: "compose-render-app"
@@ -40,14 +41,18 @@ def render-with-timeout [files: list<string>, timeout?: string] {
     }
 
     with-env $required {
+        # Profile activation is deployment metadata below, never ambient shell
+        # state. This keeps a caller's COMPOSE_PROFILES from masking an omitted
+        # explicit profile argument.
+        hide-env --ignore-errors COMPOSE_PROFILES
         if $timeout == null {
             # The parent shell must not be able to turn the default assertion
             # into an accidental override assertion.
             hide-env --ignore-errors FETCH_TIMEOUT_MS
-            render-compose $files
+            render-compose $files $profiles
         } else {
             with-env { FETCH_TIMEOUT_MS: $timeout } {
-                render-compose $files
+                render-compose $files $profiles
             }
         }
     }
@@ -65,7 +70,84 @@ def assert-timeout [name: string, rendered: record, expected: string] {
     }
 }
 
+def assert-socket-bind [name: string, service_name: string, service: record] {
+    let matches = (
+        $service.volumes
+        | where target == "/var/run/postgresql"
+    )
+    if ($matches | length) != 1 {
+        error make {
+            msg: $"($name): ($service_name) must have exactly one socket bind"
+        }
+    }
+
+    let mount = ($matches | first)
+    let bind = ($mount.bind? | default {})
+    if $mount.type? != "bind" {
+        error make { msg: $"($name): ($service_name) socket mount is not a bind" }
+    }
+    if $mount.source? != "/tmp/compose-render-openbrain-log-sink" {
+        error make { msg: $"($name): ($service_name) socket bind has the wrong source" }
+    }
+    if $bind.selinux? != "z" {
+        error make { msg: $"($name): ($service_name) socket bind lost SELinux relabel z" }
+    }
+    # Absence is ambiguous: Compose 2.38 omits false via `omitempty`, while 5.3
+    # normalizes explicit true away. The source assertion below is therefore
+    # the enforcing create_host_path check; this rejects any observable
+    # non-true rendered value.
+    let create_host_path = ($bind.create_host_path? | default null)
+    if $create_host_path != null and $create_host_path != true {
+        error make { msg: $"($name): ($service_name) socket bind rendered create_host_path!=true" }
+    }
+}
+
+def assert-declared-socket-binds [name: string, path: string] {
+    # Nushell's YAML parser does not know Compose's !reset tag. It appears only
+    # on an unrelated ports field, so remove the tag marker before inspecting
+    # the source mount records (the value itself remains intact).
+    let document = try {
+        open --raw $path
+        | str replace --all "!reset " ""
+        | from yaml
+    } catch {|error|
+        error make {
+            msg: $"($name): cannot inspect socket bind declarations in ($path): ($error.msg)"
+        }
+    }
+    for service_name in ["log-ingester" "log-sink"] {
+        let volumes = ($document.services | get $service_name | get volumes)
+        let matches = (
+            $volumes
+            | where {|mount|
+                (($mount | describe) | str starts-with "record") and $mount.target? == "/var/run/postgresql"
+            }
+        )
+        if ($matches | length) != 1 {
+            error make {
+                msg: $"($name): ($service_name) must declare exactly one socket bind"
+            }
+        }
+
+        let mount = ($matches | first)
+        if $mount.type? != "bind" or $mount.bind.create_host_path? != true {
+            error make {
+                msg: $"($name): ($service_name) must declare bind.create_host_path=true"
+            }
+        }
+    }
+}
+
 def assert-pattern-b-sink [name: string, rendered: record] {
+    let service_names = ($rendered.services | columns)
+    for required_service in ["log-ingester" "log-sink"] {
+        if $required_service not-in $service_names {
+            error make {
+                msg: $"($name): Pattern B render omitted required service ($required_service); check profile activation"
+            }
+        }
+    }
+
     let ingester = $rendered.services | get log-ingester
     let sink = $rendered.services | get log-sink
     let corpus_env = if "postgres" in ($rendered.services | columns) {
@@ -81,6 +163,8 @@ def assert-pattern-b-sink [name: string, rendered: record] {
     if $ingester.environment.DB_HOST != "/var/run/postgresql" {
         error make { msg: $"($name): log-ingester DB_HOST escaped the sink socket" }
     }
+    assert-socket-bind $name "log-ingester" $ingester
+    assert-socket-bind $name "log-sink" $sink
     if "log-sink" not-in ($ingester.depends_on | columns) {
         error make { msg: $"($name): log-ingester does not health-gate on log-sink" }
     }
@@ -115,22 +199,41 @@ def assert-pattern-b-sink [name: string, rendered: record] {
 }
 
 let repo_root = ($env.CURRENT_FILE | path dirname | path dirname)
+let tailnet_pattern_b = (
+    $repo_root | path join "deploy/compose-tailnet/docker-compose.pattern-b.yml"
+)
+let qubes_ingress_path = (
+    $repo_root | path join "deploy/qubes/ingress-qube/docker-compose.yml"
+)
+
+# Compose 2.38.2 preserves create_host_path=true in rendered JSON, while 5.3.1
+# normalizes the default-true field away. Check the source declaration as well
+# as the rendered mount so both representations enforce the runtime invariant.
+assert-declared-socket-binds "compose-tailnet-overlay" $tailnet_pattern_b
+assert-declared-socket-binds "qubes-ingress" $qubes_ingress_path
+
 let deployments = [
     {
         name: "compose-local"
+        profiles: []
+        expect_pattern_b: false
         files: [
             ($repo_root | path join "deploy/compose-local/docker-compose.yml")
         ]
     }
     {
         name: "compose-tailnet-overlay"
+        profiles: ["pattern-b"]
+        expect_pattern_b: true
         files: [
             ($repo_root | path join "deploy/compose-local/docker-compose.yml")
-            ($repo_root | path join "deploy/compose-tailnet/docker-compose.pattern-b.yml")
+            $tailnet_pattern_b
         ]
     }
     {
         name: "compose-external-db-overlay"
+        profiles: []
+        expect_pattern_b: false
         files: [
             ($repo_root | path join "deploy/compose-local/docker-compose.yml")
             ($repo_root | path join "deploy/qubes/docker-compose.external-db.yml")
@@ -138,14 +241,18 @@ let deployments = [
     }
     {
         name: "compose-tailnet-external-corpus-overlay"
+        profiles: ["pattern-b"]
+        expect_pattern_b: true
         files: [
             ($repo_root | path join "deploy/compose-local/docker-compose.yml")
-            ($repo_root | path join "deploy/compose-tailnet/docker-compose.pattern-b.yml")
+            $tailnet_pattern_b
             ($repo_root | path join "deploy/qubes/docker-compose.external-db.yml")
         ]
     }
     {
         name: "qubes-app"
+        profiles: []
+        expect_pattern_b: false
         files: [
             ($repo_root | path join "deploy/qubes/app-qube/docker-compose.yml")
         ]
@@ -157,19 +264,17 @@ let sentinel = "27182"
 # FETCH_TIMEOUT_MS contract, but it is still a Pattern B deployment. Render it
 # separately so the same structural sink/ingester boundary is enforced for
 # every shipped Pattern B shape.
-let qubes_ingress = render-with-timeout [
-    ($repo_root | path join "deploy/qubes/ingress-qube/docker-compose.yml")
-]
+let qubes_ingress = render-with-timeout [$qubes_ingress_path] []
 assert-pattern-b-sink "qubes-ingress" $qubes_ingress
 
 $deployments | each {|deployment|
-    let defaults = (render-with-timeout $deployment.files)
+    let defaults = (render-with-timeout $deployment.files $deployment.profiles)
     assert-timeout $"($deployment.name) default" $defaults "15000"
-    if "log-sink" in ($defaults.services | columns) {
+    if $deployment.expect_pattern_b {
         assert-pattern-b-sink $deployment.name $defaults
     }
 
-    let overridden = (render-with-timeout $deployment.files $sentinel)
+    let overridden = (render-with-timeout $deployment.files $deployment.profiles $sentinel)
     assert-timeout $"($deployment.name) override" $overridden $sentinel
 
     {

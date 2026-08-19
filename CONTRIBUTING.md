@@ -30,13 +30,15 @@ hook's self-test — is in [`.githooks/README.md`](.githooks/README.md).
 
 Deno 2.9.4 — the version pinned in the server images and CI — is the canonical
 toolchain for repository checks. Use that exact version because formatter output
-and lint rules can change between Deno releases:
+and lint rules can change between Deno releases. The launcher drift check also
+requires Docker Compose because it audits Compose's rendered model rather than
+maintaining a second merge implementation:
 
 ```sh
 deno fmt --check
 deno lint
 cd server
-deno task test              # hermetic unit tests — no database, no network
+deno task test              # unit tests + local Compose render; no containers/network
 deno task check-allow-env   # checks Dockerfile + Compose Deno launchers
 ```
 
@@ -47,18 +49,29 @@ formatting check described below.
 
 ### Native Deno launchers
 
-CI checks the Dockerfiles and every checked-in Compose service whose effective
-`entrypoint` and/or `command` launches `deno run`, including the documented
-base-plus-override stacks and launcher defaults inherited from their checked-in
-build Dockerfiles. Unresolved image defaults — including image-only services
-whose pin is not on the reviewed non-Deno list — Compose `!reset`/`!override`
-merge tags outside reviewed launcher-irrelevant fields, ambiguous shell
-positional arguments, Node's `process.env` surface, and custom Deno
-config/import-map semantics fail closed; the checked-in `server/deno.json`
-imports are the explicit audited policy. CI cannot inspect a systemd unit
-maintained only on a deployment host. Before restarting such a unit, load the
-same environment file the unit uses and validate the real `index.ts` import
-graph under the unit's **exact** comma-separated allowlist:
+CI asks `docker compose config --no-interpolate` to render every documented
+standalone and base-plus-override stack, then checks every effective service
+whose `entrypoint` and/or `command` launches `deno run`, including launcher
+defaults inherited from checked-in build Dockerfiles. Disabling interpolation
+keeps launcher text controlled by runtime environment dynamic and therefore
+fail-closed. Unresolved image defaults — including image-only services whose pin
+is not on the reviewed non-Deno list — ambiguous shell positional arguments,
+Node's `process.env` surface, and custom Deno config/import-map semantics also
+fail closed; the checked-in `server/deno.json` imports are the explicit audited
+policy.
+
+This is a drift guard for honest edits to checked-in launchers, not a sandbox
+for deliberately adversarial pull-request syntax. Compose owns its YAML and
+merge semantics; human review owns hostile checked-in source. Once the live-tree
+verdict and honest-edit cases are stable, findings that require adversarial
+construction default to a bounded follow-up instead of expanding the gate. See
+[issue #76](https://github.com/lcjanke2020/ob1-selfhosted/issues/76) for that
+stopping rule.
+
+CI cannot inspect a systemd unit maintained only on a deployment host. Before
+restarting such a unit, load the same environment file the unit uses and
+validate the real `index.ts` import graph under the unit's **exact**
+comma-separated allowlist:
 
 ```sh
 set -a

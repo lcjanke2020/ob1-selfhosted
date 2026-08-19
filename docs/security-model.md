@@ -376,10 +376,11 @@ receive a separate security review.
 - A CI guard (`server/scripts/check_allow_env.ts`) rejects unrestricted or
   dynamic checked-in Deno launchers and keeps Dockerfile/effective Compose-stack
   allowlists in lockstep with statically reachable env reads plus explicit
-  out-of-tree dependency policies. Compose services inherit audited launcher
-  defaults from their checked-in build Dockerfiles before overrides are applied;
-  unresolved image defaults (image-only services need a reviewed non-Deno pin),
-  Compose merge tags on launcher-relevant fields, and shell positional
+  out-of-tree dependency policies. The guard delegates YAML merge, override,
+  tag, null, anchor, include, and extends semantics to
+  `docker compose config --no-interpolate`, then resolves audited launcher
+  defaults from checked-in build Dockerfiles. Unresolved image defaults
+  (image-only services need a reviewed non-Deno pin) and shell positional
   boundaries fail closed. The checked-in Deno import configuration is pinned as
   part of that audit, while custom config/import-map semantics and Node's
   `process.env` surface are rejected. Host-local systemd units are outside

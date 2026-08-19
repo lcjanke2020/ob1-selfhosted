@@ -146,8 +146,15 @@ services:
       - caddy_cursors:/var/lib/ingester/cursors
       # The sink's socket directory, shared with log-sink. RW because
       # connecting to a unix socket needs write access to the socket file.
-      # `:z` (shared) for SELinux — the same label as the sink's mount.
-      - ${LOG_SINK_SOCKET_DIR:?set LOG_SINK_SOCKET_DIR to a SHORT host path, e.g. /home/user/ob1-log-sink/run}:/var/run/postgresql:z
+      # A shared SELinux label matches the sink's mount. Long syntax also
+      # keeps the `:?` message unambiguous when tooling renders without
+      # interpolation.
+      - type: bind
+        source: ${LOG_SINK_SOCKET_DIR:?set LOG_SINK_SOCKET_DIR to a SHORT host path, e.g. /home/user/ob1-log-sink/run}
+        target: /var/run/postgresql
+        bind:
+          create_host_path: true
+          selinux: z
 
   # Local Funnel-log sink — this qube's own Postgres, reachable ONLY over a
   # unix socket. It replaces the INSERT path that used to cross to the db qube,
@@ -240,7 +247,12 @@ services:
       # (sun_path), and it is the HOST path that counts for host-side clients.
       # A deep directory produces `Unix-domain socket path ... is too long`
       # at connect time, not at mount time.
-      - ${LOG_SINK_SOCKET_DIR:?set LOG_SINK_SOCKET_DIR to a SHORT host path, e.g. /home/user/ob1-log-sink/run}:/var/run/postgresql:z
+      - type: bind
+        source: ${LOG_SINK_SOCKET_DIR:?set LOG_SINK_SOCKET_DIR to a SHORT host path, e.g. /home/user/ob1-log-sink/run}
+        target: /var/run/postgresql
+        bind:
+          create_host_path: true
+          selinux: z
       - ../../../db/log-sink/log-sink-entrypoint.sh:/usr/local/bin/openbrain-log-sink-entrypoint.sh:ro
       - ../../../db/log-sink/00-log-sink-roles.sh:/docker-entrypoint-initdb.d/00-log-sink-roles.sh:ro
       - ../../../db/log-sink/01-log-sink.sql:/docker-entrypoint-initdb.d/01-log-sink.sql:ro

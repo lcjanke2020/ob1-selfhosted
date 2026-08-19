@@ -13,7 +13,7 @@
     "https://deno.land/x/postgres@v0.19.3/utils/deferred.ts": "./postgres_deferred_patched.ts"
   },
   "tasks": {
-    "test": "deno test --frozen --allow-env --allow-net=127.0.0.1 --allow-read --allow-write --allow-run=deno --ignore=scripts/check_allow_env_test.ts && deno test --config scripts/deno.json --lock scripts/deno.lock --frozen --allow-read --allow-write scripts/check_allow_env_test.ts",
-    "check-allow-env": "deno run --config scripts/deno.json --lock scripts/deno.lock --frozen --allow-read scripts/check_allow_env.ts"
+    "test": "deno test --frozen --allow-env --allow-net=127.0.0.1 --allow-read --allow-write --allow-run=deno --ignore=scripts/check_allow_env_test.ts && deno test --config scripts/deno.json --lock scripts/deno.lock --frozen --allow-read --allow-write --allow-run=docker scripts/check_allow_env_test.ts",
+    "check-allow-env": "deno run --config scripts/deno.json --lock scripts/deno.lock --frozen --allow-read --allow-run=docker scripts/check_allow_env.ts"
   }
 }

@@ -7,9 +7,9 @@
 // crashes with `NotCapable: Requires env access to "NEW_KEY"`.
 //
 // Algorithm:
-//   1. Parse the mcp + ingester Dockerfiles and every Compose service whose
-//      effective `entrypoint` and/or `command` invokes `deno run`, including
-//      built-image defaults and the supported base-plus-override stacks.
+//   1. Parse the mcp + ingester Dockerfiles, ask `docker compose config` to
+//      render every supported Compose stack, and inspect each effective
+//      service whose `entrypoint` and/or `command` invokes `deno run`.
 //   2. Reject unrestricted grants, dynamic/multi-Deno Compose launchers, and
 //      executable Deno subcommands outside the supported `run` model.
 //   3. Validate the effective Deno config/import map against the checked-in
@@ -26,9 +26,15 @@
 //
 // Run locally: `deno task check-allow-env` (from server/).
 // CI: runs as the check-allow-env job in .github/workflows/ci.yml.
+//
+// Support boundary: this drift guard catches honest edits to checked-in
+// launchers. It is not a sandbox for deliberately adversarial Compose source;
+// pull-request review remains responsible for hostile checked-in syntax. The
+// guard therefore delegates Compose parsing and merge behavior to the real
+// Compose implementation instead of mirroring an open-ended YAML grammar. See
+// https://github.com/lcjanke2020/ob1-selfhosted/issues/76 for the stopping rule.
 
 import { dirname, fromFileUrl, join, relative, resolve } from "@std/path";
-import { parse as parseYaml } from "@std/yaml";
 // These AST-only dependencies live in scripts/deno.{json,lock}; the root lock
 // is copied into production images and deliberately excludes CI tooling.
 import { parse as parseTypeScriptModule } from "@babel/parser";
@@ -893,77 +899,74 @@ function normalizeComposeEntrypoint(value: string, source: string): string {
   return normalized;
 }
 
-// Compose merge-tag keys the audit is allowed to erase: !reset / !override
-// only change how a later layer merges the tagged field, and none of these
-// reviewed fields can influence which launcher runs. A tag on any other
-// position — build, image, entrypoint, command, a whole service, a sequence
-// item — would make the audited merge diverge from Compose's, so it fails
-// closed until the key is reviewed here.
-const COMPOSE_MERGE_TAG_KEYS = new Set(["depends_on", "devices", "ports"]);
+const EMPTY_COMPOSE_ENV_FILE = Deno.build.os === "windows"
+  ? "NUL"
+  : "/dev/null";
 
-function composeDocument(content: string, source: string): UnknownRecord {
-  // Compose's !reset / !override tags are merge directives rather than data
-  // types. Removing only the tag token preserves the value that std/yaml then
-  // validates, but is sound only where the audit never reads the merged
-  // result: tags attached to a COMPOSE_MERGE_TAG_KEYS field are stripped,
-  // occurrences inside YAML comments are left for the parser to discard, and
-  // every other position fails closed. Any other unknown tag still fails
-  // closed at parse time.
-  const standardYaml = content.replace(
-    /(^|[\s:[{,])!(?:reset|override)(?=\s)/gm,
-    (match, prefix: string, offset: number) => {
-      const lineStart = content.lastIndexOf("\n", offset) + 1;
-      const linePrefix = content.slice(lineStart, offset + prefix.length);
-      if (/(^|\s)#/.test(linePrefix)) return match;
-      const attachedKey = linePrefix.match(/([^\s:{,[\]]+):\s*$/)?.[1];
-      if (
-        attachedKey !== undefined && COMPOSE_MERGE_TAG_KEYS.has(attachedKey)
-      ) {
-        // A tag travels with its node through anchors/aliases, so a tagged
-        // anchored node defined under a reviewed key could be replayed onto
-        // a launcher-relevant field. Reject the combination outright.
-        if (/^\s*&/.test(content.slice(offset + match.length))) {
-          throw new Error(
-            `${source}: Compose merge tag on ${attachedKey} carries a YAML anchor; ` +
-              "a tagged node reused through an alias cannot be audited",
-          );
-        }
-        return prefix;
-      }
-      throw new Error(
-        `${source}: Compose merge tag on ${
-          attachedKey ?? "an unrecognised position"
-        } cannot be audited; !reset/!override are supported only on reviewed ` +
-          `launcher-irrelevant fields (${
-            [...COMPOSE_MERGE_TAG_KEYS].join(", ")
-          })`,
-      );
-    },
-  );
-  let document: unknown;
+function composeStackSource(files: readonly string[]): string {
+  return files.map((path) =>
+    relative(REPO_DIR, resolve(path)).replaceAll("\\", "/")
+  )
+    .join(" + ");
+}
+
+function renderComposeDocument(files: readonly string[]): UnknownRecord {
+  if (files.length === 0) {
+    throw new Error("Compose stack must contain at least one file");
+  }
+  const source = composeStackSource(files);
+  const args = ["compose", "--env-file", EMPTY_COMPOSE_ENV_FILE];
+  for (const path of files) args.push("-f", resolve(path));
+  // Interpolation stays disabled so a launcher controlled by runtime env is
+  // still rejected by literalArguments(). Merge/override/tag/null semantics
+  // are nevertheless resolved by Compose itself.
+  args.push("config", "--no-interpolate", "--format", "json");
+
+  let output: Deno.CommandOutput;
   try {
-    document = parseYaml(standardYaml);
+    output = new Deno.Command("docker", {
+      args,
+      stdout: "piped",
+      stderr: "piped",
+    }).outputSync();
   } catch (error) {
     throw new Error(
-      `${source}: invalid Compose YAML: ${(error as Error).message}`,
+      `${source}: cannot run docker compose config: ${
+        (error as Error).message
+      }`,
+    );
+  }
+  if (!output.success) {
+    const detail = new TextDecoder().decode(output.stderr).trim();
+    throw new Error(
+      `${source}: docker compose config failed${detail ? `: ${detail}` : ""}`,
+    );
+  }
+
+  let document: unknown;
+  try {
+    document = JSON.parse(new TextDecoder().decode(output.stdout));
+  } catch (error) {
+    throw new Error(
+      `${source}: docker compose config returned invalid JSON: ${
+        (error as Error).message
+      }`,
     );
   }
   if (!isRecord(document)) {
-    throw new Error(`${source}: Compose document must be a mapping`);
-  }
-  if (document.include !== undefined) {
-    throw new Error(
-      `${source}: Compose include cannot be audited; classify the files as an explicit stack`,
-    );
+    throw new Error(`${source}: rendered Compose document must be a mapping`);
   }
   return document;
 }
 
-export function parseComposeTargets(
-  content: string,
+export function parseRenderedComposeTargets(
+  document: unknown,
   source: string,
+  composeBaseDirectory = dirname(resolve(REPO_DIR, source)),
 ): CheckTarget[] {
-  const document = composeDocument(content, source);
+  if (!isRecord(document)) {
+    throw new Error(`${source}: rendered Compose document must be a mapping`);
+  }
   if (document.services === undefined) return [];
   if (!isRecord(document.services)) {
     throw new Error(`${source}: services must be a mapping`);
@@ -971,7 +974,18 @@ export function parseComposeTargets(
   return parseComposeServiceTargets(
     document.services,
     source,
-    dirname(resolve(REPO_DIR, source)),
+    composeBaseDirectory,
+  );
+}
+
+export function renderComposeStackTargets(
+  files: readonly string[],
+): CheckTarget[] {
+  const source = composeStackSource(files);
+  return parseRenderedComposeTargets(
+    renderComposeDocument(files),
+    source,
+    dirname(resolve(files[0])),
   );
 }
 
@@ -1093,9 +1107,7 @@ function effectiveComposeArguments(
     composeBaseDirectory,
   );
   if (dockerfile === undefined) {
-    // A null image is Compose for "unset" (the rendered config drops the
-    // key), so it cannot anchor an image-only service.
-    if (rawService.image !== undefined && rawService.image !== null) {
+    if (rawService.image !== undefined) {
       if (explicitCommand !== undefined) {
         throw new Error(
           `${source}: command overrides an image whose ENTRYPOINT cannot be resolved; ` +
@@ -1171,11 +1183,6 @@ function parseComposeServiceTargets(
     if (!isRecord(rawService)) {
       throw new Error(`${label}: service definition must be a mapping`);
     }
-    if (rawService.extends !== undefined) {
-      throw new Error(
-        `${label}: Compose extends cannot be audited; use an explicit checked-in stack`,
-      );
-    }
     const launcherArgs = effectiveComposeArguments(
       rawService,
       label,
@@ -1200,68 +1207,6 @@ function parseComposeServiceTargets(
     });
   }
   return targets;
-}
-
-export function parseComposeStackTargets(
-  layers: readonly { content: string; source: string }[],
-): CheckTarget[] {
-  if (layers.length === 0) {
-    throw new Error("Compose stack must contain at least one file");
-  }
-  const effectiveServices: UnknownRecord = {};
-  for (const layer of layers) {
-    const document = composeDocument(layer.content, layer.source);
-    if (document.services === undefined) continue;
-    if (!isRecord(document.services)) {
-      throw new Error(`${layer.source}: services must be a mapping`);
-    }
-    for (const [serviceName, rawService] of Object.entries(document.services)) {
-      const label = `${layer.source}#${serviceName}`;
-      if (rawService === null) {
-        // Compose treats a null service override (including a bare `name:`
-        // stub) as a no-op: the rendered config retains the accumulated
-        // service. Measured on the pinned Compose; see the null-override
-        // regressions.
-        continue;
-      }
-      if (!isRecord(rawService)) {
-        throw new Error(`${label}: service definition must be a mapping`);
-      }
-      if (rawService.extends !== undefined) {
-        throw new Error(
-          `${label}: Compose extends cannot be audited; use an explicit checked-in stack`,
-        );
-      }
-      const current = isRecord(effectiveServices[serviceName])
-        ? { ...effectiveServices[serviceName] }
-        : {};
-      for (
-        const field of ["build", "image", "entrypoint", "command"] as const
-      ) {
-        if (!Object.hasOwn(rawService, field)) continue;
-        // Compose null semantics are field-dependent (measured on the pinned
-        // Compose): null build/image are no-ops that retain the accumulated
-        // value, while null entrypoint/command reset the field to the image
-        // defaults and so must be copied through.
-        if (
-          rawService[field] === null &&
-          (field === "build" || field === "image")
-        ) {
-          continue;
-        }
-        current[field] = field === "build" &&
-            isRecord(current.build) && isRecord(rawService.build)
-          ? { ...current.build, ...rawService.build }
-          : rawService[field];
-      }
-      effectiveServices[serviceName] = current;
-    }
-  }
-  return parseComposeServiceTargets(
-    effectiveServices,
-    layers.map((layer) => layer.source).join(" + "),
-    dirname(resolve(REPO_DIR, layers[0].source)),
-  );
 }
 
 function composeFiles(directory: string): string[] {
@@ -2045,15 +1990,7 @@ export function repositoryTargets(): CheckTarget[] {
       ...parseDockerfile(join(SERVER_DIR, "Dockerfile.ingester")),
     },
   ];
-  const composeLayers = new Map(
-    composeFiles(DEPLOY_DIR).map((path) => [
-      path,
-      {
-        content: Deno.readTextFileSync(path),
-        source: relative(REPO_DIR, path).replaceAll("\\", "/"),
-      },
-    ]),
-  );
+  const discoveredComposePaths = new Set(composeFiles(DEPLOY_DIR));
   const basePath = join(DEPLOY_DIR, "compose-local", "docker-compose.yml");
   const overlayPaths = [
     join(DEPLOY_DIR, "compose-tailnet", "docker-compose.pattern-b.yml"),
@@ -2069,35 +2006,33 @@ export function repositoryTargets(): CheckTarget[] {
     ...overlayPaths,
     ...standalonePaths,
   ]);
-  for (const path of composeLayers.keys()) {
+  for (const path of discoveredComposePaths) {
     if (!classifiedPaths.has(path)) {
       throw new Error(
         `Compose file is not classified as standalone or a supported override: ${path}`,
       );
     }
   }
-  for (const layer of composeLayers.values()) {
-    targets.push(...parseComposeTargets(layer.content, layer.source));
+  for (const path of classifiedPaths) {
+    if (!discoveredComposePaths.has(path)) {
+      throw new Error(`Missing classified Compose file: ${path}`);
+    }
   }
 
   // These three override files are documented as optional layers on the
   // compose-local base. Audit every supported subset in its documented order
-  // so an override command is combined with an inherited Deno entrypoint.
-  const baseLayer = composeLayers.get(basePath);
-  if (!baseLayer) {
-    throw new Error(`Missing supported Compose base: ${basePath}`);
-  }
+  // so Compose itself combines override commands with inherited entrypoints.
+  targets.push(...renderComposeStackTargets([basePath]));
   for (let mask = 1; mask < 1 << overlayPaths.length; mask++) {
-    const stack = [baseLayer];
+    const stack = [basePath];
     for (const [index, path] of overlayPaths.entries()) {
       if ((mask & (1 << index)) === 0) continue;
-      const layer = composeLayers.get(path);
-      if (!layer) {
-        throw new Error(`Missing supported Compose override: ${path}`);
-      }
-      stack.push(layer);
+      stack.push(path);
     }
-    targets.push(...parseComposeStackTargets(stack));
+    targets.push(...renderComposeStackTargets(stack));
+  }
+  for (const path of standalonePaths) {
+    targets.push(...renderComposeStackTargets([path]));
   }
   return uniqueTargets(targets);
 }

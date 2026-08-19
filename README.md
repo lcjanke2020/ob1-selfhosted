@@ -509,7 +509,9 @@ with the scope contract in [`docs/spaces.md`](docs/spaces.md).
 ## Status & roadmap
 
 - All three install paths describe deployments that are running today; the test
-  suite (`cd server && deno task test`) is hermetic and runs in CI.
+  suite (`cd server && deno task test`) runs in CI without starting containers
+  or requiring database/network services. Its launcher-guard cases do require a
+  local Docker Compose CLI to render configuration.
 - The Qubes install path runs as the **three-qube split**, each role in its own
   self-contained per-qube compose directory
   ([`deploy/qubes/db-qube/`](deploy/qubes/db-qube/),
