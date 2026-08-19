@@ -44,6 +44,13 @@ services:
       # Clear it together with the key or config.ts correctly refuses the
       # otherwise-unused binding on this OAuth-only public deployment.
       MCP_ACCESS_KEY_PRINCIPAL: ""
+      # Match the OAuth-only Qubes shape: fail during Compose rendering when
+      # the only configured credential door lacks any verifier input. Waiting
+      # for the server process to reject this at startup obscures the actual
+      # deployment defect behind its restart policy.
+      AUTH0_ISSUER: ${AUTH0_ISSUER:?set AUTH0_ISSUER (Pattern B is OAuth-only)}
+      AUTH0_JWKS_URI: ${AUTH0_JWKS_URI:?set AUTH0_JWKS_URI (Pattern B is OAuth-only)}
+      AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:?set AUTH0_AUDIENCE (Pattern B is OAuth-only)}
 
   # Caddy access log ingester.
   #

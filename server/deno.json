@@ -14,6 +14,7 @@
   },
   "tasks": {
     "test": "deno test --frozen --allow-env --allow-net=127.0.0.1 --allow-read --allow-write --allow-run=deno --ignore=scripts/check_allow_env_test.ts --ignore=scripts/check_compose_env_test.ts && deno test --config scripts/deno.json --lock scripts/deno.lock --frozen --allow-read --allow-write --allow-run=docker scripts/check_allow_env_test.ts scripts/check_compose_env_test.ts",
+    "test-compose-contract": "deno test --config scripts/deno.json --lock scripts/deno.lock --frozen --allow-read --allow-run=docker scripts/check_compose_env_test.ts",
     "check-allow-env": "deno run --config scripts/deno.json --lock scripts/deno.lock --frozen --allow-read --allow-run=docker scripts/check_allow_env.ts",
     "check-compose-env": "deno run --config scripts/deno.json --lock scripts/deno.lock --frozen --allow-read --allow-run=docker scripts/check_compose_env.ts"
   }

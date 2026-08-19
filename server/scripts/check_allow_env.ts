@@ -34,15 +34,20 @@
 // Compose implementation instead of mirroring an open-ended YAML grammar. See
 // https://github.com/lcjanke2020/ob1-selfhosted/issues/76 for the stopping rule.
 
-import { dirname, fromFileUrl, join, relative, resolve } from "@std/path";
+import { dirname, join, relative, resolve } from "@std/path";
 // These AST-only dependencies live in scripts/deno.{json,lock}; the root lock
 // is copied into production images and deliberately excludes CI tooling.
 import { parse as parseTypeScriptModule } from "@babel/parser";
 import type * as t from "@babel/types";
-
-const SERVER_DIR = fromFileUrl(new URL("..", import.meta.url));
-const REPO_DIR = resolve(SERVER_DIR, "..");
-const DEPLOY_DIR = join(REPO_DIR, "deploy");
+import {
+  allowEnvComposeStacks,
+  auditDeploymentManifest,
+  auditDiscoveredComposeFiles,
+  composeFilePaths,
+  DEPLOY_DIR,
+  REPO_DIR,
+  SERVER_DIR,
+} from "./compose_deployments.ts";
 
 // deno-postgres@v0.19.3's getPgEnv() reads exactly these seven keys at Pool
 // construction, even when callers pass explicit connection options.
@@ -2014,48 +2019,22 @@ export function repositoryTargets(): CheckTarget[] {
     },
   ];
   const discoveredComposePaths = new Set(composeFiles(DEPLOY_DIR));
-  const basePath = join(DEPLOY_DIR, "compose-local", "docker-compose.yml");
-  const overlayPaths = [
-    join(DEPLOY_DIR, "compose-tailnet", "docker-compose.pattern-b.yml"),
-    join(DEPLOY_DIR, "qubes", "docker-compose.external-db.yml"),
-    join(DEPLOY_DIR, "qubes", "docker-compose.cpu-ollama.yml"),
+  const manifestIssues = [
+    ...auditDeploymentManifest(),
+    ...auditDiscoveredComposeFiles(discoveredComposePaths),
   ];
-  const standalonePaths = [
-    join(DEPLOY_DIR, "qubes", "app-qube", "docker-compose.yml"),
-    join(DEPLOY_DIR, "qubes", "ingress-qube", "docker-compose.yml"),
-  ];
-  const classifiedPaths = new Set([
-    basePath,
-    ...overlayPaths,
-    ...standalonePaths,
-  ]);
-  for (const path of discoveredComposePaths) {
-    if (!classifiedPaths.has(path)) {
-      throw new Error(
-        `Compose file is not classified as standalone or a supported override: ${path}`,
-      );
-    }
-  }
-  for (const path of classifiedPaths) {
-    if (!discoveredComposePaths.has(path)) {
-      throw new Error(`Missing classified Compose file: ${path}`);
-    }
+  if (manifestIssues.length > 0) {
+    throw new Error(
+      `invalid Compose deployment manifest:\n${manifestIssues.join("\n")}`,
+    );
   }
 
-  // These three override files are documented as optional layers on the
-  // compose-local base. Audit every supported subset in its documented order
-  // so Compose itself combines override commands with inherited entrypoints.
-  targets.push(...renderComposeStackTargets([basePath]));
-  for (let mask = 1; mask < 1 << overlayPaths.length; mask++) {
-    const stack = [basePath];
-    for (const [index, path] of overlayPaths.entries()) {
-      if ((mask & (1 << index)) === 0) continue;
-      stack.push(path);
-    }
-    targets.push(...renderComposeStackTargets(stack));
-  }
-  for (const path of standalonePaths) {
-    targets.push(...renderComposeStackTargets([path]));
+  // Unlike the smaller documented deployment list used by environment
+  // parity, this list contains the complete three-overlay power set. The
+  // un-interpolated oracle intentionally retains inactive profile services,
+  // so the one-shot tools profile is audited without becoming a deployment.
+  for (const stack of allowEnvComposeStacks()) {
+    targets.push(...renderComposeStackTargets(composeFilePaths(stack.files)));
   }
   return uniqueTargets(targets);
 }

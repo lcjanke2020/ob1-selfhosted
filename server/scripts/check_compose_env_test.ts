@@ -1,13 +1,34 @@
-import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
+  assert,
+  assertEquals,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
+import {
+  auditDeploymentPolicy,
   auditExampleEnvironment,
+  auditForwardingRules,
   auditServerEnvironment,
   auditServerPlacement,
   collectComposeInterpolationVariables,
   composeFixtureValue,
   type ComposeSnapshot,
+  type DeploymentPolicy,
+  type ExampleVariableInventory,
+  parseComposeVariableMetadata,
   parseExampleEnvironment,
-} from "./check_compose_env.ts";
+  type UnknownRecord,
+} from "./compose_env_audit.ts";
+import {
+  allowEnvComposeStacks,
+  auditDeploymentManifest,
+  COMPOSE_FILES,
+  composeFilePaths,
+  DOCUMENTED_DEPLOYMENTS,
+  EXAMPLE_CONTRACTS,
+  type ManifestAuditInput,
+} from "./compose_deployments.ts";
+import { renderComposeConfig } from "./check_allow_env.ts";
 
 Deno.test("interpolation inventory includes raw Compose variables but not escaped shell variables", () => {
   const variables = collectComposeInterpolationVariables({
@@ -26,6 +47,30 @@ Deno.test("interpolation inventory includes raw Compose variables but not escape
   );
 });
 
+Deno.test("Compose variable inventory preserves required and default metadata", () => {
+  const variables = parseComposeVariableMetadata({
+    REQUIRED: { Name: "REQUIRED", Required: true, DefaultValue: "" },
+    DEFAULTED: {
+      Name: "DEFAULTED",
+      Required: false,
+      DefaultValue: "15000",
+    },
+  });
+
+  assertEquals(variables.get("REQUIRED"), {
+    name: "REQUIRED",
+    required: true,
+    defaultValue: "",
+    source: "compose",
+  });
+  assertEquals(variables.get("DEFAULTED"), {
+    name: "DEFAULTED",
+    required: false,
+    defaultValue: "15000",
+    source: "compose",
+  });
+});
+
 function snapshot(
   keys: readonly string[],
   overrides: Partial<ComposeSnapshot> = {},
@@ -39,6 +84,25 @@ function snapshot(
     ),
     ...overrides,
   };
+}
+
+function variableInventory(
+  definitions: Readonly<
+    Record<string, { defaultValue?: string; required?: boolean }>
+  >,
+): ExampleVariableInventory {
+  return new Map(
+    Object.entries(definitions).map(([name, definition]) => [
+      name,
+      [{
+        name,
+        shape: "mutation",
+        required: definition.required ?? false,
+        defaultValue: definition.defaultValue ?? "",
+        source: "compose" as const,
+      }],
+    ]),
+  );
 }
 
 Deno.test("environment parity reports a missing forwarded key", () => {
@@ -71,7 +135,7 @@ Deno.test("example parity reports drift from Compose variable inventory", () => 
   );
   const issues = auditExampleEnvironment(
     "mutation",
-    new Set(["FIRST", "SECOND"]),
+    variableInventory({ FIRST: {}, SECOND: {} }),
     example,
   );
 
@@ -111,7 +175,7 @@ Deno.test("rationale-bearing deployment difference is accepted and pinned", () =
   );
 
   assertEquals(issues, []);
-  assertStringIncludes(drifted.join("\n"), "reviewed forwarding expression");
+  assertStringIncludes(drifted.join("\n"), "reviewed expression pair");
   assertStringIncludes(
     auditServerEnvironment(
       "drifted-baseline",
@@ -122,7 +186,7 @@ Deno.test("rationale-bearing deployment difference is accepted and pinned", () =
       }),
       policy,
     ).join("\n"),
-    "requires compose-local forwarding expression",
+    "does not match the reviewed expression pair",
   );
 });
 
@@ -185,7 +249,7 @@ Deno.test("example inventory observes export and lowercase dotenv assignments", 
   );
   const issues = auditExampleEnvironment(
     "dotenv-mutation",
-    new Set(["EXPECTED"]),
+    variableInventory({ EXPECTED: {} }),
     example,
   );
 
@@ -263,4 +327,194 @@ Deno.test("deployment policy categories must be disjoint", () => {
   );
 
   assertStringIncludes(issues.join("\n"), "conflicting policy categories");
+});
+
+Deno.test("required Compose metadata requires an active example assignment", () => {
+  const commented = parseExampleEnvironment(
+    "# REQUIRED_VALUE=choose-me\n# TIMEOUT_MS=15000\n",
+  );
+  const issues = auditExampleEnvironment(
+    "metadata-mutation",
+    variableInventory({
+      REQUIRED_VALUE: { required: true },
+      TIMEOUT_MS: { defaultValue: "16000" },
+    }),
+    commented,
+  );
+
+  assertStringIncludes(issues.join("\n"), "must actively assign");
+  assertStringIncludes(issues.join("\n"), "Compose defaults to 16000");
+
+  const pinned = auditExampleEnvironment(
+    "metadata-pin",
+    variableInventory({
+      REQUIRED_VALUE: { required: true },
+      TIMEOUT_MS: { defaultValue: "16000" },
+    }),
+    parseExampleEnvironment("REQUIRED_VALUE=\nTIMEOUT_MS=15000\n"),
+    {
+      valuePins: {
+        TIMEOUT_MS: {
+          value: "15000",
+          rationale: "This deployment deliberately uses a shorter timeout.",
+        },
+      },
+    },
+  );
+  assertEquals(pinned, []);
+
+  const stalePin = auditExampleEnvironment(
+    "metadata-stale-pin",
+    variableInventory({ TIMEOUT_MS: { defaultValue: "15000" } }),
+    parseExampleEnvironment("TIMEOUT_MS=15000\n"),
+    {
+      valuePins: {
+        TIMEOUT_MS: {
+          value: "15000",
+          rationale: "This used to differ from Compose.",
+        },
+      },
+    },
+  );
+  assertStringIncludes(stalePin.join("\n"), "value-pin policy");
+  assertStringIncludes(stalePin.join("\n"), "is stale");
+});
+
+Deno.test("shared forwarding rules reject unknown, stale, and unexplained entries", () => {
+  const issues = auditForwardingRules(new Set(["KNOWN"]), {
+    KNOWN: { kind: "variable", name: "KNOWN", rationale: "" },
+    RETIRED: {
+      kind: "literal",
+      value: "fixed",
+      rationale: "No longer supported.",
+    },
+  });
+
+  assertStringIncludes(issues.join("\n"), "empty rationale");
+  assertStringIncludes(issues.join("\n"), "identity forwarding is implicit");
+  assertStringIncludes(issues.join("\n"), "unknown server key RETIRED");
+});
+
+Deno.test("deployment policy validation fails fast for invalid table entries", () => {
+  const cases: ReadonlyArray<{
+    expected: string;
+    policy: DeploymentPolicy;
+  }> = [
+    {
+      expected: "empty rationale",
+      policy: { omissions: { FIRST: "" } },
+    },
+    {
+      expected: "unknown server key RETIRED",
+      policy: {
+        pins: {
+          RETIRED: { value: "fixed", rationale: "No longer supported." },
+        },
+      },
+    },
+    {
+      expected: "conflicting policy categories",
+      policy: {
+        omissions: { FIRST: "Omit it." },
+        pins: { FIRST: { value: "fixed", rationale: "Pin it." } },
+      },
+    },
+  ];
+
+  for (const mutation of cases) {
+    assertStringIncludes(
+      auditDeploymentPolicy(
+        "policy-mutation",
+        new Set(["FIRST"]),
+        mutation.policy,
+      ).join("\n"),
+      mutation.expected,
+    );
+  }
+});
+
+Deno.test("manifest keeps all overlay subsets distinct from documented deployments", () => {
+  assertEquals(auditDeploymentManifest(), []);
+  assertEquals(allowEnvComposeStacks().length, 10);
+  assertEquals(DOCUMENTED_DEPLOYMENTS.length, 8);
+
+  const documented = new Set(
+    DOCUMENTED_DEPLOYMENTS.map((shape) => shape.files.join("+")),
+  );
+  assert(!documented.has("local+cpuOllama"));
+  assert(!documented.has("local+patternB+cpuOllama"));
+  assert(
+    allowEnvComposeStacks().some((stack) =>
+      stack.files.join("+") === "local+cpuOllama"
+    ),
+  );
+});
+
+Deno.test("manifest validation rejects invalid shape combinations", () => {
+  const base: ManifestAuditInput = {
+    files: COMPOSE_FILES,
+    examples: EXAMPLE_CONTRACTS,
+    deployments: DOCUMENTED_DEPLOYMENTS,
+  };
+  const cases = [
+    {
+      expected: "repeats shape name",
+      deployments: DOCUMENTED_DEPLOYMENTS.map((shape, index) =>
+        index === 1 ? { ...shape, name: DOCUMENTED_DEPLOYMENTS[0].name } : shape
+      ),
+    },
+    {
+      expected: "server-absent shape cannot carry server policy",
+      deployments: DOCUMENTED_DEPLOYMENTS.map((shape) =>
+        shape.server.kind === "absent"
+          ? {
+            ...shape,
+            server: { ...shape.server, policy: {} },
+          }
+          : shape
+      ),
+    },
+    {
+      expected: "references unknown example group",
+      deployments: DOCUMENTED_DEPLOYMENTS.map((shape, index) =>
+        index === 0 ? { ...shape, exampleGroup: "missing" } : shape
+      ),
+    },
+  ];
+
+  for (const mutation of cases) {
+    const issues = auditDeploymentManifest({
+      ...base,
+      deployments: mutation.deployments,
+    } as unknown as ManifestAuditInput);
+    assertStringIncludes(issues.join("\n"), mutation.expected);
+  }
+
+  const optionalPolicy = DOCUMENTED_DEPLOYMENTS.map((shape, index) =>
+    index === 0 ? { ...shape, server: { kind: "present" as const } } : shape
+  );
+  assertEquals(
+    auditDeploymentManifest({
+      ...base,
+      deployments: optionalPolicy,
+    }),
+    [],
+  );
+});
+
+Deno.test("un-interpolated oracle audits tools without making it a deployment", () => {
+  const files = composeFilePaths(["local"]);
+  const uninterpolated = renderComposeConfig(files);
+  const interpolated = renderComposeConfig(files, {
+    environment: { METADATA_FALLBACK_POLICY: "off" },
+    interpolate: true,
+  });
+  const rawServices = uninterpolated.services as UnknownRecord;
+  const activeServices = interpolated.services as UnknownRecord;
+
+  assert(Object.hasOwn(rawServices, "token-admin"));
+  assert(!Object.hasOwn(activeServices, "token-admin"));
+  assert(
+    !DOCUMENTED_DEPLOYMENTS.some((shape) => shape.profiles?.includes("tools")),
+  );
 });
