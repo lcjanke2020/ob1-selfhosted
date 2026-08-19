@@ -3,15 +3,18 @@
 //
 // The supported key set comes from the same AST walk used by check_allow_env,
 // not from another hand-maintained inventory. Compose itself supplies both the
-// merged service model and its interpolation-variable metadata. Unique
-// sentinels then prove that a declared knob is actually forwarded. The only
-// policy below is the finite set of deliberate aliases, literals, deployment
-// omissions/pins, and required-vs-defaulted differences.
+// merged service model and its interpolation-variable metadata. Its
+// un-interpolated service environment preserves exact per-service default and
+// empty-value semantics, including metadata gaps in older Compose releases.
+// Unique sentinels then prove that a declared knob is actually forwarded. The
+// only policy below is the finite set of deliberate aliases, literals,
+// deployment omissions/pins, and forwarding-expression differences.
 
-import { fromFileUrl, join, resolve } from "@std/path";
+import { dirname, fromFileUrl, join, resolve } from "@std/path";
 import {
   analyzeTarget,
   parseDockerfile,
+  parseRenderedComposeTargets,
   renderComposeConfig,
   type UnknownRecord,
 } from "./check_allow_env.ts";
@@ -20,20 +23,29 @@ const SERVER_DIR = fromFileUrl(new URL("..", import.meta.url));
 const REPO_DIR = resolve(SERVER_DIR, "..");
 const DEPLOY_DIR = join(REPO_DIR, "deploy");
 
-export interface ComposeVariableContract {
-  defaultValue: string;
-  required: boolean;
-}
-
 export interface ComposeSnapshot {
   environment: Readonly<Record<string, string>>;
-  variables: Readonly<Record<string, ComposeVariableContract>>;
+  rawEnvironment: Readonly<Record<string, ComposeEnvironmentValue>>;
+}
+
+export type ComposeEnvironmentValue = string | number | boolean | null;
+
+interface ExpressionPolicy {
+  rationale: string;
+  value: ComposeEnvironmentValue;
+}
+
+interface ExpressionDifferencePolicy extends ExpressionPolicy {
+  baselineValue: ComposeEnvironmentValue;
 }
 
 export interface DeploymentPolicy {
+  expressionDifferences?: Readonly<
+    Record<string, ExpressionDifferencePolicy>
+  >;
+  expressionPins?: Readonly<Record<string, ExpressionPolicy>>;
   omissions?: Readonly<Record<string, string>>;
   pins?: Readonly<Record<string, { rationale: string; value: string }>>;
-  variableDifferences?: Readonly<Record<string, string>>;
 }
 
 export interface ExampleEnvironment {
@@ -59,7 +71,9 @@ interface ComposeShape {
 
 interface RenderedShape {
   document: UnknownRecord;
-  variables: Record<string, ComposeVariableContract>;
+  interpolationVariables: ReadonlySet<string>;
+  rawEnvironment?: Readonly<Record<string, ComposeEnvironmentValue>>;
+  serverServices: readonly string[];
 }
 
 type ForwardingRule =
@@ -116,9 +130,22 @@ const PATTERN_B_PINS: DeploymentPolicy["pins"] = {
   },
 };
 
-const EXTERNAL_DB_DIFFERENCE: DeploymentPolicy["variableDifferences"] = {
-  DB_HOST:
-    "The external-corpus overlay makes DB_HOST required instead of defaulting to the parked postgres service.",
+const EXTERNAL_DB_DIFFERENCE: DeploymentPolicy["expressionDifferences"] = {
+  DB_HOST: {
+    baselineValue: "${DB_HOST:-postgres}",
+    value:
+      "${DB_HOST:?set DB_HOST to the external Postgres address (Qubes split — this qube own-IP ConnectTCP db forwarder) when layering the external-db override}",
+    rationale:
+      "The external-corpus overlay makes DB_HOST required instead of defaulting to the parked postgres service.",
+  },
+};
+
+const LOCAL_EXPRESSION_PINS: DeploymentPolicy["expressionPins"] = {
+  FETCH_TIMEOUT_MS: {
+    value: "${FETCH_TIMEOUT_MS:-15000}",
+    rationale:
+      "The operator contract documents a 15-second embedding request deadline.",
+  },
 };
 
 const SHAPES: readonly ComposeShape[] = [
@@ -126,7 +153,7 @@ const SHAPES: readonly ComposeShape[] = [
     name: "compose-local",
     exampleGroup: "compose-local",
     files: [join(DEPLOY_DIR, "compose-local", "docker-compose.yml")],
-    serverPolicy: {},
+    serverPolicy: { expressionPins: LOCAL_EXPRESSION_PINS },
   },
   {
     name: "compose-tailnet-overlay",
@@ -145,7 +172,7 @@ const SHAPES: readonly ComposeShape[] = [
       join(DEPLOY_DIR, "compose-local", "docker-compose.yml"),
       join(DEPLOY_DIR, "qubes", "docker-compose.external-db.yml"),
     ],
-    serverPolicy: { variableDifferences: EXTERNAL_DB_DIFFERENCE },
+    serverPolicy: { expressionDifferences: EXTERNAL_DB_DIFFERENCE },
   },
   {
     name: "compose-external-db-cpu-overlay",
@@ -155,7 +182,7 @@ const SHAPES: readonly ComposeShape[] = [
       join(DEPLOY_DIR, "qubes", "docker-compose.external-db.yml"),
       join(DEPLOY_DIR, "qubes", "docker-compose.cpu-ollama.yml"),
     ],
-    serverPolicy: { variableDifferences: EXTERNAL_DB_DIFFERENCE },
+    serverPolicy: { expressionDifferences: EXTERNAL_DB_DIFFERENCE },
   },
   {
     name: "compose-tailnet-external-corpus-overlay",
@@ -168,7 +195,7 @@ const SHAPES: readonly ComposeShape[] = [
     profiles: ["pattern-b"],
     serverPolicy: {
       pins: PATTERN_B_PINS,
-      variableDifferences: EXTERNAL_DB_DIFFERENCE,
+      expressionDifferences: EXTERNAL_DB_DIFFERENCE,
     },
   },
   {
@@ -183,7 +210,7 @@ const SHAPES: readonly ComposeShape[] = [
     profiles: ["pattern-b"],
     serverPolicy: {
       pins: PATTERN_B_PINS,
-      variableDifferences: EXTERNAL_DB_DIFFERENCE,
+      expressionDifferences: EXTERNAL_DB_DIFFERENCE,
     },
   },
   {
@@ -205,17 +232,42 @@ const SHAPES: readonly ComposeShape[] = [
           rationale: "The split app qube is OAuth-only.",
         },
       },
-      variableDifferences: {
-        DB_HOST:
-          "The split app qube requires its explicit ConnectTCP database forwarder.",
-        DB_PASSWORD:
-          "The split app qube requires the app-role credential at Compose render time.",
-        AUTH0_ISSUER:
-          "OAuth is the split deployment's only authentication door.",
-        AUTH0_JWKS_URI:
-          "OAuth is the split deployment's only authentication door.",
-        AUTH0_AUDIENCE:
-          "OAuth is the split deployment's only authentication door.",
+      expressionDifferences: {
+        DB_HOST: {
+          baselineValue: "${DB_HOST:-postgres}",
+          value:
+            "${DB_HOST:?set DB_HOST to this qube's own IP — the ob1-db-forward ConnectTCP forwarder (the three-qube split has no local postgres)}",
+          rationale:
+            "The split app qube requires its explicit ConnectTCP database forwarder.",
+        },
+        DB_PASSWORD: {
+          baselineValue: "${OPENBRAIN_APP_PASSWORD}",
+          value:
+            "${OPENBRAIN_APP_PASSWORD:?set OPENBRAIN_APP_PASSWORD (the app role mcp connects as)}",
+          rationale:
+            "The split app qube requires the app-role credential at Compose render time.",
+        },
+        AUTH0_ISSUER: {
+          baselineValue: "${AUTH0_ISSUER:-}",
+          value:
+            "${AUTH0_ISSUER:?set AUTH0_ISSUER (Qubes deployment is OAuth-only)}",
+          rationale:
+            "OAuth is the split deployment's only authentication door.",
+        },
+        AUTH0_JWKS_URI: {
+          baselineValue: "${AUTH0_JWKS_URI:-}",
+          value:
+            "${AUTH0_JWKS_URI:?set AUTH0_JWKS_URI (Qubes deployment is OAuth-only)}",
+          rationale:
+            "OAuth is the split deployment's only authentication door.",
+        },
+        AUTH0_AUDIENCE: {
+          baselineValue: "${AUTH0_AUDIENCE:-}",
+          value:
+            "${AUTH0_AUDIENCE:?set AUTH0_AUDIENCE (Qubes deployment is OAuth-only)}",
+          rationale:
+            "OAuth is the split deployment's only authentication door.",
+        },
       },
     },
   },
@@ -321,14 +373,6 @@ function forwardingRule(
   };
 }
 
-function sameVariableContract(
-  left: ComposeVariableContract,
-  right: ComposeVariableContract,
-): boolean {
-  return left.required === right.required &&
-    left.defaultValue === right.defaultValue;
-}
-
 export function auditServerEnvironment(
   name: string,
   supportedKeys: ReadonlySet<string>,
@@ -337,22 +381,59 @@ export function auditServerEnvironment(
   policy: DeploymentPolicy = {},
 ): string[] {
   const issues: string[] = [];
+  const expressionDifferences = policy.expressionDifferences ?? {};
+  const expressionPins = policy.expressionPins ?? {};
   const omissions = policy.omissions ?? {};
   const pins = policy.pins ?? {};
-  const variableDifferences = policy.variableDifferences ?? {};
 
   issues.push(...rationaleIssues(`${name} omission policy`, omissions));
-  issues.push(...rationaleIssues(
-    `${name} variable-difference policy`,
-    variableDifferences,
-  ));
   for (const [key, pin] of Object.entries(pins)) {
     if (pin.rationale.trim().length === 0) {
       issues.push(`${name} pin policy: ${key} has an empty rationale`);
     }
   }
+  for (
+    const [category, entries] of [
+      ["expression-difference", expressionDifferences],
+      ["expression-pin", expressionPins],
+    ] as const
+  ) {
+    for (const [key, entry] of Object.entries(entries)) {
+      if (entry.rationale.trim().length === 0) {
+        issues.push(
+          `${name} ${category} policy: ${key} has an empty rationale`,
+        );
+      }
+    }
+  }
+
+  const categories = [
+    ["expression difference", expressionDifferences],
+    ["expression pin", expressionPins],
+    ["omission", omissions],
+    ["literal pin", pins],
+  ] as const;
+  const policyKeys = new Set(
+    categories.flatMap(([, entries]) => Object.keys(entries)),
+  );
+  for (const key of policyKeys) {
+    const present = categories.filter(([, entries]) =>
+      Object.hasOwn(entries, key)
+    ).map(([category]) => category);
+    if (present.length > 1) {
+      issues.push(
+        `${name}: ${key} appears in conflicting policy categories: ${
+          present.join(", ")
+        }`,
+      );
+    }
+    if (!supportedKeys.has(key)) {
+      issues.push(`${name}: policy names unknown server key ${key}`);
+    }
+  }
 
   const actualKeys = new Set(Object.keys(snapshot.environment));
+  const rawKeys = new Set(Object.keys(snapshot.rawEnvironment));
   for (const key of supportedKeys) {
     if (Object.hasOwn(omissions, key)) {
       if (actualKeys.has(key)) {
@@ -371,15 +452,41 @@ export function auditServerEnvironment(
       issues.push(`${name}: mcp environment has undocumented extra key ${key}`);
     }
   }
-  for (const key of Object.keys(omissions)) {
-    if (!supportedKeys.has(key)) {
+  for (const key of actualKeys) {
+    if (!rawKeys.has(key)) {
       issues.push(
-        `${name}: omission allowlist names unknown server key ${key}`,
+        `${name}: un-interpolated mcp environment is missing rendered key ${key}`,
+      );
+    }
+  }
+  for (const key of rawKeys) {
+    if (!actualKeys.has(key)) {
+      issues.push(
+        `${name}: un-interpolated mcp environment has unmatched key ${key}`,
       );
     }
   }
 
-  const observedVariableDifferences = new Set<string>();
+  for (const [key, expected] of Object.entries(expressionPins)) {
+    if (!supportedKeys.has(key) || !rawKeys.has(key)) continue;
+    const rule = forwardingRule(key, policy);
+    if (rule.kind !== "variable") {
+      issues.push(
+        `${name}: expression pin for ${key} cannot target a literal forwarding rule`,
+      );
+      continue;
+    }
+    const actual = snapshot.rawEnvironment[key];
+    if (!Object.is(actual, expected.value)) {
+      issues.push(
+        `${name}: ${key} must keep forwarding expression ${
+          JSON.stringify(expected.value)
+        }; got ${JSON.stringify(actual)}`,
+      );
+    }
+  }
+
+  const observedExpressionDifferences = new Set<string>();
   for (const key of supportedKeys) {
     if (!actualKeys.has(key)) continue;
     const rule = forwardingRule(key, policy);
@@ -395,13 +502,6 @@ export function auditServerEnvironment(
       continue;
     }
 
-    const variable = snapshot.variables[rule.name];
-    if (!variable) {
-      issues.push(
-        `${name}: ${key} claims forwarding from ${rule.name}, but Compose does not report that variable`,
-      );
-      continue;
-    }
     const expected = composeFixtureValue(rule.name);
     if (actual !== expected) {
       issues.push(
@@ -412,49 +512,61 @@ export function auditServerEnvironment(
     }
 
     if (!baseline) continue;
-    const baselineRule = forwardingRule(key, {});
-    if (baselineRule.kind !== "variable") continue;
-    const baselineVariable = baseline.variables[baselineRule.name];
-    if (!baselineVariable) {
+    if (!Object.hasOwn(baseline.rawEnvironment, key)) {
       issues.push(
-        `${name}: compose-local baseline does not report ${baselineRule.name} for ${key}`,
+        `${name}: compose-local baseline has no forwarding expression for ${key}`,
       );
       continue;
     }
-    const differs = !sameVariableContract(variable, baselineVariable);
-    const allowed = Object.hasOwn(variableDifferences, key);
-    if (differs) observedVariableDifferences.add(key);
+    if (!Object.hasOwn(snapshot.rawEnvironment, key)) continue;
+    const baselineExpression = baseline.rawEnvironment[key];
+    const expression = snapshot.rawEnvironment[key];
+    const differs = !Object.is(expression, baselineExpression);
+    const allowed = expressionDifferences[key];
+    if (differs) observedExpressionDifferences.add(key);
+    if (allowed && !Object.is(baselineExpression, allowed.baselineValue)) {
+      issues.push(
+        `${name}: ${key} requires compose-local forwarding expression ${
+          JSON.stringify(allowed.baselineValue)
+        }; got ${JSON.stringify(baselineExpression)}`,
+      );
+    }
     if (differs && !allowed) {
       issues.push(
-        `${name}: ${key} changes Compose variable semantics for ${rule.name} ` +
-          `(local required=${baselineVariable.required}, default=${
-            JSON.stringify(baselineVariable.defaultValue)
-          }; ` +
-          `here required=${variable.required}, default=${
-            JSON.stringify(variable.defaultValue)
-          }) without an allowlist rationale`,
+        `${name}: ${key} changes its mcp forwarding expression from ${
+          JSON.stringify(baselineExpression)
+        } to ${JSON.stringify(expression)} without an allowlist rationale`,
+      );
+    } else if (differs && !Object.is(expression, allowed.value)) {
+      issues.push(
+        `${name}: ${key} must use reviewed forwarding expression ${
+          JSON.stringify(allowed.value)
+        }; got ${JSON.stringify(expression)}`,
       );
     } else if (!differs && allowed) {
       issues.push(
-        `${name}: variable-difference allowlist for ${key} is stale; it matches compose-local`,
+        `${name}: expression-difference allowlist for ${key} is stale; it matches compose-local`,
       );
     }
   }
 
-  for (const key of Object.keys(variableDifferences)) {
-    if (!supportedKeys.has(key)) {
+  for (const key of Object.keys(expressionDifferences)) {
+    if (!supportedKeys.has(key)) continue;
+    const rule = forwardingRule(key, policy);
+    if (rule.kind !== "variable") {
       issues.push(
-        `${name}: variable-difference allowlist names unknown server key ${key}`,
+        `${name}: expression difference for ${key} cannot target a literal forwarding rule`,
       );
-    } else if (!observedVariableDifferences.has(key) && !actualKeys.has(key)) {
+    } else if (!baseline) {
       issues.push(
-        `${name}: variable-difference allowlist for ${key} cannot be observed because the key is absent`,
+        `${name}: expression difference for ${key} cannot be declared on the baseline`,
       );
-    }
-  }
-  for (const key of Object.keys(pins)) {
-    if (!supportedKeys.has(key)) {
-      issues.push(`${name}: pin allowlist names unknown server key ${key}`);
+    } else if (
+      !observedExpressionDifferences.has(key) && !actualKeys.has(key)
+    ) {
+      issues.push(
+        `${name}: expression difference for ${key} is not observable`,
+      );
     }
   }
   return issues;
@@ -464,8 +576,21 @@ export function parseExampleEnvironment(content: string): ExampleEnvironment {
   const keys = new Set<string>();
   const active = new Map<string, string>();
   for (const [index, line] of content.split(/\r?\n/).entries()) {
-    const match = line.match(/^\s*(#\s*)?([A-Z][A-Z0-9_]*)=(.*)$/);
-    if (!match) continue;
+    const match = line.match(
+      /^\s*(#\s*)?(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/,
+    );
+    if (!match) {
+      const candidate = line.trim();
+      if (
+        candidate.length > 0 && !candidate.startsWith("#") &&
+        candidate.includes("=")
+      ) {
+        throw new Error(
+          `.env.example:${index + 1}: unsupported assignment syntax`,
+        );
+      }
+      continue;
+    }
     const [, comment, key, rawValue] = match;
     keys.add(key);
     if (comment) continue;
@@ -527,11 +652,8 @@ export function auditExampleEnvironment(
   return issues;
 }
 
-function parseComposeVariables(document: UnknownRecord): Record<
-  string,
-  ComposeVariableContract
-> {
-  const variables: Record<string, ComposeVariableContract> = {};
+function parseComposeVariableNames(document: UnknownRecord): Set<string> {
+  const variables = new Set<string>();
   for (const [key, raw] of Object.entries(document)) {
     if (
       !isRecord(raw) || raw.Name !== key ||
@@ -542,18 +664,41 @@ function parseComposeVariables(document: UnknownRecord): Record<
         `docker compose config --variables returned an unsupported record for ${key}`,
       );
     }
-    variables[key] = {
-      required: raw.Required,
-      defaultValue: raw.DefaultValue,
-    };
+    variables.add(key);
   }
   return variables;
 }
 
-function serviceEnvironment(
+export function collectComposeInterpolationVariables(
+  value: unknown,
+  variables = new Set<string>(),
+): Set<string> {
+  if (typeof value === "string") {
+    const interpolation =
+      /(?<!\$)\$(?:\{([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*))/g;
+    for (const match of value.matchAll(interpolation)) {
+      variables.add(match[1] ?? match[2]);
+    }
+    return variables;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectComposeInterpolationVariables(item, variables);
+    }
+    return variables;
+  }
+  if (isRecord(value)) {
+    for (const item of Object.values(value)) {
+      collectComposeInterpolationVariables(item, variables);
+    }
+  }
+  return variables;
+}
+
+function serviceEnvironmentValues(
   document: UnknownRecord,
   shapeName: string,
-): Record<string, string> | undefined {
+): Record<string, ComposeEnvironmentValue> | undefined {
   if (!isRecord(document.services)) {
     throw new Error(
       `${shapeName}: rendered Compose services must be a mapping`,
@@ -561,14 +706,69 @@ function serviceEnvironment(
   }
   const service = document.services.mcp;
   if (service === undefined) return undefined;
-  if (!isRecord(service) || !isRecord(service.environment)) {
-    throw new Error(`${shapeName}: rendered mcp environment must be a mapping`);
+  if (!isRecord(service)) {
+    throw new Error(`${shapeName}: rendered mcp service must be a mapping`);
   }
+  const raw = service.environment;
+  if (!isRecord(raw) && !Array.isArray(raw)) {
+    throw new Error(
+      `${shapeName}: rendered mcp environment must be a mapping or list`,
+    );
+  }
+  const environment: Record<string, ComposeEnvironmentValue> = {};
+  const add = (key: string, value: ComposeEnvironmentValue) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new Error(
+        `${shapeName}: rendered mcp environment has invalid key ${key}`,
+      );
+    }
+    if (Object.hasOwn(environment, key)) {
+      throw new Error(
+        `${shapeName}: rendered mcp environment repeats key ${key}`,
+      );
+    }
+    environment[key] = value;
+  };
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (typeof item !== "string") {
+        throw new Error(
+          `${shapeName}: rendered mcp environment list must contain strings`,
+        );
+      }
+      const delimiter = item.indexOf("=");
+      add(
+        delimiter < 0 ? item : item.slice(0, delimiter),
+        delimiter < 0 ? null : item.slice(delimiter + 1),
+      );
+    }
+    return environment;
+  }
+  for (const [key, value] of Object.entries(raw)) {
+    if (
+      value !== null && typeof value !== "string" &&
+      typeof value !== "number" && typeof value !== "boolean"
+    ) {
+      throw new Error(
+        `${shapeName}: rendered mcp environment value for ${key} must be scalar`,
+      );
+    }
+    add(key, value);
+  }
+  return environment;
+}
+
+function serviceEnvironment(
+  document: UnknownRecord,
+  shapeName: string,
+): Record<string, string> | undefined {
+  const values = serviceEnvironmentValues(document, shapeName);
+  if (!values) return undefined;
   const environment: Record<string, string> = {};
-  for (const [key, value] of Object.entries(service.environment)) {
+  for (const [key, value] of Object.entries(values)) {
     if (typeof value !== "string") {
       throw new Error(
-        `${shapeName}: rendered mcp environment value for ${key} must be a string`,
+        `${shapeName}: interpolated mcp environment value for ${key} must be a string`,
       );
     }
     environment[key] = value;
@@ -576,21 +776,102 @@ function serviceEnvironment(
   return environment;
 }
 
-function renderShape(shape: ComposeShape): RenderedShape {
+export function auditServerPlacement(
+  name: string,
+  serverServices: readonly string[],
+  absentRationale?: string,
+): string[] {
+  if (absentRationale !== undefined) {
+    const issues = absentRationale.trim().length === 0
+      ? [`${name}: absent-server rationale is empty`]
+      : [];
+    if (serverServices.length > 0) {
+      issues.push(
+        `${name}: server launcher must be absent; found service(s) ${
+          serverServices.join(", ")
+        }`,
+      );
+    }
+    return issues;
+  }
+  return serverServices.length === 1 && serverServices[0] === "mcp" ? [] : [
+    `${name}: expected exactly one server launcher named mcp; found ${
+      serverServices.length > 0 ? serverServices.join(", ") : "none"
+    }`,
+  ];
+}
+
+function serverServiceNames(
+  document: UnknownRecord,
+  shape: ComposeShape,
+  serverEntrypoint: string,
+): string[] {
+  const source = shape.name;
+  const prefix = `${source}#`;
+  return parseRenderedComposeTargets(
+    document,
+    source,
+    dirname(resolve(shape.files[0])),
+  ).filter((target) => analyzeTarget(target).files.has(serverEntrypoint)).map(
+    (target) => {
+      if (!target.source.startsWith(prefix)) {
+        throw new Error(
+          `${shape.name}: cannot identify service for ${target.source}`,
+        );
+      }
+      return target.source.slice(prefix.length);
+    },
+  ).sort();
+}
+
+function renderShape(
+  shape: ComposeShape,
+  serverEntrypoint: string,
+): RenderedShape {
   const composeControlEnvironment = { COMPOSE_PROFILES: "" };
-  const variableDocument = renderComposeConfig(shape.files, {
+  const uninterpolatedDocument = renderComposeConfig(shape.files, {
     environment: composeControlEnvironment,
+    profiles: shape.profiles,
+  });
+  const interpolationVariables = collectComposeInterpolationVariables(
+    uninterpolatedDocument,
+  );
+  const rawEnvironment = serviceEnvironmentValues(
+    uninterpolatedDocument,
+    shape.name,
+  );
+  const inventoryEnvironment: Record<string, string> = {
+    ...composeControlEnvironment,
+  };
+  for (const key of interpolationVariables) {
+    inventoryEnvironment[key] = composeFixtureValue(key);
+  }
+
+  // Compose 2.38.x validates required bind-source interpolation before
+  // producing --variables output, then omits that variable from the output.
+  // Seed every variable from the real un-interpolated model so inventory is
+  // version-stable without weakening required-variable behavior.
+  const variableDocument = renderComposeConfig(shape.files, {
+    environment: inventoryEnvironment,
+    profiles: shape.profiles,
     variables: true,
   });
-  const variables = parseComposeVariables(variableDocument);
+  const variables = parseComposeVariableNames(variableDocument);
   const environment: Record<string, string> = {
     ...composeControlEnvironment,
   };
-  for (const key of Object.keys(variables)) {
+  for (const key of variables) interpolationVariables.add(key);
+  for (const key of interpolationVariables) {
     environment[key] = composeFixtureValue(key);
   }
   return {
-    variables,
+    interpolationVariables,
+    rawEnvironment,
+    serverServices: serverServiceNames(
+      uninterpolatedDocument,
+      shape,
+      serverEntrypoint,
+    ),
     document: renderComposeConfig(shape.files, {
       environment,
       interpolate: true,
@@ -599,20 +880,26 @@ function renderShape(shape: ComposeShape): RenderedShape {
   };
 }
 
-function supportedServerKeys(): Set<string> {
+function serverContract(): { entrypoint: string; supported: Set<string> } {
   const dockerfile = join(SERVER_DIR, "Dockerfile");
   const target = {
     source: "server/Dockerfile",
     ...parseDockerfile(dockerfile),
   };
-  return analyzeTarget(target).reads;
+  return {
+    entrypoint: target.entrypoint,
+    supported: analyzeTarget(target).reads,
+  };
 }
 
 function main(): number {
   try {
-    const supported = supportedServerKeys();
+    const server = serverContract();
+    const supported = server.supported;
     const rendered = new Map<string, RenderedShape>();
-    for (const shape of SHAPES) rendered.set(shape.name, renderShape(shape));
+    for (const shape of SHAPES) {
+      rendered.set(shape.name, renderShape(shape, server.entrypoint));
+    }
 
     const baselineRendered = rendered.get("compose-local")!;
     const baselineEnvironment = serviceEnvironment(
@@ -624,31 +911,36 @@ function main(): number {
         "compose-local: rendered Compose omitted required mcp service",
       );
     }
+    if (!baselineRendered.rawEnvironment) {
+      throw new Error(
+        "compose-local: un-interpolated Compose omitted required mcp service",
+      );
+    }
     const baseline: ComposeSnapshot = {
       environment: baselineEnvironment,
-      variables: baselineRendered.variables,
+      rawEnvironment: baselineRendered.rawEnvironment,
     };
 
     const issues: string[] = [];
     for (const shape of SHAPES) {
       const snapshot = rendered.get(shape.name)!;
       const environment = serviceEnvironment(snapshot.document, shape.name);
+      const placementIssues = auditServerPlacement(
+        shape.name,
+        snapshot.serverServices,
+        shape.serverAbsent,
+      );
+      issues.push(...placementIssues);
       if (shape.serverAbsent) {
-        if (shape.serverAbsent.trim().length === 0) {
-          issues.push(`${shape.name}: absent-server rationale is empty`);
-        }
-        if (environment) {
-          issues.push(
-            `${shape.name}: mcp service is present despite the reviewed per-qube boundary`,
-          );
-        } else {
+        if (placementIssues.length === 0) {
           console.log(
-            `✓ ${shape.name}: no mcp service (${shape.serverAbsent})`,
+            `✓ ${shape.name}: no server launcher (${shape.serverAbsent})`,
           );
         }
         continue;
       }
-      if (!environment || !shape.serverPolicy) {
+      if (placementIssues.length > 0) continue;
+      if (!environment || !snapshot.rawEnvironment || !shape.serverPolicy) {
         issues.push(
           `${shape.name}: rendered Compose omitted required mcp service`,
         );
@@ -657,7 +949,7 @@ function main(): number {
       const deploymentIssues = auditServerEnvironment(
         shape.name,
         supported,
-        { environment, variables: snapshot.variables },
+        { environment, rawEnvironment: snapshot.rawEnvironment },
         shape.name === "compose-local" ? undefined : baseline,
         shape.serverPolicy,
       );
@@ -681,9 +973,9 @@ function main(): number {
       const variables = new Set<string>();
       for (const shape of SHAPES) {
         if (shape.exampleGroup !== groupName) continue;
-        for (const key of Object.keys(rendered.get(shape.name)!.variables)) {
-          variables.add(key);
-        }
+        for (
+          const key of rendered.get(shape.name)!.interpolationVariables
+        ) variables.add(key);
       }
       const example = parseExampleEnvironment(
         Deno.readTextFileSync(contract.path),
