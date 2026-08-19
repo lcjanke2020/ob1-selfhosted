@@ -1,5 +1,5 @@
-# Render the canonical MCP deployment descriptors so operator-facing env and
-# bind-mount invariants cannot be documented yet silently dropped by Compose.
+# Render the canonical deployment descriptors so the supported MCP environment,
+# example files, and Pattern B sink boundary cannot silently drift.
 
 name: Compose config
 
@@ -12,10 +12,17 @@ on:
       - "deploy/compose-local/.env.example"
       - "deploy/compose-tailnet/docker-compose.pattern-b.yml"
       - "deploy/qubes/docker-compose.external-db.yml"
+      - "deploy/qubes/docker-compose.cpu-ollama.yml"
       - "deploy/qubes/app-qube/docker-compose.yml"
       - "deploy/qubes/app-qube/.env.example"
       - "deploy/qubes/ingress-qube/docker-compose.yml"
-      - "scripts/check_fetch_timeout_compose.nu"
+      - "deploy/qubes/ingress-qube/.env.example"
+      - "scripts/check_pattern_b_compose.nu"
+      - "server/**/*.ts"
+      - "server/Dockerfile"
+      - "server/deno.json"
+      - "server/scripts/deno.json"
+      - "server/scripts/deno.lock"
       - ".github/workflows/compose-config.yml"
   push:
     branches: [main]
@@ -24,10 +31,17 @@ on:
       - "deploy/compose-local/.env.example"
       - "deploy/compose-tailnet/docker-compose.pattern-b.yml"
       - "deploy/qubes/docker-compose.external-db.yml"
+      - "deploy/qubes/docker-compose.cpu-ollama.yml"
       - "deploy/qubes/app-qube/docker-compose.yml"
       - "deploy/qubes/app-qube/.env.example"
       - "deploy/qubes/ingress-qube/docker-compose.yml"
-      - "scripts/check_fetch_timeout_compose.nu"
+      - "deploy/qubes/ingress-qube/.env.example"
+      - "scripts/check_pattern_b_compose.nu"
+      - "server/**/*.ts"
+      - "server/Dockerfile"
+      - "server/deno.json"
+      - "server/scripts/deno.json"
+      - "server/scripts/deno.lock"
       - ".github/workflows/compose-config.yml"
   workflow_dispatch:
 
@@ -35,8 +49,8 @@ permissions:
   contents: read
 
 jobs:
-  fetch-timeout:
-    name: FETCH_TIMEOUT_MS is forwarded
+  compose-contract:
+    name: Environment parity and Pattern B boundary
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR head safely
@@ -50,8 +64,17 @@ jobs:
         with:
           version: "0.113.1"
 
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.4
+
       - name: Report Docker Compose version
         run: docker compose version
 
-      - name: Verify rendered MCP environments
-        run: nu scripts/check_fetch_timeout_compose.nu
+      - name: Verify rendered MCP environment parity
+        working-directory: server
+        run: deno task check-compose-env
+
+      - name: Verify Pattern B sink boundary
+        run: nu scripts/check_pattern_b_compose.nu

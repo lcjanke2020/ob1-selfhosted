@@ -1,7 +1,7 @@
-# Render each canonical MCP deployment and verify FETCH_TIMEOUT_MS plus the
-# Pattern B socket-bind invariants survive Compose interpolation. Parsing
-# `docker compose config --format json` keeps these regressions structural:
-# unrelated YAML formatting cannot make them pass.
+# Render every shipped Pattern B shape and verify the log-ingester/log-sink
+# boundary survives Compose interpolation. Environment-key parity belongs to
+# server/scripts/check_compose_env.ts; this check intentionally owns only the
+# sink topology and socket-mount invariants named here.
 
 def render-compose [files: list<string>, profiles: list<string>] {
     let file_args = ($files | each {|file| ["-f" $file] } | flatten)
@@ -18,11 +18,7 @@ def render-compose [files: list<string>, profiles: list<string>] {
     $result.stdout | from json
 }
 
-def render-with-timeout [
-    files: list<string>
-    profiles: list<string>
-    timeout?: string
-] {
+def render-pattern-b [files: list<string>, profiles: list<string>] {
     let required = {
         POSTGRES_PASSWORD: "compose-render-superuser"
         OPENBRAIN_APP_PASSWORD: "compose-render-app"
@@ -45,28 +41,7 @@ def render-with-timeout [
         # state. This keeps a caller's COMPOSE_PROFILES from masking an omitted
         # explicit profile argument.
         hide-env --ignore-errors COMPOSE_PROFILES
-        if $timeout == null {
-            # The parent shell must not be able to turn the default assertion
-            # into an accidental override assertion.
-            hide-env --ignore-errors FETCH_TIMEOUT_MS
-            render-compose $files $profiles
-        } else {
-            with-env { FETCH_TIMEOUT_MS: $timeout } {
-                render-compose $files $profiles
-            }
-        }
-    }
-}
-
-def assert-timeout [name: string, rendered: record, expected: string] {
-    let actual = (
-        $rendered.services.mcp.environment.FETCH_TIMEOUT_MS?
-        | default null
-    )
-    if $actual != $expected {
-        error make {
-            msg: $"($name): expected mcp FETCH_TIMEOUT_MS=($expected), got ($actual)"
-        }
+        render-compose $files $profiles
     }
 }
 
@@ -199,10 +174,19 @@ def assert-pattern-b-sink [name: string, rendered: record] {
 }
 
 let repo_root = ($env.CURRENT_FILE | path dirname | path dirname)
+let compose_local = (
+    $repo_root | path join "deploy/compose-local/docker-compose.yml"
+)
 let tailnet_pattern_b = (
     $repo_root | path join "deploy/compose-tailnet/docker-compose.pattern-b.yml"
 )
-let qubes_ingress_path = (
+let external_db = (
+    $repo_root | path join "deploy/qubes/docker-compose.external-db.yml"
+)
+let cpu_ollama = (
+    $repo_root | path join "deploy/qubes/docker-compose.cpu-ollama.yml"
+)
+let qubes_ingress = (
     $repo_root | path join "deploy/qubes/ingress-qube/docker-compose.yml"
 )
 
@@ -210,76 +194,37 @@ let qubes_ingress_path = (
 # normalizes the default-true field away. Check the source declaration as well
 # as the rendered mount so both representations enforce the runtime invariant.
 assert-declared-socket-binds "compose-tailnet-overlay" $tailnet_pattern_b
-assert-declared-socket-binds "qubes-ingress" $qubes_ingress_path
+assert-declared-socket-binds "qubes-ingress" $qubes_ingress
 
 let deployments = [
     {
-        name: "compose-local"
-        profiles: []
-        expect_pattern_b: false
-        files: [
-            ($repo_root | path join "deploy/compose-local/docker-compose.yml")
-        ]
-    }
-    {
         name: "compose-tailnet-overlay"
         profiles: ["pattern-b"]
-        expect_pattern_b: true
-        files: [
-            ($repo_root | path join "deploy/compose-local/docker-compose.yml")
-            $tailnet_pattern_b
-        ]
-    }
-    {
-        name: "compose-external-db-overlay"
-        profiles: []
-        expect_pattern_b: false
-        files: [
-            ($repo_root | path join "deploy/compose-local/docker-compose.yml")
-            ($repo_root | path join "deploy/qubes/docker-compose.external-db.yml")
-        ]
+        files: [$compose_local $tailnet_pattern_b]
     }
     {
         name: "compose-tailnet-external-corpus-overlay"
         profiles: ["pattern-b"]
-        expect_pattern_b: true
-        files: [
-            ($repo_root | path join "deploy/compose-local/docker-compose.yml")
-            $tailnet_pattern_b
-            ($repo_root | path join "deploy/qubes/docker-compose.external-db.yml")
-        ]
+        files: [$compose_local $tailnet_pattern_b $external_db]
     }
     {
-        name: "qubes-app"
+        name: "compose-tailnet-external-corpus-cpu-overlay"
+        profiles: ["pattern-b"]
+        files: [$compose_local $tailnet_pattern_b $external_db $cpu_ollama]
+    }
+    {
+        name: "qubes-ingress"
         profiles: []
-        expect_pattern_b: false
-        files: [
-            ($repo_root | path join "deploy/qubes/app-qube/docker-compose.yml")
-        ]
+        files: [$qubes_ingress]
     }
 ]
-let sentinel = "27182"
-
-# The split Qubes ingress project has no mcp service and therefore no
-# FETCH_TIMEOUT_MS contract, but it is still a Pattern B deployment. Render it
-# separately so the same structural sink/ingester boundary is enforced for
-# every shipped Pattern B shape.
-let qubes_ingress = render-with-timeout [$qubes_ingress_path] []
-assert-pattern-b-sink "qubes-ingress" $qubes_ingress
 
 $deployments | each {|deployment|
-    let defaults = (render-with-timeout $deployment.files $deployment.profiles)
-    assert-timeout $"($deployment.name) default" $defaults "15000"
-    if $deployment.expect_pattern_b {
-        assert-pattern-b-sink $deployment.name $defaults
-    }
-
-    let overridden = (render-with-timeout $deployment.files $deployment.profiles $sentinel)
-    assert-timeout $"($deployment.name) override" $overridden $sentinel
-
+    let rendered = (render-pattern-b $deployment.files $deployment.profiles)
+    assert-pattern-b-sink $deployment.name $rendered
     {
         deployment: $deployment.name
-        default: $defaults.services.mcp.environment.FETCH_TIMEOUT_MS
-        override: $overridden.services.mcp.environment.FETCH_TIMEOUT_MS
+        ingester_transport: $rendered.services.log-ingester.network_mode
+        sink_transport: $rendered.services.log-sink.network_mode
     }
 }
