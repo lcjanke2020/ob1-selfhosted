@@ -153,6 +153,7 @@ services:
         source: ${LOG_SINK_SOCKET_DIR:?set LOG_SINK_SOCKET_DIR to a SHORT host path, e.g. /home/user/ob1-log-sink/run}
         target: /var/run/postgresql
         bind:
+          create_host_path: true
           selinux: z
 
   # Local Funnel-log sink — this qube's own Postgres, reachable ONLY over a
@@ -250,6 +251,7 @@ services:
         source: ${LOG_SINK_SOCKET_DIR:?set LOG_SINK_SOCKET_DIR to a SHORT host path, e.g. /home/user/ob1-log-sink/run}
         target: /var/run/postgresql
         bind:
+          create_host_path: true
           selinux: z
       - ../../../db/log-sink/log-sink-entrypoint.sh:/usr/local/bin/openbrain-log-sink-entrypoint.sh:ro
       - ../../../db/log-sink/00-log-sink-roles.sh:/docker-entrypoint-initdb.d/00-log-sink-roles.sh:ro

@@ -287,6 +287,53 @@ CMD ["image.ts"]
   }
 });
 
+Deno.test("Compose resolves include and extends before launcher audit", async () => {
+  const directory = await Deno.makeTempDir();
+  const sharedDirectory = `${directory}/shared`;
+  try {
+    await Deno.mkdir(sharedDirectory);
+    await Deno.writeTextFile(
+      `${sharedDirectory}/Dockerfile`,
+      `FROM denoland/deno:2.9.4
+ENTRYPOINT ["deno", "run", "--no-config", "--allow-env=FROM_INCLUDE"]
+CMD ["included.ts"]
+`,
+    );
+    await Deno.writeTextFile(
+      `${sharedDirectory}/included.yml`,
+      "services:\n  included:\n    build:\n      context: .\n",
+    );
+    await Deno.writeTextFile(
+      `${sharedDirectory}/common.yml`,
+      "services:\n  base:\n    image: denoland/deno:2.9.4\n" +
+        "    entrypoint: [deno, run, --no-config, --allow-env=FROM_EXTENDS, /app/extended.ts]\n",
+    );
+    const composePath = `${directory}/compose.yml`;
+    await Deno.writeTextFile(
+      composePath,
+      "include: [shared/included.yml]\nservices:\n  extended:\n" +
+        "    extends:\n      file: shared/common.yml\n      service: base\n",
+    );
+
+    const targets = renderComposeStackTargets([composePath]);
+    const included = targets.find((target) =>
+      target.source.endsWith("#included")
+    );
+    const extended = targets.find((target) =>
+      target.source.endsWith("#extended")
+    );
+    if (!included || !extended) {
+      throw new Error("rendered include/extends targets not found");
+    }
+    assertEquals(included.entrypoint, "included.ts");
+    assertEquals([...included.allowEnv], ["FROM_INCLUDE"]);
+    assertEquals(extended.entrypoint, "extended.ts");
+    assertEquals([...extended.allowEnv], ["FROM_EXTENDS"]);
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
+});
+
 Deno.test("Compose builds fail closed on unresolved launcher defaults", async () => {
   const directory = await Deno.makeTempDir();
   try {

@@ -1,5 +1,5 @@
-# Render the canonical MCP deployment descriptors so an operator-facing env
-# knob cannot be documented yet silently dropped by Compose interpolation.
+# Render the canonical MCP deployment descriptors so operator-facing env and
+# bind-mount invariants cannot be documented yet silently dropped by Compose.
 
 name: Compose config
 
@@ -49,6 +49,9 @@ jobs:
         uses: hustcer/setup-nu@f3fd65374ffc4d60974c0dd2f7263c6c5c285f81 # v3
         with:
           version: "0.113.1"
+
+      - name: Report Docker Compose version
+        run: docker compose version
 
       - name: Verify rendered MCP environments
         run: nu scripts/check_fetch_timeout_compose.nu

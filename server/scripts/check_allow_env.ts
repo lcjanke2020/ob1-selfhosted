@@ -916,9 +916,6 @@ function renderComposeDocument(files: readonly string[]): UnknownRecord {
   }
   const source = composeStackSource(files);
   const args = ["compose", "--env-file", EMPTY_COMPOSE_ENV_FILE];
-  if (files.some((path) => path.endsWith("docker-compose.pattern-b.yml"))) {
-    args.push("--profile", "pattern-b");
-  }
   for (const path of files) args.push("-f", resolve(path));
   // Interpolation stays disabled so a launcher controlled by runtime env is
   // still rejected by literalArguments(). Merge/override/tag/null semantics

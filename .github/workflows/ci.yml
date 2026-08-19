@@ -80,6 +80,9 @@ jobs:
         with:
           deno-version: v2.9.4
 
+      - name: Report Docker Compose version
+        run: docker compose version
+
       - name: Run check-allow-env
         working-directory: server
         run: deno task check-allow-env
