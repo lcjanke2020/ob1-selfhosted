@@ -5,37 +5,26 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { assert, assertEquals } from "@std/assert";
-import { asPool, FAKE_VECTOR, FakePool, makeDeps } from "./api_test_support.ts";
+import {
+  asPool,
+  FAKE_VECTOR,
+  FakePool,
+  makeDeps,
+  withEnv,
+} from "./api_test_support.ts";
 import { MAX_SEARCH_QUERY_BYTES } from "./schemas.ts";
 
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "METADATA_FALLBACK_POLICY",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  MCP_ACCESS_KEY: "k".repeat(64),
+  METADATA_FALLBACK_POLICY: "off",
+};
 
 const FOUND_THOUGHT_ID = "6f6c0d3a-9a0b-4e3e-8f4a-2d1c5b7e9a01";
 const MISSING_THOUGHT_ID = "11111111-1111-4111-8111-111111111111";
 
 Deno.test("MCP publishes and executes the shared thought contracts", async () => {
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((key) => [key, Deno.env.get(key)]),
-  );
-  Deno.env.delete("AUTH0_ISSUER");
-  Deno.env.delete("AUTH0_JWKS_URI");
-  Deno.env.delete("AUTH0_AUDIENCE");
-  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-  Deno.env.set("DB_PASSWORD", "test-password");
-  Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
-  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
-
-  try {
+  await withEnv([], TEST_ENV, async () => {
     const { createMcpServer } = await import("./mcp-server.ts");
     let capturedSql = "";
     let capturedParams: unknown[] = [];
@@ -424,10 +413,5 @@ Deno.test("MCP publishes and executes the shared thought contracts", async () =>
       await client.close();
       await server.close();
     }
-  } finally {
-    for (const [key, value] of origEnv) {
-      if (value === undefined) Deno.env.delete(key);
-      else Deno.env.set(key, value);
-    }
-  }
+  })();
 });

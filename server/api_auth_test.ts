@@ -7,23 +7,16 @@
 // (Cache-Control: no-store) must survive the rewrite.
 
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { asPool, FakePool, makeDeps } from "./api_test_support.ts";
+import { asPool, FakePool, makeDeps, withEnv } from "./api_test_support.ts";
 
 const KEY = "k".repeat(64);
 
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "ENABLE_NATIVE_TOKENS",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "OAUTH_ALLOWED_SUBJECTS",
-  "OBS_AUTH_EVENTS_ENABLED",
-  "METADATA_FALLBACK_POLICY",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  MCP_ACCESS_KEY: KEY,
+  OBS_AUTH_EVENTS_ENABLED: "false",
+  METADATA_FALLBACK_POLICY: "off",
+};
 
 async function assertRest401(res: Response): Promise<void> {
   assertEquals(res.status, 401);
@@ -46,41 +39,25 @@ async function assertRest401(res: Response): Promise<void> {
 }
 
 Deno.test("REST /api/v1 — auth failure shapes", async (t) => {
-  // ─── Setup ─────────────────────────────────────────────────────────────
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-  );
-  Deno.env.delete("AUTH0_ISSUER");
-  Deno.env.delete("AUTH0_JWKS_URI");
-  Deno.env.delete("AUTH0_AUDIENCE");
-  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-  Deno.env.delete("OAUTH_ALLOWED_SUBJECTS");
-  Deno.env.set("DB_PASSWORD", "test-password");
-  Deno.env.delete("ENABLE_NATIVE_TOKENS");
-  Deno.env.set("MCP_ACCESS_KEY", KEY);
-  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-  Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
+  await withEnv([], TEST_ENV, async () => {
+    const { createApiRouter } = await import("./api.ts");
 
-  const { createApiRouter } = await import("./api.ts");
-
-  const api = createApiRouter(
-    asPool(
-      new FakePool((sql) =>
-        // Only the stats aggregates are scripted — auth-failed requests must
-        // never reach the DB, and any other query would throw a 500.
-        sql.includes("COUNT(*)::int AS count")
-          ? { rows: [{ count: 0, earliest: null, latest: null }] }
-          : sql.includes("AS k") || sql.includes("AS topic") ||
-              sql.includes("AS person")
-          ? { rows: [] }
-          : undefined
+    const api = createApiRouter(
+      asPool(
+        new FakePool((sql) =>
+          // Only the stats aggregates are scripted — auth-failed requests must
+          // never reach the DB, and any other query would throw a 500.
+          sql.includes("COUNT(*)::int AS count")
+            ? { rows: [{ count: 0, earliest: null, latest: null }] }
+            : sql.includes("AS k") || sql.includes("AS topic") ||
+                sql.includes("AS person")
+            ? { rows: [] }
+            : undefined
+        ),
       ),
-    ),
-    makeDeps(),
-  );
+      makeDeps(),
+    );
 
-  try {
     await t.step(
       "no credential → 401 JSON error (not the MCP envelope)",
       async () => {
@@ -135,11 +112,5 @@ Deno.test("REST /api/v1 — auth failure shapes", async (t) => {
       assertEquals(body.count, 0);
       assert(!("error" in body));
     });
-  } finally {
-    // ─── Teardown ──────────────────────────────────────────────────────
-    for (const [k, v] of origEnv) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
-  }
+  })();
 });

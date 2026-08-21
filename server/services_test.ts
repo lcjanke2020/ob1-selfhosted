@@ -12,20 +12,16 @@ import {
   FakePool,
   makeDeps,
   makeEmbedDownDeps,
+  withEnv,
 } from "./api_test_support.ts";
 import { MAX_SEARCH_QUERY_BYTES } from "./schemas.ts";
 import { computeContentHash, parseSessionToml } from "./session_toml.ts";
 
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "METADATA_FALLBACK_POLICY",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  MCP_ACCESS_KEY: "k".repeat(64),
+  METADATA_FALLBACK_POLICY: "off",
+};
 
 const AUTH = { door: "tailnet" as const, sub: null, tokenLabel: null };
 
@@ -55,33 +51,20 @@ function sessionSearchRow(id: number, score = 0.9) {
 }
 
 Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
-  // ─── Setup ─────────────────────────────────────────────────────────────
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-  );
-  Deno.env.delete("AUTH0_ISSUER");
-  Deno.env.delete("AUTH0_JWKS_URI");
-  Deno.env.delete("AUTH0_AUDIENCE");
-  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-  Deno.env.set("DB_PASSWORD", "test-password");
-  Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
-  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
+  await withEnv([], TEST_ENV, async () => {
+    const {
+      captureSessionFromToml,
+      captureThoughtWithMetadata,
+      fetchThoughtInScope,
+      listSessionsInScope,
+      NotFoundError,
+      searchSessionsByQuery,
+      searchThoughtsByQuery,
+      updateSessionStatusInScope,
+      UpstreamError,
+      ValidationError,
+    } = await import("./services.ts");
 
-  const {
-    captureSessionFromToml,
-    captureThoughtWithMetadata,
-    fetchThoughtInScope,
-    listSessionsInScope,
-    NotFoundError,
-    searchSessionsByQuery,
-    searchThoughtsByQuery,
-    updateSessionStatusInScope,
-    UpstreamError,
-    ValidationError,
-  } = await import("./services.ts");
-
-  try {
     // ─── captureThoughtWithMetadata ───────────────────────────────────
     await t.step(
       "thought capture: persists versioned caller assertions beside verified transport stamps",
@@ -261,7 +244,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         const pool = new FakePool((sql, params) => {
           if (sql.includes("INSERT INTO metadata_degradation_events")) {
             eventInsert = params;
-            return undefined;
+            return { rows: [] };
           }
           return sql.includes("INSERT INTO thoughts")
             ? {
@@ -1254,11 +1237,5 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         ]);
       },
     );
-  } finally {
-    // ─── Teardown ──────────────────────────────────────────────────────
-    for (const [k, v] of origEnv) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
-  }
+  })();
 });

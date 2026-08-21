@@ -13,42 +13,18 @@
 // config_require_at_least_one_auth_test.ts`).
 
 import { assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
-
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "ENABLE_NATIVE_TOKENS",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "OBS_AUTH_EVENTS_ENABLED",
-  "METADATA_FALLBACK_POLICY",
-];
+import { withEnv } from "./api_test_support.ts";
 
 Deno.test(
   "config.ts: throws when neither auth door is configured (no MCP_ACCESS_KEY, no AUTH0_*)",
-  async () => {
-    const origEnv = new Map<string, string | undefined>(
-      ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-    );
-
-    // Disable every door: no static key, native token verifier, or OAuth.
-    // DB_PASSWORD is set so the
-    // throw we observe is the auth guard, not the unrelated DB_PASSWORD required().
-    Deno.env.delete("MCP_ACCESS_KEY");
-    Deno.env.delete("ENABLE_NATIVE_TOKENS");
-    Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-    Deno.env.delete("AUTH0_ISSUER");
-    Deno.env.delete("AUTH0_JWKS_URI");
-    Deno.env.delete("AUTH0_AUDIENCE");
-    Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-    Deno.env.set("DB_PASSWORD", "test-password");
-    Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-    Deno.env.set("METADATA_FALLBACK_POLICY", "off");
-
-    try {
+  withEnv(
+    [],
+    {
+      DB_PASSWORD: "test-password",
+      OBS_AUTH_EVENTS_ENABLED: "false",
+      METADATA_FALLBACK_POLICY: "off",
+    },
+    async () => {
       let threw = false;
       let message = "";
       try {
@@ -77,11 +53,6 @@ Deno.test(
         "AUTH0_",
         "error must name the OAuth option",
       );
-    } finally {
-      for (const [k, v] of origEnv) {
-        if (v === undefined) Deno.env.delete(k);
-        else Deno.env.set(k, v);
-      }
-    }
-  },
+    },
+  ),
 );

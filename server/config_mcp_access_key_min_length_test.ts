@@ -15,44 +15,20 @@
 // config_mcp_access_key_min_length_test.ts`).
 
 import { assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
-
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "ENABLE_NATIVE_TOKENS",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "OBS_AUTH_EVENTS_ENABLED",
-  "METADATA_FALLBACK_POLICY",
-];
+import { withEnv } from "./api_test_support.ts";
 
 Deno.test(
   "config.ts: throws when MCP_ACCESS_KEY is shorter than 32 chars (min length)",
-  async () => {
-    const origEnv = new Map<string, string | undefined>(
-      ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-    );
-
-    // Delete AUTH0_* so the min-length throw isn't masked by partial-OAuth env
-    // left in a developer's shell. The min-length check fires while evaluating
-    // MCP_ACCESS_KEY, before the "at least one auth door" guard, so a short key
-    // still throws the min-length error even with OAuth off.
-    Deno.env.delete("AUTH0_ISSUER");
-    Deno.env.delete("ENABLE_NATIVE_TOKENS");
-    Deno.env.delete("AUTH0_JWKS_URI");
-    Deno.env.delete("AUTH0_AUDIENCE");
-    Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-    Deno.env.set("DB_PASSWORD", "test-password");
-    Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-    Deno.env.set("METADATA_FALLBACK_POLICY", "off");
-    // The weak literal the ticket calls out. 8 chars < 32 → must throw.
-    Deno.env.set("MCP_ACCESS_KEY", "password");
-    Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-
-    try {
+  withEnv(
+    [],
+    {
+      DB_PASSWORD: "test-password",
+      OBS_AUTH_EVENTS_ENABLED: "false",
+      METADATA_FALLBACK_POLICY: "off",
+      // The weak literal the ticket calls out. 8 chars < 32 → must throw.
+      MCP_ACCESS_KEY: "password",
+    },
+    async () => {
       let threw = false;
       let message = "";
       try {
@@ -81,11 +57,6 @@ Deno.test(
         "openssl rand -hex 32",
         "error message must point operators at the recommended generator",
       );
-    } finally {
-      for (const [k, v] of origEnv) {
-        if (v === undefined) Deno.env.delete(k);
-        else Deno.env.set(k, v);
-      }
-    }
-  },
+    },
+  ),
 );

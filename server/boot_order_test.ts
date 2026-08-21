@@ -20,12 +20,13 @@
 // grant. setup-deno CI installs a plain binary, so it cannot catch a revert.
 
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
+import { runDenoSubprocess } from "./api_test_support.ts";
 
 // Nothing listens here — connections are refused immediately.
 const REFUSED_DB = { DB_HOST: "127.0.0.1", DB_PORT: "59999" };
 
 Deno.test("boot order: unreachable DB → [db] error + exit 1 before the port binds", async () => {
-  const command = new Deno.Command("deno", {
+  const { code, stdout, stderr } = await runDenoSubprocess({
     args: [
       "run",
       "--frozen",
@@ -45,23 +46,9 @@ Deno.test("boot order: unreachable DB → [db] error + exit 1 before the port bi
       METADATA_FALLBACK_POLICY: "off",
       PORT: "18797",
     },
-    stdout: "piped",
-    stderr: "piped",
+    timeoutMs: 20_000,
   });
-  const child = command.spawn();
-  // Kill switch: if a regression makes the server boot and keep serving,
-  // fail via the assertions below instead of hanging the suite.
-  const killer = setTimeout(() => {
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      // already exited
-    }
-  }, 20_000);
-  const { code, stdout, stderr } = await child.output();
-  clearTimeout(killer);
-  const output = new TextDecoder().decode(stdout) +
-    new TextDecoder().decode(stderr);
+  const output = stdout + stderr;
 
   assertEquals(code, 1, `expected exit 1, got ${code}; output:\n${output}`);
   assertStringIncludes(

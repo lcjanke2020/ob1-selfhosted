@@ -14,32 +14,21 @@
 // checklist (issue a 401, observe a row in `mcp_auth_events`).
 
 import { assertEquals, assertStrictEquals } from "jsr:@std/assert@1";
+import { withEnv } from "./api_test_support.ts";
 
-const ENV_KEYS = [
-  "DB_HOST",
-  "DB_PORT",
-  "DB_NAME",
-  "DB_USER",
-  "DB_PASSWORD",
-  "OBS_AUTH_EVENTS_ENABLED",
-];
+const TEST_ENV = {
+  // Force the disabled branch even with a valid-looking DB password.
+  DB_PASSWORD: "test-password",
+  OBS_AUTH_EVENTS_ENABLED: "false",
+};
 
-Deno.test("auth_audit (disabled path)", async (t) => {
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-  );
+async function testDisabledAudit(t: Deno.TestContext): Promise<void> {
+  await withEnv([], TEST_ENV, async () => {
+    const { logAuthFailure, logAuthSuccess, shutdownAuthAuditForTests } =
+      await import(
+        "./auth_audit.ts"
+      );
 
-  // Force the disabled branch — emitter should construct as a no-op even
-  // though a "valid-looking" DB_PASSWORD is present.
-  Deno.env.set("DB_PASSWORD", "test-password");
-  Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-
-  const { logAuthFailure, logAuthSuccess, shutdownAuthAuditForTests } =
-    await import(
-      "./auth_audit.ts"
-    );
-
-  try {
     await t.step("logAuthFailure: returns synchronously, no throw", () => {
       // Multiple back-to-back calls. If the pool were live, this would
       // queue several microtasks; the disabled branch returns immediately.
@@ -55,26 +44,29 @@ Deno.test("auth_audit (disabled path)", async (t) => {
       assertStrictEquals(typeof logAuthFailure, "function");
     });
 
-    await t.step("logAuthFailure: tolerates undefined optional fields", () => {
-      logAuthFailure({
-        reason: "missing_credentials",
-        middleware: "require_auth",
-      });
-      logAuthFailure({
-        reason: "token_validation_failed",
-        middleware: "require_auth",
-        clientIp: undefined,
-        path: undefined,
-      });
-      // The one failure class that carries a verified identity.
-      logAuthFailure({
-        reason: "subject_not_allowed",
-        middleware: "require_auth",
-        clientIp: "192.0.2.1",
-        path: "/mcp",
-        subject: "auth0|refused-subject",
-      });
-    });
+    await t.step(
+      "logAuthFailure: tolerates undefined optional fields",
+      () => {
+        logAuthFailure({
+          reason: "missing_credentials",
+          middleware: "require_auth",
+        });
+        logAuthFailure({
+          reason: "token_validation_failed",
+          middleware: "require_auth",
+          clientIp: undefined,
+          path: undefined,
+        });
+        // The one failure class that carries a verified identity.
+        logAuthFailure({
+          reason: "subject_not_allowed",
+          middleware: "require_auth",
+          clientIp: "192.0.2.1",
+          path: "/mcp",
+          subject: "auth0|refused-subject",
+        });
+      },
+    );
 
     await t.step(
       "logAuthSuccess: returns synchronously, no throw, all door shapes",
@@ -115,10 +107,7 @@ Deno.test("auth_audit (disabled path)", async (t) => {
       // branch).
       assertEquals(true, true);
     });
-  } finally {
-    for (const [k, v] of origEnv) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
-  }
-});
+  })();
+}
+
+Deno.test("auth_audit (disabled path)", testDisabledAudit);

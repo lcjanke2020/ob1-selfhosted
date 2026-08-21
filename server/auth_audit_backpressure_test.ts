@@ -24,35 +24,19 @@
 // timeouts on every queued microtask.
 
 import { assertEquals, assertStrictEquals } from "jsr:@std/assert@1";
+import { withEnv } from "./api_test_support.ts";
 
-const ENV_KEYS = [
-  "DB_HOST",
-  "DB_PORT",
-  "DB_NAME",
-  "DB_USER",
-  "DB_PASSWORD",
-  "OBS_AUTH_EVENTS_ENABLED",
-  "OBS_AUTH_EVENTS_MAX_IN_FLIGHT",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  OBS_AUTH_EVENTS_ENABLED: "true",
+  OBS_AUTH_EVENTS_MAX_IN_FLIGHT: "3",
+  // Guaranteed-fast-fail target; see the file-level rationale.
+  DB_HOST: "127.0.0.1",
+  DB_PORT: "1",
+};
 
-Deno.test("auth_audit backpressure (synchronous)", async (t) => {
-  // Snapshot env BEFORE setting anything that could throw at import, and
-  // enter the try/finally before the dynamic import so an import-time
-  // failure still restores the env.
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-  );
-  try {
-    // Force the enabled path with a low cap so a small burst trips it.
-    Deno.env.set("DB_PASSWORD", "test-password");
-    Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "true");
-    Deno.env.set("OBS_AUTH_EVENTS_MAX_IN_FLIGHT", "3");
-    // Guaranteed-fast-fail target for the pool's connect() attempts so
-    // the test never hangs on DNS lookup for the default "postgres"
-    // hostname (see file-level doc).
-    Deno.env.set("DB_HOST", "127.0.0.1");
-    Deno.env.set("DB_PORT", "1");
-
+async function testAuditBackpressure(t: Deno.TestContext): Promise<void> {
+  await withEnv([], TEST_ENV, async () => {
     const {
       logAuthFailure,
       getAuditMetricsForTests,
@@ -120,10 +104,7 @@ Deno.test("auth_audit backpressure (synchronous)", async (t) => {
       await shutdownAuthAuditForTests();
       assertEquals(true, true);
     });
-  } finally {
-    for (const [k, v] of origEnv) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
-  }
-});
+  })();
+}
+
+Deno.test("auth_audit backpressure (synchronous)", testAuditBackpressure);

@@ -17,6 +17,7 @@ import {
   assertStringIncludes,
 } from "jsr:@std/assert@1";
 import { Pool } from "postgres";
+import { makeFakePool, type QueryHandler } from "./api_test_support.ts";
 import { probeDbAtBoot } from "./db_boot_probe.ts";
 
 const delay = (ms: number): Promise<void> =>
@@ -54,102 +55,93 @@ Deno.test("probeDbAtBoot: unreachable Postgres rejects with guidance, no unhandl
 // Only the surface probeDbAtBoot touches is modeled.
 // ---------------------------------------------------------------------------
 
-class FakeClient {
-  queryCalls: string[] = [];
-  releaseCalls = 0;
+type RequiredSchema = [
+  boolean,
+  boolean,
+  boolean,
+  boolean,
+  boolean,
+  boolean,
+  boolean,
+  boolean,
+  boolean,
+  boolean,
+  boolean,
+  boolean,
+];
 
-  constructor(
-    private requiredSchema: [
-      boolean,
-      boolean,
-      boolean,
-      boolean,
-      boolean,
-      boolean,
-      boolean,
-      boolean,
-      boolean,
-      boolean,
-      boolean,
-      boolean,
-    ] = [
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-    ],
-    private defaultWorkspaceExists = true,
-    private notificationStateExists = true,
-  ) {}
+const COMPLETE_SCHEMA: RequiredSchema = [
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+];
 
-  queryArray(sql: string): Promise<{ rows: unknown[] }> {
-    this.queryCalls.push(sql);
+function bootQueryHandler(
+  requiredSchema: RequiredSchema = COMPLETE_SCHEMA,
+  defaultWorkspaceExists = true,
+  notificationStateExists = true,
+): QueryHandler {
+  return (sql) => {
     if (sql.includes("to_regclass")) {
-      return Promise.resolve({ rows: [this.requiredSchema] });
+      return { rows: [requiredSchema] };
     }
     if (sql.includes("FROM public.metadata_degradation_notification_state")) {
-      return Promise.resolve({ rows: [[this.notificationStateExists]] });
+      return { rows: [[notificationStateExists]] };
     }
     if (sql.includes("FROM memory_scope.workspace WHERE id")) {
-      return Promise.resolve({ rows: [[this.defaultWorkspaceExists]] });
+      return { rows: [[defaultWorkspaceExists]] };
     }
-    return Promise.resolve({ rows: [[1]] });
-  }
-
-  release(): void {
-    this.releaseCalls++;
-  }
+    if (sql.trim() === "SELECT 1") return { rows: [[1]] };
+    return undefined;
+  };
 }
 
 Deno.test("probeDbAtBoot: success path validates connectivity and hybrid schema", async () => {
-  const client = new FakeClient();
-  const fakePool = {
-    connect: () => Promise.resolve(client),
-  } as unknown as Pool;
+  const { pool: fakePool, client } = makeFakePool(bootQueryHandler());
 
   await probeDbAtBoot(fakePool, "db:5432");
-  assertEquals(client.queryCalls.length, 4);
-  assertEquals(client.queryCalls[0], "SELECT 1");
-  assert(client.queryCalls[1].includes("idx_thoughts_content_tsv"));
-  assert(client.queryCalls[1].includes("idx_thoughts_content_trgm"));
-  assert(client.queryCalls[1].includes("metadata_degradation_events_id_seq"));
-  assert(client.queryCalls[1].includes("metadata_degradation_outbox"));
-  assert(client.queryCalls[1].includes("last_delivery_attempt_at"));
-  assert(client.queryCalls[1].includes("last_failed_channels"));
-  assert(client.queryCalls[1].includes("last_event_id"));
-  assert(client.queryCalls[1].includes("created_at"));
-  assert(client.queryCalls[1].includes("native_auth.access_token"));
-  assert(client.queryCalls[1].includes("mcp_auth_events"));
-  assert(client.queryCalls[1].includes("mcp_auth_events_outcome_shape_check"));
-  assert(client.queryCalls[1].includes("public.thought_revisions"));
-  assert(client.queryCalls[1].includes("thought_revisions_app_head"));
+  const queries = client.queryArrayCalls.map(({ sql }) => sql);
+  assertEquals(queries.length, 4);
+  assertEquals(queries[0], "SELECT 1");
+  assert(queries[1].includes("idx_thoughts_content_tsv"));
+  assert(queries[1].includes("idx_thoughts_content_trgm"));
+  assert(queries[1].includes("metadata_degradation_events_id_seq"));
+  assert(queries[1].includes("metadata_degradation_outbox"));
+  assert(queries[1].includes("last_delivery_attempt_at"));
+  assert(queries[1].includes("last_failed_channels"));
+  assert(queries[1].includes("last_event_id"));
+  assert(queries[1].includes("created_at"));
+  assert(queries[1].includes("native_auth.access_token"));
+  assert(queries[1].includes("mcp_auth_events"));
+  assert(queries[1].includes("mcp_auth_events_outcome_shape_check"));
+  assert(queries[1].includes("public.thought_revisions"));
+  assert(queries[1].includes("thought_revisions_app_head"));
   assert(
-    client.queryCalls[1].includes(
+    queries[1].includes(
       "memory_scope.move_thought(uuid,text,text,memory_scope.visibility,text,text)",
     ),
   );
   assert(
-    client.queryCalls[1].includes(
+    queries[1].includes(
       "metadata_degradation_failed_channels_shape",
     ),
   );
-  assert(
-    client.queryCalls[2].includes("metadata_degradation_notification_state"),
-  );
-  assert(client.queryCalls[3].includes("memory_scope.workspace"));
+  assert(queries[2].includes("metadata_degradation_notification_state"));
+  assert(queries[3].includes("memory_scope.workspace"));
   assertEquals(client.releaseCalls, 1);
 });
 
 Deno.test("probeDbAtBoot: missing hybrid schema rejects with migration guidance", async () => {
-  const client = new FakeClient([
+  const { pool: fakePool, client } = makeFakePool(bootQueryHandler([
     true,
     false,
     true,
@@ -162,10 +154,7 @@ Deno.test("probeDbAtBoot: missing hybrid schema rejects with migration guidance"
     true,
     true,
     true,
-  ]);
-  const fakePool = {
-    connect: () => Promise.resolve(client),
-  } as unknown as Pool;
+  ]));
 
   const err = await assertRejects(
     () => probeDbAtBoot(fakePool, "db:5432"),
@@ -177,7 +166,7 @@ Deno.test("probeDbAtBoot: missing hybrid schema rejects with migration guidance"
 });
 
 Deno.test("probeDbAtBoot: missing spaces schema rejects with migration guidance", async () => {
-  const client = new FakeClient([
+  const { pool: fakePool, client } = makeFakePool(bootQueryHandler([
     true,
     true,
     true,
@@ -190,10 +179,7 @@ Deno.test("probeDbAtBoot: missing spaces schema rejects with migration guidance"
     true,
     true,
     true,
-  ]);
-  const fakePool = {
-    connect: () => Promise.resolve(client),
-  } as unknown as Pool;
+  ]));
 
   const err = await assertRejects(
     () => probeDbAtBoot(fakePool, "db:5432"),
@@ -206,7 +192,7 @@ Deno.test("probeDbAtBoot: missing spaces schema rejects with migration guidance"
 });
 
 Deno.test("probeDbAtBoot: missing audience indexes rejects before serving", async () => {
-  const client = new FakeClient([
+  const { pool: fakePool, client } = makeFakePool(bootQueryHandler([
     true,
     true,
     true,
@@ -219,10 +205,7 @@ Deno.test("probeDbAtBoot: missing audience indexes rejects before serving", asyn
     true,
     true,
     true,
-  ]);
-  const fakePool = {
-    connect: () => Promise.resolve(client),
-  } as unknown as Pool;
+  ]));
 
   const err = await assertRejects(
     () => probeDbAtBoot(fakePool, "db:5432"),
@@ -234,7 +217,7 @@ Deno.test("probeDbAtBoot: missing audience indexes rejects before serving", asyn
 });
 
 Deno.test("probeDbAtBoot: missing native token schema rejects with migration guidance", async () => {
-  const client = new FakeClient([
+  const { pool: fakePool, client } = makeFakePool(bootQueryHandler([
     true,
     true,
     true,
@@ -247,10 +230,7 @@ Deno.test("probeDbAtBoot: missing native token schema rejects with migration gui
     false,
     true,
     true,
-  ]);
-  const fakePool = {
-    connect: () => Promise.resolve(client),
-  } as unknown as Pool;
+  ]));
 
   const err = await assertRejects(
     () => probeDbAtBoot(fakePool, "db:5432"),
@@ -266,7 +246,7 @@ Deno.test("probeDbAtBoot: pre-1.20 auth-audit table shape rejects with migration
   // or shape constraint) must refuse boot: without this gate a missed db/02
   // re-apply leaves the server healthy while the fire-and-forget emitter
   // silently drops every audit row.
-  const client = new FakeClient([
+  const { pool: fakePool, client } = makeFakePool(bootQueryHandler([
     true,
     true,
     true,
@@ -279,10 +259,7 @@ Deno.test("probeDbAtBoot: pre-1.20 auth-audit table shape rejects with migration
     true,
     false,
     true,
-  ]);
-  const fakePool = {
-    connect: () => Promise.resolve(client),
-  } as unknown as Pool;
+  ]));
 
   const err = await assertRejects(
     () => probeDbAtBoot(fakePool, "db:5432"),
@@ -296,7 +273,7 @@ Deno.test("probeDbAtBoot: pre-1.20 auth-audit table shape rejects with migration
 Deno.test("probeDbAtBoot: missing thought-mutation schema rejects with migration guidance", async () => {
   // update_thought/move_thought would otherwise fail per call against an
   // otherwise healthy 1.22.0 server; the gate names the migration to apply.
-  const client = new FakeClient([
+  const { pool: fakePool, client } = makeFakePool(bootQueryHandler([
     true,
     true,
     true,
@@ -309,10 +286,7 @@ Deno.test("probeDbAtBoot: missing thought-mutation schema rejects with migration
     true,
     true,
     false,
-  ]);
-  const fakePool = {
-    connect: () => Promise.resolve(client),
-  } as unknown as Pool;
+  ]));
 
   const err = await assertRejects(
     () => probeDbAtBoot(fakePool, "db:5432"),
@@ -325,7 +299,7 @@ Deno.test("probeDbAtBoot: missing thought-mutation schema rejects with migration
 });
 
 Deno.test("probeDbAtBoot: missing or incomplete metadata audit schema rejects with migration guidance", async () => {
-  const client = new FakeClient([
+  const { pool: fakePool, client } = makeFakePool(bootQueryHandler([
     true,
     true,
     true,
@@ -338,10 +312,7 @@ Deno.test("probeDbAtBoot: missing or incomplete metadata audit schema rejects wi
     true,
     true,
     true,
-  ]);
-  const fakePool = {
-    connect: () => Promise.resolve(client),
-  } as unknown as Pool;
+  ]));
 
   const err = await assertRejects(
     () => probeDbAtBoot(fakePool, "db:5432"),
@@ -354,14 +325,9 @@ Deno.test("probeDbAtBoot: missing or incomplete metadata audit schema rejects wi
 });
 
 Deno.test("probeDbAtBoot: missing metadata notification singleton rejects with migration guidance", async () => {
-  const client = new FakeClient(
-    [true, true, true, true, true, true, true, true, true, true, true, true],
-    true,
-    false,
+  const { pool: fakePool, client } = makeFakePool(
+    bootQueryHandler(COMPLETE_SCHEMA, true, false),
   );
-  const fakePool = {
-    connect: () => Promise.resolve(client),
-  } as unknown as Pool;
 
   const err = await assertRejects(
     () => probeDbAtBoot(fakePool, "db:5432"),
@@ -373,13 +339,9 @@ Deno.test("probeDbAtBoot: missing metadata notification singleton rejects with m
 });
 
 Deno.test("probeDbAtBoot: unknown configured workspace rejects before serving", async () => {
-  const client = new FakeClient(
-    [true, true, true, true, true, true, true, true, true, true, true, true],
-    false,
+  const { pool: fakePool, client } = makeFakePool(
+    bootQueryHandler(COMPLETE_SCHEMA, false),
   );
-  const fakePool = {
-    connect: () => Promise.resolve(client),
-  } as unknown as Pool;
 
   const err = await assertRejects(
     () =>
@@ -394,12 +356,9 @@ Deno.test("probeDbAtBoot: unknown configured workspace rejects before serving", 
 });
 
 Deno.test("probeDbAtBoot: client released even when the validation query fails", async () => {
-  const client = new FakeClient();
-  client.queryArray = () =>
-    Promise.reject(new Error("Connection refused (os error 111)"));
-  const fakePool = {
-    connect: () => Promise.resolve(client),
-  } as unknown as Pool;
+  const { pool: fakePool, client } = makeFakePool(() => {
+    throw new Error("Connection refused (os error 111)");
+  });
 
   await assertRejects(() => probeDbAtBoot(fakePool, "db:5432"), Error);
   assertEquals(client.releaseCalls, 1);
@@ -431,7 +390,7 @@ Deno.test("probeDbAtBoot: hung connect warns after slowWarnAfterMs, then resolve
       `expected a slow-connect warning, got: ${JSON.stringify(warns)}`,
     );
     // Un-hang: the probe must still complete normally after a late connect.
-    resolveConnect(new FakeClient());
+    resolveConnect(makeFakePool(bootQueryHandler()).client);
     await probe;
   } finally {
     console.warn = origWarn;
@@ -466,7 +425,7 @@ Deno.test("probeDbAtBoot: fast success never emits the slow-connect warning", as
   };
   try {
     const fakePool = {
-      connect: () => Promise.resolve(new FakeClient()),
+      connect: () => Promise.resolve(makeFakePool(bootQueryHandler()).client),
     } as unknown as Pool;
     await probeDbAtBoot(fakePool, "db:5432", { slowWarnAfterMs: 20 });
     await delay(60); // would fire by now if the timer weren't cleared

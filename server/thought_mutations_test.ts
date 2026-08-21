@@ -17,18 +17,14 @@ import {
   makeDeps,
   makeEmbedDownDeps,
   type QueryHandler,
+  withEnv,
 } from "./api_test_support.ts";
 
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "METADATA_FALLBACK_POLICY",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  MCP_ACCESS_KEY: "k".repeat(64),
+  METADATA_FALLBACK_POLICY: "off",
+};
 
 const THOUGHT_ID = "6f6c0d3a-9a0b-4e3e-8f4a-2d1c5b7e9a01";
 const OTHER_ID = "0b3d2c1a-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
@@ -193,31 +189,17 @@ function moveScript(
 }
 
 Deno.test("thought mutations (services + MCP)", async (t) => {
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-  );
-  Deno.env.delete("AUTH0_ISSUER");
-  Deno.env.delete("AUTH0_JWKS_URI");
-  Deno.env.delete("AUTH0_AUDIENCE");
-  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-  Deno.env.set("DB_PASSWORD", "test-password");
-  Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
-  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
+  await withEnv([], TEST_ENV, async () => {
+    const {
+      ConflictError,
+      moveThoughtInScope,
+      updateThoughtInScope,
+      UpstreamError,
+      ValidationError,
+    } = await import("./services.ts");
+    const { createMcpServer } = await import("./mcp-server.ts");
+    const { PRESERVED_METADATA_KEYS_ON_UPDATE } = await import("./queries.ts");
 
-  const {
-    ConflictError,
-    moveThoughtInScope,
-    updateThoughtInScope,
-    UpstreamError,
-    ValidationError,
-  } = await import("./services.ts");
-  const { createMcpServer } = await import("./mcp-server.ts");
-  // queries.ts transitively reads env at module load, so import it after the
-  // env snapshot like the other modules.
-  const { PRESERVED_METADATA_KEYS_ON_UPDATE } = await import("./queries.ts");
-
-  try {
     // ─── update_thought (services) ────────────────────────────────────
     await t.step(
       "update: re-embeds, re-classifies, snapshots prior state, preserves capture stamps",
@@ -892,10 +874,5 @@ Deno.test("thought mutations (services + MCP)", async (t) => {
         }
       },
     );
-  } finally {
-    for (const [k, v] of origEnv) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
-  }
+  })();
 });

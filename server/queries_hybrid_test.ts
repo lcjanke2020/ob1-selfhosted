@@ -6,18 +6,9 @@ import {
   assertEquals,
   assertStringIncludes,
 } from "@std/assert";
-import { asPool, FAKE_VECTOR, FakePool } from "./api_test_support.ts";
+import { asPool, FAKE_VECTOR, FakePool, withEnv } from "./api_test_support.ts";
 import type { HybridCandidate } from "./queries.ts";
 import type { ResolvedReadScope } from "./scope_contract.ts";
-
-// queries.ts imports embeddings.ts, whose configuration validates at module
-// load. Set the one required value before the dynamic import, matching the
-// existing service/API test pattern.
-Deno.env.set("DB_PASSWORD", "test-password");
-Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
-Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 
 const {
   DEFAULT_RRF_K,
@@ -26,7 +17,15 @@ const {
   hasIndexableLiteralTrigram,
   MIN_HYBRID_CANDIDATES_PER_LEG,
   searchThoughts,
-} = await import("./queries.ts");
+} = await withEnv(
+  [],
+  {
+    DB_PASSWORD: "test-password",
+    MCP_ACCESS_KEY: "k".repeat(64),
+    METADATA_FALLBACK_POLICY: "off",
+  },
+  () => import("./queries.ts"),
+)();
 
 const DEFAULT_SCOPE: ResolvedReadScope = {
   workspaceId: "default",

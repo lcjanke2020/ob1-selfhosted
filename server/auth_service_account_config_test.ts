@@ -3,6 +3,7 @@
 // avoids echoing them so boot logs do not become an identity inventory.
 
 import { assertEquals, assertStringIncludes } from "@std/assert";
+import { runConfigSubprocess } from "./api_test_support.ts";
 
 const SCRIPT = `
   const c = await import("./config.ts");
@@ -20,21 +21,8 @@ const BASE_ENV: Record<string, string> = {
   METADATA_FALLBACK_POLICY: "off",
 };
 
-async function runConfig(overrides: Record<string, string>) {
-  const command = new Deno.Command("deno", {
-    args: ["eval", SCRIPT],
-    cwd: import.meta.dirname!,
-    env: { ...BASE_ENV, ...overrides },
-    stdout: "piped",
-    stderr: "piped",
-  });
-  const output = await command.output();
-  return {
-    code: output.code,
-    stdout: new TextDecoder().decode(output.stdout).trim(),
-    stderr: new TextDecoder().decode(output.stderr).trim(),
-  };
-}
+const runConfig = (overrides: Record<string, string>) =>
+  runConfigSubprocess(SCRIPT, BASE_ENV, overrides);
 
 Deno.test("service-account subject config is exact, bounded, and OAuth-only", async (t) => {
   await t.step("empty list is valid", async () => {

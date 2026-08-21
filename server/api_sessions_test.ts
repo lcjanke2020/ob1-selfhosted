@@ -10,23 +10,19 @@ import {
   FakePool,
   makeDeps,
   type QueryHandler,
+  withEnv,
 } from "./api_test_support.ts";
 import { computeContentHash, parseSessionToml } from "./session_toml.ts";
 import { MAX_SEARCH_QUERY_BYTES } from "./schemas.ts";
 
 const KEY = "k".repeat(64);
 
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "OBS_AUTH_EVENTS_ENABLED",
-  "METADATA_FALLBACK_POLICY",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  MCP_ACCESS_KEY: KEY,
+  OBS_AUTH_EVENTS_ENABLED: "false",
+  METADATA_FALLBACK_POLICY: "off",
+};
 
 function authed(init: RequestInit = {}): RequestInit {
   return {
@@ -67,26 +63,12 @@ function capturedSessionRow(status = "active") {
 }
 
 Deno.test("REST /api/v1 — session routes", async (t) => {
-  // ─── Setup ─────────────────────────────────────────────────────────────
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-  );
-  Deno.env.delete("AUTH0_ISSUER");
-  Deno.env.delete("AUTH0_JWKS_URI");
-  Deno.env.delete("AUTH0_AUDIENCE");
-  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-  Deno.env.set("DB_PASSWORD", "test-password");
-  Deno.env.set("MCP_ACCESS_KEY", KEY);
-  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-  Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
+  await withEnv([], TEST_ENV, async () => {
+    const { createApiRouter } = await import("./api.ts");
 
-  const { createApiRouter } = await import("./api.ts");
+    const makeApi = (handler: QueryHandler, deps = makeDeps()) =>
+      createApiRouter(asPool(new FakePool(handler)), deps);
 
-  const makeApi = (handler: QueryHandler, deps = makeDeps()) =>
-    createApiRouter(asPool(new FakePool(handler)), deps);
-
-  try {
     await t.step("POST /sessions (fresh) → 201 created", async () => {
       const api = makeApi((sql) =>
         sql.includes("INSERT INTO sessions.session")
@@ -518,11 +500,5 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
       );
       assertEquals(res.status, 404);
     });
-  } finally {
-    // ─── Teardown ──────────────────────────────────────────────────────
-    for (const [k, v] of origEnv) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
-  }
+  })();
 });

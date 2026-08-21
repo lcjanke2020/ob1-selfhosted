@@ -7,10 +7,16 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { authContextFromValues } from "./auth_context.ts";
 import type { AppVariables } from "./auth.ts";
-import { asPool, FakePool, makeDeps } from "./api_test_support.ts";
+import {
+  asPool,
+  FakePool,
+  makeDeps,
+  makeJwksFixture,
+  runDenoSubprocess,
+  withEnv,
+} from "./api_test_support.ts";
 
 const CLIENT_ID = "headless-test-client";
 const CLIENT_SECRET = "headless-test-secret";
@@ -20,32 +26,30 @@ const ISSUER = "https://headless-issuer.invalid/";
 const AUDIENCE = "https://brain.invalid/mcp";
 const JWKS_URL = "https://headless-issuer.invalid/.well-known/jwks.json";
 
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "OAUTH_ALLOWED_SUBJECTS",
-  "OBS_AUTH_EVENTS_ENABLED",
-  "METADATA_FALLBACK_POLICY",
-  "JWKS_FETCH_TIMEOUT_MS",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  AUTH0_ISSUER: ISSUER,
+  AUTH0_JWKS_URI: JWKS_URL,
+  AUTH0_AUDIENCE: AUDIENCE,
+  OAUTH_ALLOWED_SUBJECTS: SUBJECT,
+  OBS_AUTH_EVENTS_ENABLED: "false",
+  METADATA_FALLBACK_POLICY: "off",
+  JWKS_FETCH_TIMEOUT_MS: "2000",
+};
 
-Deno.test("browserless client_credentials authenticates through MCP and REST service gates", async () => {
-  const original = new Map(
-    ENV_KEYS.map((key) => [key, Deno.env.get(key)] as const),
-  );
-  const originalFetch = globalThis.fetch;
-  const { publicKey, privateKey } = await generateKeyPair("RS256", {
-    extractable: true,
+Deno.test(
+  "browserless client_credentials authenticates through MCP and REST service gates",
+  withEnv([], TEST_ENV, runHeadlessIntegrationTest),
+);
+
+async function runHeadlessIntegrationTest(): Promise<void> {
+  const jwks = await makeJwksFixture({
+    issuer: ISSUER,
+    audience: AUDIENCE,
+    jwksUrl: JWKS_URL,
+    kid: "headless-test-key",
+    expirationTime: "5m",
   });
-  const publicJwk = await exportJWK(publicKey);
-  publicJwk.alg = "RS256";
-  publicJwk.kid = "headless-test-key";
-  publicJwk.use = "sig";
 
   let address: Deno.NetAddr | undefined;
   let accessToken = "";
@@ -70,7 +74,9 @@ Deno.test("browserless client_credentials authenticates through MCP and REST ser
           form.get("client_id") !== CLIENT_ID ||
           form.get("client_secret") !== CLIENT_SECRET
         ) {
-          return Response.json({ error: "invalid_client" }, { status: 401 });
+          return Response.json({ error: "invalid_client" }, {
+            status: 401,
+          });
         }
         return Response.json({
           access_token: accessToken,
@@ -86,49 +92,13 @@ Deno.test("browserless client_credentials authenticates through MCP and REST ser
     },
   );
 
+  const restoreFetch = jwks.installFetchMock();
   try {
     if (!address) throw new Error("local OAuth fixture did not bind");
     const origin = `http://127.0.0.1:${address.port}`;
-    accessToken = await new SignJWT({
-      sub: SUBJECT,
-      gty: "client-credentials",
-    })
-      .setProtectedHeader({ alg: "RS256", kid: "headless-test-key" })
-      .setIssuer(ISSUER)
-      .setAudience(AUDIENCE)
-      .setIssuedAt()
-      .setExpirationTime("5m")
-      .sign(privateKey as CryptoKey);
-
-    Deno.env.set("DB_PASSWORD", "test-password");
-    Deno.env.delete("MCP_ACCESS_KEY");
-    Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-    Deno.env.set("AUTH0_ISSUER", ISSUER);
-    Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
-    Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
-    Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-    // Authorization allowlist (fail-closed): admit the machine subject this
-    // integration mints. Note attribution (service-door classification via
-    // gty) and authorization (this list) are deliberately separate gates.
-    Deno.env.set("OAUTH_ALLOWED_SUBJECTS", SUBJECT);
-    Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-    Deno.env.set("METADATA_FALLBACK_POLICY", "off");
-    Deno.env.set("JWKS_FETCH_TIMEOUT_MS", "2000");
-
-    globalThis.fetch = ((
-      input: string | URL | Request,
-      init?: RequestInit,
-    ) => {
-      const url = typeof input === "string"
-        ? input
-        : input instanceof URL
-        ? input.href
-        : input.url;
-      if (url === JWKS_URL) {
-        return Promise.resolve(Response.json({ keys: [publicJwk] }));
-      }
-      return originalFetch(input, init);
-    }) as typeof fetch;
+    accessToken = await jwks.signToken({
+      claims: { sub: SUBJECT, gty: "client-credentials" },
+    });
 
     const { requireAuth } = await import("./auth.ts");
     const { createMcpServer } = await import("./mcp-server.ts");
@@ -164,7 +134,7 @@ Deno.test("browserless client_credentials authenticates through MCP and REST ser
     });
 
     const runHelper = async (extraEnv: Record<string, string>) => {
-      const command = new Deno.Command("deno", {
+      return await runDenoSubprocess({
         args: [
           "run",
           "--allow-env=OAUTH_TOKEN_URL,OAUTH_CLIENT_ID,OAUTH_CLIENT_SECRET,OAUTH_AUDIENCE,OAUTH_SCOPE,OAUTH_CLIENT_AUTH_METHOD,OPENBRAIN_MCP_URL,OAUTH_SMOKE_TIMEOUT_MS,OAUTH_SMOKE_PRINT_SUBJECT",
@@ -183,15 +153,7 @@ Deno.test("browserless client_credentials authenticates through MCP and REST ser
           OPENBRAIN_MCP_URL: `${origin}/mcp`,
           ...extraEnv,
         },
-        stdout: "piped",
-        stderr: "piped",
       });
-      const output = await command.output();
-      return {
-        code: output.code,
-        stdout: new TextDecoder().decode(output.stdout),
-        stderr: new TextDecoder().decode(output.stderr),
-      };
     };
 
     const success = await runHelper({});
@@ -218,20 +180,19 @@ Deno.test("browserless client_credentials authenticates through MCP and REST ser
     // decoded subject the operator needs to enroll — and without the flag
     // it must not leak the subject anywhere.
     const admittedToken = accessToken;
-    const outsiderToken = await new SignJWT({
-      sub: OUTSIDER_SUBJECT,
-      gty: "client-credentials",
-    })
-      .setProtectedHeader({ alg: "RS256", kid: "headless-test-key" })
-      .setIssuer(ISSUER)
-      .setAudience(AUDIENCE)
-      .setIssuedAt()
-      .setExpirationTime("5m")
-      .sign(privateKey as CryptoKey);
+    const outsiderToken = await jwks.signToken({
+      claims: { sub: OUTSIDER_SUBJECT, gty: "client-credentials" },
+    });
     accessToken = outsiderToken;
 
-    const bootstrap = await runHelper({ OAUTH_SMOKE_PRINT_SUBJECT: "true" });
-    assertEquals(bootstrap.code === 0, false, "unadmitted subject must fail");
+    const bootstrap = await runHelper({
+      OAUTH_SMOKE_PRINT_SUBJECT: "true",
+    });
+    assertEquals(
+      bootstrap.code === 0,
+      false,
+      "unadmitted subject must fail",
+    );
     assertStringIncludes(
       bootstrap.stdout,
       `Token subject (locally decoded): ${OUTSIDER_SUBJECT}`,
@@ -269,11 +230,7 @@ Deno.test("browserless client_credentials authenticates through MCP and REST ser
     assertEquals(restResponse.status, 200);
     assertEquals((await restResponse.json()).count, 0);
   } finally {
-    globalThis.fetch = originalFetch;
+    restoreFetch();
     await fixture.shutdown();
-    for (const [key, value] of original) {
-      if (value === undefined) Deno.env.delete(key);
-      else Deno.env.set(key, value);
-    }
   }
-});
+}

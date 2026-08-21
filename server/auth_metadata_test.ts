@@ -2,55 +2,29 @@
 // transformation that inserts `/.well-known/oauth-protected-resource` between
 // the host and the resource path. Run with `deno task test`.
 //
-// Hermetic: snapshots + restores DB_PASSWORD / MCP_ACCESS_KEY / AUTH0_* so
-// the suite is not order-/machine-dependent. Explicitly deletes AUTH0_*
-// before importing auth.ts so a dev/CI host that has those set in its
-// shell doesn't accidentally enable OAuth.
+// Hermetic: the shared server-env fixture supplies the static-key door and
+// clears ambient OAuth configuration before auth.ts loads.
 
 import { assertEquals, assertThrows } from "jsr:@std/assert@1";
+import { withEnv } from "./api_test_support.ts";
 
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  // importing auth.ts pulls in auth_audit.ts which would
-  // otherwise construct a postgres pool. Defensively disable for tests.
-  "OBS_AUTH_EVENTS_ENABLED",
-  "METADATA_FALLBACK_POLICY",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  MCP_ACCESS_KEY: "0".repeat(64),
+  // Importing auth.ts also imports the audit emitter.
+  OBS_AUTH_EVENTS_ENABLED: "false",
+  METADATA_FALLBACK_POLICY: "off",
+};
 
-Deno.test("deriveProtectedResourceMetadata (RFC 9728 §3.1)", async (t) => {
-  // ─── Setup ─────────────────────────────────────────────────────────────
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-  );
+async function testProtectedResourceMetadata(
+  t: Deno.TestContext,
+): Promise<void> {
+  await withEnv([], TEST_ENV, async () => {
+    const {
+      buildProtectedResourceMetadata,
+      deriveProtectedResourceMetadata,
+    } = await import("./auth.ts");
 
-  // Force Pattern A at module load — delete AUTH0_* even if the host shell
-  // has them set, so `ENABLE_OAUTH` evaluates to false in config.ts.
-  Deno.env.delete("AUTH0_ISSUER");
-  Deno.env.delete("AUTH0_JWKS_URI");
-  Deno.env.delete("AUTH0_AUDIENCE");
-  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-
-  // config.ts requires these to be present (else throws at module load).
-  Deno.env.set("DB_PASSWORD", "test-password");
-  Deno.env.set("MCP_ACCESS_KEY", "0".repeat(64));
-  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-  // disable audit emission for the same reason as the other
-  // auth_*_test files.
-  Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
-
-  const {
-    buildProtectedResourceMetadata,
-    deriveProtectedResourceMetadata,
-  } = await import("./auth.ts");
-
-  try {
     await t.step("root resource yields well-known at origin root", () => {
       const r = deriveProtectedResourceMetadata("https://host.example/");
       assertEquals(
@@ -78,7 +52,9 @@ Deno.test("deriveProtectedResourceMetadata (RFC 9728 §3.1)", async (t) => {
     });
 
     await t.step("multiple trailing slashes are all stripped", () => {
-      const r = deriveProtectedResourceMetadata("https://host.example/mcp///");
+      const r = deriveProtectedResourceMetadata(
+        "https://host.example/mcp///",
+      );
       assertEquals(
         r.url,
         "https://host.example/.well-known/oauth-protected-resource/mcp",
@@ -168,11 +144,10 @@ Deno.test("deriveProtectedResourceMetadata (RFC 9728 §3.1)", async (t) => {
         assertEquals("scopes_supported" in document, false);
       },
     );
-  } finally {
-    // ─── Teardown ──────────────────────────────────────────────────────
-    for (const [k, v] of origEnv) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
-  }
-});
+  })();
+}
+
+Deno.test(
+  "deriveProtectedResourceMetadata (RFC 9728 §3.1)",
+  testProtectedResourceMetadata,
+);

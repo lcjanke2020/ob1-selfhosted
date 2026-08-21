@@ -20,7 +20,11 @@
 // (a presented header ignored) is covered separately in auth_oauth_only_test.ts.
 
 import { assertEquals, assertFalse } from "jsr:@std/assert@1";
-import { Hono, type MiddlewareHandler } from "hono";
+import {
+  assertUnauthorized401,
+  makeAuthTestApp as makeApp,
+  withEnv,
+} from "./api_test_support.ts";
 
 const KEY = "k".repeat(64);
 
@@ -30,106 +34,19 @@ const KEY = "k".repeat(64);
 // observable, just on a tighter clock.
 const TEST_BODY_READ_TIMEOUT_MS = "150";
 
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "ENABLE_NATIVE_TOKENS",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "OAUTH_ALLOWED_SUBJECTS",
-  // the auth middlewares now fire-and-forget an audit row into
-  // postgres on auth-fail. Disable that here so the test suite doesn't
-  // try to open a DB connection it can't reach.
-  "OBS_AUTH_EVENTS_ENABLED",
-  "METADATA_FALLBACK_POLICY",
-  // Body-read timeout knob; tests pin it short so the slow-
-  // stream test runs fast.
-  "AUTH_BODY_READ_TIMEOUT_MS",
-];
-
-function makeApp(mw: MiddlewareHandler) {
-  const app = new Hono();
-  app.use("*", mw);
-  app.get("/", (c) => c.json({ ok: true }));
-  app.post("/", (c) => c.json({ ok: true }));
-  app.delete("/", (c) => c.json({ ok: true }));
-  return app;
-}
-
-// Asserts the uniform auth-failure shape returned by requireAuth on the
-// MCP transport: HTTP 401, application/json, Cache-Control: no-store,
-// body { jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized:
-// missing or invalid authentication." }, id }. Since PR55-AUTH-001 every
-// rejection reason shares this transport status. WWW-Authenticate (if
-// PROTECTED_RESOURCE_METADATA_URL is set) is checked at the call site,
-// not here, since Pattern A leaves it null.
-async function assertUnauthorized401(
-  res: Response,
-  expectedId: string | number | null,
-): Promise<void> {
-  assertEquals(
-    res.status,
-    401,
-    "expected HTTP 401",
-  );
-  assertEquals(
-    res.headers.get("content-type")?.startsWith("application/json"),
-    true,
-    "envelope content-type is JSON",
-  );
-  assertEquals(
-    res.headers.get("cache-control"),
-    "no-store",
-    "envelope must not be cacheable",
-  );
-  const body = await res.json();
-  assertEquals(body.jsonrpc, "2.0");
-  assertEquals(body.error?.code, -32001);
-  assertEquals(
-    body.error?.message,
-    "Unauthorized: missing or invalid authentication.",
-  );
-  assertEquals(body.id, expectedId);
-}
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  MCP_ACCESS_KEY: KEY,
+  OBS_AUTH_EVENTS_ENABLED: "false",
+  METADATA_FALLBACK_POLICY: "off",
+  AUTH_BODY_READ_TIMEOUT_MS: TEST_BODY_READ_TIMEOUT_MS,
+};
 
 Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-local mode)", async (t) => {
-  // ─── Setup ─────────────────────────────────────────────────────────────
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-  );
-
-  // Force the x-brain-key-only mode regardless of host env. config.ts evaluates
-  // ENABLE_OAUTH from these at module load; if any AUTH0_* are set in the shell,
-  // ENABLE_OAUTH becomes true and the OAuth-disabled assertions below would fail
-  // in confusing ways. MCP_ACCESS_KEY is set, so the "at least one auth door"
-  // guard is satisfied.
-  Deno.env.delete("AUTH0_ISSUER");
-  Deno.env.delete("AUTH0_JWKS_URI");
-  Deno.env.delete("AUTH0_AUDIENCE");
-  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-  Deno.env.delete("OAUTH_ALLOWED_SUBJECTS");
-  Deno.env.set("DB_PASSWORD", "test-password");
-  Deno.env.delete("ENABLE_NATIVE_TOKENS");
-  Deno.env.set("MCP_ACCESS_KEY", KEY);
-  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-  // disable audit emission so unauthorized() doesn't try to open
-  // a DB connection. auth_audit reads this at module load, so it MUST be
-  // set before the dynamic-import of auth.ts below.
-  Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
-  // Short timeout so the slow-stream regression test is fast.
-  // auth.ts reads this at module load, so it MUST be set before the
-  // dynamic-import below.
-  Deno.env.set("AUTH_BODY_READ_TIMEOUT_MS", TEST_BODY_READ_TIMEOUT_MS);
-
-  const { requireAuth, PROTECTED_RESOURCE_METADATA_URL } = await import(
-    "./auth.ts"
-  );
-
-  try {
+  await withEnv([], TEST_ENV, async () => {
+    const { requireAuth, PROTECTED_RESOURCE_METADATA_URL } = await import(
+      "./auth.ts"
+    );
     await t.step(
       "module sanity: OAuth metadata URL is null when AUTH0_* unset",
       () => {
@@ -460,11 +377,5 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
         assertFalse(PROTECTED_RESOURCE_METADATA_URL !== null);
       },
     );
-  } finally {
-    // ─── Teardown ──────────────────────────────────────────────────────
-    for (const [k, v] of origEnv) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
-  }
+  })();
 });

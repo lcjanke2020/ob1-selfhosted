@@ -9,16 +9,10 @@
 // is idle for the duration of the tests (main() only runs under
 // `import.meta.main`).
 //
-// CURSOR_DIR is likewise read at module load. All tests in this file
-// share the single cached module instance, so the override below must
-// run BEFORE the first dynamic import — hence module scope, not a
-// per-test env dance. Tests use distinct log-file basenames because the
-// cursor filename derives from the basename alone. The final
-// "cleanup" test below removes the temp dir and restores the env var
-// (Deno.test bodies run in declaration order, so it runs last).
-const ORIG_CURSOR_DIR = Deno.env.get("INGESTER_CURSOR_DIR");
+// CURSOR_DIR is likewise read at module load. withIngesterEnv supplies the
+// shared temp directory before the first dynamic import; later tests reuse the
+// cached module. Distinct log-file basenames keep their cursor files separate.
 const CURSOR_TMP = await Deno.makeTempDir({ prefix: "log_ingester_cursors_" });
-Deno.env.set("INGESTER_CURSOR_DIR", CURSOR_TMP);
 
 import {
   assert,
@@ -26,14 +20,7 @@ import {
   assertNotEquals,
   assertThrows,
 } from "@std/assert";
-
-const ENV_KEYS = [
-  "DB_HOST",
-  "DB_PORT",
-  "DB_NAME",
-  "DB_USER",
-  "DB_PASSWORD",
-];
+import { withEnv } from "./api_test_support.ts";
 
 // Snapshot + restore the env around a test body, with DB_PASSWORD set so
 // the dynamic import of log_ingester.ts succeeds. (Only the first import
@@ -42,20 +29,18 @@ const ENV_KEYS = [
 async function withIngesterEnv(
   body: (mod: typeof import("./log_ingester.ts")) => Promise<void>,
 ): Promise<void> {
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-  );
-  try {
-    Deno.env.set("DB_HOST", "/var/run/postgresql");
-    Deno.env.set("DB_PASSWORD", "test-password");
-    const mod = await import("./log_ingester.ts");
-    await body(mod);
-  } finally {
-    for (const [k, v] of origEnv) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
-  }
+  await withEnv(
+    ["INGESTER_CURSOR_DIR"],
+    {
+      DB_HOST: "/var/run/postgresql",
+      DB_PASSWORD: "test-password",
+      INGESTER_CURSOR_DIR: CURSOR_TMP,
+    },
+    async () => {
+      const mod = await import("./log_ingester.ts");
+      await body(mod);
+    },
+  )();
 }
 
 const FRESH = { offset: 0, dev: null, ino: null };
@@ -296,14 +281,11 @@ Deno.test("dbHostType: only absolute sink socket paths are accepted", async () =
 });
 
 // Declared last so it runs after every test above: drop the shared
-// module-scope cursor temp dir and restore INGESTER_CURSOR_DIR to
-// whatever the process had before this file's module setup ran.
-Deno.test("cleanup: remove shared cursor temp dir and restore env", async () => {
+// module-scope cursor temp dir.
+Deno.test("cleanup: remove shared cursor temp dir", async () => {
   try {
     await Deno.remove(CURSOR_TMP, { recursive: true });
   } catch (e) {
     if (!(e instanceof Deno.errors.NotFound)) throw e;
   }
-  if (ORIG_CURSOR_DIR === undefined) Deno.env.delete("INGESTER_CURSOR_DIR");
-  else Deno.env.set("INGESTER_CURSOR_DIR", ORIG_CURSOR_DIR);
 });

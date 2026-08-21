@@ -2,19 +2,26 @@
 // PostgreSQL or embedding endpoint is contacted.
 
 import { assertEquals, assertRejects } from "@std/assert";
-import { asPool, FakePool, makeDeps } from "./api_test_support.ts";
-
-Deno.env.set("DB_PASSWORD", "test-password");
-Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
-Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-Deno.env.set("METADATA_FALLBACK_POLICY", "off");
+import { asPool, FakePool, makeDeps, withEnv } from "./api_test_support.ts";
 
 const {
   captureThoughtWithMetadata,
+  resolveReadScope,
+  resolveWriteScope,
   ValidationError,
-} = await import("./services.ts");
-const { resolveReadScope, resolveWriteScope } = await import("./scope.ts");
+} = await withEnv(
+  [],
+  {
+    DB_PASSWORD: "test-password",
+    MCP_ACCESS_KEY: "k".repeat(64),
+    METADATA_FALLBACK_POLICY: "off",
+  },
+  async () => {
+    const services = await import("./services.ts");
+    const scope = await import("./scope.ts");
+    return { ...services, ...scope };
+  },
+)();
 
 const OAUTH_ALICE = {
   door: "funnel" as const,

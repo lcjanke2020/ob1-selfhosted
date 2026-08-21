@@ -16,35 +16,7 @@ import {
   normalizeAccessTokenPrefix,
   revokeAccessToken,
 } from "./access_tokens.ts";
-
-type QueryResult = { rows: unknown[] };
-type QueryHandler = (sql: string, params: unknown[]) => QueryResult;
-
-class FakeClient {
-  released = 0;
-
-  constructor(private readonly handler: QueryHandler) {}
-
-  queryArray(): Promise<QueryResult> {
-    return Promise.resolve({ rows: [[1]] });
-  }
-
-  queryObject<T>(sql: string, params: unknown[] = []): Promise<{ rows: T[] }> {
-    return Promise.resolve(this.handler(sql, params) as { rows: T[] });
-  }
-
-  release(): void {
-    this.released++;
-  }
-}
-
-function fakePool(handler: QueryHandler): { pool: Pool; client: FakeClient } {
-  const client = new FakeClient(handler);
-  return {
-    pool: { connect: () => Promise.resolve(client) } as unknown as Pool,
-    client,
-  };
-}
+import { makeFakePool } from "./api_test_support.ts";
 
 function deterministicBytes(length: number): Uint8Array {
   return Uint8Array.from({ length }, (_, index) => index % 256);
@@ -103,7 +75,7 @@ Deno.test("native token label and prefix validation are bounded", () => {
 
 Deno.test("create persists only hash + metadata and reveals plaintext after registration", async () => {
   let registeredParams: unknown[] = [];
-  const { pool, client } = fakePool((sql, params) => {
+  const { pool, client } = makeFakePool((sql, params) => {
     assert(sql.includes("native_auth.register_access_token"));
     registeredParams = params;
     return {
@@ -134,7 +106,7 @@ Deno.test("create persists only hash + metadata and reveals plaintext after regi
     registeredParams[1],
     await hashAccessToken(result.token),
   );
-  assertEquals(client.released, 1);
+  assertEquals(client.releaseCalls, 1);
 });
 
 Deno.test("authenticate performs a fresh prefix lookup and rejects immediately after revoke", async () => {
@@ -142,7 +114,7 @@ Deno.test("authenticate performs a fresh prefix lookup and rejects immediately a
   const tokenHash = await hashAccessToken(token);
   let revoked = false;
   let lookups = 0;
-  const { pool, client } = fakePool((sql, params) => {
+  const { pool, client } = makeFakePool((sql, params) => {
     assert(sql.includes("FROM native_auth.access_token"));
     assertEquals(params, [prefix]);
     lookups++;
@@ -161,7 +133,7 @@ Deno.test("authenticate performs a fresh prefix lookup and rejects immediately a
   revoked = true;
   assertEquals(await authenticateAccessToken(pool, token), null);
   assertEquals(lookups, 2, "no per-request credential result may be cached");
-  assertEquals(client.released, 2);
+  assertEquals(client.releaseCalls, 2);
 });
 
 Deno.test("authenticate rejects malformed, unknown, and hash-mismatched tokens", async () => {
@@ -179,11 +151,11 @@ Deno.test("authenticate rejects malformed, unknown, and hash-mismatched tokens",
   assertEquals(connects, 0);
 
   const { token } = generateAccessToken(deterministicBytes);
-  const unknown = fakePool(() => ({ rows: [] }));
+  const unknown = makeFakePool(() => ({ rows: [] }));
   assertEquals(await authenticateAccessToken(unknown.pool, token), null);
-  assertEquals(unknown.client.released, 1);
+  assertEquals(unknown.client.releaseCalls, 1);
 
-  const mismatch = fakePool(() => ({
+  const mismatch = makeFakePool(() => ({
     rows: [{
       token_hash: new Uint8Array(32).fill(9),
       label: "other client",
@@ -193,7 +165,7 @@ Deno.test("authenticate rejects malformed, unknown, and hash-mismatched tokens",
   assertEquals(await authenticateAccessToken(mismatch.pool, token), null);
 
   const tokenHash = await hashAccessToken(token);
-  const malformedLabel = fakePool(() => ({
+  const malformedLabel = makeFakePool(() => ({
     rows: [{
       token_hash: tokenHash,
       label: "\u00a0padded in storage\u00a0",
@@ -205,7 +177,7 @@ Deno.test("authenticate rejects malformed, unknown, and hash-mismatched tokens",
 
 Deno.test("list never selects hashes and revoke targets one validated prefix", async () => {
   const calls: Array<{ sql: string; params: unknown[] }> = [];
-  const { pool, client } = fakePool((sql, params) => {
+  const { pool, client } = makeFakePool((sql, params) => {
     calls.push({ sql, params });
     if (sql.includes("revoke_access_token")) {
       return {
@@ -236,5 +208,5 @@ Deno.test("list never selects hashes and revoke targets one validated prefix", a
   const revoked = await revokeAccessToken(pool, "ob1_AAECAwQF");
   assertEquals(revoked?.revoked_at, "2026-07-30T10:02:00.000Z");
   assertEquals(calls[1].params, ["ob1_AAECAwQF"]);
-  assertEquals(client.released, 2);
+  assertEquals(client.releaseCalls, 2);
 });

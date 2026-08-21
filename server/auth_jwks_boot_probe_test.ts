@@ -26,22 +26,16 @@ import {
   assertRejects,
   assertStringIncludes,
 } from "jsr:@std/assert@1";
+import { withEnv } from "./api_test_support.ts";
 
 const JWKS_URL = "https://test.invalid/.well-known/jwks.json";
-
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "OAUTH_ALLOWED_SUBJECTS",
-  "OBS_AUTH_EVENTS_ENABLED",
-  "METADATA_FALLBACK_POLICY",
-  "JWKS_FETCH_TIMEOUT_MS",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  // Satisfies the at-least-one-door guard while OAuth stays disabled.
+  MCP_ACCESS_KEY: "k".repeat(64),
+  OBS_AUTH_EVENTS_ENABLED: "false",
+  METADATA_FALLBACK_POLICY: "off",
+};
 
 function installFetchMock(
   jwksHandler: (req: Request) => Response | Promise<Response>,
@@ -64,31 +58,15 @@ function installFetchMock(
   };
 }
 
-Deno.test("probeJwksReachability — negative cases", async (t) => {
-  // ─── Setup ───────────────────────────────────────────────────────────
-  // Load auth.ts with OAuth DISABLED so the module-load probe is skipped.
-  // We import the function and exercise it directly with per-subtest
-  // fetch mocks — keeps each subtest independent without needing a
-  // separate test file per failure mode.
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-  );
-  Deno.env.delete("AUTH0_ISSUER");
-  Deno.env.delete("AUTH0_JWKS_URI");
-  Deno.env.delete("AUTH0_AUDIENCE");
-  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-  Deno.env.delete("OAUTH_ALLOWED_SUBJECTS");
-  Deno.env.set("DB_PASSWORD", "test-password");
-  // MCP_ACCESS_KEY set so the "at least one auth door" guard is satisfied while
-  // OAuth is disabled (which is what skips the module-load probe).
-  Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
-  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-  Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
+async function testJwksProbeFailures(t: Deno.TestContext): Promise<void> {
+  await withEnv([], TEST_ENV, async () => {
+    // ─── Setup ───────────────────────────────────────────────────────────
+    // Load auth.ts with OAuth DISABLED so the module-load probe is skipped.
+    // We import the function and exercise it directly with per-subtest
+    // fetch mocks — keeps each subtest independent without needing a
+    // separate test file per failure mode.
+    const { probeJwksReachability } = await import("./auth.ts");
 
-  const { probeJwksReachability } = await import("./auth.ts");
-
-  try {
     await t.step(
       "HTTP 500 → throws with status + URL + env-var hint",
       async () => {
@@ -215,17 +193,16 @@ Deno.test("probeJwksReachability — negative cases", async (t) => {
         try {
           // assertEquals on a resolved promise's return value — `undefined`
           // because probeJwksReachability returns Promise<void>.
-          assertEquals(await probeJwksReachability(JWKS_URL, 1000), undefined);
+          assertEquals(
+            await probeJwksReachability(JWKS_URL, 1000),
+            undefined,
+          );
         } finally {
           restore();
         }
       },
     );
-  } finally {
-    // ─── Teardown ──────────────────────────────────────────────────────
-    for (const [k, v] of origEnv) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
-  }
-});
+  })();
+}
+
+Deno.test("probeJwksReachability — negative cases", testJwksProbeFailures);

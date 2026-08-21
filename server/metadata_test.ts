@@ -1,36 +1,32 @@
 // Tests for extractMetadata's primary → fallback → stub orchestration and the
 // json_schema structured-output request shape. Run with `deno task test`.
 //
-// Hermetic: snapshots/restores the env keys THIS TEST mutates (DB_PASSWORD /
-// MCP_ACCESS_KEY / the CHAT_* + FALLBACK_CHAT_* knobs config.ts reads at module
-// load) and the global fetch. config.ts reads other env vars too, but they are
-// not touched here. Both the primary and fallback endpoints are configured so a
+// Hermetic: the shared server-env fixture supplies only the module-load config
+// this suite needs and the test restores global fetch. Both the primary and
+// fallback endpoints are configured so a
 // single module-load (Deno caches dynamic imports per worker) can exercise
 // every path — the path taken is driven entirely by the swappable fetch stub,
 // keyed on which endpoint's URL was called. No real network: fetch is stubbed.
 
 import { assertEquals } from "jsr:@std/assert@1";
+import { withEnv } from "./api_test_support.ts";
 
 const PRIMARY_BASE = "http://primary.invalid/v1";
 const FALLBACK_BASE = "http://fallback.invalid/v1";
 const TEST_CHAT_TIMEOUT_MS = 40;
-
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "OBS_AUTH_EVENTS_ENABLED",
-  "CHAT_API_BASE",
-  "CHAT_API_KEY",
-  "CHAT_MODEL",
-  "CHAT_TIMEOUT_MS",
-  "FALLBACK_CHAT_API_BASE",
-  "FALLBACK_CHAT_API_KEY",
-  "FALLBACK_CHAT_MODEL",
-  "ENABLE_PRIMARY_EXTRACTION",
-  "METADATA_FALLBACK_POLICY",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  MCP_ACCESS_KEY: "k".repeat(64),
+  OBS_AUTH_EVENTS_ENABLED: "false",
+  CHAT_API_BASE: PRIMARY_BASE,
+  CHAT_MODEL: "local-model",
+  CHAT_TIMEOUT_MS: String(TEST_CHAT_TIMEOUT_MS),
+  FALLBACK_CHAT_API_BASE: FALLBACK_BASE,
+  FALLBACK_CHAT_MODEL: "hosted-model",
+  FALLBACK_CHAT_API_KEY: "test-fallback-key",
+  ENABLE_PRIMARY_EXTRACTION: "true",
+  METADATA_FALLBACK_POLICY: "allow",
+};
 
 interface Captured {
   url: string;
@@ -111,28 +107,9 @@ function validMetadata(
   };
 }
 
-Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-  );
+async function testMetadata(t: Deno.TestContext): Promise<void> {
   const origFetch = globalThis.fetch;
   const origWarn = console.warn;
-
-  // config.ts module-load requirements + both endpoints configured.
-  Deno.env.set("DB_PASSWORD", "test-password");
-  Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
-  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-  Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-  Deno.env.set("CHAT_API_BASE", PRIMARY_BASE);
-  Deno.env.set("CHAT_MODEL", "local-model");
-  Deno.env.set("CHAT_TIMEOUT_MS", String(TEST_CHAT_TIMEOUT_MS));
-  Deno.env.delete("CHAT_API_KEY"); // primary needs no auth (e.g. local ollama)
-  Deno.env.set("FALLBACK_CHAT_API_BASE", FALLBACK_BASE);
-  Deno.env.set("FALLBACK_CHAT_MODEL", "hosted-model");
-  Deno.env.set("FALLBACK_CHAT_API_KEY", "test-fallback-key");
-  Deno.env.set("ENABLE_PRIMARY_EXTRACTION", "true"); // exercise the primary path
-  Deno.env.set("METADATA_FALLBACK_POLICY", "allow");
 
   const calls: Captured[] = [];
   // Reassigned per step to choose what each endpoint returns.
@@ -152,7 +129,7 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
   }) as typeof fetch;
   console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
 
-  try {
+  const run = withEnv([], TEST_ENV, async () => {
     // Import inside the try so the finally below always restores fetch + env,
     // even if module-load (config.ts validation) were to throw.
     const { extractMetadata, sanitizeMetadataEndpointBase } = await import(
@@ -206,16 +183,19 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
       },
     );
 
-    await t.step("request carries strict json_schema response_format", () => {
-      const rf = calls[0].body.response_format as Record<string, unknown>;
-      assertEquals(rf.type, "json_schema");
-      const js = rf.json_schema as Record<string, unknown>;
-      assertEquals(js.name, "thought_metadata");
-      assertEquals(js.strict, true);
-      assertEquals(calls[0].body.model, "local-model");
-      // primary has no API key → no Authorization header.
-      assertEquals(calls[0].headers.Authorization, undefined);
-    });
+    await t.step(
+      "request carries strict json_schema response_format",
+      () => {
+        const rf = calls[0].body.response_format as Record<string, unknown>;
+        assertEquals(rf.type, "json_schema");
+        const js = rf.json_schema as Record<string, unknown>;
+        assertEquals(js.name, "thought_metadata");
+        assertEquals(js.strict, true);
+        assertEquals(calls[0].body.model, "local-model");
+        // primary has no API key → no Authorization header.
+        assertEquals(calls[0].headers.Authorization, undefined);
+      },
+    );
 
     await t.step(
       "primary failure (5xx) falls back to the hosted endpoint",
@@ -393,34 +373,37 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
       );
     });
 
-    await t.step("primary array output is rejected, falls back", async () => {
-      calls.length = 0;
-      warnings.length = 0;
-      responder = (c) =>
-        c.url.startsWith(PRIMARY_BASE)
-          // 200 but content is a JSON array — typeof [] === "object", so this
-          // guards that arrays aren't mistaken for a metadata object.
-          ? chatOk([])
-          : chatOk({
-            type: "person_note",
-            topics: ["dana"],
-            people: ["Dana"],
-            action_items: [],
-            dates_mentioned: [],
-          });
+    await t.step(
+      "primary array output is rejected, falls back",
+      async () => {
+        calls.length = 0;
+        warnings.length = 0;
+        responder = (c) =>
+          c.url.startsWith(PRIMARY_BASE)
+            // 200 but content is a JSON array — typeof [] === "object", so this
+            // guards that arrays aren't mistaken for a metadata object.
+            ? chatOk([])
+            : chatOk({
+              type: "person_note",
+              topics: ["dana"],
+              people: ["Dana"],
+              action_items: [],
+              dates_mentioned: [],
+            });
 
-      const r = await extractMetadata("note about Dana");
-      assertEquals(r.metadata.type, "person_note");
-      assertEquals(
-        calls.length,
-        2,
-        "an array from the primary must not count as success",
-      );
-      assertEquals(
-        warnings[0],
-        "[metadata] primary endpoint returned schema-invalid metadata — falling through",
-      );
-    });
+        const r = await extractMetadata("note about Dana");
+        assertEquals(r.metadata.type, "person_note");
+        assertEquals(
+          calls.length,
+          2,
+          "an array from the primary must not count as success",
+        );
+        assertEquals(
+          warnings[0],
+          "[metadata] primary endpoint returned schema-invalid metadata — falling through",
+        );
+      },
+    );
 
     const invalidMetadataCases: Array<{ name: string; value: unknown }> = [
       { name: "missing required fields", value: {} },
@@ -451,32 +434,35 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
     ];
 
     for (const { name, value } of invalidMetadataCases) {
-      await t.step(`schema-invalid primary (${name}) falls back`, async () => {
-        calls.length = 0;
-        warnings.length = 0;
-        const fallbackMetadata = validMetadata({
-          type: "idea",
-          topics: ["validated-fallback"],
-        });
-        responder = (c) =>
-          c.url.startsWith(PRIMARY_BASE)
-            ? chatOk(value)
-            : chatOk(fallbackMetadata);
+      await t.step(
+        `schema-invalid primary (${name}) falls back`,
+        async () => {
+          calls.length = 0;
+          warnings.length = 0;
+          const fallbackMetadata = validMetadata({
+            type: "idea",
+            topics: ["validated-fallback"],
+          });
+          responder = (c) =>
+            c.url.startsWith(PRIMARY_BASE)
+              ? chatOk(value)
+              : chatOk(fallbackMetadata);
 
-        const r = await extractMetadata("schema validation case");
-        assertEquals(r.metadata, fallbackMetadata);
-        assertEquals(
-          calls.map((c) => c.url),
-          [
-            `${PRIMARY_BASE}/chat/completions`,
-            `${FALLBACK_BASE}/chat/completions`,
-          ],
-        );
-        assertEquals(
-          warnings[0],
-          "[metadata] primary endpoint returned schema-invalid metadata — falling through",
-        );
-      });
+          const r = await extractMetadata("schema validation case");
+          assertEquals(r.metadata, fallbackMetadata);
+          assertEquals(
+            calls.map((c) => c.url),
+            [
+              `${PRIMARY_BASE}/chat/completions`,
+              `${FALLBACK_BASE}/chat/completions`,
+            ],
+          );
+          assertEquals(
+            warnings[0],
+            "[metadata] primary endpoint returned schema-invalid metadata — falling through",
+          );
+        },
+      );
     }
 
     await t.step(
@@ -491,7 +477,11 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
           topics: ["uncategorized"],
           type: "observation",
         });
-        assertEquals(calls.length, 2, "primary then fallback both attempted");
+        assertEquals(
+          calls.length,
+          2,
+          "primary then fallback both attempted",
+        );
         assertEquals(warnings, [
           "[metadata] primary endpoint returned schema-invalid metadata — falling through",
           "[metadata] fallback endpoint returned schema-invalid metadata — falling through",
@@ -512,7 +502,11 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
           topics: ["uncategorized"],
           type: "observation",
         });
-        assertEquals(calls.length, 2, "primary then fallback both attempted");
+        assertEquals(
+          calls.length,
+          2,
+          "primary then fallback both attempted",
+        );
         assertEquals(warnings, [
           "[metadata] primary endpoint failed (non-2xx response) — HTTP 401",
           "[metadata] fallback endpoint failed (non-2xx response) — HTTP 503",
@@ -547,12 +541,13 @@ Deno.test("extractMetadata: primary → fallback → stub", async (t) => {
         ]);
       },
     );
+  });
+  try {
+    await run();
   } finally {
     globalThis.fetch = origFetch;
     console.warn = origWarn;
-    for (const [k, v] of origEnv) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
   }
-});
+}
+
+Deno.test("extractMetadata: primary → fallback → stub", testMetadata);
