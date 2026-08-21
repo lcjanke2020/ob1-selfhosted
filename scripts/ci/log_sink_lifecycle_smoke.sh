@@ -60,8 +60,7 @@ COMPOSE_PROJECT_NAME=$adoption_project
 ADOPTION_VOLUME=$adoption_volume
 ENV
 
-adoption_compose=(
-  docker compose
+adoption_compose_opts=(
   --project-directory "$adoption_root"
   --env-file "$adoption_root/.env"
   --project-name "$adoption_project"
@@ -70,11 +69,11 @@ adoption_compose=(
 cleanup_adoption() {
   local rc=$1
   if (( rc != 0 )); then
-    "${adoption_compose[@]}" \
+    docker compose "${adoption_compose_opts[@]}" \
       -f "$adoption_root/compose.yml" -f "$adoption_root/marker.yml" \
       logs >&2 || true
   fi
-  "${adoption_compose[@]}" \
+  docker compose "${adoption_compose_opts[@]}" \
     -f "$adoption_root/compose.yml" -f "$adoption_root/marker.yml" \
     down -v >/dev/null 2>&1 || true
   docker volume rm "$adoption_volume" >/dev/null 2>&1 || true
@@ -83,7 +82,7 @@ cleanup_adoption() {
 }
 trap 'cleanup_adoption "$?"' EXIT
 
-"${adoption_compose[@]}" \
+docker compose "${adoption_compose_opts[@]}" \
   -f "$adoption_root/compose.yml" up -d log-sink
 
 # pg_isready alone can see the init-phase temporary socket server. PID 1
@@ -91,7 +90,8 @@ trap 'cleanup_adoption "$?"' EXIT
 # server, eliminating the shutdown/startup gap.
 ready=
 for _ in $(seq 1 60); do
-  if "${adoption_compose[@]}" -f "$adoption_root/compose.yml" \
+  if docker compose "${adoption_compose_opts[@]}" \
+    -f "$adoption_root/compose.yml" \
     exec -T log-sink sh -c \
       'test "$(cat /proc/1/comm)" = postgres && pg_isready -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
       >/dev/null 2>&1; then
@@ -101,13 +101,15 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 test "$ready" = 1
-"${adoption_compose[@]}" -f "$adoption_root/compose.yml" \
+docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
   exec -T log-sink sh -c \
     'test ! -e "$PGDATA/.openbrain-log-sink-init-complete"'
 
 # Preserve a representative historical row across adoption/recreate. A
 # healthy old catalog plus one drift relation must remain unmarked.
-"${adoption_compose[@]}" -f "$adoption_root/compose.yml" \
+docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
   exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" log-sink \
     psql -X -w -h /var/run/postgresql -U "$POSTGRES_USER" \
       -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
@@ -129,11 +131,13 @@ trap log_sink_error ERR
 test "$adoption_rc" -ne 0
 grep -Fq 'expected exactly (funnel_access_log, funnel_access_summary)' \
   <<< "$adoption_output"
-"${adoption_compose[@]}" -f "$adoption_root/compose.yml" \
+docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
   exec -T log-sink sh -c \
     'test ! -e "$PGDATA/.openbrain-log-sink-init-complete"'
 
-"${adoption_compose[@]}" -f "$adoption_root/compose.yml" \
+docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
   exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" log-sink \
     psql -X -w -h /var/run/postgresql -U "$POSTGRES_USER" \
       -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
@@ -145,18 +149,19 @@ adoption_output=$(COMPOSE_DIR="$adoption_root" \
 grep -Fq 'log sink: invariants OK' <<< "$adoption_output"
 grep -Fq 'pre-marker volume adopted after current invariants passed' \
   <<< "$adoption_output"
-"${adoption_compose[@]}" -f "$adoption_root/compose.yml" \
+docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
   exec -T log-sink sh -c \
     'test -f "$PGDATA/.openbrain-log-sink-init-complete" && test "$(stat -c %a "$PGDATA/.openbrain-log-sink-init-complete")" = 600'
 
 # Recreate the service with the new wrapper on the SAME named volume. It must
 # accept the assertion-gated marker and keep the catalog/data.
-"${adoption_compose[@]}" \
+docker compose "${adoption_compose_opts[@]}" \
   -f "$adoption_root/compose.yml" -f "$adoption_root/marker.yml" \
   up -d --force-recreate log-sink
 restarted=
 for _ in $(seq 1 60); do
-  if "${adoption_compose[@]}" \
+  if docker compose "${adoption_compose_opts[@]}" \
     -f "$adoption_root/compose.yml" -f "$adoption_root/marker.yml" \
     exec -T log-sink sh -c \
       'test "$(cat /proc/1/comm)" = postgres && test -f "$PGDATA/.openbrain-log-sink-init-complete" && pg_isready -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
@@ -167,7 +172,7 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 test "$restarted" = 1
-history_rows=$("${adoption_compose[@]}" \
+history_rows=$(docker compose "${adoption_compose_opts[@]}" \
   -f "$adoption_root/compose.yml" -f "$adoption_root/marker.yml" \
   exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" log-sink \
     psql -X -w -h /var/run/postgresql -U "$POSTGRES_USER" \
