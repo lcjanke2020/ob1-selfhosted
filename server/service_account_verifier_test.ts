@@ -14,7 +14,7 @@ function jwt(payload: Record<string, unknown>): string {
   return `${encode({ alg: "RS256" })}.${encode(payload)}.signature`;
 }
 
-Deno.test("service-account smoke helper builds provider-specific token requests", async (t) => {
+Deno.test("service-account verifier builds provider-specific token requests", async (t) => {
   await t.step("client_secret_post uses a form body", async () => {
     const request = buildTokenRequest({
       tokenUrl: "https://issuer.example/oauth/token",
@@ -53,7 +53,7 @@ Deno.test("service-account smoke helper builds provider-specific token requests"
   );
 });
 
-Deno.test("service-account smoke helper builds a non-redirecting MCP request", async () => {
+Deno.test("service-account verifier builds a non-redirecting MCP request", async () => {
   const request = buildInitializeRequest(
     "https://brain.example/mcp",
     "header.payload.signature",
@@ -66,7 +66,7 @@ Deno.test("service-account smoke helper builds a non-redirecting MCP request", a
   assertEquals((await request.json()).method, "initialize");
 });
 
-Deno.test("service-account smoke helper refuses credential-bearing redirects", async (t) => {
+Deno.test("service-account verifier refuses credential-bearing redirects", async (t) => {
   let address: Deno.NetAddr | undefined;
   let sinkRequests = 0;
   const server = Deno.serve(
@@ -134,7 +134,7 @@ Deno.test("service-account smoke helper refuses credential-bearing redirects", a
   }
 });
 
-Deno.test("service-account smoke helper bounds chunked responses while streaming", async () => {
+Deno.test("service-account verifier bounds chunked responses while streaming", async () => {
   let chunks = 0;
   let cancelled = false;
   const response = new Response(
@@ -158,7 +158,7 @@ Deno.test("service-account smoke helper bounds chunked responses while streaming
   assertEquals(cancelled, true);
 });
 
-Deno.test("service-account smoke helper decodes JWT identity without accepting opaque tokens", () => {
+Deno.test("service-account verifier decodes JWT identity without accepting opaque tokens", () => {
   assertEquals(
     decodeJwtPayload(
       jwt({ sub: "machine-subject", gty: "client-credentials" }),
@@ -168,7 +168,7 @@ Deno.test("service-account smoke helper decodes JWT identity without accepting o
   assertThrows(() => decodeJwtPayload("opaque-token"), Error, "three-part JWT");
 });
 
-Deno.test("service-account smoke helper accepts JSON and SSE initialize results", () => {
+Deno.test("service-account verifier accepts JSON and SSE initialize results", () => {
   const message = {
     jsonrpc: "2.0",
     id: 1,
