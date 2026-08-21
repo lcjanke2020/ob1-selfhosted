@@ -11,8 +11,11 @@ Run from a checkout with Bash 4+, Docker, and Deno 2.9.x. The `summary` family
 also requires `systemd-analyze`. Docker must be able to bind loopback port
 55439; override it with `DB_SMOKE_PORT` when needed.
 
-The runner pins its own CI-only database names and throwaway credentials rather
-than inheriting deployment values from the caller's environment.
+The runner anchors all paths to the checkout containing the script and pins its
+loopback host, CI-only database names, and throwaway credentials rather than
+inheriting deployment values from the caller's environment. It can therefore be
+invoked by absolute path from outside the checkout; `DB_SMOKE_PORT` remains an
+intentional caller override.
 
 ## Commands
 

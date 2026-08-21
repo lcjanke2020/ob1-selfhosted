@@ -5,7 +5,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CI_REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-export CI_REPO_ROOT GITHUB_WORKSPACE="${GITHUB_WORKSPACE:-$CI_REPO_ROOT}"
+cd "$CI_REPO_ROOT"
+export CI_REPO_ROOT GITHUB_WORKSPACE="$CI_REPO_ROOT"
 
 usage() {
   cat <<'USAGE'
@@ -37,13 +38,14 @@ for family in "$@"; do
 done
 
 # This runner owns a throwaway fixture. Do not inherit a caller's deployment
-# target or credentials into it.
+# target, host, or credentials into it.
 export POSTGRES_DB=openbrain
 export POSTGRES_USER=postgres
 export POSTGRES_PASSWORD=ci_superuser_pw
 export OPENBRAIN_APP_PASSWORD=ci_app_pw
 export OPENBRAIN_READONLY_PASSWORD=ci_readonly_pw
 export OPENBRAIN_TOKEN_ADMIN_PASSWORD=ci_token_admin_pw
+export DB_SMOKE_HOST=127.0.0.1
 export DB_SMOKE_PORT="${DB_SMOKE_PORT:-55439}"
 
 created_runner_temp=
@@ -99,8 +101,14 @@ run_preflight() {
 }
 
 start_database() {
-  command -v docker >/dev/null
-  command -v deno >/dev/null
+  command -v docker >/dev/null || {
+    echo "docker is required for DB-init smoke families" >&2
+    return 127
+  }
+  command -v deno >/dev/null || {
+    echo "deno is required for DB-init smoke families" >&2
+    return 127
+  }
 
   if docker container inspect "$DB_INIT_CONTAINER" >/dev/null 2>&1; then
     echo "container already exists: $DB_INIT_CONTAINER" >&2

@@ -94,20 +94,9 @@ jobs:
   readonly-pg-dump:
     name: readonly role can pg_dump
     runs-on: ubuntu-latest
-    env:
-      # The local runner derives PG_IMAGE from compose at runtime so it cannot
-      # drift from the deployed stack's Postgres pin.
-      POSTGRES_DB: openbrain
-      POSTGRES_USER: postgres
-      # CI-only throwaway credentials for an ephemeral container — not secrets.
-      POSTGRES_PASSWORD: ci_superuser_pw
-      OPENBRAIN_APP_PASSWORD: ci_app_pw
-      OPENBRAIN_READONLY_PASSWORD: ci_readonly_pw
-      # Dedicated create/list/revoke role for the native-token smoke.
-      OPENBRAIN_TOKEN_ADMIN_PASSWORD: ci_token_admin_pw
     steps:
-      # Keep untrusted PR code in the PR cache scope. Trusted push/manual runs
-      # use their event SHA in the separate step below.
+      # Pin PR execution to the immutable head SHA that triggered this run.
+      # Trusted push/manual runs use their event SHA in the separate step below.
       - name: Checkout PR head safely
         if: github.event_name == 'pull_request'
         uses: actions/checkout@v4
@@ -129,8 +118,13 @@ jobs:
         with:
           deno-version: v2.9.4
 
-      - name: Run corpus DB-init smoke families
-        run: bash scripts/ci/run_db_init_smokes.sh all
+      - name: Run corpus DB-init smoke families from outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: |
+          env \
+            GITHUB_WORKSPACE="$RUNNER_TEMP/ignored-workspace" \
+            DB_SMOKE_HOST=192.0.2.1 \
+            bash "${{ github.workspace }}/scripts/ci/run_db_init_smokes.sh" all
 
   log-sink-init:
     name: log sink init, invariants, and rollup
@@ -147,8 +141,8 @@ jobs:
       OPENBRAIN_LOGS_ROLLUP_PASSWORD: ci_sink_rollup_pw
       OPENBRAIN_MONITOR_PASSWORD: ci_sink_monitor_pw
     steps:
-      # Keep untrusted PR code in the PR cache scope. Trusted push/manual runs
-      # use their event SHA in the separate step below.
+      # Pin PR execution to the immutable head SHA that triggered this run.
+      # Trusted push/manual runs use their event SHA in the separate step below.
       - name: Checkout PR head safely
         if: github.event_name == 'pull_request'
         uses: actions/checkout@v4

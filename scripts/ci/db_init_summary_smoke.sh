@@ -232,7 +232,10 @@ if [[ " $* " == *" exec -T log-sink "* ]]; then
   test "${@: -1}" = ci_sink_from_compose
   cat > "$COMPOSE_PROBE_INPUT"
   grep -Fq '# Funnel observability report' "$COMPOSE_PROBE_INPUT"
-  ! grep -Fq 'auth-failure reasons' "$COMPOSE_PROBE_INPUT"
+  if grep -Fq 'auth-failure reasons' "$COMPOSE_PROBE_INPUT"; then
+    echo "sink rollup received the corpus auth-events SQL" >&2
+    exit 46
+  fi
   echo '# Funnel observability report'
   exit 0
 fi
