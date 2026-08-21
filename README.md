@@ -39,9 +39,12 @@ laptop" to "compartmentalized Qubes OS deployment with a hardened public edge":
 >   asks the setup's most important question (who may become a user), and its
 >   defaults answer it wrong.
 >
-> The Funnel overlay also needs **Docker Compose v2.20+** (the `!reset` YAML
-> tag); the Qubes path additionally assumes a working **Qubes OS** machine with
-> Docker-capable templates.
+> The supported project floor is **Docker Compose v2.38.2**; CI tests that exact
+> floor and the current supported line, v5.3.1. The Funnel and Qubes overlays
+> use the `!reset` YAML tag, which Compose documented earlier in v2.24.4, but
+> availability of that one feature is not the project's full compatibility
+> contract. The Qubes path additionally assumes a working **Qubes OS** machine
+> with Docker-capable templates.
 
 ## Supported authentication methods
 

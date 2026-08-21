@@ -82,10 +82,15 @@ each `.env.example`.
 typed manifest for Compose files, documented stacks, active profiles, example
 groups, capabilities, and reviewed exceptions;
 [`compose_env_audit.ts`](server/scripts/compose_env_audit.ts) contains only pure
-policy checks. The allow-env guard deliberately expands the three local overlays
-to all eight syntactically supported subsets, while parity checks only the six
-documented local stacks plus the two standalone Qubes stacks. Every exception
-carries a rationale, and unknown, conflicting, empty, or stale policy fails.
+policy checks. The allow-env guard deliberately expands the three current local
+overlays to all eight syntactically supported subsets, while parity checks only
+the six documented local stacks plus the two standalone Qubes stacks. Every
+exception carries a rationale, and unknown, conflicting, empty, or stale policy
+fails. The launcher power set is derived from each Compose file's manifest
+`kind`, so a newly classified overlay cannot remain invisible to the audit. The
+`log-sink` and `token-admin` capabilities are also checked against services in
+Compose's un-interpolated model; this keeps the profile-gated token tool
+load-bearing without pretending it is active in a long-running deployment.
 
 The local and Qubes app examples deliberately differ on
 `METADATA_FALLBACK_POLICY`: the single-host quickstart preselects strict `off`,
@@ -100,12 +105,17 @@ a one-shot operator command rather than a deployment shape; Compose's
 un-interpolated model retains it for allow-env analysis, and a regression test
 pins that oracle behavior.
 
-The supported Compose floor is **2.38.2**, retained as the older compatibility
-lane that exposed the original required-variable and rendered-mount metadata
-differences. The current supported line is pinned at **5.3.1**. CI downloads and
-checksum-verifies both exact Linux plugin binaries and runs the same parity,
-launcher-permission, and Pattern B contracts in each matrix lane; it never
-relies on the runner's floating preinstalled Compose version.
+The CI-certified project Compose floor is **2.38.2**, retained as the older
+compatibility lane that exposed the original required-variable and
+rendered-mount metadata differences. It is deliberately newer than the first
+Compose release documenting an individual feature such as `!reset`; feature
+availability alone is not the full rendered-contract guarantee. The current
+supported line is pinned at **5.3.1**. The `compose-config.yml` workflow
+downloads and checksum-verifies both exact Linux plugin binaries and runs the
+same parity, launcher-permission, and Pattern B contracts in each matrix lane.
+Separately, `ci.yml` intentionally runs the launcher audit once against the
+GitHub runner's floating preinstalled Compose as a forward-compatibility smoke;
+that unpinned lane does not define or extend the supported-version contract.
 
 CI cannot inspect a systemd unit maintained only on a deployment host. Before
 restarting such a unit, load the same environment file the unit uses and

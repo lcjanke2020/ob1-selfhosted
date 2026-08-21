@@ -68,6 +68,10 @@ export type ExampleVariableInventory = ReadonlyMap<
   readonly ComposeVariableUsage[]
 >;
 
+export type ServiceCapabilityContracts = Readonly<
+  Record<string, { service: string }>
+>;
+
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -89,6 +93,34 @@ export function composeFixtureValue(name: string): string {
   }
   if (name === "INGESTER_DB_HOST") return "/var/run/postgresql";
   return `compose-parity-${name.toLowerCase().replaceAll("_", "-")}`;
+}
+
+export function auditDeclaredServiceCapabilities(
+  name: string,
+  capabilities: readonly string[],
+  declaredServices: ReadonlySet<string>,
+  contracts: ServiceCapabilityContracts,
+): string[] {
+  const issues: string[] = [];
+  const capabilitySet = new Set(capabilities);
+  for (const [capability, contract] of Object.entries(contracts)) {
+    if (contract.service.trim().length === 0) {
+      issues.push(`${name}: capability ${capability} names an empty service`);
+      continue;
+    }
+    const hasCapability = capabilitySet.has(capability);
+    const hasService = declaredServices.has(contract.service);
+    if (hasCapability && !hasService) {
+      issues.push(
+        `${name}: capability ${capability} requires declared service ${contract.service}`,
+      );
+    } else if (!hasCapability && hasService) {
+      issues.push(
+        `${name}: declared service ${contract.service} lacks capability ${capability}`,
+      );
+    }
+  }
+  return issues;
 }
 
 export function auditForwardingRules(
@@ -427,6 +459,22 @@ export function groupComposeVariables(
   return grouped;
 }
 
+function optionalComposeDefaults(
+  usages: readonly ComposeVariableUsage[],
+): Set<string> {
+  return new Set(
+    usages.flatMap((usage) =>
+      usage.source === "compose" && usage.required === false
+        ? [usage.defaultValue]
+        : []
+    ),
+  );
+}
+
+function displayExampleValue(value: string): string {
+  return value.length === 0 ? "<empty>" : value;
+}
+
 export function auditExampleEnvironment(
   name: string,
   composeVariables: ExampleVariableInventory,
@@ -471,16 +519,12 @@ export function auditExampleEnvironment(
       issues.push(`${name}: .env.example must declare ${key}`);
     } else if (example.declared.get(key) !== pin.value) {
       issues.push(
-        `${name}: .env.example must document ${key}=${pin.value}; got ${
-          example.declared.get(key)
-        }`,
+        `${name}: .env.example must document ${key}=${
+          displayExampleValue(pin.value)
+        }; got ${displayExampleValue(example.declared.get(key)!)}`,
       );
     } else {
-      const defaults = new Set(
-        composeVariables.get(key)!.map((usage) => usage.defaultValue).filter(
-          (value): value is string => value !== null && value.length > 0,
-        ),
-      );
+      const defaults = optionalComposeDefaults(composeVariables.get(key)!);
       if (defaults.size === 1 && defaults.has(pin.value)) {
         issues.push(
           `${name}: value-pin policy for ${key} is stale; it matches the Compose default`,
@@ -500,11 +544,7 @@ export function auditExampleEnvironment(
       );
     }
     if (Object.hasOwn(valuePins, key) || !example.declared.has(key)) continue;
-    const defaults = new Set(
-      usages.map((usage) => usage.defaultValue).filter(
-        (value): value is string => value !== null && value.length > 0,
-      ),
-    );
+    const defaults = optionalComposeDefaults(usages);
     if (defaults.size > 1) {
       issues.push(
         `${name}: Compose shapes disagree on the default for ${key}; add a rationale-bearing value pin`,
@@ -515,7 +555,9 @@ export function auditExampleEnvironment(
     const documented = example.declared.get(key);
     if (expected !== undefined && documented !== expected) {
       issues.push(
-        `${name}: .env.example documents ${key}=${documented}, but Compose defaults to ${expected}; ` +
+        `${name}: .env.example documents ${key}=${
+          displayExampleValue(documented!)
+        }, but Compose defaults to ${displayExampleValue(expected)}; ` +
           "synchronize the example or add a rationale-bearing value pin",
       );
     }
@@ -549,16 +591,30 @@ export function collectComposeInterpolationVariables(
   return variables;
 }
 
-export function serviceEnvironmentValues(
+function composeServices(
   document: UnknownRecord,
   shapeName: string,
-): Record<string, ComposeEnvironmentValue> | undefined {
+): UnknownRecord {
   if (!isRecord(document.services)) {
     throw new Error(
       `${shapeName}: rendered Compose services must be a mapping`,
     );
   }
-  const service = document.services.mcp;
+  return document.services;
+}
+
+export function composeServiceNames(
+  document: UnknownRecord,
+  shapeName: string,
+): ReadonlySet<string> {
+  return new Set(Object.keys(composeServices(document, shapeName)));
+}
+
+export function serviceEnvironmentValues(
+  document: UnknownRecord,
+  shapeName: string,
+): Record<string, ComposeEnvironmentValue> | undefined {
+  const service = composeServices(document, shapeName).mcp;
   if (service === undefined) return undefined;
   if (!isRecord(service)) {
     throw new Error(`${shapeName}: rendered mcp service must be a mapping`);

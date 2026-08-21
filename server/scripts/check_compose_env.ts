@@ -10,6 +10,7 @@ import {
   renderComposeConfig,
 } from "./check_allow_env.ts";
 import {
+  auditDeclaredServiceCapabilities,
   auditExampleEnvironment,
   auditForwardingRules,
   auditServerEnvironment,
@@ -17,6 +18,7 @@ import {
   collectComposeInterpolationVariables,
   type ComposeEnvironmentValue,
   composeFixtureValue,
+  composeServiceNames,
   type ComposeSnapshot,
   type ComposeVariableMetadata,
   groupComposeVariables,
@@ -33,10 +35,12 @@ import {
   DOCUMENTED_DEPLOYMENTS,
   EXAMPLE_CONTRACTS,
   SERVER_DIR,
+  SERVICE_CAPABILITY_CONTRACTS,
   SHARED_FORWARDING_RULES,
 } from "./compose_deployments.ts";
 
 interface RenderedShape {
+  declaredServices: ReadonlySet<string>;
   document: UnknownRecord;
   rawEnvironment?: Readonly<Record<string, ComposeEnvironmentValue>>;
   serverServices: readonly string[];
@@ -124,6 +128,7 @@ function renderShape(
     environment[key] = composeFixtureValue(key);
   }
   return {
+    declaredServices: composeServiceNames(uninterpolatedDocument, shape.name),
     variables,
     rawEnvironment,
     serverServices: serverServiceNames(
@@ -197,6 +202,14 @@ function main(): number {
     );
     for (const shape of DOCUMENTED_DEPLOYMENTS) {
       const snapshot = rendered.get(shape.name)!;
+      issues.push(
+        ...auditDeclaredServiceCapabilities(
+          shape.name,
+          shape.capabilities,
+          snapshot.declaredServices,
+          SERVICE_CAPABILITY_CONTRACTS,
+        ),
+      );
       const environment = serviceEnvironment(snapshot.document, shape.name);
       const absentRationale = shape.server.kind === "absent"
         ? shape.server.rationale

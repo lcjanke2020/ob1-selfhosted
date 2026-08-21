@@ -19,9 +19,9 @@
 #      points mcp at the real database instead.) Pattern B's separate log-sink
 #      remains local and is unaffected by this corpus override.
 #   2. Clears the `depends_on: postgres` health-gate on mcp and token-admin —
-#      there is no local corpus Postgres to wait on. Uses the `!reset` tag (compose
-#      needs a Compose v2 that supports `!reset`; v2.24.4 documents it), same mechanism as
-#      docker-compose.pattern-b.yml's `ports: !reset`.
+#      there is no local corpus Postgres to wait on. Uses the `!reset` tag,
+#      documented by Compose in v2.24.4; this project's CI-certified floor is
+#      v2.38.2. This is the same mechanism as Pattern B's `ports: !reset`.
 #   3. Makes DB_HOST mandatory under this override (fail-fast at `docker compose
 #      config` time, not at connect time).
 #

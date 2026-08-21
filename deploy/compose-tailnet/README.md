@@ -45,8 +45,9 @@ branch; the public Funnel branch remains restricted to Anthropic egress.
 1. **Removes mcp's host port mapping** (`ports: !reset null`) — the raw `:8787`
    becomes unreachable from the host, so a stray
    `tailscale funnel http://127.0.0.1:8787` physically cannot reach mcp past the
-   Caddy perimeter (IP allowlist, body cap, logging). Requires compose v2.20+
-   (the `!reset` YAML tag).
+   Caddy perimeter (IP allowlist, body cap, logging). The supported Docker
+   Compose floor is v2.38.2; `!reset` itself was documented in v2.24.4, but that
+   individual feature does not define the full compatibility floor.
 2. **Disables the complete `x-brain-key` door** — it blanks `MCP_ACCESS_KEY` and
    pins `ENABLE_NATIVE_TOKENS=false`. The base compose enables native tokens and
    may inherit a static key, so both overrides are required to make OAuth the
