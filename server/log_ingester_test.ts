@@ -30,7 +30,7 @@ async function withIngesterEnv(
   body: (mod: typeof import("./log_ingester.ts")) => Promise<void>,
 ): Promise<void> {
   await withEnv(
-    ["INGESTER_CURSOR_DIR"],
+    ["CADDY_LOG_DIR", "INGESTER_POLL_INTERVAL_MS", "INGESTER_CURSOR_DIR"],
     {
       DB_HOST: "/var/run/postgresql",
       DB_PASSWORD: "test-password",
