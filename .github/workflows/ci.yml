@@ -48,9 +48,9 @@ jobs:
     name: Server unit tests
     runs-on: ubuntu-latest
     steps:
-      # For PR events, use the GitHub-synced `refs/pull/<N>/head` mirror
-      # rather than the PR head SHA directly: fork-PR head SHAs aren't in
-      # the base repo and `actions/checkout` would fail to fetch them.
+      # For PR events, retain this workflow's established GitHub-synced
+      # `refs/pull/<N>/head` convention. An immutable PR head SHA is also
+      # fork-safe; other workflows may pin `github.event.pull_request.head.sha`.
       # Falls back to `github.sha` for push and workflow_dispatch.
       - name: Checkout PR head safely
         uses: actions/checkout@v4
