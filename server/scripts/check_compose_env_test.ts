@@ -5,6 +5,7 @@ import {
   assertThrows,
 } from "@std/assert";
 import {
+  auditDeclaredServiceCapabilities,
   auditDeploymentPolicy,
   auditExampleEnvironment,
   auditForwardingRules,
@@ -24,9 +25,11 @@ import {
   auditDeploymentManifest,
   COMPOSE_FILES,
   composeFilePaths,
+  deriveAllowEnvComposeStacks,
   DOCUMENTED_DEPLOYMENTS,
   EXAMPLE_CONTRACTS,
   type ManifestAuditInput,
+  SERVICE_CAPABILITY_CONTRACTS,
 } from "./compose_deployments.ts";
 import { renderComposeConfig } from "./check_allow_env.ts";
 
@@ -303,6 +306,40 @@ Deno.test("server placement follows launcher identity rather than service name",
   );
 });
 
+Deno.test("declared services and capability labels cannot drift apart", () => {
+  assertEquals(
+    auditDeclaredServiceCapabilities(
+      "matching-capabilities",
+      ["log-sink", "token-admin"],
+      new Set(["log-sink", "token-admin"]),
+      SERVICE_CAPABILITY_CONTRACTS,
+    ),
+    [],
+  );
+
+  const staleLabel = auditDeclaredServiceCapabilities(
+    "stale-label",
+    ["log-sink"],
+    new Set<string>(),
+    SERVICE_CAPABILITY_CONTRACTS,
+  );
+  assertStringIncludes(
+    staleLabel.join("\n"),
+    "capability log-sink requires declared service log-sink",
+  );
+
+  const missingLabel = auditDeclaredServiceCapabilities(
+    "missing-label",
+    [],
+    new Set(["token-admin"]),
+    SERVICE_CAPABILITY_CONTRACTS,
+  );
+  assertStringIncludes(
+    missingLabel.join("\n"),
+    "declared service token-admin lacks capability token-admin",
+  );
+});
+
 Deno.test("deployment policy categories must be disjoint", () => {
   const issues = auditServerEnvironment(
     "conflicting-policy",
@@ -380,6 +417,115 @@ Deno.test("required Compose metadata requires an active example assignment", () 
   assertStringIncludes(stalePin.join("\n"), "is stale");
 });
 
+Deno.test("example audit preserves optional empty defaults without treating required empties as defaults", () => {
+  const optionalEmpty = variableInventory({
+    FEATURE_FLAG: { defaultValue: "", required: false },
+  });
+  const unpinnedGuidance = auditExampleEnvironment(
+    "empty-default-guidance",
+    optionalEmpty,
+    parseExampleEnvironment("# FEATURE_FLAG=true\n"),
+  );
+  assertStringIncludes(
+    unpinnedGuidance.join("\n"),
+    "Compose defaults to <empty>",
+  );
+
+  assertEquals(
+    auditExampleEnvironment(
+      "pinned-empty-default-guidance",
+      optionalEmpty,
+      parseExampleEnvironment("# FEATURE_FLAG=true\n"),
+      {
+        valuePins: {
+          FEATURE_FLAG: {
+            value: "true",
+            rationale: "The example demonstrates an explicit opt-in.",
+          },
+        },
+      },
+    ),
+    [],
+  );
+
+  const staleEmptyPin = auditExampleEnvironment(
+    "stale-empty-pin",
+    optionalEmpty,
+    parseExampleEnvironment("# FEATURE_FLAG=\n"),
+    {
+      valuePins: {
+        FEATURE_FLAG: {
+          value: "",
+          rationale: "This used to differ from Compose.",
+        },
+      },
+    },
+  );
+  assertStringIncludes(staleEmptyPin.join("\n"), "is stale");
+
+  const conflictingDefaults: ExampleVariableInventory = new Map([
+    [
+      "FEATURE_FLAG",
+      [
+        {
+          name: "FEATURE_FLAG",
+          shape: "empty-default",
+          required: false,
+          defaultValue: "",
+          source: "compose" as const,
+        },
+        {
+          name: "FEATURE_FLAG",
+          shape: "non-empty-default",
+          required: false,
+          defaultValue: "true",
+          source: "compose" as const,
+        },
+      ],
+    ],
+  ]);
+  assertStringIncludes(
+    auditExampleEnvironment(
+      "conflicting-defaults",
+      conflictingDefaults,
+      parseExampleEnvironment("# FEATURE_FLAG=\n"),
+    ).join("\n"),
+    "Compose shapes disagree on the default",
+  );
+
+  assertEquals(
+    auditExampleEnvironment(
+      "required-empty-metadata",
+      variableInventory({
+        REQUIRED_VALUE: { defaultValue: "", required: true },
+      }),
+      parseExampleEnvironment("REQUIRED_VALUE=chosen\n"),
+    ),
+    [],
+  );
+
+  const fallbackInventory: ExampleVariableInventory = new Map([
+    [
+      "FALLBACK_VALUE",
+      [{
+        name: "FALLBACK_VALUE",
+        shape: "older-compose",
+        required: null,
+        defaultValue: null,
+        source: "raw-model-fallback" as const,
+      }],
+    ],
+  ]);
+  assertEquals(
+    auditExampleEnvironment(
+      "fallback-metadata",
+      fallbackInventory,
+      parseExampleEnvironment("# FALLBACK_VALUE=\n"),
+    ),
+    [],
+  );
+});
+
 Deno.test("shared forwarding rules reject unknown, stale, and unexplained entries", () => {
   const issues = auditForwardingRules(new Set(["KNOWN"]), {
     KNOWN: { kind: "variable", name: "KNOWN", rationale: "" },
@@ -435,7 +581,8 @@ Deno.test("deployment policy validation fails fast for invalid table entries", (
 
 Deno.test("manifest keeps all overlay subsets distinct from documented deployments", () => {
   assertEquals(auditDeploymentManifest(), []);
-  assertEquals(allowEnvComposeStacks().length, 10);
+  const launcherStacks = allowEnvComposeStacks();
+  assertEquals(launcherStacks.length, 10);
   assertEquals(DOCUMENTED_DEPLOYMENTS.length, 8);
 
   const documented = new Set(
@@ -444,9 +591,39 @@ Deno.test("manifest keeps all overlay subsets distinct from documented deploymen
   assert(!documented.has("local+cpuOllama"));
   assert(!documented.has("local+patternB+cpuOllama"));
   assert(
-    allowEnvComposeStacks().some((stack) =>
-      stack.files.join("+") === "local+cpuOllama"
+    launcherStacks.some((stack) => stack.files.join("+") === "local+cpuOllama"),
+  );
+
+  const overlayIds = Object.entries(COMPOSE_FILES).filter(([, file]) =>
+    file.kind === "overlay"
+  ).map(([id]) => id);
+  for (const overlayId of overlayIds) {
+    assert(
+      launcherStacks.some((stack) =>
+        stack.files.includes(overlayId as keyof typeof COMPOSE_FILES)
+      ),
+      `classified overlay ${overlayId} must appear in the derived launcher power set`,
+    );
+  }
+
+  const withFutureOverlay = {
+    ...COMPOSE_FILES,
+    futureOverlay: { kind: "overlay" as const, path: "/future-overlay.yml" },
+    futureStandalone: {
+      kind: "standalone" as const,
+      path: "/future-standalone.yml",
+    },
+  };
+  const futureStacks = deriveAllowEnvComposeStacks(withFutureOverlay);
+  assert(
+    futureStacks.some((stack) => stack.files.includes("futureOverlay")),
+    "a future classified overlay must enter the launcher power set automatically",
+  );
+  assert(
+    futureStacks.some((stack) =>
+      stack.files.length === 1 && stack.files[0] === "futureStandalone"
     ),
+    "a future classified standalone must enter the launcher audit automatically",
   );
 });
 
@@ -489,6 +666,63 @@ Deno.test("manifest validation rejects invalid shape combinations", () => {
     } as unknown as ManifestAuditInput);
     assertStringIncludes(issues.join("\n"), mutation.expected);
   }
+
+  const standaloneOverlay = {
+    ...COMPOSE_FILES,
+    patternB: { ...COMPOSE_FILES.patternB, kind: "standalone" as const },
+  };
+  assertStringIncludes(
+    auditDeploymentManifest({ ...base, files: standaloneOverlay }).join("\n"),
+    "a standalone Compose file must be the only file in its stack",
+  );
+
+  const withoutBase = {
+    ...COMPOSE_FILES,
+    local: { ...COMPOSE_FILES.local, kind: "overlay" as const },
+  };
+  assertStringIncludes(
+    auditDeploymentManifest({ ...base, files: withoutBase }).join("\n"),
+    "must classify exactly one base file",
+  );
+  assertThrows(
+    () => deriveAllowEnvComposeStacks(withoutBase),
+    Error,
+    "requires exactly one base file",
+  );
+
+  const withUndocumentedOverlay = {
+    ...COMPOSE_FILES,
+    futureOverlay: { kind: "overlay" as const, path: "/future-overlay.yml" },
+  };
+  assertStringIncludes(
+    auditDeploymentManifest({
+      ...base,
+      files: withUndocumentedOverlay,
+    }).join("\n"),
+    "Compose file futureOverlay is not used by a documented deployment",
+  );
+
+  const overlayWithoutBase = DOCUMENTED_DEPLOYMENTS.map((shape, index) =>
+    index === 0 ? { ...shape, files: ["patternB"] as const } : shape
+  );
+  assertStringIncludes(
+    auditDeploymentManifest({
+      ...base,
+      deployments: overlayWithoutBase,
+    }).join("\n"),
+    "layered Compose stack requires exactly one base file",
+  );
+
+  const mixedStandalone = DOCUMENTED_DEPLOYMENTS.map((shape, index) =>
+    index === 0 ? { ...shape, files: ["local", "qubesApp"] as const } : shape
+  );
+  assertStringIncludes(
+    auditDeploymentManifest({
+      ...base,
+      deployments: mixedStandalone,
+    }).join("\n"),
+    "a standalone Compose file must be the only file in its stack",
+  );
 
   const optionalPolicy = DOCUMENTED_DEPLOYMENTS.map((shape, index) =>
     index === 0 ? { ...shape, server: { kind: "present" as const } } : shape

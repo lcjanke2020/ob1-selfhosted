@@ -1,7 +1,7 @@
 // Canonical metadata and reviewed policy for every documented Compose
-// deployment. The allow-env consumer deliberately expands the three overlays
-// to their full power set; DOCUMENTED_DEPLOYMENTS is the smaller set users are
-// actually told to run.
+// deployment. The allow-env consumer deliberately expands every classified
+// overlay to its full power set; DOCUMENTED_DEPLOYMENTS is the smaller set
+// users are actually told to run.
 
 import { fromFileUrl, join, resolve } from "@std/path";
 import type {
@@ -14,9 +14,9 @@ export const SERVER_DIR = fromFileUrl(new URL("..", import.meta.url));
 export const REPO_DIR = resolve(SERVER_DIR, "..");
 export const DEPLOY_DIR = join(REPO_DIR, "deploy");
 
-type ComposeFileKind = "base" | "overlay" | "standalone";
+export type ComposeFileKind = "base" | "overlay" | "standalone";
 
-interface ComposeFileDefinition {
+export interface ComposeFileDefinition {
   kind: ComposeFileKind;
   path: string;
 }
@@ -54,17 +54,6 @@ export const COMPOSE_FILES = {
 
 export type ComposeFileId = keyof typeof COMPOSE_FILES;
 
-export const OVERLAY_FILE_IDS = [
-  "patternB",
-  "externalDb",
-  "cpuOllama",
-] as const satisfies readonly ComposeFileId[];
-
-export const STANDALONE_FILE_IDS = [
-  "qubesApp",
-  "qubesIngress",
-] as const satisfies readonly ComposeFileId[];
-
 export type ExampleGroupName =
   | "compose-local"
   | "qubes-app"
@@ -77,6 +66,21 @@ export type DeploymentCapability =
   | "mcp-server"
   | "pattern-b-edge"
   | "token-admin";
+
+export interface ServiceCapabilityContract {
+  service: string;
+}
+
+// These capability labels describe services declared by the rendered,
+// un-interpolated Compose model. That distinction is load-bearing for
+// token-admin: the service remains auditable while its `tools` profile stays
+// inactive in every documented long-running deployment.
+export const SERVICE_CAPABILITY_CONTRACTS = {
+  "log-sink": { service: "log-sink" },
+  "token-admin": { service: "token-admin" },
+} as const satisfies Readonly<
+  Partial<Record<DeploymentCapability, ServiceCapabilityContract>>
+>;
 
 interface DeploymentBase {
   capabilities: readonly DeploymentCapability[];
@@ -397,6 +401,11 @@ export const EXAMPLE_CONTRACTS: Readonly<
           rationale:
             "The commented assignment demonstrates the explicit opt-out rather than restating the enabled default.",
         },
+        ENABLE_PRIMARY_EXTRACTION: {
+          value: "true",
+          rationale:
+            "The example demonstrates the explicit opt-in while Compose's empty default keeps primary extraction disabled.",
+        },
         CITATION_BASE_URL: {
           value: "",
           rationale:
@@ -427,6 +436,11 @@ export const EXAMPLE_CONTRACTS: Readonly<
           "The app qube retains the corpus migration credential outside the MCP service environment.",
       },
       valuePins: {
+        ENABLE_PRIMARY_EXTRACTION: {
+          value: "true",
+          rationale:
+            "The example demonstrates the explicit opt-in while Compose's empty default keeps primary extraction disabled.",
+        },
         CITATION_BASE_URL: {
           value: "",
           rationale:
@@ -451,8 +465,8 @@ export const EXAMPLE_CONTRACTS: Readonly<
   },
 };
 
-export interface ComposeStack {
-  files: readonly ComposeFileId[];
+export interface ComposeStack<FileId extends string = ComposeFileId> {
+  files: readonly FileId[];
   name: string;
 }
 
@@ -462,19 +476,48 @@ export function composeFilePaths(
   return fileIds.map((id) => COMPOSE_FILES[id].path);
 }
 
-export function allowEnvComposeStacks(): readonly ComposeStack[] {
-  const stacks: ComposeStack[] = [];
-  for (let mask = 0; mask < 1 << OVERLAY_FILE_IDS.length; mask++) {
-    const files: ComposeFileId[] = ["local"];
-    for (const [index, id] of OVERLAY_FILE_IDS.entries()) {
-      if ((mask & (1 << index)) !== 0) files.push(id);
-    }
-    stacks.push({ name: `allow-env:${files.join("+")}`, files });
+function composeFileIdsByKind<FileId extends string>(
+  files: Readonly<Record<FileId, ComposeFileDefinition>>,
+  kind: ComposeFileKind,
+): FileId[] {
+  // Object declaration order is the canonical base/overlay/standalone order.
+  return (Object.entries(files) as [FileId, ComposeFileDefinition][])
+    .filter(([, file]) => file.kind === kind)
+    .map(([id]) => id);
+}
+
+export function deriveAllowEnvComposeStacks<FileId extends string>(
+  files: Readonly<Record<FileId, ComposeFileDefinition>>,
+): readonly ComposeStack<FileId>[] {
+  const baseFileIds = composeFileIdsByKind(files, "base");
+  if (baseFileIds.length !== 1) {
+    throw new Error(
+      `Compose launcher partition requires exactly one base file; found ${baseFileIds.length}`,
+    );
   }
-  for (const id of STANDALONE_FILE_IDS) {
+  const [baseFileId] = baseFileIds;
+  const overlayFileIds = composeFileIdsByKind(files, "overlay");
+  const standaloneFileIds = composeFileIdsByKind(files, "standalone");
+
+  const stacks: ComposeStack<FileId>[] = [];
+  for (let mask = 0; mask < 1 << overlayFileIds.length; mask++) {
+    const stackFiles: FileId[] = [baseFileId];
+    for (const [index, id] of overlayFileIds.entries()) {
+      if ((mask & (1 << index)) !== 0) stackFiles.push(id);
+    }
+    stacks.push({
+      name: `allow-env:${stackFiles.join("+")}`,
+      files: stackFiles,
+    });
+  }
+  for (const id of standaloneFileIds) {
     stacks.push({ name: `allow-env:${id}`, files: [id] });
   }
   return stacks;
+}
+
+export function allowEnvComposeStacks(): readonly ComposeStack[] {
+  return deriveAllowEnvComposeStacks(COMPOSE_FILES);
 }
 
 export interface ManifestAuditInput {
@@ -492,11 +535,24 @@ export function auditDeploymentManifest(
 ): string[] {
   const issues: string[] = [];
   const paths = new Set<string>();
+  const fileKinds = new Map<string, ComposeFileKind>();
   for (const [id, file] of Object.entries(manifest.files)) {
     if (paths.has(file.path)) {
       issues.push(`Compose file ${id} repeats path ${file.path}`);
     }
     paths.add(file.path);
+    if (!(["base", "overlay", "standalone"] as const).includes(file.kind)) {
+      issues.push(`Compose file ${id} has unknown kind ${file.kind}`);
+      continue;
+    }
+    fileKinds.set(id, file.kind);
+  }
+  const baseFileIds = [...fileKinds].filter(([, kind]) => kind === "base")
+    .map(([id]) => id);
+  if (baseFileIds.length !== 1) {
+    issues.push(
+      `Compose manifest must classify exactly one base file; found ${baseFileIds.length}`,
+    );
   }
 
   const names = new Set<string>();
@@ -518,6 +574,33 @@ export function auditDeploymentManifest(
       } else {
         stackFiles.add(id);
         referencedFiles.add(id);
+      }
+    }
+    const stackKinds = shape.files.flatMap((id) => {
+      const kind = fileKinds.get(id);
+      return kind ? [kind] : [];
+    });
+    const standaloneCount = stackKinds.filter((kind) =>
+      kind === "standalone"
+    ).length;
+    const overlayCount = stackKinds.filter((kind) => kind === "overlay")
+      .length;
+    const baseCount = stackKinds.filter((kind) => kind === "base").length;
+    if (standaloneCount > 0) {
+      if (stackKinds.length !== 1 || standaloneCount !== 1) {
+        issues.push(
+          `${shape.name}: a standalone Compose file must be the only file in its stack`,
+        );
+      }
+    } else if (baseCount > 0 || overlayCount > 0) {
+      if (baseCount !== 1) {
+        issues.push(
+          `${shape.name}: layered Compose stack requires exactly one base file`,
+        );
+      } else if (fileKinds.get(shape.files[0]) !== "base") {
+        issues.push(
+          `${shape.name}: layered Compose stack must start with its base file`,
+        );
       }
     }
     if (!Object.hasOwn(manifest.examples, shape.exampleGroup)) {
@@ -558,7 +641,7 @@ export function auditDeploymentManifest(
       }
     }
 
-    const layered = shape.files.includes("local");
+    const layered = stackKinds.includes("base");
     const patternB = shape.capabilities.includes("pattern-b-edge");
     if (layered && patternB !== profiles.includes("pattern-b")) {
       issues.push(

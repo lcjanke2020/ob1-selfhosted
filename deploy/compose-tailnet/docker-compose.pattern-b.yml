@@ -22,7 +22,9 @@
 # A stray `tailscale funnel http://127.0.0.1:8787` then reaches mcp directly,
 # bypassing the Caddy perimeter (IP allowlist, body cap, access logging).
 #
-# Requires a Docker Compose v2 that supports the `!reset` tag (v2.24.4 documents it).
+# Requires the project's CI-certified Docker Compose floor, v2.38.2. The
+# `!reset` tag itself is documented in v2.24.4, but that alone is not the full
+# rendered-contract compatibility boundary.
 
 services:
   mcp:

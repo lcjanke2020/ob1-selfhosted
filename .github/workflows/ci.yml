@@ -11,8 +11,10 @@
 #
 # Deno version pinned to match server/Dockerfile (FROM denoland/deno:2.9.4)
 # so the CI runtime matches what ships.
-# The allow-env job also uses the runner's Docker Compose installation as the
-# parser and merge oracle for every supported checked-in stack.
+# The allow-env job intentionally uses the runner's floating Docker Compose as
+# a forward-compatibility smoke for every supported checked-in stack. The
+# checksum-pinned 2.38.2 floor and 5.3.1 current contract live in
+# compose-config.yml; this floating lane does not define version support.
 
 name: CI
 
