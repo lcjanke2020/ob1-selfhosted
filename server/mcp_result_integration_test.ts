@@ -5,19 +5,14 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { assert, assertEquals, assertFalse } from "@std/assert";
-import { asPool, FakePool, makeDeps } from "./api_test_support.ts";
+import { asPool, FakePool, makeDeps, withEnv } from "./api_test_support.ts";
 import { MAX_MCP_TOOL_RESULT_BYTES } from "./mcp_result.ts";
 
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "METADATA_FALLBACK_POLICY",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  MCP_ACCESS_KEY: "k".repeat(64),
+  METADATA_FALLBACK_POLICY: "off",
+};
 
 const THOUGHT_IDS = [
   "00000000-0000-4000-8000-000000000001",
@@ -58,19 +53,7 @@ function textTruncation(output: string): Record<string, unknown> {
 }
 
 Deno.test("MCP read tools enforce one serialized result budget", async () => {
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((key) => [key, Deno.env.get(key)]),
-  );
-  Deno.env.delete("AUTH0_ISSUER");
-  Deno.env.delete("AUTH0_JWKS_URI");
-  Deno.env.delete("AUTH0_AUDIENCE");
-  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-  Deno.env.set("DB_PASSWORD", "test-password");
-  Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
-  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
-
-  try {
+  await withEnv([], TEST_ENV, async () => {
     const { createMcpServer } = await import("./mcp-server.ts");
     const summary = "s".repeat(99_000);
     const rawToml = `title = "budget fixture"\nsummary = "${summary}"\n`;
@@ -302,10 +285,5 @@ Deno.test("MCP read tools enforce one serialized result budget", async () => {
       await client.close();
       await server.close();
     }
-  } finally {
-    for (const [key, value] of origEnv) {
-      if (value === undefined) Deno.env.delete(key);
-      else Deno.env.set(key, value);
-    }
-  }
+  })();
 });

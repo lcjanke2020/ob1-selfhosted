@@ -8,7 +8,7 @@
 
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert@1";
 import { ConnectionError } from "postgres";
-import type { Pool } from "postgres";
+import { asPool, FakeClient } from "./api_test_support.ts";
 import { getClient, isConnectionError } from "./db_pool.ts";
 
 // ---------------------------------------------------------------------------
@@ -49,54 +49,52 @@ Deno.test("isConnectionError: SQL / non-connection errors are NOT matched", () =
 
 type FailKind = "broken-pipe" | "sql" | null;
 
-class FakeClient {
-  alive: boolean;
+class LifecycleClient extends FakeClient {
+  private state: { alive: boolean; failKind: FailKind };
   ended = false;
-  failKind: FailKind;
-  endCalls = 0;
-  releaseCalls = 0;
-  queryCalls = 0;
 
   constructor(alive: boolean, failKind: FailKind = "broken-pipe") {
-    this.alive = alive;
-    this.failKind = failKind;
-  }
-
-  // deno-postgres PoolClient surface that getClient() touches:
-  queryArray(_sql: string): Promise<{ rows: unknown[] }> {
-    this.queryCalls++;
-    if (!this.alive) {
-      if (this.failKind === "sql") {
-        return Promise.reject(
-          new Error("duplicate key value violates unique constraint"),
-        );
+    const state = { alive, failKind };
+    super(() => {
+      if (!state.alive) {
+        if (state.failKind === "sql") {
+          throw new Error("duplicate key value violates unique constraint");
+        }
+        throw new Error("write: Broken pipe (os error 32)");
       }
-      return Promise.reject(new Error("write: Broken pipe (os error 32)"));
-    }
-    return Promise.resolve({ rows: [] });
+      return { rows: [] };
+    }, { scriptValidation: true });
+    this.state = state;
   }
 
-  end(): Promise<void> {
-    this.endCalls++;
+  get alive(): boolean {
+    return this.state.alive;
+  }
+
+  set alive(value: boolean) {
+    this.state.alive = value;
+  }
+
+  get queryCalls(): number {
+    return this.queryArrayCalls.length;
+  }
+
+  override end(): Promise<void> {
     this.alive = false;
     this.ended = true;
-    return Promise.resolve();
-  }
-
-  release(): void {
-    this.releaseCalls++;
+    return super.end();
   }
 }
 
 // reconnectable: connect() revives an end()'d client (DB is back).
 // down: connect() hands the dead client back unchanged (DB still gone).
-class FakePool {
+class ReconnectingPool {
   connectCalls = 0;
   constructor(
-    public client: FakeClient,
+    public client: LifecycleClient,
     private mode: "reconnectable" | "down",
   ) {}
-  connect(): Promise<FakeClient> {
+  connect(): Promise<LifecycleClient> {
     this.connectCalls++;
     if (this.mode === "reconnectable" && this.client.ended) {
       this.client.ended = false;
@@ -106,19 +104,17 @@ class FakePool {
   }
 }
 
-const asPool = (p: FakePool): Pool => p as unknown as Pool;
-
 // ---------------------------------------------------------------------------
 // getClient — behaviour
 // ---------------------------------------------------------------------------
 
 Deno.test("getClient: returns a healthy client directly (single probe)", async () => {
-  const client = new FakeClient(true);
-  const pool = new FakePool(client, "reconnectable");
+  const client = new LifecycleClient(true);
+  const pool = new ReconnectingPool(client, "reconnectable");
 
   const got = await getClient(asPool(pool));
 
-  assertEquals(got as unknown as FakeClient, client);
+  assertEquals(got as unknown as LifecycleClient, client);
   assertEquals(client.queryCalls, 1); // one validation probe
   assertEquals(client.endCalls, 0);
   assertEquals(client.releaseCalls, 0); // caller releases later
@@ -127,20 +123,20 @@ Deno.test("getClient: returns a healthy client directly (single probe)", async (
 Deno.test("getClient: recovers a dead pooled connection after a DB restart", async () => {
   // Stale-dead socket: first probe fails, getClient evicts (end) + releases,
   // the pool reconnects on the next borrow, second probe succeeds.
-  const client = new FakeClient(false);
-  const pool = new FakePool(client, "reconnectable");
+  const client = new LifecycleClient(false);
+  const pool = new ReconnectingPool(client, "reconnectable");
 
   const got = await getClient(asPool(pool));
 
-  assertEquals(got as unknown as FakeClient, client);
+  assertEquals(got as unknown as LifecycleClient, client);
   assertEquals(client.endCalls, 1); // dead client evicted exactly once
   assertEquals(client.queryCalls, 2); // failed probe + successful probe
   assert(pool.connectCalls >= 2); // re-borrowed to get the reconnect
 });
 
 Deno.test("getClient: throws when the database stays down", async () => {
-  const client = new FakeClient(false);
-  const pool = new FakePool(client, "down");
+  const client = new LifecycleClient(false);
+  const pool = new ReconnectingPool(client, "down");
 
   await assertRejects(
     () => getClient(asPool(pool), 2),
@@ -151,8 +147,8 @@ Deno.test("getClient: throws when the database stays down", async () => {
 });
 
 Deno.test("getClient: propagates a non-connection (SQL) error without retrying", async () => {
-  const client = new FakeClient(false, "sql");
-  const pool = new FakePool(client, "down");
+  const client = new LifecycleClient(false, "sql");
+  const pool = new ReconnectingPool(client, "down");
 
   await assertRejects(
     () => getClient(asPool(pool)),

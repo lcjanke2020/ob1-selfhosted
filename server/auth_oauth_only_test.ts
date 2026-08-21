@@ -12,99 +12,46 @@
 // Run with `deno task test`.
 
 import { assertEquals } from "jsr:@std/assert@1";
-import { Hono, type MiddlewareHandler } from "hono";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import {
+  makeAuthTestApp,
+  makeJwksFixture,
+  withEnv,
+} from "./api_test_support.ts";
 
 const ISSUER = "https://test.invalid/";
 const AUDIENCE = "https://test.invalid:8443/mcp";
 const JWKS_URL = "https://test.invalid/.well-known/jwks.json";
 
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "ENABLE_NATIVE_TOKENS",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "OAUTH_ALLOWED_SUBJECTS",
-  "OBS_AUTH_EVENTS_ENABLED",
-  "METADATA_FALLBACK_POLICY",
-  "JWKS_FETCH_TIMEOUT_MS",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  ENABLE_NATIVE_TOKENS: "false",
+  AUTH0_ISSUER: ISSUER,
+  AUTH0_JWKS_URI: JWKS_URL,
+  AUTH0_AUDIENCE: AUDIENCE,
+  OAUTH_ALLOWED_SUBJECTS: "user-under-test",
+  OBS_AUTH_EVENTS_ENABLED: "false",
+  METADATA_FALLBACK_POLICY: "off",
+  JWKS_FETCH_TIMEOUT_MS: "2000",
+};
 
-function makeApp(mw: MiddlewareHandler) {
-  const app = new Hono();
-  app.use("*", mw);
-  app.get("/", (c) => c.json({ ok: true }));
-  return app;
-}
+Deno.test(
+  "requireAuth (OAuth only — x-brain-key door disabled)",
+  withEnv([], TEST_ENV, runOauthOnlyTest),
+);
 
-Deno.test("requireAuth (OAuth only — x-brain-key door disabled)", async (t) => {
-  const origFetch = globalThis.fetch;
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-  );
-
-  const { publicKey, privateKey } = await generateKeyPair("RS256", {
-    extractable: true,
+async function runOauthOnlyTest(t: Deno.TestContext): Promise<void> {
+  const fixture = await makeJwksFixture({
+    issuer: ISSUER,
+    audience: AUDIENCE,
+    jwksUrl: JWKS_URL,
   });
-  const publicJwk = await exportJWK(publicKey);
-  publicJwk.alg = "RS256";
-  publicJwk.kid = "test-key-1";
-  publicJwk.use = "sig";
-  const jwksBody = JSON.stringify({ keys: [publicJwk] });
-
-  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
-    const url = typeof input === "string"
-      ? input
-      : input instanceof URL
-      ? input.href
-      : input.url;
-    if (url === JWKS_URL) {
-      return Promise.resolve(
-        new Response(jwksBody, {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    }
-    return origFetch(input, init);
-  }) as typeof fetch;
-
-  // OAuth door ON, x-brain-key door OFF (MCP_ACCESS_KEY deliberately deleted).
-  Deno.env.delete("MCP_ACCESS_KEY");
-  Deno.env.set("ENABLE_NATIVE_TOKENS", "false");
-  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-  Deno.env.set("DB_PASSWORD", "test-password");
-  Deno.env.set("AUTH0_ISSUER", ISSUER);
-  Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
-  Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
-  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-  // Authorization allowlist (fail-closed): admit the one subject this file
-  // mints for its success paths.
-  Deno.env.set("OAUTH_ALLOWED_SUBJECTS", "user-under-test");
-  Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
-  Deno.env.set("JWKS_FETCH_TIMEOUT_MS", "2000");
-
+  const restoreFetch = fixture.installFetchMock();
   const { requireAuth } = await import("./auth.ts");
-  const app = makeApp(requireAuth);
-
-  async function signToken(): Promise<string> {
-    return await new SignJWT({ sub: "user-under-test" })
-      .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-      .setIssuer(ISSUER)
-      .setAudience(AUDIENCE)
-      .setIssuedAt()
-      .setExpirationTime("1h")
-      .sign(privateKey as CryptoKey);
-  }
+  const app = makeAuthTestApp(requireAuth);
 
   try {
     await t.step("valid Bearer → 200", async () => {
-      const token = await signToken();
+      const token = await fixture.signToken();
       const res = await app.request("/", {
         headers: { "authorization": `Bearer ${token}` },
       });
@@ -117,7 +64,9 @@ Deno.test("requireAuth (OAuth only — x-brain-key door disabled)", async (t) =>
         // No key is configured, so any x-brain-key value is ignored and the
         // request reads as missing_credentials → HTTP 401.
         const res = await app.request("/", {
-          headers: { "x-brain-key": "any-value-since-no-key-is-configured" },
+          headers: {
+            "x-brain-key": "any-value-since-no-key-is-configured",
+          },
         });
         assertEquals(res.status, 401);
       },
@@ -126,7 +75,7 @@ Deno.test("requireAuth (OAuth only — x-brain-key door disabled)", async (t) =>
     await t.step(
       "x-brain-key + valid Bearer → 200 (Bearer honored, key irrelevant)",
       async () => {
-        const token = await signToken();
+        const token = await fixture.signToken();
         const res = await app.request("/", {
           headers: {
             "x-brain-key": "ignored",
@@ -137,10 +86,6 @@ Deno.test("requireAuth (OAuth only — x-brain-key door disabled)", async (t) =>
       },
     );
   } finally {
-    globalThis.fetch = origFetch;
-    for (const [k, v] of origEnv) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
+    restoreFetch();
   }
-});
+}

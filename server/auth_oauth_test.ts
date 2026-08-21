@@ -27,8 +27,13 @@
 // subprocesses, defense in depth).
 
 import { assertEquals, assertMatch, assertNotEquals } from "jsr:@std/assert@1";
-import { Hono, type MiddlewareHandler } from "hono";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { generateKeyPair } from "jose";
+import {
+  assertUnauthorized401,
+  makeAuthTestApp,
+  makeJwksFixture,
+  withEnv,
+} from "./api_test_support.ts";
 
 const BRAIN_KEY = "b".repeat(64);
 const ISSUER = "https://test.invalid/";
@@ -37,138 +42,38 @@ const JWKS_URL = "https://test.invalid/.well-known/jwks.json";
 const WRONG_ISSUER = "https://attacker.invalid/";
 const WRONG_AUDIENCE = "https://test.invalid:8443/different-resource";
 
-// Env keys this test sets; tracked so we can clear them in teardown.
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "OAUTH_ALLOWED_SUBJECTS",
-  // see auth_brainkey_test.ts for why this is here.
-  "OBS_AUTH_EVENTS_ENABLED",
-  "METADATA_FALLBACK_POLICY",
-  // bound the boot-time JWKS reachability probe with a short
-  // timeout so this test suite stays fast even if the mock somehow
-  // doesn't intercept the probe fetch.
-  "JWKS_FETCH_TIMEOUT_MS",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  MCP_ACCESS_KEY: BRAIN_KEY,
+  AUTH0_ISSUER: ISSUER,
+  AUTH0_JWKS_URI: JWKS_URL,
+  AUTH0_AUDIENCE: AUDIENCE,
+  OAUTH_ALLOWED_SUBJECTS: "user-under-test,user-no-exp,user",
+  OBS_AUTH_EVENTS_ENABLED: "false",
+  METADATA_FALLBACK_POLICY: "off",
+  JWKS_FETCH_TIMEOUT_MS: "2000",
+};
 
-function makeApp(mw: MiddlewareHandler) {
-  const app = new Hono();
-  app.use("*", mw);
-  app.get("/", (c) => c.json({ ok: true }));
-  app.post("/", (c) => c.json({ ok: true }));
-  return app;
-}
+Deno.test(
+  "requireAuth (OAuth enabled, x-brain-key door also on)",
+  withEnv([], TEST_ENV, runAuthOauthTest),
+);
 
-// Asserts the uniform auth-failure shape: HTTP 401 with the JSON-RPC
-// error envelope body. Since PR55-AUTH-001 every rejection reason shares this
-// transport status; the WWW-Authenticate challenge is asserted at the
-// call sites that pin the discovery payload, since some subtests pair
-// this with extra header assertions.
-async function assertUnauthorized401(
-  res: Response,
-  expectedId: string | number | null,
-): Promise<void> {
-  assertEquals(
-    res.status,
-    401,
-    "expected HTTP 401",
-  );
-  assertEquals(
-    res.headers.get("content-type")?.startsWith("application/json"),
-    true,
-    "envelope content-type is JSON",
-  );
-  assertEquals(
-    res.headers.get("cache-control"),
-    "no-store",
-    "envelope must not be cacheable",
-  );
-  const body = await res.json();
-  assertEquals(body.jsonrpc, "2.0");
-  assertEquals(body.error?.code, -32001);
-  assertEquals(
-    body.error?.message,
-    "Unauthorized: missing or invalid authentication.",
-  );
-  assertEquals(body.id, expectedId);
-}
-
-Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => {
-  // ─── Setup ─────────────────────────────────────────────────────────────
-  // Snapshot fetch and env so teardown can restore them.
-  const origFetch = globalThis.fetch;
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-  );
-
-  // Real RS256 key pair. The JWKS we publish over the mock fetch contains
-  // the public key; signing uses the private key.
-  const { publicKey, privateKey } = await generateKeyPair("RS256", {
-    extractable: true,
+async function runAuthOauthTest(t: Deno.TestContext): Promise<void> {
+  const fixture = await makeJwksFixture({
+    issuer: ISSUER,
+    audience: AUDIENCE,
+    jwksUrl: JWKS_URL,
   });
-  const publicJwk = await exportJWK(publicKey);
-  publicJwk.alg = "RS256";
-  publicJwk.kid = "test-key-1";
-  publicJwk.use = "sig";
-  const jwksBody = JSON.stringify({ keys: [publicJwk] });
-
-  // Install fetch mock BEFORE the dynamic import of auth.ts — jose's
-  // createRemoteJWKSet is called at module load when ENABLE_OAUTH is true
-  // and it needs to see the mocked fetch.
-  let jwksFetchCount = 0;
-  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
-    const url = typeof input === "string"
-      ? input
-      : input instanceof URL
-      ? input.href
-      : input.url;
-    if (url === JWKS_URL) {
-      jwksFetchCount++;
-      return Promise.resolve(
-        new Response(jwksBody, {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    }
-    return origFetch(input, init);
-  }) as typeof fetch;
-
-  // Required env BEFORE the dynamic import.
-  Deno.env.set("DB_PASSWORD", "test-password");
-  Deno.env.set("MCP_ACCESS_KEY", BRAIN_KEY);
-  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-  Deno.env.set("AUTH0_ISSUER", ISSUER);
-  Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
-  Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
-  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-  // Authorization allowlist (fail-closed): every subject this file mints —
-  // including the deliberately-broken tokens ("user-no-exp", "user"), so
-  // their 401s stay attributable to the exact claim defect under test
-  // rather than to the allowlist.
-  Deno.env.set("OAUTH_ALLOWED_SUBJECTS", "user-under-test,user-no-exp,user");
-  // disable audit emission; the audit module reads this at load.
-  Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
-  // short JWKS fetch timeout so the boot probe (intercepted by
-  // the fetch mock above) and any per-request refresh fail fast in tests
-  // rather than waiting the production 10 s default.
-  Deno.env.set("JWKS_FETCH_TIMEOUT_MS", "2000");
-
+  // Install before importing auth.ts: createRemoteJWKSet is configured at
+  // module load when the OAuth door is enabled.
+  const restoreFetch = fixture.installFetchMock();
   const { requireAuth, PROTECTED_RESOURCE_METADATA_URL } = await import(
     "./auth.ts"
   );
-  const app = makeApp(requireAuth);
+  const app = makeAuthTestApp(requireAuth);
 
-  // Helper closes over privateKey + the issuer/audience constants. Defined
-  // here (not at module scope) so it can capture the fresh keypair without
-  // a parameter shuffle.
-  async function signToken(opts: {
+  const signToken = (opts: {
     issuer?: string;
     audience?: string;
     expiresIn?: string;
@@ -176,21 +81,19 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
     kid?: string;
     alg?: string;
     privateKeyOverride?: CryptoKey;
-  }): Promise<string> {
-    const jwt = new SignJWT({ sub: "user-under-test" })
-      .setProtectedHeader({
+  }) =>
+    fixture.signToken({
+      issuer: opts.issuer,
+      audience: opts.audience,
+      expirationTime: opts.expiresIn,
+      notBefore: opts.notBefore,
+      protectedHeader: {
         alg: opts.alg ?? "RS256",
-        kid: opts.kid ?? "test-key-1",
-      })
-      .setIssuer(opts.issuer ?? ISSUER)
-      .setAudience(opts.audience ?? AUDIENCE)
-      .setIssuedAt()
-      .setExpirationTime(opts.expiresIn ?? "1h");
-    if (opts.notBefore) jwt.setNotBefore(opts.notBefore);
-    return await jwt.sign(opts.privateKeyOverride ?? (privateKey as CryptoKey));
-  }
+        kid: opts.kid ?? fixture.kid,
+      },
+      privateKey: opts.privateKeyOverride,
+    });
 
-  // ─── Tests (all wrapped in try/finally for guaranteed teardown) ───────
   try {
     await t.step(
       "module sanity: OAuth metadata URL is set when AUTH0_* configured",
@@ -203,13 +106,16 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
       },
     );
 
-    await t.step("Bearer: valid token → 200 (Bearer-only path)", async () => {
-      const token = await signToken({});
-      const res = await app.request("/", {
-        headers: { "authorization": `Bearer ${token}` },
-      });
-      assertEquals(res.status, 200);
-    });
+    await t.step(
+      "Bearer: valid token → 200 (Bearer-only path)",
+      async () => {
+        const token = await signToken({});
+        const res = await app.request("/", {
+          headers: { "authorization": `Bearer ${token}` },
+        });
+        assertEquals(res.status, 200);
+      },
+    );
 
     await t.step(
       "Bearer: brain-key absent + Bearer absent → 401 (missing-credentials 401)",
@@ -296,13 +202,10 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
         // was verified with a one-off Deno check before the fix —
         // pre-fix this exact request would have returned 200.
         //
-        // SignJWT here intentionally skips `.setExpirationTime()`.
-        const token = await new SignJWT({ sub: "user-no-exp" })
-          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-          .setIssuer(ISSUER)
-          .setAudience(AUDIENCE)
-          .setIssuedAt()
-          .sign(privateKey as CryptoKey);
+        const token = await fixture.signToken({
+          claims: { sub: "user-no-exp" },
+          expirationTime: false,
+        });
         const res = await app.request("/", {
           headers: { "authorization": `Bearer ${token}` },
         });
@@ -321,13 +224,11 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
         // disconnected after expiry until a human reauthenticated.
         // Sign with an `exp` 1 hour in the past.
         const past = Math.floor(Date.now() / 1000) - 3600;
-        const token = await new SignJWT({ sub: "user" })
-          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-          .setIssuer(ISSUER)
-          .setAudience(AUDIENCE)
-          .setIssuedAt(past - 7200)
-          .setExpirationTime(past)
-          .sign(privateKey as CryptoKey);
+        const token = await fixture.signToken({
+          claims: { sub: "user" },
+          issuedAt: past - 7200,
+          expirationTime: past,
+        });
         const res = await app.request("/", {
           headers: { "authorization": `Bearer ${token}` },
         });
@@ -365,7 +266,9 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
         // Generates a NEW key pair and signs with the attacker's private key. The
         // JWKS we publish only contains the original public key, so verification
         // must fail signature check.
-        const attacker = await generateKeyPair("RS256", { extractable: true });
+        const attacker = await generateKeyPair("RS256", {
+          extractable: true,
+        });
         const token = await signToken({
           privateKeyOverride: attacker.privateKey as CryptoKey,
         });
@@ -496,7 +399,7 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
       async () => {
         // Reset counter relative to its current value; earlier subtests already
         // triggered the fetch.
-        const start = jwksFetchCount;
+        const start = fixture.fetchCount;
         // Do 5 successful verifications back-to-back. With jose's default cooldown
         // (30s) and cacheMaxAge (10min), no new fetch should fire.
         for (let i = 0; i < 5; i++) {
@@ -507,19 +410,13 @@ Deno.test("requireAuth (OAuth enabled, x-brain-key door also on)", async (t) => 
           assertEquals(res.status, 200);
         }
         assertEquals(
-          jwksFetchCount,
+          fixture.fetchCount,
           start,
-          `expected no new JWKS fetch, saw ${jwksFetchCount - start} extra`,
+          `expected no new JWKS fetch, saw ${fixture.fetchCount - start} extra`,
         );
       },
     );
   } finally {
-    // ─── Teardown ──────────────────────────────────────────────────────
-    // Restore fetch and env to whatever they were before this test ran.
-    globalThis.fetch = origFetch;
-    for (const [k, v] of origEnv) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
+    restoreFetch();
   }
-});
+}

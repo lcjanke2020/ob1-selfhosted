@@ -3,25 +3,20 @@
 // stalls until the production AbortController fires. No real network is used.
 
 import { assert } from "@std/assert";
+import { withEnv } from "./api_test_support.ts";
 
 const FETCH_TIMEOUT_MS = 40;
 const ASSERTION_DEADLINE_MS = 250;
 const OLLAMA_URL = "http://ollama.invalid";
-
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "OBS_AUTH_EVENTS_ENABLED",
-  "METADATA_FALLBACK_POLICY",
-  "FETCH_TIMEOUT_MS",
-  "OLLAMA_URL",
-  "EMBED_DIM",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  MCP_ACCESS_KEY: "k".repeat(64),
+  OBS_AUTH_EVENTS_ENABLED: "false",
+  METADATA_FALLBACK_POLICY: "off",
+  FETCH_TIMEOUT_MS: String(FETCH_TIMEOUT_MS),
+  OLLAMA_URL,
+  EMBED_DIM: "1",
+};
 
 type Outcome =
   | { kind: "resolved"; value: number[] }
@@ -73,24 +68,8 @@ function stalledResponse(
   };
 }
 
-Deno.test("embed: timeout covers response body consumption", async (t) => {
-  const originalEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((key) => [key, Deno.env.get(key)]),
-  );
+async function testEmbeddingTimeout(t: Deno.TestContext): Promise<void> {
   const originalFetch = globalThis.fetch;
-
-  Deno.env.set("DB_PASSWORD", "test-password");
-  Deno.env.set("MCP_ACCESS_KEY", "k".repeat(64));
-  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-  Deno.env.delete("AUTH0_ISSUER");
-  Deno.env.delete("AUTH0_JWKS_URI");
-  Deno.env.delete("AUTH0_AUDIENCE");
-  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-  Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
-  Deno.env.set("FETCH_TIMEOUT_MS", String(FETCH_TIMEOUT_MS));
-  Deno.env.set("OLLAMA_URL", OLLAMA_URL);
-  Deno.env.set("EMBED_DIM", "1");
 
   let responseStatus = 200;
   let responsePrefix = "{";
@@ -106,10 +85,12 @@ Deno.test("embed: timeout covers response body consumption", async (t) => {
     return Promise.resolve(stalled.response);
   }) as typeof fetch;
 
-  try {
+  const run = withEnv([], TEST_ENV, async () => {
     const { embed } = await import("./embeddings.ts");
 
-    const assertTimesOutByDeadline = async (label: string): Promise<void> => {
+    const assertTimesOutByDeadline = async (
+      label: string,
+    ): Promise<void> => {
       const pending = embed(label);
       let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
       const deadline = new Promise<Outcome>((resolve) => {
@@ -160,12 +141,16 @@ Deno.test("embed: timeout covers response body consumption", async (t) => {
       responsePrefix = "backend warming";
       await assertTimesOutByDeadline("error body stalls");
     });
+  });
+  try {
+    await run();
   } finally {
     releaseBody();
     globalThis.fetch = originalFetch;
-    for (const [key, value] of originalEnv) {
-      if (value === undefined) Deno.env.delete(key);
-      else Deno.env.set(key, value);
-    }
   }
-});
+}
+
+Deno.test(
+  "embed: timeout covers response body consumption",
+  testEmbeddingTimeout,
+);

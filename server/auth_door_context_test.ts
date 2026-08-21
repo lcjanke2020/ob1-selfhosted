@@ -26,113 +26,60 @@
 // alternative to inventing a module-mocking harness).
 
 import { assertEquals } from "@std/assert";
-import { Hono, type MiddlewareHandler } from "hono";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import type { AuthContext } from "./auth_context.ts";
+import { generateKeyPair } from "jose";
+import {
+  makeAuthTestApp,
+  makeJwksFixture,
+  withEnv,
+} from "./api_test_support.ts";
 
 const BRAIN_KEY = "b".repeat(64);
 const ISSUER = "https://test.invalid/";
 const AUDIENCE = "https://test.invalid:8443/mcp";
 const JWKS_URL = "https://test.invalid/.well-known/jwks.json";
 
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "ENABLE_NATIVE_TOKENS",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "OAUTH_ALLOWED_SUBJECTS",
-  "OBS_AUTH_EVENTS_ENABLED",
-  "METADATA_FALLBACK_POLICY",
-  "JWKS_FETCH_TIMEOUT_MS",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  MCP_ACCESS_KEY: BRAIN_KEY,
+  AUTH0_ISSUER: ISSUER,
+  AUTH0_JWKS_URI: JWKS_URL,
+  AUTH0_AUDIENCE: AUDIENCE,
+  OAUTH_SERVICE_ACCOUNT_SUBJECTS: "generic-service-subject",
+  OAUTH_ALLOWED_SUBJECTS: [
+    "auth0|leo-source-marker-test",
+    "auth0-m2m-client@clients",
+    "generic-service-subject",
+    "Generic-Service-Subject",
+    "rfc9068-machine@clients",
+    "password-flow-user",
+    "auth0|fallthrough-test",
+  ].join(","),
+  OBS_AUTH_EVENTS_ENABLED: "false",
+  METADATA_FALLBACK_POLICY: "off",
+  JWKS_FETCH_TIMEOUT_MS: "2000",
+};
 
-// Sentinel downstream handler. Reads the auth context vars `requireAuth`
-// is expected to populate and surfaces them in the response so we can
-// assert on what was written. The `sub` shape matters: null is distinct
-// from undefined and from "" — keep all three observable.
-function makeApp(
-  mw: MiddlewareHandler<{ Variables: AuthContext }>,
-) {
-  const app = new Hono<{ Variables: AuthContext }>();
-  app.use("*", mw);
-  app.get("/", (c) =>
-    c.json({
-      door: c.get("door"),
-      sub: c.get("sub"),
-      tokenLabel: c.get("tokenLabel"),
-      subType: c.get("sub") === null ? "null" : typeof c.get("sub"),
-    }));
-  return app;
-}
+Deno.test(
+  "requireAuth sets door + sub on Hono context (door/sub stamping)",
+  withEnv([], TEST_ENV, runDoorContextTest),
+);
 
-Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", async (t) => {
-  // ─── Setup ─────────────────────────────────────────────────────────────
-  const origFetch = globalThis.fetch;
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-  );
-
-  const { publicKey, privateKey } = await generateKeyPair("RS256", {
-    extractable: true,
+async function runDoorContextTest(t: Deno.TestContext): Promise<void> {
+  const fixture = await makeJwksFixture({
+    issuer: ISSUER,
+    audience: AUDIENCE,
+    jwksUrl: JWKS_URL,
   });
-  const publicJwk = await exportJWK(publicKey);
-  publicJwk.alg = "RS256";
-  publicJwk.kid = "test-key-1";
-  publicJwk.use = "sig";
-  const jwksBody = JSON.stringify({ keys: [publicJwk] });
-
-  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
-    const url = typeof input === "string"
-      ? input
-      : input instanceof URL
-      ? input.href
-      : input.url;
-    if (url === JWKS_URL) {
-      return Promise.resolve(
-        new Response(jwksBody, {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    }
-    return origFetch(input, init);
-  }) as typeof fetch;
-
-  Deno.env.set("DB_PASSWORD", "test-password");
-  Deno.env.delete("ENABLE_NATIVE_TOKENS");
-  Deno.env.set("MCP_ACCESS_KEY", BRAIN_KEY);
-  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-  Deno.env.set("AUTH0_ISSUER", ISSUER);
-  Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
-  Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
-  Deno.env.set("OAUTH_SERVICE_ACCOUNT_SUBJECTS", "generic-service-subject");
-  // Authorization allowlist (fail-closed): every subject a step expects to
-  // reach 200 with. Deliberately includes the case-variant + unmapped-machine
-  // subjects — those steps assert door CLASSIFICATION, which requires the
-  // token to be admitted first. "forged-machine" stays off the list: that
-  // step's token dies at signature verification, before authorization.
-  Deno.env.set(
-    "OAUTH_ALLOWED_SUBJECTS",
-    [
-      "auth0|leo-source-marker-test",
-      "auth0-m2m-client@clients",
-      "generic-service-subject",
-      "Generic-Service-Subject",
-      "rfc9068-machine@clients",
-      "password-flow-user",
-      "auth0|fallthrough-test",
-    ].join(","),
-  );
-  Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
-  Deno.env.set("JWKS_FETCH_TIMEOUT_MS", "2000");
-
+  const restoreFetch = fixture.installFetchMock();
   const { requireAuth } = await import("./auth.ts");
-  const app = makeApp(requireAuth);
+  // The sentinel response keeps null distinct from undefined/empty string.
+  const app = makeAuthTestApp(requireAuth, (context) =>
+    context.json({
+      door: context.get("door"),
+      sub: context.get("sub"),
+      tokenLabel: context.get("tokenLabel"),
+      subType: context.get("sub") === null ? "null" : typeof context.get("sub"),
+    }));
 
   try {
     await t.step(
@@ -158,13 +105,9 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
       "Bearer success → door = 'funnel', sub = <verified jwt.sub>",
       async () => {
         const expectedSub = "auth0|leo-source-marker-test";
-        const token = await new SignJWT({ sub: expectedSub })
-          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-          .setIssuer(ISSUER)
-          .setAudience(AUDIENCE)
-          .setIssuedAt()
-          .setExpirationTime("1h")
-          .sign(privateKey as CryptoKey);
+        const token = await fixture.signToken({
+          claims: { sub: expectedSub },
+        });
         const res = await app.request("/", {
           headers: { "authorization": `Bearer ${token}` },
         });
@@ -181,16 +124,9 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
       "Auth0 client-credentials Bearer → door = 'service' with verified client sub",
       async () => {
         const expectedSub = "auth0-m2m-client@clients";
-        const token = await new SignJWT({
-          sub: expectedSub,
-          gty: "client-credentials",
-        })
-          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-          .setIssuer(ISSUER)
-          .setAudience(AUDIENCE)
-          .setIssuedAt()
-          .setExpirationTime("1h")
-          .sign(privateKey as CryptoKey);
+        const token = await fixture.signToken({
+          claims: { sub: expectedSub, gty: "client-credentials" },
+        });
         const res = await app.request("/", {
           headers: { "authorization": `Bearer ${token}` },
         });
@@ -206,13 +142,9 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
       "configured generic service subject → door = 'service' without gty claim",
       async () => {
         const expectedSub = "generic-service-subject";
-        const token = await new SignJWT({ sub: expectedSub })
-          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-          .setIssuer(ISSUER)
-          .setAudience(AUDIENCE)
-          .setIssuedAt()
-          .setExpirationTime("1h")
-          .sign(privateKey as CryptoKey);
+        const token = await fixture.signToken({
+          claims: { sub: expectedSub },
+        });
         const res = await app.request("/", {
           headers: { "authorization": `Bearer ${token}` },
         });
@@ -226,13 +158,9 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
     await t.step(
       "generic service-subject mapping is exact and case-sensitive",
       async () => {
-        const token = await new SignJWT({ sub: "Generic-Service-Subject" })
-          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-          .setIssuer(ISSUER)
-          .setAudience(AUDIENCE)
-          .setIssuedAt()
-          .setExpirationTime("1h")
-          .sign(privateKey as CryptoKey);
+        const token = await fixture.signToken({
+          claims: { sub: "Generic-Service-Subject" },
+        });
         const res = await app.request("/", {
           headers: { "authorization": `Bearer ${token}` },
         });
@@ -245,21 +173,14 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
       "Auth0 RFC 9068 M2M shape without gty stays funnel until mapped",
       async () => {
         const expectedSub = "rfc9068-machine@clients";
-        const token = await new SignJWT({
-          sub: expectedSub,
-          client_id: "rfc9068-machine",
-          jti: "rfc9068-token-id",
-        })
-          .setProtectedHeader({
-            alg: "RS256",
-            kid: "test-key-1",
-            typ: "at+jwt",
-          })
-          .setIssuer(ISSUER)
-          .setAudience(AUDIENCE)
-          .setIssuedAt()
-          .setExpirationTime("1h")
-          .sign(privateKey as CryptoKey);
+        const token = await fixture.signToken({
+          claims: {
+            sub: expectedSub,
+            client_id: "rfc9068-machine",
+            jti: "rfc9068-token-id",
+          },
+          protectedHeader: { typ: "at+jwt" },
+        });
         const res = await app.request("/", {
           headers: { "authorization": `Bearer ${token}` },
         });
@@ -273,16 +194,9 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
     await t.step(
       "non-client-credentials gty does not select the service door",
       async () => {
-        const token = await new SignJWT({
-          sub: "password-flow-user",
-          gty: "password",
-        })
-          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-          .setIssuer(ISSUER)
-          .setAudience(AUDIENCE)
-          .setIssuedAt()
-          .setExpirationTime("1h")
-          .sign(privateKey as CryptoKey);
+        const token = await fixture.signToken({
+          claims: { sub: "password-flow-user", gty: "password" },
+        });
         const res = await app.request("/", {
           headers: { "authorization": `Bearer ${token}` },
         });
@@ -295,16 +209,10 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
       "unverified gty claim cannot select the service door",
       async () => {
         const { privateKey: attackerKey } = await generateKeyPair("RS256");
-        const token = await new SignJWT({
-          sub: "forged-machine",
-          gty: "client-credentials",
-        })
-          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-          .setIssuer(ISSUER)
-          .setAudience(AUDIENCE)
-          .setIssuedAt()
-          .setExpirationTime("1h")
-          .sign(attackerKey as CryptoKey);
+        const token = await fixture.signToken({
+          claims: { sub: "forged-machine", gty: "client-credentials" },
+          privateKey: attackerKey as CryptoKey,
+        });
         const res = await app.request("/", {
           headers: { "authorization": `Bearer ${token}` },
         });
@@ -322,13 +230,7 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
         // source-marker change adds "sub" to verifyBearer's requiredClaims so
         // jose fails closed before the source-marker stamp ever runs.
         // (Mirror of the "no exp" test in auth_oauth_test.ts.)
-        const token = await new SignJWT({})
-          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-          .setIssuer(ISSUER)
-          .setAudience(AUDIENCE)
-          .setIssuedAt()
-          .setExpirationTime("1h")
-          .sign(privateKey as CryptoKey);
+        const token = await fixture.signToken({ claims: {} });
         const res = await app.request("/", {
           headers: { "authorization": `Bearer ${token}` },
         });
@@ -357,13 +259,7 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
             sub: invalidSub,
             gty: "client-credentials",
           };
-          const token = await new SignJWT(claims)
-            .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-            .setIssuer(ISSUER)
-            .setAudience(AUDIENCE)
-            .setIssuedAt()
-            .setExpirationTime("1h")
-            .sign(privateKey as CryptoKey);
+          const token = await fixture.signToken({ claims });
           const res = await app.request("/", {
             headers: { "authorization": `Bearer ${token}` },
           });
@@ -399,13 +295,9 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
       "invalid brain-key + valid Bearer → door = 'funnel' (fall-through honors Bearer)",
       async () => {
         const expectedSub = "auth0|fallthrough-test";
-        const token = await new SignJWT({ sub: expectedSub })
-          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-          .setIssuer(ISSUER)
-          .setAudience(AUDIENCE)
-          .setIssuedAt()
-          .setExpirationTime("1h")
-          .sign(privateKey as CryptoKey);
+        const token = await fixture.signToken({
+          claims: { sub: expectedSub },
+        });
         const res = await app.request("/", {
           headers: {
             "x-brain-key": "wrong-value",
@@ -419,10 +311,6 @@ Deno.test("requireAuth sets door + sub on Hono context (door/sub stamping)", asy
       },
     );
   } finally {
-    globalThis.fetch = origFetch;
-    for (const [k, v] of origEnv) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
+    restoreFetch();
   }
-});
+}

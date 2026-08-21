@@ -15,8 +15,11 @@
 // verification via jose, with globalThis.fetch intercepted for the key set.
 
 import { assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
-import { Hono, type MiddlewareHandler } from "hono";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import {
+  makeAuthTestApp,
+  makeJwksFixture,
+  withEnv,
+} from "./api_test_support.ts";
 
 const ISSUER = "https://test.invalid/";
 const AUDIENCE = "https://test.invalid:8443/mcp";
@@ -26,99 +29,43 @@ const ALLOWED_USER = "auth0|allowlisted-user";
 const ALLOWED_MACHINE = "allowlisted-machine@clients";
 const OUTSIDER = "auth0|verified-but-not-admitted";
 
-const ENV_KEYS = [
-  "DB_PASSWORD",
-  "ENABLE_NATIVE_TOKENS",
-  "MCP_ACCESS_KEY",
-  "MCP_ACCESS_KEY_PRINCIPAL",
-  "AUTH0_ISSUER",
-  "AUTH0_JWKS_URI",
-  "AUTH0_AUDIENCE",
-  "OAUTH_SERVICE_ACCOUNT_SUBJECTS",
-  "OAUTH_ALLOWED_SUBJECTS",
-  "OBS_AUTH_EVENTS_ENABLED",
-  "METADATA_FALLBACK_POLICY",
-  "JWKS_FETCH_TIMEOUT_MS",
-];
+const TEST_ENV = {
+  DB_PASSWORD: "test-password",
+  ENABLE_NATIVE_TOKENS: "false",
+  AUTH0_ISSUER: ISSUER,
+  AUTH0_JWKS_URI: JWKS_URL,
+  AUTH0_AUDIENCE: AUDIENCE,
+  OAUTH_ALLOWED_SUBJECTS: `${ALLOWED_USER},${ALLOWED_MACHINE}`,
+  OBS_AUTH_EVENTS_ENABLED: "false",
+  METADATA_FALLBACK_POLICY: "off",
+  JWKS_FETCH_TIMEOUT_MS: "2000",
+};
 
-// Echo handler so admitted requests expose the context the middleware set —
-// asserting on door/sub proves the allowlisted identity actually crossed
-// into the request context, not merely that some 200 came back.
-function makeApp(mw: MiddlewareHandler) {
-  const app = new Hono();
-  app.use("*", mw);
-  app.get("/", (c) =>
-    c.json({
-      door: c.get("door" as never),
-      sub: c.get("sub" as never),
-    }));
-  return app;
-}
+Deno.test(
+  "requireAuth OAUTH_ALLOWED_SUBJECTS gate (non-empty allowlist)",
+  withEnv([], TEST_ENV, runSubjectAllowlistTest),
+);
 
-Deno.test("requireAuth OAUTH_ALLOWED_SUBJECTS gate (non-empty allowlist)", async (t) => {
-  const origFetch = globalThis.fetch;
-  const origEnv = new Map<string, string | undefined>(
-    ENV_KEYS.map((k) => [k, Deno.env.get(k)]),
-  );
-
-  const { publicKey, privateKey } = await generateKeyPair("RS256", {
-    extractable: true,
+async function runSubjectAllowlistTest(t: Deno.TestContext): Promise<void> {
+  const fixture = await makeJwksFixture({
+    issuer: ISSUER,
+    audience: AUDIENCE,
+    jwksUrl: JWKS_URL,
   });
-  const publicJwk = await exportJWK(publicKey);
-  publicJwk.alg = "RS256";
-  publicJwk.kid = "test-key-1";
-  publicJwk.use = "sig";
-  const jwksBody = JSON.stringify({ keys: [publicJwk] });
-
-  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
-    const url = typeof input === "string"
-      ? input
-      : input instanceof URL
-      ? input.href
-      : input.url;
-    if (url === JWKS_URL) {
-      return Promise.resolve(
-        new Response(jwksBody, {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    }
-    return origFetch(input, init);
-  }) as typeof fetch;
-
-  // OAuth-only deployment shape, allowlist admitting exactly two subjects.
-  Deno.env.delete("MCP_ACCESS_KEY");
-  Deno.env.set("ENABLE_NATIVE_TOKENS", "false");
-  Deno.env.delete("MCP_ACCESS_KEY_PRINCIPAL");
-  Deno.env.set("DB_PASSWORD", "test-password");
-  Deno.env.set("AUTH0_ISSUER", ISSUER);
-  Deno.env.set("AUTH0_JWKS_URI", JWKS_URL);
-  Deno.env.set("AUTH0_AUDIENCE", AUDIENCE);
-  Deno.env.delete("OAUTH_SERVICE_ACCOUNT_SUBJECTS");
-  Deno.env.set(
-    "OAUTH_ALLOWED_SUBJECTS",
-    `${ALLOWED_USER},${ALLOWED_MACHINE}`,
-  );
-  Deno.env.set("OBS_AUTH_EVENTS_ENABLED", "false");
-  Deno.env.set("METADATA_FALLBACK_POLICY", "off");
-  Deno.env.set("JWKS_FETCH_TIMEOUT_MS", "2000");
-
+  const restoreFetch = fixture.installFetchMock();
   const { requireAuth } = await import("./auth.ts");
-  const app = makeApp(requireAuth);
+  // Echo the middleware-populated identity to prove the request crossed
+  // the authorization gate, rather than merely observing a 200 status.
+  const app = makeAuthTestApp(requireAuth, (context) =>
+    context.json({
+      door: context.get("door"),
+      sub: context.get("sub"),
+    }));
 
-  async function signToken(
+  const signToken = (
     sub: string,
     extraClaims: Record<string, unknown> = {},
-  ): Promise<string> {
-    return await new SignJWT({ sub, ...extraClaims })
-      .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-      .setIssuer(ISSUER)
-      .setAudience(AUDIENCE)
-      .setIssuedAt()
-      .setExpirationTime("1h")
-      .sign(privateKey as CryptoKey);
-  }
+  ) => fixture.signToken({ claims: { sub, ...extraClaims } });
 
   try {
     await t.step(
@@ -140,7 +87,9 @@ Deno.test("requireAuth OAUTH_ALLOWED_SUBJECTS gate (non-empty allowlist)", async
       "valid tenant token, non-allowlisted sub → 401 with the uniform envelope",
       async () => {
         const res = await app.request("/", {
-          headers: { "authorization": `Bearer ${await signToken(OUTSIDER)}` },
+          headers: {
+            "authorization": `Bearer ${await signToken(OUTSIDER)}`,
+          },
         });
         assertEquals(res.status, 401);
         assertEquals(res.headers.get("cache-control"), "no-store");
@@ -164,7 +113,9 @@ Deno.test("requireAuth OAUTH_ALLOWED_SUBJECTS gate (non-empty allowlist)", async
       "rejection must not echo the verified subject (no side-channel)",
       async () => {
         const res = await app.request("/", {
-          headers: { "authorization": `Bearer ${await signToken(OUTSIDER)}` },
+          headers: {
+            "authorization": `Bearer ${await signToken(OUTSIDER)}`,
+          },
         });
         assertEquals(res.status, 401);
         const raw = await res.text();
@@ -189,16 +140,19 @@ Deno.test("requireAuth OAUTH_ALLOWED_SUBJECTS gate (non-empty allowlist)", async
       },
     );
 
-    await t.step("allowlist match is exact and case-sensitive", async () => {
-      const res = await app.request("/", {
-        headers: {
-          "authorization": `Bearer ${await signToken(
-            ALLOWED_USER.toUpperCase(),
-          )}`,
-        },
-      });
-      assertEquals(res.status, 401);
-    });
+    await t.step(
+      "allowlist match is exact and case-sensitive",
+      async () => {
+        const res = await app.request("/", {
+          headers: {
+            "authorization": `Bearer ${await signToken(
+              ALLOWED_USER.toUpperCase(),
+            )}`,
+          },
+        });
+        assertEquals(res.status, 401);
+      },
+    );
 
     await t.step(
       "allowlisted machine subject → 200 through the service classification",
@@ -221,13 +175,11 @@ Deno.test("requireAuth OAUTH_ALLOWED_SUBJECTS gate (non-empty allowlist)", async
       "allowlist cannot resurrect a cryptographically bad token",
       async () => {
         // Allowlisted sub, expired token: verification runs first and wins.
-        const expired = await new SignJWT({ sub: ALLOWED_USER })
-          .setProtectedHeader({ alg: "RS256", kid: "test-key-1" })
-          .setIssuer(ISSUER)
-          .setAudience(AUDIENCE)
-          .setIssuedAt(Math.floor(Date.now() / 1000) - 7200)
-          .setExpirationTime(Math.floor(Date.now() / 1000) - 3600)
-          .sign(privateKey as CryptoKey);
+        const expired = await fixture.signToken({
+          claims: { sub: ALLOWED_USER },
+          issuedAt: Math.floor(Date.now() / 1000) - 7200,
+          expirationTime: Math.floor(Date.now() / 1000) - 3600,
+        });
         const res = await app.request("/", {
           headers: { "authorization": `Bearer ${expired}` },
         });
@@ -235,10 +187,6 @@ Deno.test("requireAuth OAUTH_ALLOWED_SUBJECTS gate (non-empty allowlist)", async
       },
     );
   } finally {
-    globalThis.fetch = origFetch;
-    for (const [k, v] of origEnv) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
+    restoreFetch();
   }
-});
+}
