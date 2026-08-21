@@ -483,8 +483,9 @@ export const asPool = (p: { connect(): Promise<unknown> }): Pool =>
 
 export function makeFakePool(
   handler: QueryHandler,
+  clientOptions: FakeClientOptions = {},
 ): { pool: Pool; fakePool: FakePool; client: FakeClient } {
-  const client = new FakeClient(handler);
+  const client = new FakeClient(handler, clientOptions);
   const fakePool = new FakePool(handler, { client });
   return { pool: asPool(fakePool), fakePool, client };
 }

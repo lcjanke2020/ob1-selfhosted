@@ -358,10 +358,15 @@ Deno.test("probeDbAtBoot: unknown configured workspace rejects before serving", 
 Deno.test("probeDbAtBoot: client released even when the validation query fails", async () => {
   const { pool: fakePool, client } = makeFakePool(() => {
     throw new Error("Connection refused (os error 111)");
-  });
+  }, { scriptValidation: true });
 
   await assertRejects(() => probeDbAtBoot(fakePool, "db:5432"), Error);
   assertEquals(client.releaseCalls, 1);
+  assertEquals(
+    client.queryArrayCalls.map(({ sql }) => sql),
+    ["SELECT 1"],
+    "the initial validation query must be the failing query",
+  );
 });
 
 Deno.test("probeDbAtBoot: hung connect warns after slowWarnAfterMs, then resolves cleanly", async () => {

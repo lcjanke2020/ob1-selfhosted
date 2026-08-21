@@ -93,6 +93,29 @@ Deno.test("JWKS fixture signs a token the remote verifier accepts", async () => 
   }
 });
 
+Deno.test("FakeClient answers the borrow probe implicitly unless scripted", async () => {
+  const implicitHandlerCalls: string[] = [];
+  const implicit = new FakeClient((sql) => {
+    implicitHandlerCalls.push(sql);
+    return { rows: [] };
+  });
+  assertEquals(await implicit.queryArray("SELECT 1"), { rows: [[1]] });
+  assertEquals(implicitHandlerCalls, []);
+
+  const scriptedHandlerCalls: string[] = [];
+  const scripted = new FakeClient((sql) => {
+    scriptedHandlerCalls.push(sql);
+    return { rows: [] };
+  }, { scriptValidation: true });
+  assertEquals(await scripted.queryArray("SELECT 1"), { rows: [] });
+  assertEquals(scriptedHandlerCalls, ["SELECT 1"]);
+  assertEquals(
+    [implicit, scripted].map((client) => client.queryArrayCalls.length),
+    [1, 1],
+    "both probes are recorded",
+  );
+});
+
 Deno.test("FakeClient rejects unscripted DB work", async () => {
   const client = new FakeClient(() => undefined);
   await assertRejects(
