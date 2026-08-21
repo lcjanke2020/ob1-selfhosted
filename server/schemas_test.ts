@@ -4,7 +4,7 @@
 // comments in schemas.ts: `.max` measures UTF-16 code units, the `.refine`
 // enforces the UTF-8 byte budget.
 
-import { assert, assertEquals, assertFalse } from "jsr:@std/assert@1";
+import { assert, assertEquals, assertFalse } from "@std/assert";
 import {
   captureThoughtBody,
   fetchThoughtSchema,
@@ -248,6 +248,18 @@ Deno.test("memory scope: exact upstream fields are strict and bounded", () => {
   );
   assertFalse(
     sessionSearchBody.safeParse({ query: "private", scop: {} }).success,
+  );
+  assertFalse(
+    searchThoughtsBody.safeParse({
+      query: "private",
+      scope: { workspace_id: "   " },
+    }).success,
+  );
+  assertFalse(
+    searchThoughtsBody.safeParse({
+      query: "private",
+      scope: { project_id: "x".repeat(129) },
+    }).success,
   );
   assertFalse(
     captureThoughtBody.safeParse({ content: "private", owner_subject: "alice" })

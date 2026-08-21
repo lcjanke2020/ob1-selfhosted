@@ -36,6 +36,7 @@
 import { Pool } from "postgres";
 import { getClient } from "./db_pool.ts";
 import { parseInetCandidate } from "./inet.ts";
+import { parseDbPort, parsePositiveIntegerSetting } from "./runtime_config.ts";
 
 // Local env reads only — intentionally NOT importing from ./config.ts so
 // the ingester doesn't get tangled in the mcp server's startup validation
@@ -51,17 +52,11 @@ function optional(name: string, fallback: string): string {
   return Deno.env.get(name)?.trim() || fallback;
 }
 function optionalInt(name: string, fallback: number): number {
-  const raw = Deno.env.get(name)?.trim();
-  if (!raw) return fallback;
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isInteger(n) || n <= 0) {
-    throw new Error(`Invalid integer env var ${name}: "${raw}"`);
-  }
-  return n;
+  return parsePositiveIntegerSetting(name, Deno.env.get(name), fallback);
 }
 
 const DB_HOST = required("DB_HOST");
-const DB_PORT = optionalInt("DB_PORT", 5432);
+const DB_PORT = parseDbPort(Deno.env.get("DB_PORT"));
 const DB_NAME = optional("DB_NAME", "openbrain_logs");
 
 /**

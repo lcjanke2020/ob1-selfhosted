@@ -11,20 +11,11 @@ import {
   listAccessTokens,
   revokeAccessToken,
 } from "./access_tokens.ts";
+import { parseDbPort } from "./runtime_config.ts";
 
 function env(name: string, fallback?: string): string {
   const value = Deno.env.get(name)?.trim() || fallback;
   if (!value) throw new Error(`Missing required env var: ${name}`);
-  return value;
-}
-
-function port(): number {
-  const raw = env("DB_PORT", "5432");
-  if (!/^[0-9]+$/.test(raw)) throw new Error("DB_PORT must be an integer");
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 1 || value > 65_535) {
-    throw new Error("DB_PORT must be between 1 and 65535");
-  }
   return value;
 }
 
@@ -136,7 +127,7 @@ async function main(): Promise<number> {
   const pool = new Pool(
     {
       hostname: env("DB_HOST", "127.0.0.1"),
-      port: port(),
+      port: parseDbPort(Deno.env.get("DB_PORT")),
       database: env("DB_NAME", "openbrain"),
       user: env("DB_USER", "openbrain_token_admin"),
       password: env("DB_PASSWORD"),

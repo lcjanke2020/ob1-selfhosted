@@ -1,6 +1,6 @@
 // Regression coverage for the complete Ollama embedding-response deadline.
 // Hermetic: fetch returns headers immediately, then a signal-aware body stream
-// stalls until the production AbortController fires. No real network is used.
+// stalls until the shared bounded-fetch deadline fires. No real network is used.
 
 import { assert } from "@std/assert";
 import { withEnv } from "./api_test_support.ts";
