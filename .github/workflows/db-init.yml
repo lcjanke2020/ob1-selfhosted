@@ -106,12 +106,23 @@ jobs:
       # Dedicated create/list/revoke role for the native-token smoke.
       OPENBRAIN_TOKEN_ADMIN_PASSWORD: ci_token_admin_pw
     steps:
-      # Same fork-safe ref pattern as ci.yml.
+      # Keep untrusted PR code in the PR cache scope. Trusted push/manual runs
+      # use their event SHA in the separate step below.
       - name: Checkout PR head safely
+        if: github.event_name == 'pull_request'
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout trusted event ref
+        if: github.event_name != 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Setup Deno
         uses: denoland/setup-deno@v2
@@ -136,11 +147,20 @@ jobs:
       OPENBRAIN_LOGS_ROLLUP_PASSWORD: ci_sink_rollup_pw
       OPENBRAIN_MONITOR_PASSWORD: ci_sink_monitor_pw
     steps:
-      # Same fork-safe ref pattern as ci.yml.
+      # Keep untrusted PR code in the PR cache scope. Trusted push/manual runs
+      # use their event SHA in the separate step below.
       - name: Checkout PR head safely
+        if: github.event_name == 'pull_request'
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Checkout trusted event ref
+        if: github.event_name != 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Ingress rollup units parse (mirror of the app-qube check)
