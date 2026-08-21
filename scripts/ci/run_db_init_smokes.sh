@@ -68,7 +68,7 @@ cleanup() {
       echo "DB-init smoke failed; container logs follow" >&2
       docker logs "$DB_INIT_CONTAINER" >&2 || true
     fi
-    docker rm -f "$DB_INIT_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f -v "$DB_INIT_CONTAINER" >/dev/null 2>&1 || true
   fi
   if [[ -n "$created_runner_temp" ]]; then
     rm -rf -- "$created_runner_temp"
@@ -143,7 +143,7 @@ start_database() {
     "$image" >/dev/null; then
     # Docker may create the named container before failing to bind its port.
     # The name was proven absent above, so any such residue belongs to us.
-    docker rm -f "$DB_INIT_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f -v "$DB_INIT_CONTAINER" >/dev/null 2>&1 || true
     return 1
   fi
   container_started=1
