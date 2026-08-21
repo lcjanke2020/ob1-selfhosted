@@ -1,11 +1,13 @@
 # Database CI smoke scripts
 
-The corpus half of `.github/workflows/db-init.yml` is runnable outside GitHub
-Actions through `run_db_init_smokes.sh`. The runner starts an ephemeral pgvector
-container with the repository's real init mounts, runs the requested families,
-and removes the container on success or failure.
+Both database halves of `.github/workflows/db-init.yml` are runnable outside
+GitHub Actions. Each runner anchors itself to the checkout containing the
+script, pins CI-only fixture values, names the active family and invariant, and
+removes its containers and volumes on success or failure.
 
-## Prerequisites
+## Corpus runner
+
+### Prerequisites
 
 Run from a checkout with Bash 4+, Docker, and Deno 2.9.x. The `summary` family
 also requires `systemd-analyze`. Docker must be able to bind loopback port
@@ -17,7 +19,7 @@ inheriting deployment values from the caller's environment. It can therefore be
 invoked by absolute path from outside the checkout; `DB_SMOKE_PORT` remains an
 intentional caller override.
 
-## Commands
+### Commands
 
 | Family            | Local command                                 | Coverage                                                                      |
 | ----------------- | --------------------------------------------- | ----------------------------------------------------------------------------- |
@@ -39,3 +41,37 @@ scripts/ci/run_db_init_smokes.sh grants retirement
 The documented runner form makes fixture ownership and multi-family reuse
 explicit. Invoking an individual family file directly bootstraps the same runner
 for that family.
+
+## Log-sink runner
+
+### Prerequisites
+
+Run from a checkout with Bash 4+, Docker, the Docker Compose plugin, and
+`systemd-analyze`. No host port is opened: the primary sink and every lifecycle
+fixture use a Unix socket inside a `--network none` container. The image pin is
+derived from the ingress-qube Compose file.
+
+The runner ignores inherited deployment database names, credentials, images,
+workspace paths, and container names. Local scratch data stays under
+`RUNNER_TEMP`, `TMPDIR`, or a mode-0700 per-user directory under `/tmp`.
+
+### Commands
+
+| Family              | Local command                                 | Coverage                                                                                 |
+| ------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| All log-sink checks | `scripts/ci/run_log_sink_smokes.sh all`       | CI-equivalent preflight plus every family below                                          |
+| Preflight           | `scripts/ci/run_log_sink_smokes.sh preflight` | Ingress summary service/timer parsing and calendar                                       |
+| Lifecycle           | `scripts/ci/run_log_sink_smokes.sh lifecycle` | Assertion-gated pre-marker adoption, preserved history, and partial-init restart refusal |
+| Contract            | `scripts/ci/run_log_sink_smokes.sh contract`  | Durable marker, socket-only boundary, exact role grants, SCRAM, mutation matrix          |
+| Rollup              | `scripts/ci/run_log_sink_smokes.sh rollup`    | Late arrivals, retention ordering, snapshot concurrency, and bounded top-3 sketches      |
+| Summary wrapper     | `scripts/ci/run_log_sink_smokes.sh wrapper`   | Target-pinned sink role, socket, SQL, database, retention, and report shape              |
+
+Multiple primary-container families share one fresh fixture:
+
+```sh
+scripts/ci/run_log_sink_smokes.sh contract rollup wrapper
+```
+
+The lifecycle family owns separate adoption and failed-init volumes. Invoking a
+checked-in `log_sink_*_smoke.sh` file directly bootstraps the corresponding
+runner family.
