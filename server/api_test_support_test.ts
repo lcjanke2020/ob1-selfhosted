@@ -116,6 +116,18 @@ Deno.test("FakeClient answers the borrow probe implicitly unless scripted", asyn
   );
 });
 
+Deno.test("FakeClient converts handler throws to rejected promises", async () => {
+  const client = new FakeClient(() => {
+    throw new Error("handler failed");
+  });
+  const arrayResult = client.queryArray("SELECT array_failure");
+  const objectResult = client.queryObject("SELECT object_failure");
+  assertStrictEquals(arrayResult instanceof Promise, true);
+  assertStrictEquals(objectResult instanceof Promise, true);
+  await assertRejects(() => arrayResult, Error, "handler failed");
+  await assertRejects(() => objectResult, Error, "handler failed");
+});
+
 Deno.test("FakeClient rejects unscripted DB work", async () => {
   const client = new FakeClient(() => undefined);
   await assertRejects(

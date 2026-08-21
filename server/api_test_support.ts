@@ -408,8 +408,13 @@ export class FakeClient {
         sql.trim() === "SELECT 1"
       ? implicitQueryArrayResult(sql)
       : undefined;
-    const result = implicitValidation ?? this.handler(sql, params) ??
-      implicitQueryArrayResult(sql);
+    let result: QueryResult | undefined;
+    try {
+      result = implicitValidation ?? this.handler(sql, params) ??
+        implicitQueryArrayResult(sql);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     if (!result) {
       return Promise.reject(
         new Error(
@@ -425,7 +430,12 @@ export class FakeClient {
     params: unknown[] = [],
   ): Promise<{ rows: T[] }> {
     this.queryObjectCalls.push({ sql, params });
-    const r = this.handler(sql, params);
+    let r: QueryResult | undefined;
+    try {
+      r = this.handler(sql, params);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     // Every scoped service resolves the registry before doing work. Keep the
     // default legacy workspace implicit in existing hermetic tests; focused
     // scope tests can override by returning their own row (or `{rows: []}`).
