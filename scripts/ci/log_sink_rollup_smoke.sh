@@ -140,8 +140,13 @@ lock_ctl="$lock_dir/lock_ctl"
 mkfifo "$lock_ctl"
 locker_pid=
 rollup_pid=
+lock_fd=
 cleanup_concurrency() {
   local rc=$1
+  if [[ -n "$lock_fd" ]]; then
+    exec {lock_fd}>&-
+    lock_fd=
+  fi
   for pid in "$rollup_pid" "$locker_pid"; do
     if [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1; then
       kill "$pid" >/dev/null 2>&1 || true
@@ -153,15 +158,16 @@ cleanup_concurrency() {
 }
 trap 'cleanup_concurrency "$?"' EXIT
 
-{
-  echo "BEGIN;
-        SELECT 1 FROM funnel_access_summary
-        WHERE day = (now() AT TIME ZONE 'UTC')::date - 31
-          AND socket = 'tailnet' AND status_class = '2xx'
-        FOR UPDATE;"
-  cat "$lock_ctl"
-} | sink_psql "$POSTGRES_USER" "$POSTGRES_PASSWORD" >/dev/null &
+sink_psql "$POSTGRES_USER" "$POSTGRES_PASSWORD" \
+  < "$lock_ctl" >/dev/null &
 locker_pid=$!
+exec {lock_fd}> "$lock_ctl"
+printf '%s\n' \
+  "BEGIN;
+   SELECT 1 FROM funnel_access_summary
+   WHERE day = (now() AT TIME ZONE 'UTC')::date - 31
+     AND socket = 'tailnet' AND status_class = '2xx'
+   FOR UPDATE;" >&"$lock_fd"
 
 # Wait until the locker's backend is parked idle in its open transaction.
 locker_count=0
@@ -199,7 +205,9 @@ sink_super_sql \
    VALUES (now() - interval '31 days', 'tailnet', 200, 'rr-concurrent')" \
   >/dev/null
 
-echo "COMMIT;" > "$lock_ctl"
+printf '%s\n' "COMMIT;" >&"$lock_fd"
+exec {lock_fd}>&-
+lock_fd=
 wait "$rollup_pid" || {
   echo "rollup transaction failed" >&2
   exit 1

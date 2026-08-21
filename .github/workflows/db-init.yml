@@ -154,4 +154,6 @@ jobs:
             POSTGRES_PASSWORD=ignored_password \
             PG_IMAGE=ignored_image \
             LOG_SINK_CONTAINER=ignored_container \
+            COMPOSE_PROJECT_NAME=openbrain-ingress \
+            COMPOSE_FILE="$RUNNER_TEMP/ignored-compose.yml" \
             bash "${{ github.workspace }}/scripts/ci/run_log_sink_smokes.sh" all

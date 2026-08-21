@@ -52,8 +52,9 @@ fixture use a Unix socket inside a `--network none` container. The image pin is
 derived from the ingress-qube Compose file.
 
 The runner ignores inherited deployment database names, credentials, images,
-workspace paths, and container names. Local scratch data stays under
-`RUNNER_TEMP`, `TMPDIR`, or a mode-0700 per-user directory under `/tmp`.
+workspace paths, Compose project/file selectors, and container names. Local
+scratch data stays under `RUNNER_TEMP`, `TMPDIR`, or a mode-0700 per-user
+directory under `/tmp`.
 
 ### Commands
 

@@ -38,7 +38,8 @@ for family in "$@"; do
 done
 
 # This runner owns throwaway fixtures. Deployment values from the caller must
-# never select its database, credentials, image, checkout, or container names.
+# never select its database, credentials, image, checkout, Compose project, or
+# container names.
 export POSTGRES_DB=openbrain_logs
 export POSTGRES_USER=postgres
 export POSTGRES_PASSWORD=ci_sink_superuser_pw
@@ -46,6 +47,11 @@ export OPENBRAIN_INGESTER_PASSWORD=ci_sink_ingester_pw
 export OPENBRAIN_LOGS_ROLLUP_PASSWORD=ci_sink_rollup_pw
 export OPENBRAIN_MONITOR_PASSWORD=ci_sink_monitor_pw
 export LOG_SINK_RUNNER_ACTIVE=1
+# Process-environment values override Compose env files. Scrub every selector
+# that could redirect a lifecycle fixture or its adoption helper to a caller's
+# deployment; the fixture supplies its own project and file explicitly.
+unset COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_PATH_SEPARATOR \
+  COMPOSE_PROFILES COMPOSE_ENV_FILES
 
 created_runner_temp=
 if [[ -z "${RUNNER_TEMP:-}" ]]; then
@@ -77,7 +83,7 @@ cleanup() {
       echo "Log-sink smoke failed; primary container logs follow" >&2
       docker logs "$LOG_SINK_CONTAINER" >&2 || true
     fi
-    docker rm -f "$LOG_SINK_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f -v "$LOG_SINK_CONTAINER" >/dev/null 2>&1 || true
   fi
   if [[ -n "$created_runner_temp" ]]; then
     rm -rf -- "$created_runner_temp"
@@ -149,7 +155,7 @@ start_sink() {
     --entrypoint /bin/sh \
     "$PG_IMAGE" /usr/local/bin/openbrain-log-sink-entrypoint.sh \
     postgres -c listen_addresses= >/dev/null; then
-    docker rm -f "$LOG_SINK_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f -v "$LOG_SINK_CONTAINER" >/dev/null 2>&1 || true
     return 1
   fi
   container_started=1
