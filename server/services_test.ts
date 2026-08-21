@@ -50,23 +50,23 @@ function sessionSearchRow(id: number, score = 0.9) {
   };
 }
 
-Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
-  await withEnv([], TEST_ENV, async () => {
-    const {
-      captureSessionFromToml,
-      captureThoughtWithMetadata,
-      fetchThoughtInScope,
-      listSessionsInScope,
-      NotFoundError,
-      searchSessionsByQuery,
-      searchThoughtsByQuery,
-      updateSessionStatusInScope,
-      UpstreamError,
-      ValidationError,
-    } = await import("./services.ts");
+await withEnv([], TEST_ENV, async () => {
+  const {
+    captureSessionFromToml,
+    captureThoughtWithMetadata,
+    fetchThoughtInScope,
+    listSessionsInScope,
+    NotFoundError,
+    searchSessionsByQuery,
+    searchThoughtsByQuery,
+    updateSessionStatusInScope,
+    UpstreamError,
+    ValidationError,
+  } = await import("./services.ts");
 
+  function registerServiceTests(): void {
     // ─── captureThoughtWithMetadata ───────────────────────────────────
-    await t.step(
+    Deno.test(
       "thought capture: persists versioned caller assertions beside verified transport stamps",
       async () => {
         let captured: unknown[] = [];
@@ -128,7 +128,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "thought capture: via 'mcp' persists source and server-owned classifier stamps",
       async () => {
         const pool = new FakePool((sql, params) =>
@@ -167,7 +167,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "thought capture: service auth persists machine label and verified subject",
       async () => {
         const pool = new FakePool((sql, params) =>
@@ -205,7 +205,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "thought capture: native token label is server-owned attribution",
       async () => {
         const pool = new FakePool((sql, params) =>
@@ -237,7 +237,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "thought capture: reserved metadata keys cannot be forged by an extractor",
       async () => {
         let eventInsert: unknown[] = [];
@@ -326,7 +326,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "thought capture: audit insert failure rolls back the thought upsert",
       async () => {
         let rolledBack = false;
@@ -377,7 +377,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "thought capture: direct service callers cannot persist empty provenance",
       async () => {
         const pool = new FakePool(() => {
@@ -401,7 +401,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "thought capture: embed failure → UpstreamError with the original message",
       async () => {
         const pool = new FakePool(() => undefined);
@@ -420,7 +420,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
     );
 
     // ─── searchThoughtsByQuery / searchSessionsByQuery ────────────────
-    await t.step(
+    Deno.test(
       "thought search: embeds the query and passes bounds through",
       async () => {
         let captured: unknown[] = [];
@@ -467,7 +467,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "thought search: include and any-match exclusions reach canonical SQL",
       async () => {
         let capturedSql = "";
@@ -550,7 +550,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "thought search: filtered query failures roll back the local HNSW setting",
       async () => {
         const statements: string[] = [];
@@ -591,7 +591,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "thought search: direct callers fail malformed filters before embedding",
       async () => {
         const pool = new FakePool(() => undefined);
@@ -611,7 +611,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "thought search: direct callers reject oversized queries before embedding",
       async () => {
         const pool = new FakePool(() => undefined);
@@ -634,7 +634,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "thought fetch: direct callers reject malformed UUIDs before DB work",
       async () => {
         const pool = new FakePool(() => undefined);
@@ -647,7 +647,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step("session search: embed failure → UpstreamError", async () => {
+    Deno.test("session search: embed failure → UpstreamError", async () => {
       const pool = new FakePool(() => undefined);
       const { deps, message } = makeEmbedDownDeps();
       await assertRejects(
@@ -662,7 +662,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       );
     });
 
-    await t.step(
+    Deno.test(
       "session search: direct callers reject invalid queries before DB or embedding",
       async () => {
         const pool = new FakePool(() => undefined);
@@ -691,7 +691,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step("session search: filters flow into SQL params", async () => {
+    Deno.test("session search: filters flow into SQL params", async () => {
       let captured: unknown[] = [];
       let capturedSql = "";
       let hnswDepth: unknown[] = [];
@@ -751,7 +751,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       );
     });
 
-    await t.step(
+    Deno.test(
       "session search: custom similarity threshold is validated and applied",
       async () => {
         let captured: unknown[] = [];
@@ -808,7 +808,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "session search: ANN underfill retries through the exact materialized path",
       async () => {
         const statements: string[] = [];
@@ -851,7 +851,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "session search: query failure rolls back transaction-local HNSW controls",
       async () => {
         const statements: string[] = [];
@@ -885,7 +885,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
     );
 
     // ─── captureSessionFromToml ───────────────────────────────────────
-    await t.step(
+    Deno.test(
       "session capture (fresh): INSERT path, embeds, created + reembedded true",
       async () => {
         let insertParams: unknown[] = [];
@@ -921,7 +921,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "session capture: service auth stamps source and verified client subject",
       async () => {
         let insertParams: unknown[] = [];
@@ -949,7 +949,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "session capture: native token label supplies non-secret source attribution",
       async () => {
         let insertParams: unknown[] = [];
@@ -977,7 +977,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "session capture (unknown id): NotFoundError BEFORE any embed is paid for",
       async () => {
         const pool = new FakePool((sql) => {
@@ -999,7 +999,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "session lifecycle status survives recapture when status is omitted",
       async () => {
         let storedStatus = "active";
@@ -1072,7 +1072,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "session capture (unchanged hash): skips embed, passes null embedding, reembedded false",
       async () => {
         const toml = 'id = 7\ntitle = "same"\nsummary = "unchanged"';
@@ -1109,7 +1109,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "session capture (changed hash): re-embeds and reembedded true",
       async () => {
         const pool = new FakePool((sql) => {
@@ -1132,7 +1132,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step("session capture: bad TOML → ValidationError", async () => {
+    Deno.test("session capture: bad TOML → ValidationError", async () => {
       const pool = new FakePool(() => undefined);
       const deps = makeDeps();
       await assertRejects(
@@ -1149,7 +1149,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       assertEquals(pool.connectCalls, 0);
     });
 
-    await t.step(
+    Deno.test(
       "session capture: invalid field types fail before embedding or DB work",
       async () => {
         const invalidDocs = [
@@ -1177,7 +1177,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
       },
     );
 
-    await t.step(
+    Deno.test(
       "session dates and list bounds fail before embedding or DB casts",
       async () => {
         const capturePool = new FakePool(() => undefined);
@@ -1237,5 +1237,7 @@ Deno.test("services (orchestration shared by MCP + REST)", async (t) => {
         ]);
       },
     );
-  })();
-});
+  }
+
+  registerServiceTests();
+})();
