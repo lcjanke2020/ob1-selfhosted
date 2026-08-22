@@ -45,6 +45,47 @@ sink_super_query "revoke select on funnel_access_log from public;" >/dev/null
 run_sink_assertion | \
   grep -F 'log sink: authorization/topology invariants OK'
 echo "monitor-free init passed; PUBLIC drift was rejected and clean state restored"
+
+log_sink_step "Permanence gate rejects a same-column view replacement"
+# Keep the destructive replacement and assertion in one transaction. The
+# expected ON_ERROR_STOP disconnect rolls the DDL back; the final clean run
+# proves the canonical table was restored before this fixture is discarded.
+if relation_output=$(
+  {
+    cat <<'SQL'
+BEGIN;
+DROP TABLE funnel_access_summary;
+CREATE VIEW funnel_access_summary AS
+SELECT NULL::date AS day,
+       NULL::text AS socket,
+       NULL::text AS status_class,
+       NULL::bigint AS request_count,
+       NULL::bigint AS unique_ips,
+       NULL::integer AS duration_ms_p50,
+       NULL::integer AS duration_ms_p95,
+       NULL::jsonb AS top_paths,
+       NULL::jsonb AS top_user_agents,
+       NULL::timestamptz AS computed_at
+WHERE false;
+GRANT SELECT, INSERT, UPDATE, DELETE ON funnel_access_summary
+  TO openbrain_logs_rollup;
+SQL
+    cat db/log-sink/02-log-sink-assertion.sql
+  } | sink_psql "$POSTGRES_USER" "$POSTGRES_PASSWORD" -f - 2>&1
+); then
+  echo "assertion missed a same-name view replacing a sink table" >&2
+  exit 1
+fi
+grep -Fq \
+  'data relations must be permanent base tables; found public.funnel_access_summary(kind=v,persistence=p)' \
+  <<< "$relation_output" || {
+  echo "assertion did not identify the same-name view replacement" >&2
+  echo "$relation_output" >&2
+  exit 1
+}
+run_sink_assertion | \
+  grep -F 'log sink: authorization/topology invariants OK'
+echo "same-column view replacement rejected; transaction rolled back cleanly"
 fi
 
 if [[ "$phase" == all || "$phase" == baseline ]]; then

@@ -30,10 +30,11 @@
 # Enforcement now sits in dom0/qrexec policy, below anything this qube can
 # reach.
 #
-# Credentials: this qube holds the INSERT-only ingester credential, the sink's
-# administrative-only superuser, and the rollup role — all three for a LOCAL cluster
-# whose entire contents are request metadata. It carries no credential of any
-# kind for the corpus. Note the deliberate absence of anything named
+# Credentials: this qube holds three required LOCAL-sink credentials: the
+# INSERT-only ingester, administrative-only superuser, and rollup role. When
+# provisioned, it also holds the optional monitor credential. The cluster's
+# entire contents are request metadata. It carries no credential of any kind
+# for the corpus. Note the deliberate absence of anything named
 # OPENBRAIN_APP_PASSWORD: the sink's rollup role is openbrain_logs_rollup
 # precisely so no secret on this qube shares a name with an app-role secret.
 #
