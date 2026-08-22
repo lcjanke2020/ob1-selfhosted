@@ -8,8 +8,9 @@
 -- system.
 --
 -- Lives in its own `sessions` schema. `public.thoughts` is untouched, so
--- upstream `thoughts` merges stay clean. The monitor relation allowlist in
--- 03-grants-assertion.sql deliberately scans this schema too.
+-- upstream `thoughts` merges stay clean. The role-independent PUBLIC ACL and
+-- token-administrator sideways-access scans in 03-grants-assertion.sql include
+-- this schema too.
 --
 -- Embedding dimension is 768 to match nomic-embed-text (EMBED_DIM). It is NOT
 -- pinned independently of OB — if EMBED_MODEL/EMBED_DIM change ),

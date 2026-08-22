@@ -124,8 +124,9 @@ services:
           create_host_path: true
           selinux: z
 
-  # Funnel request-metadata cluster. It has only the two db/log-sink relations,
-  # no corpus schema or credential, no network, and no TCP listener even on lo.
+  # Funnel request-metadata cluster. Its application tables are exactly two
+  # permanent tables; sequences/indexes are outside that count. It has no corpus
+  # schema or credential, no network, and no TCP listener even on lo.
   log-sink:
     image: postgres:17-alpine
     restart: unless-stopped
@@ -137,7 +138,7 @@ services:
     environment:
       POSTGRES_DB: ${LOG_SINK_DB:-openbrain_logs}
       POSTGRES_USER: ${LOG_SINK_SUPERUSER:-postgres}
-      POSTGRES_PASSWORD: ${LOG_SINK_SUPERUSER_PASSWORD:?set LOG_SINK_SUPERUSER_PASSWORD (the log sink's init-only superuser)}
+      POSTGRES_PASSWORD: ${LOG_SINK_SUPERUSER_PASSWORD:?set LOG_SINK_SUPERUSER_PASSWORD (the log sink's administrative superuser)}
       # Stock local trust would erase the role boundary for every process that
       # can reach the shared socket. Require SCRAM on unix sockets as well.
       POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256

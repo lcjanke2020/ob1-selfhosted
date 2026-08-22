@@ -1,7 +1,7 @@
 -- Daily summary + retention enforcement — the FUNNEL ACCESS half.
 --
--- Owns exactly two relations: `funnel_access_log` (raw, 30-day) and
--- `funnel_access_summary` (aggregate, 365-day). It touches nothing else, and
+-- Reads/writes exactly two persistent data tables: `funnel_access_log` (raw,
+-- 30-day) and `funnel_access_summary` (aggregate, 365-day). It touches nothing else, and
 -- in particular it does NOT touch `mcp_auth_events` — that table's retention
 -- and report live in the companion file, db/summarize_auth_events.sql.
 --

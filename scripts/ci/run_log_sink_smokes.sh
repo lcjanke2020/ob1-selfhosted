@@ -10,7 +10,7 @@ export CI_REPO_ROOT GITHUB_WORKSPACE="$CI_REPO_ROOT"
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/ci/run_log_sink_smokes.sh [all|preflight|lifecycle|contract|rollup|wrapper]...
+Usage: scripts/ci/run_log_sink_smokes.sh [all|preflight|lifecycle|monitor-absent|contract|rollup|wrapper]...
 
 Examples:
   scripts/ci/run_log_sink_smokes.sh lifecycle
@@ -24,7 +24,7 @@ if (( $# == 0 )); then
 fi
 for family in "$@"; do
   case "$family" in
-    all|preflight|lifecycle|contract|rollup|wrapper) ;;
+    all|preflight|lifecycle|monitor-absent|contract|rollup|wrapper) ;;
     -h|--help)
       usage
       exit 0
@@ -214,6 +214,21 @@ start_sink() {
   }
 }
 
+run_monitor_absent() {
+  local primary_container=$LOG_SINK_CONTAINER
+  local monitor_password=$OPENBRAIN_MONITOR_PASSWORD
+
+  export LOG_SINK_CONTAINER="${LOG_SINK_TOKEN}-monitor-absent"
+  unset OPENBRAIN_MONITOR_PASSWORD
+  start_sink || return
+  bash scripts/ci/log_sink_contract_smoke.sh monitor-absent || return
+  docker rm -f -v "$LOG_SINK_CONTAINER" >/dev/null || return
+  container_started=0
+
+  export LOG_SINK_CONTAINER=$primary_container
+  export OPENBRAIN_MONITOR_PASSWORD=$monitor_password
+}
+
 requested=("$@")
 run_all=0
 if [[ " ${requested[*]} " == *" all "* ]]; then
@@ -239,6 +254,10 @@ if (( run_all )) || [[ " ${requested[*]} " == *" lifecycle "* ]]; then
   }
   run_family "adoption and partial-init lifecycle" \
     bash scripts/ci/log_sink_lifecycle_smoke.sh
+fi
+
+if (( run_all )) || [[ " ${requested[*]} " == *" monitor-absent "* ]]; then
+  run_family "monitor-optional fresh init" run_monitor_absent
 fi
 
 main_requested=()

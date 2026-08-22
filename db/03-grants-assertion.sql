@@ -27,19 +27,27 @@
 --      a live DB and the assertion exercises the LIVE catalog state
 --      without mutating anything — no REVOKE+GRANT to wipe the drift
 --      first. Superuser is required only because pg_hba_file_rules restricts
---      its contents; the assertion remains read-only. This is the intended
---      contract.
+--      its contents; the assertion remains read-only. This is point-in-time
+--      detection when invoked outside a deployment workflow.
+--
+-- The assertion is a trusted deployment gate, not an authorization control
+-- over the superuser that invokes it. Runtime containment of application and
+-- administrative roles comes from PostgreSQL ACLs, RLS, role attributes, and
+-- HBA/SCRAM. A full database superuser can bypass those controls, alter data,
+-- or skip/undo this check and is outside this SQL file's threat boundary.
 --
 -- Invariants checked:
 --   (a) `openbrain_app` must have no role memberships and must not be a
---       superuser or hold BYPASSRLS directly.
+--       superuser or hold any cluster-level privilege; `openbrain_readonly`
+--       must hold BYPASSRLS for pg_dump and no other unsafe attribute; and
+--       `openbrain_token_admin` must have no memberships or unsafe attributes.
 --   (b) `openbrain_app` must NOT have DELETE on `public.thoughts`.
 --   (c) `openbrain_app` MUST have SELECT and INSERT on `public.thoughts`,
 --       plus UPDATE on its content columns only — and no UPDATE (table-wide or
 --       per column) on workspace_id/project_id/visibility/owner_subject, so the
 --       audience-move helper is the sole application audience-change path.
 --   (d) the app may read but not mutate the memory-space registry, and only
---       it may execute the two reviewed memory_scope helpers (never PUBLIC).
+--       it may execute the three reviewed memory_scope helpers (never PUBLIC).
 --   (e) metadata degradation history is append-only to the app; its pending-
 --       delivery outbox is enqueue/consume-only, and only the singleton
 --       notification ledger is otherwise mutable.
@@ -75,14 +83,25 @@ $$ LANGUAGE plpgsql;
 
 DO $$
 DECLARE
-  memberships text;
+  app_attributes      text;
+  readonly_attributes text;
+  memberships         text;
 BEGIN
-  IF (
-    SELECT rolsuper OR rolbypassrls
-    FROM pg_roles WHERE rolname = 'openbrain_app'
-  ) THEN
+  SELECT concat_ws(
+           ', ',
+           CASE WHEN rolsuper THEN 'SUPERUSER' END,
+           CASE WHEN rolcreatedb THEN 'CREATEDB' END,
+           CASE WHEN rolcreaterole THEN 'CREATEROLE' END,
+           CASE WHEN rolreplication THEN 'REPLICATION' END,
+           CASE WHEN rolbypassrls THEN 'BYPASSRLS' END
+         )
+    INTO app_attributes
+  FROM pg_roles
+  WHERE rolname = 'openbrain_app';
+  IF app_attributes <> '' THEN
     RAISE EXCEPTION
-      'grants assertion failed: openbrain_app can bypass row-level security.';
+      'grants assertion failed: openbrain_app has unsafe cluster-level role attributes: %.',
+      app_attributes;
   END IF;
   SELECT string_agg(
     roleid::regrole::text,
@@ -96,10 +115,25 @@ BEGIN
       'grants assertion failed: openbrain_app is a member of: %. It must be a standalone role so inherited privileges and SET ROLE cannot bypass row-level security.',
       memberships;
   END IF;
+  SELECT concat_ws(
+           ', ',
+           CASE WHEN rolsuper THEN 'SUPERUSER' END,
+           CASE WHEN rolcreatedb THEN 'CREATEDB' END,
+           CASE WHEN rolcreaterole THEN 'CREATEROLE' END,
+           CASE WHEN rolreplication THEN 'REPLICATION' END
+         )
+    INTO readonly_attributes
+  FROM pg_roles
+  WHERE rolname = 'openbrain_readonly';
+  IF readonly_attributes <> '' THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_readonly has unsafe cluster-level role attributes beyond required BYPASSRLS: %.',
+      readonly_attributes;
+  END IF;
   IF NOT COALESCE((
-    SELECT rolbypassrls
-    FROM pg_roles WHERE rolname = 'openbrain_readonly'
-  ), false) THEN
+       SELECT rolbypassrls
+       FROM pg_roles WHERE rolname = 'openbrain_readonly'
+     ), false) THEN
     RAISE EXCEPTION
       'grants assertion failed: openbrain_readonly lacks BYPASSRLS required by full pg_dump under FORCE RLS.';
   END IF;
@@ -280,7 +314,7 @@ BEGIN
       COALESCE(
         relation.relacl,
         acldefault(
-          (CASE WHEN relation.relkind = 'S' THEN 'S' ELSE 'r' END)::"char",
+          (CASE WHEN relation.relkind = 'S' THEN 's' ELSE 'r' END)::"char",
           relation.relowner
         )
       )
@@ -295,6 +329,102 @@ BEGIN
   ) THEN
     RAISE EXCEPTION
       'grants assertion failed: PUBLIC can access metadata degradation relations or sequence.';
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- PUBLIC is an effective grant to every present and future role. Keep this
+-- current-object census name-free and role-independent: the object ACL itself
+-- is the invariant, including privilege types added by newer PostgreSQL
+-- releases. Object-specific checks below still pin the narrower positive
+-- grants for managed roles and deliberately repeat local PUBLIC negatives so
+-- each reviewed object's contract remains self-contained.
+DO $$
+DECLARE
+  bad_public_acls text;
+  bad_public_definers text;
+BEGIN
+  SELECT string_agg(exposure.description, ', ' ORDER BY exposure.description)
+    INTO bad_public_acls
+  FROM (
+    SELECT format(
+             '%I.%I=%s',
+             namespace.nspname,
+             relation.relname,
+             acl.privilege_type
+           ) AS description
+    FROM pg_class relation
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    CROSS JOIN LATERAL aclexplode(
+      COALESCE(
+        relation.relacl,
+        acldefault(
+          (CASE WHEN relation.relkind = 'S' THEN 's' ELSE 'r' END)::"char",
+          relation.relowner
+        )
+      )
+    ) acl
+    WHERE namespace.nspname <> 'information_schema'
+      AND namespace.nspname !~ '^pg_'
+      AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+      AND acl.grantee = 0
+
+    UNION ALL
+
+    SELECT format(
+             '%I.%I.%I=%s',
+             namespace.nspname,
+             relation.relname,
+             attribute.attname,
+             acl.privilege_type
+           ) AS description
+    FROM pg_attribute attribute
+    JOIN pg_class relation ON relation.oid = attribute.attrelid
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    CROSS JOIN LATERAL aclexplode(attribute.attacl) acl
+    WHERE namespace.nspname <> 'information_schema'
+      AND namespace.nspname !~ '^pg_'
+      AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+      AND attribute.attnum > 0
+      AND NOT attribute.attisdropped
+      AND attribute.attacl IS NOT NULL
+      AND acl.grantee = 0
+  ) exposure;
+  IF bad_public_acls IS NOT NULL THEN
+    RAISE EXCEPTION
+      'grants assertion failed: PUBLIC can access current non-system relations or columns: %.',
+      bad_public_acls;
+  END IF;
+
+  -- Reviewed application SECURITY DEFINER routines have PUBLIC explicitly
+  -- revoked. An unknown definer that keeps PostgreSQL's default PUBLIC EXECUTE
+  -- grant is a real least-privilege bypass, independent of any one role name.
+  SELECT string_agg(
+           format(
+             '%I.%I(%s)',
+             namespace.nspname,
+             routine.proname,
+             pg_get_function_identity_arguments(routine.oid)
+           ),
+           ', ' ORDER BY namespace.nspname,
+                         routine.proname,
+                         pg_get_function_identity_arguments(routine.oid)
+         )
+    INTO bad_public_definers
+  FROM pg_proc routine
+  JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
+  CROSS JOIN LATERAL aclexplode(
+    COALESCE(routine.proacl, acldefault('f', routine.proowner))
+  ) acl
+  WHERE namespace.nspname <> 'information_schema'
+    AND namespace.nspname !~ '^pg_'
+    AND routine.prosecdef
+    AND acl.grantee = 0
+    AND acl.privilege_type = 'EXECUTE';
+  IF bad_public_definers IS NOT NULL THEN
+    RAISE EXCEPTION
+      'grants assertion failed: PUBLIC can execute non-system SECURITY DEFINER routines: %.',
+      bad_public_definers;
   END IF;
 END;
 $$ LANGUAGE plpgsql;
@@ -423,8 +553,17 @@ BEGIN
       bad;
   END IF;
 
-  SELECT string_agg(routine.oid::regprocedure::text, ', '
-                    ORDER BY routine.oid::regprocedure::text)
+  SELECT string_agg(
+           format(
+             '%I.%I(%s)',
+             namespace.nspname,
+             routine.proname,
+             pg_get_function_identity_arguments(routine.oid)
+           ),
+           ', ' ORDER BY namespace.nspname,
+                         routine.proname,
+                         pg_get_function_identity_arguments(routine.oid)
+         )
     INTO bad
   FROM pg_proc routine
   JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
@@ -525,7 +664,7 @@ BEGIN
       COALESCE(
         relation.relacl,
         acldefault(
-          (CASE WHEN relation.relkind = 'S' THEN 'S' ELSE 'r' END)::"char",
+          (CASE WHEN relation.relkind = 'S' THEN 's' ELSE 'r' END)::"char",
           relation.relowner
         )
       )
@@ -599,7 +738,7 @@ BEGIN
       COALESCE(
         relation.relacl,
         acldefault(
-          (CASE WHEN relation.relkind = 'S' THEN 'S' ELSE 'r' END)::"char",
+          (CASE WHEN relation.relkind = 'S' THEN 's' ELSE 'r' END)::"char",
           relation.relowner
         )
       )
