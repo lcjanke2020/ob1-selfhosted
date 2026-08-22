@@ -244,15 +244,19 @@ run_summary() {
       # on its socket; the corpus call still uses the app identity even where a
       # stock local HBA happens to trust container-local connections.
       if [[ "$TARGET_SERVICE" == "log-sink" ]]; then
+        # The inner shell expands these values after Compose enters the container.
+        # shellcheck disable=SC2016
         cat -- "$SQL_FILE" | "${compose_cmd[@]}" exec -T log-sink \
           sh -eu -c \
-          'PGPASSWORD="$OPENBRAIN_LOGS_ROLLUP_PASSWORD" exec psql -X -w -v ON_ERROR_STOP=1 -h /var/run/postgresql -U openbrain_logs_rollup -d "$1" -f -' \
-          funnel-summary "$TARGET_DB" || return 1
+          'PGPASSWORD="$OPENBRAIN_LOGS_ROLLUP_PASSWORD" exec psql -X -w -v ON_ERROR_STOP=1 -h /var/run/postgresql -U "$1" -d "$2" -f -' \
+          funnel-summary "$TARGET_ROLE" "$TARGET_DB" || return 1
       else
+        # The inner shell expands these values after Compose enters the container.
+        # shellcheck disable=SC2016
         cat -- "$SQL_FILE" | "${compose_cmd[@]}" exec -T postgres \
           sh -eu -c \
-          'PGPASSWORD="$OPENBRAIN_APP_PASSWORD" exec psql -X -w -v ON_ERROR_STOP=1 -h /var/run/postgresql -U openbrain_app -d "$1" -f -' \
-          auth-events-summary "$TARGET_DB" || return 1
+          'PGPASSWORD="$OPENBRAIN_APP_PASSWORD" exec psql -X -w -v ON_ERROR_STOP=1 -h /var/run/postgresql -U "$1" -d "$2" -f -' \
+          auth-events-summary "$TARGET_ROLE" "$TARGET_DB" || return 1
       fi
       ;;
 

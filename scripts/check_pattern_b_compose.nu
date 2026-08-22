@@ -162,6 +162,7 @@ def assert-pattern-b-sink [name: string, rendered: record] {
         "/usr/local/bin/openbrain-log-sink-entrypoint.sh"
         "/docker-entrypoint-initdb.d/00-log-sink-roles.sh"
         "/docker-entrypoint-initdb.d/01-log-sink.sql"
+        "/docker-entrypoint-initdb.d/02-log-sink-status-class.sql"
         "/docker-entrypoint-initdb.d/99-log-sink-assertion.sql"
         "/docker-entrypoint-initdb.d/zz-log-sink-ready.sh"
     ] {

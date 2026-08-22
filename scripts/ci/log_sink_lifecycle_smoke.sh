@@ -17,9 +17,9 @@ adoption_root="$(mktemp -d "$RUNNER_TEMP/log-sink-adoption.XXXXXX")"
 adoption_volume="$LOG_SINK_TOKEN-adoption-volume"
 adoption_project="$LOG_SINK_TOKEN-adoption"
 
-# Head's 00/01 changes from the last pre-marker release are comments only.
-# Omitting the wrapper + zz marker reconstructs that release's persisted
-# catalog/PGDATA shape; 99 proves the starting sink valid.
+# Omitting the generated-column migration, current assertion, wrapper, and
+# durable marker reconstructs the prior deployed catalog/PGDATA shape. The
+# current adoption helper must refuse it until the explicit migration lands.
 cat > "$adoption_root/compose.yml" <<'YAML'
 services:
   log-sink:
@@ -40,7 +40,6 @@ services:
       - log_sink_data:/var/lib/postgresql/data
       - ${CI_REPO_ROOT:?CI_REPO_ROOT is required}/db/log-sink/00-log-sink-roles.sh:/docker-entrypoint-initdb.d/00-log-sink-roles.sh:ro
       - ${CI_REPO_ROOT:?CI_REPO_ROOT is required}/db/log-sink/01-log-sink.sql:/docker-entrypoint-initdb.d/01-log-sink.sql:ro
-      - ${CI_REPO_ROOT:?CI_REPO_ROOT is required}/db/log-sink/02-log-sink-assertion.sql:/docker-entrypoint-initdb.d/99-log-sink-assertion.sql:ro
 volumes:
   log_sink_data:
     name: ${ADOPTION_VOLUME:?ADOPTION_VOLUME is required}
@@ -52,6 +51,9 @@ services:
     entrypoint: ["/bin/sh", "/usr/local/bin/openbrain-log-sink-entrypoint.sh"]
     volumes:
       - ${CI_REPO_ROOT:?CI_REPO_ROOT is required}/db/log-sink/log-sink-entrypoint.sh:/usr/local/bin/openbrain-log-sink-entrypoint.sh:ro
+      - ${CI_REPO_ROOT:?CI_REPO_ROOT is required}/db/log-sink/02-log-sink-status-class.sql:/docker-entrypoint-initdb.d/02-log-sink-status-class.sql:ro
+      - ${CI_REPO_ROOT:?CI_REPO_ROOT is required}/db/log-sink/02-log-sink-assertion.sql:/docker-entrypoint-initdb.d/99-log-sink-assertion.sql:ro
+      - ${CI_REPO_ROOT:?CI_REPO_ROOT is required}/db/log-sink/03-log-sink-ready.sh:/docker-entrypoint-initdb.d/zz-log-sink-ready.sh:ro
 YAML
 
 cat > "$adoption_root/.env" <<ENV
@@ -106,8 +108,7 @@ docker compose "${adoption_compose_opts[@]}" \
   exec -T log-sink sh -c \
     'test ! -e "$PGDATA/.openbrain-log-sink-init-complete"'
 
-# Preserve a representative historical row across adoption/recreate. A
-# healthy old catalog plus one drift relation must remain unmarked.
+# Preserve a representative historical row across migration/adoption/recreate.
 docker compose "${adoption_compose_opts[@]}" \
   -f "$adoption_root/compose.yml" \
   exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" log-sink \
@@ -116,9 +117,64 @@ docker compose "${adoption_compose_opts[@]}" \
       -c "INSERT INTO public.funnel_access_log
             (ts, socket, path, status)
           VALUES ('2026-08-13T00:00:00Z', 'funnel',
-                  '/pre-marker-history', 200);
-          CREATE TABLE public.adoption_must_refuse (id integer)"
+                  '/pre-marker-history', 200)"
 
+# The current assertion is the adoption gate, so an unmigrated legacy catalog
+# must remain unmarked even though its two old relations and grants are healthy.
+trap - ERR
+set +e
+adoption_output=$(COMPOSE_DIR="$adoption_root" \
+  COMPOSE_FILE="$adoption_root/compose.yml" \
+  COMPOSE_PROJECT_NAME="$adoption_project" \
+  "$CI_REPO_ROOT/scripts/adopt-log-sink-marker.sh" 2>&1)
+adoption_rc=$?
+set -e
+trap log_sink_error ERR
+test "$adoption_rc" -ne 0
+grep -Fq 'funnel_access_log columns drifted' \
+  <<< "$adoption_output"
+docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
+  exec -T log-sink sh -c \
+    'test ! -e "$PGDATA/.openbrain-log-sink-init-complete"'
+
+# Run the exact deployed migration twice. The first execution backfills the
+# retained row; the second proves idempotency. Both are one transaction.
+for _ in 1 2; do
+  docker compose "${adoption_compose_opts[@]}" \
+    -f "$adoption_root/compose.yml" \
+    exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" log-sink \
+      psql -X -w -h /var/run/postgresql -U "$POSTGRES_USER" \
+        -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f - \
+      < "$CI_REPO_ROOT/db/log-sink/02-log-sink-status-class.sql" \
+      >/dev/null
+done
+migration_verdict=$(docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
+  exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" log-sink \
+    psql -X -w -h /var/run/postgresql -U "$POSTGRES_USER" \
+      -d "$POSTGRES_DB" -Atc \
+      "SELECT
+         (SELECT status_class FROM public.funnel_access_log
+          WHERE path = '/pre-marker-history'),
+         (SELECT attgenerated FROM pg_attribute
+          WHERE attrelid = 'public.funnel_access_log'::regclass
+            AND attname = 'status_class' AND NOT attisdropped),
+         (SELECT count(*) FROM public.funnel_access_log
+          WHERE path = '/pre-marker-history')")
+test "$migration_verdict" = "2xx|s|1" || {
+  echo "legacy status migration drifted (class|generated|rows=$migration_verdict, want 2xx|s|1)" >&2
+  exit 1
+}
+
+# A migrated catalog with an unrelated drift relation must still remain
+# unmarked; migration is not permission to weaken the closed-world assertion.
+docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
+  exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" log-sink \
+    psql -X -w -h /var/run/postgresql -U "$POSTGRES_USER" \
+      -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
+      -c 'CREATE TABLE public.adoption_must_refuse (id integer)'
 trap - ERR
 set +e
 adoption_output=$(COMPOSE_DIR="$adoption_root" \
@@ -131,11 +187,6 @@ trap log_sink_error ERR
 test "$adoption_rc" -ne 0
 grep -Fq 'expected exactly (funnel_access_log, funnel_access_summary)' \
   <<< "$adoption_output"
-docker compose "${adoption_compose_opts[@]}" \
-  -f "$adoption_root/compose.yml" \
-  exec -T log-sink sh -c \
-    'test ! -e "$PGDATA/.openbrain-log-sink-init-complete"'
-
 docker compose "${adoption_compose_opts[@]}" \
   -f "$adoption_root/compose.yml" \
   exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" log-sink \
@@ -180,7 +231,7 @@ history_rows=$(docker compose "${adoption_compose_opts[@]}" \
       "SELECT count(*) FROM public.funnel_access_log
        WHERE path = '/pre-marker-history'")
 test "$history_rows" = 1
-echo "healthy pre-marker volume adopted with history intact; drifted volume refused; wrapper restart passed"
+echo "legacy status migration idempotent with history intact; current assertion gated adoption; drifted volume refused; wrapper restart passed"
 
 cleanup_adoption 0
 trap - EXIT

@@ -126,30 +126,166 @@
 -- scheduled run covers the same work (idempotent by design).
 BEGIN ISOLATION LEVEL REPEATABLE READ;
 
--- ---------- 1. Full recompute of every non-finalized day with raw rows ---
--- ON CONFLICT means a re-run for the same day overwrites cleanly — correct
--- here because a non-finalized day's raw is complete (deletion only ever
--- happens in the finalize/merge transactions, which stamp the finalized
--- computed_at distance). The aggregation is over `funnel_access_log.ts`
--- (the event time from Caddy), not `inserted_at` (the ingest time), so
--- backlogged rows land in the right day. Days at or past the horizon that
--- were never finalized (first-ever run over a backlog, a cron gap, or a
--- never-summarized restored day) take this branch too — their raw is
--- still complete, and the retention statement below finalizes them this
--- same run.
--- The shape: aggregate by (day, socket, status_class) over the recompute
--- set, then for each group compute count / unique_ips / percentiles and
--- subselect top-3 paths + UAs.
-WITH recompute_days AS (
+-- ---------- 1. Build one canonical aggregate batch ------------------------
+-- A transaction-local table lets the two conflict arms consume one projection
+-- without adding a persistent relation, function, or view. ON COMMIT DROP
+-- restores the sink's exact two-relation shape before the report runs.
+--
+-- A day is classified exactly as before:
+--   * no finalized summary yet -> full recompute;
+--   * a strictly past-horizon day finalized by an earlier run -> additive merge;
+--   * any other day with a finalized marker -> leave its raw rows untouched.
+-- The final case preserves the old boundary behavior even for imported or
+-- otherwise inconsistent summary metadata.
+CREATE TEMP TABLE funnel_rollup_batch
+ON COMMIT DROP
+AS
+WITH raw_days AS (
   SELECT DISTINCT (ts AT TIME ZONE 'UTC')::date AS day
   FROM funnel_access_log
   WHERE (ts AT TIME ZONE 'UTC')::date < (now() AT TIME ZONE 'UTC')::date
-    AND NOT EXISTS (
-      SELECT 1 FROM funnel_access_summary s
-      WHERE s.day = (funnel_access_log.ts AT TIME ZONE 'UTC')::date
-        AND (s.computed_at AT TIME ZONE 'UTC')::date - s.day >= 31
-    )
+),
+classified_days AS (
+  SELECT
+    raw_days.day,
+    CASE
+      WHEN raw_days.day < (now() AT TIME ZONE 'UTC')::date - 30
+        AND COALESCE(
+          bool_or(
+            (s.computed_at AT TIME ZONE 'UTC')::date - s.day >= 31
+            AND s.computed_at < now()
+          ),
+          false
+        )
+        THEN 'merge'
+      WHEN NOT COALESCE(
+        bool_or((s.computed_at AT TIME ZONE 'UTC')::date - s.day >= 31),
+        false
+      )
+        THEN 'recompute'
+    END AS rollup_mode
+  FROM raw_days
+  LEFT JOIN funnel_access_summary s ON s.day = raw_days.day
+  GROUP BY raw_days.day
+),
+eligible_days AS (
+  SELECT day, rollup_mode
+  FROM classified_days
+  WHERE rollup_mode IS NOT NULL
+),
+rollup_events AS (
+  SELECT
+    eligible_days.rollup_mode,
+    (event.ts AT TIME ZONE 'UTC')::date AS day,
+    event.socket,
+    event.status_class,
+    event.client_ip,
+    event.duration_ms,
+    event.path,
+    event.user_agent
+  FROM funnel_access_log event
+  JOIN eligible_days
+    ON eligible_days.day = (event.ts AT TIME ZONE 'UTC')::date
+),
+totals AS (
+  SELECT
+    rollup_mode,
+    day,
+    socket,
+    status_class,
+    COUNT(*)                                                       AS request_count,
+    COUNT(DISTINCT client_ip)                                      AS unique_ips,
+    percentile_disc(0.5)  WITHIN GROUP (ORDER BY duration_ms)::int AS p50,
+    percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms)::int AS p95
+  FROM rollup_events
+  GROUP BY rollup_mode, day, socket, status_class
+),
+path_counts AS (
+  SELECT
+    rollup_mode,
+    day,
+    socket,
+    status_class,
+    path,
+    COUNT(*) AS cnt
+  FROM rollup_events
+  GROUP BY rollup_mode, day, socket, status_class, path
+),
+ranked_paths AS (
+  SELECT
+    path_counts.*,
+    row_number() OVER (
+      PARTITION BY rollup_mode, day, socket, status_class
+      ORDER BY cnt DESC
+    ) AS position
+  FROM path_counts
+),
+top_paths AS (
+  SELECT
+    rollup_mode,
+    day,
+    socket,
+    status_class,
+    jsonb_agg(
+      jsonb_build_object('path', path, 'count', cnt)
+      ORDER BY cnt DESC
+    ) AS value
+  FROM ranked_paths
+  WHERE position <= 3
+  GROUP BY rollup_mode, day, socket, status_class
+),
+user_agent_counts AS (
+  SELECT
+    rollup_mode,
+    day,
+    socket,
+    status_class,
+    user_agent,
+    COUNT(*) AS cnt
+  FROM rollup_events
+  WHERE user_agent IS NOT NULL
+  GROUP BY rollup_mode, day, socket, status_class, user_agent
+),
+ranked_user_agents AS (
+  SELECT
+    user_agent_counts.*,
+    row_number() OVER (
+      PARTITION BY rollup_mode, day, socket, status_class
+      ORDER BY cnt DESC
+    ) AS position
+  FROM user_agent_counts
+),
+top_user_agents AS (
+  SELECT
+    rollup_mode,
+    day,
+    socket,
+    status_class,
+    jsonb_agg(
+      jsonb_build_object('ua', user_agent, 'count', cnt)
+      ORDER BY cnt DESC
+    ) AS value
+  FROM ranked_user_agents
+  WHERE position <= 3
+  GROUP BY rollup_mode, day, socket, status_class
 )
+SELECT
+  totals.rollup_mode,
+  totals.day,
+  totals.socket,
+  totals.status_class,
+  totals.request_count,
+  totals.unique_ips,
+  totals.p50,
+  totals.p95,
+  COALESCE(top_paths.value, '[]'::jsonb) AS top_paths,
+  COALESCE(top_user_agents.value, '[]'::jsonb) AS top_user_agents
+FROM totals
+LEFT JOIN top_paths USING (rollup_mode, day, socket, status_class)
+LEFT JOIN top_user_agents USING (rollup_mode, day, socket, status_class);
+
+-- ---------- 2. Apply the batch through the two lifecycle conflict arms -----
+-- Non-finalized days replace their summaries from complete retained evidence.
 INSERT INTO funnel_access_summary (
   day, socket, status_class,
   request_count, unique_ips,
@@ -158,81 +294,18 @@ INSERT INTO funnel_access_summary (
   computed_at
 )
 SELECT
-  d.day,
-  d.socket,
-  d.status_class,
-  d.request_count,
-  d.unique_ips,
-  d.p50,
-  d.p95,
-  COALESCE(
-    (
-      SELECT jsonb_agg(jsonb_build_object('path', path, 'count', cnt) ORDER BY cnt DESC)
-      FROM (
-        SELECT path, COUNT(*) AS cnt
-        FROM funnel_access_log
-        WHERE (ts AT TIME ZONE 'UTC')::date = d.day
-          AND socket = d.socket
-          AND CASE
-                WHEN status BETWEEN 100 AND 199 THEN '1xx'
-                WHEN status BETWEEN 200 AND 299 THEN '2xx'
-                WHEN status BETWEEN 300 AND 399 THEN '3xx'
-                WHEN status BETWEEN 400 AND 499 THEN '4xx'
-                WHEN status BETWEEN 500 AND 599 THEN '5xx'
-                ELSE 'other'
-              END = d.status_class
-        GROUP BY path
-        ORDER BY cnt DESC
-        LIMIT 3
-      ) p
-    ),
-    '[]'::jsonb
-  ) AS top_paths,
-  COALESCE(
-    (
-      SELECT jsonb_agg(jsonb_build_object('ua', user_agent, 'count', cnt) ORDER BY cnt DESC)
-      FROM (
-        SELECT user_agent, COUNT(*) AS cnt
-        FROM funnel_access_log
-        WHERE (ts AT TIME ZONE 'UTC')::date = d.day
-          AND socket = d.socket
-          AND CASE
-                WHEN status BETWEEN 100 AND 199 THEN '1xx'
-                WHEN status BETWEEN 200 AND 299 THEN '2xx'
-                WHEN status BETWEEN 300 AND 399 THEN '3xx'
-                WHEN status BETWEEN 400 AND 499 THEN '4xx'
-                WHEN status BETWEEN 500 AND 599 THEN '5xx'
-                ELSE 'other'
-              END = d.status_class
-          AND user_agent IS NOT NULL
-        GROUP BY user_agent
-        ORDER BY cnt DESC
-        LIMIT 3
-      ) u
-    ),
-    '[]'::jsonb
-  ) AS top_user_agents,
+  day,
+  socket,
+  status_class,
+  request_count,
+  unique_ips,
+  p50,
+  p95,
+  top_paths,
+  top_user_agents,
   now()
-FROM (
-  SELECT
-    (ts AT TIME ZONE 'UTC')::date AS day,
-    socket,
-    CASE
-      WHEN status BETWEEN 100 AND 199 THEN '1xx'
-      WHEN status BETWEEN 200 AND 299 THEN '2xx'
-      WHEN status BETWEEN 300 AND 399 THEN '3xx'
-      WHEN status BETWEEN 400 AND 499 THEN '4xx'
-      WHEN status BETWEEN 500 AND 599 THEN '5xx'
-      ELSE 'other'
-    END AS status_class,
-    COUNT(*)                                                        AS request_count,
-    COUNT(DISTINCT client_ip)                                       AS unique_ips,
-    percentile_disc(0.5)  WITHIN GROUP (ORDER BY duration_ms)::int  AS p50,
-    percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms)::int  AS p95
-  FROM funnel_access_log
-  WHERE (ts AT TIME ZONE 'UTC')::date IN (SELECT day FROM recompute_days)
-  GROUP BY day, socket, status_class
-) d
+FROM funnel_rollup_batch
+WHERE rollup_mode = 'recompute'
 ON CONFLICT (day, socket, status_class) DO UPDATE SET
   request_count   = EXCLUDED.request_count,
   unique_ips      = EXCLUDED.unique_ips,
@@ -242,35 +315,9 @@ ON CONFLICT (day, socket, status_class) DO UPDATE SET
   top_user_agents = EXCLUDED.top_user_agents,
   computed_at     = EXCLUDED.computed_at;
 
--- ---------- 2. Additive merge of late rows into FINALIZED days -----------
--- Same aggregation shape as statement 1, but the day set is the complement
--- (finalized days that have raw rows again) and the conflict action MERGES
--- instead of replacing: the existing summary's raw evidence is gone, so a
--- replace would shrink history to just the remainder. Every remainder row
--- is uncounted by construction — counted rows of a finalized day were
--- deleted by the transaction that counted them — so adding is exact for
--- request_count. Groups new to the day (a status class the finalized
--- summary never saw) insert as-is, including their remainder-only
--- percentiles. On conflict, the duration percentiles are deliberately NOT
--- in the SET list: they keep their as-of-finalization values.
-WITH merge_days AS (
-  SELECT DISTINCT (ts AT TIME ZONE 'UTC')::date AS day
-  FROM funnel_access_log
-  WHERE (ts AT TIME ZONE 'UTC')::date < (now() AT TIME ZONE 'UTC')::date - 30
-    AND EXISTS (
-      SELECT 1 FROM funnel_access_summary s
-      WHERE s.day = (funnel_access_log.ts AT TIME ZONE 'UTC')::date
-        AND (s.computed_at AT TIME ZONE 'UTC')::date - s.day >= 31
-        -- Finalized by a PREVIOUS transaction only. Statement 1's writes
-        -- are visible here (a transaction sees its own writes), so a day
-        -- finalized moments ago in this very run would otherwise qualify
-        -- and its rows would be counted twice — once by the finalizing
-        -- recompute, again by this merge. `now()` is transaction-stable:
-        -- rows written this run carry computed_at = now() exactly, prior
-        -- runs' rows compare strictly less.
-        AND s.computed_at < now()
-    )
-)
+-- Finalized days merge only their newly arrived remainder. Groups absent from
+-- the finalized summary insert as-is; conflicts preserve the original
+-- percentiles and combine the exact counts plus bounded top-three sketches.
 INSERT INTO funnel_access_summary (
   day, socket, status_class,
   request_count, unique_ips,
@@ -279,81 +326,18 @@ INSERT INTO funnel_access_summary (
   computed_at
 )
 SELECT
-  d.day,
-  d.socket,
-  d.status_class,
-  d.request_count,
-  d.unique_ips,
-  d.p50,
-  d.p95,
-  COALESCE(
-    (
-      SELECT jsonb_agg(jsonb_build_object('path', path, 'count', cnt) ORDER BY cnt DESC)
-      FROM (
-        SELECT path, COUNT(*) AS cnt
-        FROM funnel_access_log
-        WHERE (ts AT TIME ZONE 'UTC')::date = d.day
-          AND socket = d.socket
-          AND CASE
-                WHEN status BETWEEN 100 AND 199 THEN '1xx'
-                WHEN status BETWEEN 200 AND 299 THEN '2xx'
-                WHEN status BETWEEN 300 AND 399 THEN '3xx'
-                WHEN status BETWEEN 400 AND 499 THEN '4xx'
-                WHEN status BETWEEN 500 AND 599 THEN '5xx'
-                ELSE 'other'
-              END = d.status_class
-        GROUP BY path
-        ORDER BY cnt DESC
-        LIMIT 3
-      ) p
-    ),
-    '[]'::jsonb
-  ) AS top_paths,
-  COALESCE(
-    (
-      SELECT jsonb_agg(jsonb_build_object('ua', user_agent, 'count', cnt) ORDER BY cnt DESC)
-      FROM (
-        SELECT user_agent, COUNT(*) AS cnt
-        FROM funnel_access_log
-        WHERE (ts AT TIME ZONE 'UTC')::date = d.day
-          AND socket = d.socket
-          AND CASE
-                WHEN status BETWEEN 100 AND 199 THEN '1xx'
-                WHEN status BETWEEN 200 AND 299 THEN '2xx'
-                WHEN status BETWEEN 300 AND 399 THEN '3xx'
-                WHEN status BETWEEN 400 AND 499 THEN '4xx'
-                WHEN status BETWEEN 500 AND 599 THEN '5xx'
-                ELSE 'other'
-              END = d.status_class
-          AND user_agent IS NOT NULL
-        GROUP BY user_agent
-        ORDER BY cnt DESC
-        LIMIT 3
-      ) u
-    ),
-    '[]'::jsonb
-  ) AS top_user_agents,
+  day,
+  socket,
+  status_class,
+  request_count,
+  unique_ips,
+  p50,
+  p95,
+  top_paths,
+  top_user_agents,
   now()
-FROM (
-  SELECT
-    (ts AT TIME ZONE 'UTC')::date AS day,
-    socket,
-    CASE
-      WHEN status BETWEEN 100 AND 199 THEN '1xx'
-      WHEN status BETWEEN 200 AND 299 THEN '2xx'
-      WHEN status BETWEEN 300 AND 399 THEN '3xx'
-      WHEN status BETWEEN 400 AND 499 THEN '4xx'
-      WHEN status BETWEEN 500 AND 599 THEN '5xx'
-      ELSE 'other'
-    END AS status_class,
-    COUNT(*)                                                        AS request_count,
-    COUNT(DISTINCT client_ip)                                       AS unique_ips,
-    percentile_disc(0.5)  WITHIN GROUP (ORDER BY duration_ms)::int  AS p50,
-    percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms)::int  AS p95
-  FROM funnel_access_log
-  WHERE (ts AT TIME ZONE 'UTC')::date IN (SELECT day FROM merge_days)
-  GROUP BY day, socket, status_class
-) d
+FROM funnel_rollup_batch
+WHERE rollup_mode = 'merge'
 ON CONFLICT (day, socket, status_class) DO UPDATE SET
   request_count = funnel_access_summary.request_count + EXCLUDED.request_count,
   unique_ips    = GREATEST(funnel_access_summary.unique_ips, EXCLUDED.unique_ips),

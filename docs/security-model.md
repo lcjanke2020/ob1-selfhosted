@@ -224,8 +224,11 @@ its own `postgres`, `openbrain_app`, `openbrain_readonly`, and
 `openbrain_logs_rollup` are roles on a **separate cluster**: a socket-only
 Funnel-log sink holding two request-metadata relations and nothing else
 ([`deploy/qubes/ingress-qube/README.md`](../deploy/qubes/ingress-qube/README.md#local-log-sink)).
-The rollup name stays apart from `openbrain_app` so no sink credential can be
-mistaken for a corpus credential.
+Their required/optional status and direct grants are single-sourced in
+[`db/log-sink/role-contract.json`](../db/log-sink/role-contract.json); the
+DB-init preflight validates the unavoidable SQL, runtime, Compose, CI, and
+runbook literals against it. The rollup name stays apart from `openbrain_app` so
+no sink credential can be mistaken for a corpus credential.
 
 The point is not the grants but the layer they sit at. Grants are enforced
 _inside_ Postgres, above where a pre-auth wire-protocol or SCRAM-handshake flaw

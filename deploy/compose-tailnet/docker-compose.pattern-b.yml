@@ -162,6 +162,7 @@ services:
       - ../../db/log-sink/log-sink-entrypoint.sh:/usr/local/bin/openbrain-log-sink-entrypoint.sh:ro
       - ../../db/log-sink/00-log-sink-roles.sh:/docker-entrypoint-initdb.d/00-log-sink-roles.sh:ro
       - ../../db/log-sink/01-log-sink.sql:/docker-entrypoint-initdb.d/01-log-sink.sql:ro
+      - ../../db/log-sink/02-log-sink-status-class.sql:/docker-entrypoint-initdb.d/02-log-sink-status-class.sql:ro
       - ../../db/log-sink/02-log-sink-assertion.sql:/docker-entrypoint-initdb.d/99-log-sink-assertion.sql:ro
       - ../../db/log-sink/03-log-sink-ready.sh:/docker-entrypoint-initdb.d/zz-log-sink-ready.sh:ro
     healthcheck:
