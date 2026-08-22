@@ -301,6 +301,12 @@ Pattern-B sink, stop its only writer, reapply the idempotent schema/grant owner,
 and stream the same generated-column migration used by fresh init. Then run the
 completed-catalog assertion:
 
+Pattern B executes the wrapper and rollup SQL directly from this checkout, so
+updating the checkout refreshes both (unlike the ingress-qube installed copies).
+Pause the sink-summary cron/timer from the checkout update through the
+assertion; an accidental run in that mixed-version window fails transactionally,
+and the next run after a completed upgrade can safely cover the same work.
+
 ```sh
 docker compose --env-file .env --profile pattern-b stop log-ingester
 
@@ -334,11 +340,13 @@ assertion prints `invariants OK`. If the existing volume predates
 ```sh
 COMPOSE_DIR="$PWD" ../../scripts/adopt-log-sink-marker.sh
 docker compose --env-file .env --profile pattern-b up -d --no-deps --force-recreate --wait log-sink
+SUMMARY_TARGET=sink ../../scripts/funnel_daily_summary.sh
 docker compose --env-file .env --profile pattern-b up -d --no-deps log-ingester
 ```
 
-For a volume that already had the marker, use the same final two `up` commands
-without the adoption helper. The helper validates but never migrates, so the
+For a volume that already had the marker, use the same final three commands
+without the adoption helper. Resume the paused summary scheduler only after the
+foreground summary exits zero. The helper validates but never migrates, so the
 schema/grant replay and status-class step always come first.
 
 **Adopting the `COMPOSE_PROJECT_NAME` line** (stacks whose `.env` predates it):

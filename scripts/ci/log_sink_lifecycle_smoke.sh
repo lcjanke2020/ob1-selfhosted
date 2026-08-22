@@ -183,6 +183,43 @@ upgraded_database_capabilities=$(docker compose "${adoption_compose_opts[@]}" \
          has_database_privilege('openbrain_monitor', current_database(), 'TEMPORARY')::int")
 test "$upgraded_database_capabilities" = "1|0|0"
 
+# The prior installed rollup grouped by its CASE alias. That shape is valid on
+# the legacy catalog, while the current rollup is not; after migration the
+# resolution reverses. Pin both failures so the runbook cannot treat the SQL
+# copy and schema change as independently deployable.
+legacy_rollup_probe="
+  SELECT CASE
+           WHEN status BETWEEN 100 AND 199 THEN '1xx'
+           WHEN status BETWEEN 200 AND 299 THEN '2xx'
+           WHEN status BETWEEN 300 AND 399 THEN '3xx'
+           WHEN status BETWEEN 400 AND 499 THEN '4xx'
+           WHEN status BETWEEN 500 AND 599 THEN '5xx'
+           ELSE 'other'
+         END AS status_class,
+         count(*)
+  FROM public.funnel_access_log
+  GROUP BY status_class"
+docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
+  exec -T -e PGPASSWORD="$OPENBRAIN_LOGS_ROLLUP_PASSWORD" log-sink \
+    psql -X -w -h /var/run/postgresql -U openbrain_logs_rollup \
+      -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "$legacy_rollup_probe" \
+      >/dev/null
+trap - ERR
+set +e
+current_before_migration=$(docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
+  exec -T -e PGPASSWORD="$OPENBRAIN_LOGS_ROLLUP_PASSWORD" log-sink \
+    psql -X -w -h /var/run/postgresql -U openbrain_logs_rollup \
+      -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f - \
+    < "$CI_REPO_ROOT/db/summarize_funnel.sql" 2>&1)
+current_before_migration_rc=$?
+set -e
+trap log_sink_error ERR
+test "$current_before_migration_rc" -ne 0
+grep -Fq 'column event.status_class does not exist' \
+  <<< "$current_before_migration"
+
 # Run the exact deployed migration twice. The first execution backfills the
 # retained row; the second proves idempotency. Both are one transaction.
 for _ in 1 2; do
@@ -194,6 +231,19 @@ for _ in 1 2; do
       < "$CI_REPO_ROOT/db/log-sink/02-log-sink-status-class.sql" \
       >/dev/null
 done
+trap - ERR
+set +e
+legacy_after_migration=$(docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
+  exec -T -e PGPASSWORD="$OPENBRAIN_LOGS_ROLLUP_PASSWORD" log-sink \
+    psql -X -w -h /var/run/postgresql -U openbrain_logs_rollup \
+      -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "$legacy_rollup_probe" 2>&1)
+legacy_after_migration_rc=$?
+set -e
+trap log_sink_error ERR
+test "$legacy_after_migration_rc" -ne 0
+grep -Fq 'column "funnel_access_log.status" must appear in the GROUP BY clause' \
+  <<< "$legacy_after_migration"
 migration_verdict=$(docker compose "${adoption_compose_opts[@]}" \
   -f "$adoption_root/compose.yml" \
   exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" log-sink \
@@ -276,7 +326,24 @@ history_rows=$(docker compose "${adoption_compose_opts[@]}" \
       "SELECT count(*) FROM public.funnel_access_log
        WHERE path = '/pre-marker-history'")
 test "$history_rows" = 1
-echo "legacy grant contract replayed; status migration idempotent with history intact; current assertion gated adoption; drifted volume refused; wrapper restart passed"
+
+# Match the runbook's final foreground check on the upgraded/recreated sink,
+# then prove its transaction-local batch left the catalog closed.
+docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" -f "$adoption_root/marker.yml" \
+  exec -T -e PGPASSWORD="$OPENBRAIN_LOGS_ROLLUP_PASSWORD" log-sink \
+    psql -X -w -h /var/run/postgresql -U openbrain_logs_rollup \
+      -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f - \
+    < "$CI_REPO_ROOT/db/summarize_funnel.sql" \
+    >/dev/null
+post_rollup_assertion=$(docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" -f "$adoption_root/marker.yml" \
+  exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" log-sink \
+    psql -X -w -h /var/run/postgresql -U "$POSTGRES_USER" \
+      -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f - \
+    < "$CI_REPO_ROOT/db/log-sink/02-log-sink-assertion.sql")
+grep -Fq 'log sink: invariants OK' <<< "$post_rollup_assertion"
+echo "legacy/current rollup incompatibility pinned; grant contract replayed; status migration idempotent with history intact; assertion-gated adoption, wrapper restart, and foreground rollup passed"
 
 cleanup_adoption 0
 trap - EXIT

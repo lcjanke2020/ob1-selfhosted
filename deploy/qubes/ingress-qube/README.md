@@ -26,15 +26,23 @@ cp .env.example .env && $EDITOR .env     # MCP_UPSTREAM (ConnectTCP forwarder), 
 docker compose up -d
 ```
 
-### Existing sink upgrade: add the generated status class first
+### Existing sink upgrade: coordinate the schema and installed rollup
 
-Postgres skips every `initdb.d` mount on an existing `log_sink_data` volume.
-Before recreating an existing sink with this definition, stop its only writer,
-reapply the idempotent schema/grant owner, stream the generated-column migration
-through the current container, and run the completed-catalog assertion:
+Postgres skips every `initdb.d` mount on an existing `log_sink_data` volume. The
+host timer runs installed copies at `~/funnel_daily_summary.sh` and
+`~/summarize_funnel.sql`, not the checkout. The old SQL fails after the new
+column lands, and the new SQL fails before it lands, so treat them as one
+maintenance window: stop the writer and summary job, refresh both installed
+copies, reapply the idempotent schema/grant owner, stream the generated-column
+migration through the current container, and run the completed-catalog
+assertion:
 
 ```sh
 docker compose stop log-ingester
+systemctl --user stop funnel-summary.timer funnel-summary.service
+
+install -m 0755 ../../../scripts/funnel_daily_summary.sh ~/funnel_daily_summary.sh
+install -m 0644 ../../../db/summarize_funnel.sql          ~/summarize_funnel.sql
 
 docker compose exec -T --user postgres log-sink sh -eu -c '
   PGPASSWORD="$POSTGRES_PASSWORD" exec psql -X -w \
@@ -64,11 +72,12 @@ transaction. A busy sink fails without a partial change; leave `log-ingester`
 stopped and retry. A second successful run is a no-op. Do not recreate the
 service or restart the writer unless the assertion prints `invariants OK`.
 
-If the volume already has its completion marker, finish with:
+If the volume already has its completion marker, recreate the sink and then
+continue at
+[Finish either upgrade path](#finish-either-existing-sink-upgrade-path):
 
 ```sh
 docker compose --env-file .env up -d --no-deps --force-recreate --wait log-sink
-docker compose up -d --no-deps log-ingester
 ```
 
 If it predates the marker, keep the writer stopped and continue with the
@@ -85,7 +94,6 @@ container running, and execute:
 ```sh
 ../../../scripts/adopt-log-sink-marker.sh
 docker compose --env-file .env up -d --no-deps --force-recreate --wait log-sink
-docker compose up -d --no-deps log-ingester
 ```
 
 The helper does not trust the old container's init log or old mounted assertion.
@@ -106,6 +114,23 @@ running project are deliberately elsewhere. If the marker-gated definition was
 already recreated and is refusing the old volume, do not delete the volume:
 restore/start the previous Compose definition against that same volume, run the
 helper while it is healthy, and then recreate with the current definition.
+
+#### Finish either existing-sink upgrade path
+
+With the current `log-sink` running on the migrated, marker-gated volume, run
+the newly installed rollup once in the foreground. Only after it exits zero,
+re-enable the timer and restart ingestion:
+
+```sh
+FUNNEL_SUMMARY_ENV_FILE=$HOME/.config/funnel-summary.env bash ~/funnel_daily_summary.sh
+systemctl --user enable --now funnel-summary.timer
+docker compose up -d --no-deps log-ingester
+systemctl --user list-timers funnel-summary.timer --no-pager
+```
+
+If the foreground run fails, leave both the timer and writer stopped, correct
+the installation or catalog, and rerun it. This keeps a mixed SQL/schema pair
+from silently disabling summary retention overnight.
 
 There is no `DB_HOST` here any more: the Funnel access log is written to a
 [local sink](#local-log-sink) on this qube, so the internet-facing edge holds no
