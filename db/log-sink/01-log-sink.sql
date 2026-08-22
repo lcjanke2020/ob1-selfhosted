@@ -14,8 +14,10 @@
 --
 -- This file is the SOLE schema owner for Funnel request metadata. The corpus
 -- schema deliberately has no copy; db/03-grants-assertion.sql rejects one.
--- db/log-sink/02-log-sink-assertion.sql pins this sink's exact relation and
--- column set, while CI runs every Funnel rollup regression against this schema.
+-- db/log-sink/02-log-sink-status-class.sql adds the raw table's generated
+-- classification on both fresh and upgraded sinks. The completed-catalog
+-- assertion pins the resulting relation and column set, while CI runs every
+-- Funnel rollup regression against this schema.
 --
 -- Idempotent (IF NOT EXISTS throughout), so it is safe to re-run by hand
 -- against an existing sink. The docker entrypoint only runs
@@ -65,6 +67,9 @@ CREATE TABLE IF NOT EXISTS funnel_access_log (
   -- socket; redundant with `socket` but kept for ingester-side debugging.
   caddy_logger   TEXT,
   inserted_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  -- status_class is appended by 02-log-sink-status-class.sql. Keeping the
+  -- migration as its sole definition gives fresh and upgraded sinks the same
+  -- column order and one idempotent upgrade path.
 );
 
 CREATE INDEX IF NOT EXISTS idx_funnel_access_log_ts        ON funnel_access_log (ts DESC);
@@ -84,9 +89,9 @@ CREATE TABLE IF NOT EXISTS funnel_access_summary (
   -- re-running the summary script for the same day is idempotent.
   day             DATE NOT NULL,
   socket          TEXT NOT NULL,
-  -- Status class: '1xx' | '2xx' | '3xx' | '4xx' | '5xx'. Coarser than
-  -- the exact status because the long-term value here is "is the 4xx
-  -- rate climbing", not the exact code distribution.
+  -- Status class: '1xx' | '2xx' | '3xx' | '4xx' | '5xx' | 'other'.
+  -- Coarser than the exact status because the long-term value here is "is the
+  -- 4xx rate climbing", not the exact code distribution.
   status_class    TEXT NOT NULL,
   request_count   BIGINT NOT NULL,
   unique_ips      BIGINT NOT NULL,
@@ -109,6 +114,10 @@ CREATE INDEX IF NOT EXISTS idx_funnel_access_summary_day ON funnel_access_summar
 -- ---------- Grants ---------------------------------------------------------
 -- PUBLIC gets nothing. Every role below is named explicitly, and
 -- 02-log-sink-assertion.sql fails the init if any of them acquires more.
+-- Database TEMPORARY is granted directly to the rollup role: its
+-- transaction-local projection needs temporary-table access, and the direct
+-- grant keeps hardened installs working after they revoke the stock PUBLIC
+-- default.
 --
 -- The `public` SCHEMA itself: PostgreSQL 15+ already revokes CREATE from
 -- PUBLIC, so the three roles can use the schema but not add objects to it.
@@ -116,6 +125,12 @@ CREATE INDEX IF NOT EXISTS idx_funnel_access_summary_day ON funnel_access_summar
 -- claim is "these two tables and nothing else".
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO openbrain_ingester, openbrain_logs_rollup;
+
+DO $$
+BEGIN
+  EXECUTE format('GRANT TEMPORARY ON DATABASE %I TO openbrain_logs_rollup', current_database());
+END;
+$$ LANGUAGE plpgsql;
 
 -- openbrain_ingester: INSERT-only on the raw table. This role is sink-only;
 -- the corpus assertion rejects the role name and has no matching relation.
@@ -128,7 +143,8 @@ GRANT USAGE  ON SEQUENCE funnel_access_log_id_seq TO openbrain_ingester;
 -- openbrain_logs_rollup: the DML db/summarize_funnel.sql needs — SELECT and
 -- DELETE on raw, SELECT/INSERT/UPDATE/DELETE on the aggregate. No sequence
 -- grant: the rollup never INSERTs into funnel_access_log, only reads and
--- retires it.
+-- retires it. Its TEMPORARY database capability above is required by the
+-- transaction-local aggregate projection and is pinned by the assertion.
 GRANT SELECT, DELETE                         ON funnel_access_log     TO openbrain_logs_rollup;
 GRANT SELECT, INSERT, UPDATE, DELETE         ON funnel_access_summary TO openbrain_logs_rollup;
 

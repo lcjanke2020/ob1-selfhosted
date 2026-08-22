@@ -87,7 +87,65 @@ sink_query openbrain_monitor "$OPENBRAIN_MONITOR_PASSWORD" \
   echo "a sink role can CREATE in public" >&2
   exit 1
 }
-echo "ingester INSERT-only, monitor one-table real probes, no role may CREATE"
+# Routine database hardening revokes the stock PUBLIC TEMPORARY default. The
+# rollup's explicit grant must survive that without giving the capability to
+# the ingester or monitor.
+sink_super_query \
+  "revoke temporary on database $POSTGRES_DB from public;" >/dev/null
+! sink_sql openbrain_ingester "$OPENBRAIN_INGESTER_PASSWORD" \
+  "create temporary table ingester_temp_forbidden(x int);" 2>/dev/null || {
+  echo "ingester can create temporary tables" >&2
+  exit 1
+}
+sink_sql openbrain_logs_rollup "$OPENBRAIN_LOGS_ROLLUP_PASSWORD" \
+  "create temporary table rollup_temp_allowed(x int);" >/dev/null
+! sink_sql openbrain_monitor "$OPENBRAIN_MONITOR_PASSWORD" \
+  "create temporary table monitor_temp_forbidden(x int);" 2>/dev/null || {
+  echo "monitor can create temporary tables" >&2
+  exit 1
+}
+sink_super_query \
+  "grant temporary on database $POSTGRES_DB to public;" >/dev/null
+echo "ingester INSERT-only, monitor one-table probes, rollup survives revoked PUBLIC TEMPORARY, no role may create persistent objects"
+
+log_sink_step "Generated status classification pins every boundary"
+sink_sql openbrain_ingester "$OPENBRAIN_INGESTER_PASSWORD" \
+  "INSERT INTO funnel_access_log (ts, socket, path, status, user_agent)
+   VALUES
+     (now(), 'tailnet', '/status-class/00-null', NULL, 'status-class-smoke'),
+     (now(), 'tailnet', '/status-class/01-099',  99, 'status-class-smoke'),
+     (now(), 'tailnet', '/status-class/02-100', 100, 'status-class-smoke'),
+     (now(), 'tailnet', '/status-class/03-199', 199, 'status-class-smoke'),
+     (now(), 'tailnet', '/status-class/04-200', 200, 'status-class-smoke'),
+     (now(), 'tailnet', '/status-class/05-299', 299, 'status-class-smoke'),
+     (now(), 'tailnet', '/status-class/06-300', 300, 'status-class-smoke'),
+     (now(), 'tailnet', '/status-class/07-399', 399, 'status-class-smoke'),
+     (now(), 'tailnet', '/status-class/08-400', 400, 'status-class-smoke'),
+     (now(), 'tailnet', '/status-class/09-499', 499, 'status-class-smoke'),
+     (now(), 'tailnet', '/status-class/10-500', 500, 'status-class-smoke'),
+     (now(), 'tailnet', '/status-class/11-599', 599, 'status-class-smoke'),
+     (now(), 'tailnet', '/status-class/12-600', 600, 'status-class-smoke')" \
+  >/dev/null
+status_classes=$(sink_super_query \
+  "SELECT string_agg(coalesce(status::text, 'null') || '=' || status_class,
+                     ',' ORDER BY path)
+   FROM funnel_access_log
+   WHERE user_agent = 'status-class-smoke'")
+expected_status_classes="null=other,99=other,100=1xx,199=1xx,200=2xx,299=2xx,300=3xx,399=3xx,400=4xx,499=4xx,500=5xx,599=5xx,600=other"
+test "$status_classes" = "$expected_status_classes" || {
+  echo "generated status classes drifted: $status_classes" >&2
+  exit 1
+}
+! sink_super_sql \
+  "INSERT INTO funnel_access_log (ts, socket, status, status_class)
+   VALUES (now(), 'tailnet', 200, '5xx')" 2>/dev/null || {
+  echo "status_class accepted an explicit caller value" >&2
+  exit 1
+}
+sink_super_sql \
+  "DELETE FROM funnel_access_log WHERE user_agent = 'status-class-smoke'" \
+  >/dev/null
+echo "all status boundaries generated correctly; explicit override refused"
 fi
 
 if [[ "$phase" == all || "$phase" == auth ]]; then
@@ -139,6 +197,28 @@ sink_super_query "grant select on funnel_access_log to pg_monitor;" >/dev/null
   exit 1
 }
 sink_super_query "revoke select on funnel_access_log from pg_monitor;" >/dev/null
+
+log_sink_step "Assertion pins database TEMPORARY to the rollup role"
+sink_super_query \
+  "revoke temporary on database $POSTGRES_DB from openbrain_logs_rollup;" \
+  >/dev/null
+! run_sink_assertion 2>/dev/null || {
+  echo "assertion missed a missing rollup TEMPORARY privilege" >&2
+  exit 1
+}
+sink_super_query \
+  "grant temporary on database $POSTGRES_DB to openbrain_logs_rollup;" \
+  >/dev/null
+sink_super_query \
+  "grant temporary on database $POSTGRES_DB to openbrain_logs_rollup with grant option;" \
+  >/dev/null
+! run_sink_assertion 2>/dev/null || {
+  echo "assertion missed grant option on rollup TEMPORARY" >&2
+  exit 1
+}
+sink_super_query \
+  "revoke grant option for temporary on database $POSTGRES_DB from openbrain_logs_rollup;" \
+  >/dev/null
 
 log_sink_step "Assertion rejects missing, disabled, stray, or inherited roles"
 sink_super_query "create role intruder login;" >/dev/null
@@ -247,5 +327,5 @@ sink_super_query \
   "create or replace view information_schema.information_schema_catalog_name as select current_database()::information_schema.sql_identifier as catalog_name;" \
   >/dev/null
 run_sink_assertion | grep -F 'invariants OK'
-echo "assertion catches widened grants, grant options, memberships, missing/disabled/foreign roles, database CREATE, stray relations, stray schemas, stray routines (including system-schema definer functions and views), in-place SECURITY DEFINER flips, catalog views repointed at sink tables, and PUBLIC"
+echo "assertion catches widened grants, grant options, memberships, missing/disabled/foreign roles, database CREATE/direct-TEMPORARY drift, stray relations, stray schemas, stray routines (including system-schema definer functions and views), in-place SECURITY DEFINER flips, catalog views repointed at sink tables, and PUBLIC"
 fi

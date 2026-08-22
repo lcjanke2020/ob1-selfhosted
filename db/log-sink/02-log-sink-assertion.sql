@@ -2,7 +2,7 @@
 --
 -- Run as the final catalog check during init (the entrypoint sees it as 99-…;
 -- only the zz- completion-marker script follows), and re-run by hand after any
--- change to 01-log-sink.sql. Counterpart to
+-- change to 01-log-sink.sql or 02-log-sink-status-class.sql. Counterpart to
 -- db/03-grants-assertion.sql on the corpus, but the claim here is stronger
 -- and simpler to state: this cluster contains TWO relations, TWO required
 -- roles, and at most one optional monitor role;
@@ -26,7 +26,9 @@
 -- CONNECT/TEMP, USAGE on schema public, EXECUTE on built-in functions. None
 -- of those reaches the two relations (section 3 pins their ACLs exactly);
 -- asserting them away would mean fighting harmless defaults on every major
--- version instead of guarding the promise that matters.
+-- version instead of guarding the promise that matters. Section 4 separately
+-- pins a direct TEMPORARY grant for the rollup so hardening PUBLIC cannot break
+-- its transaction-local projection.
 --
 -- Why assert at all on a cluster whose contents are disposable: the sink sits
 -- on the internet-facing qube. Its value is not the data — it is the promise
@@ -38,6 +40,50 @@
 -- Every check is a NEGATIVE one: it enumerates what is permitted and rejects
 -- the rest, so a relation or privilege added later is caught without this
 -- file having to learn about it first.
+
+-- The runtime assertion cannot import a host-side JSON file: fresh-init and
+-- adoption stream this SQL through psql in several deployment layouts. Keep
+-- the unavoidable embedded copy below data-equivalent to role-contract.json,
+-- including object key order. The checker in
+-- scripts/ci/check_log_sink_roles.ts compares the two before any Docker fixture
+-- starts. Every section below reads this one session-local
+-- contract instead of repeating role arrays or privilege CASE expressions.
+-- ROLE_CONTRACT_JSON_BEGIN
+DO $contract_setup$
+BEGIN
+  PERFORM set_config(
+    'openbrain.log_sink_role_contract',
+    $role_contract$[
+      {
+        "key": "ingester",
+        "name": "openbrain_ingester",
+        "required": true,
+        "password_env": "OPENBRAIN_INGESTER_PASSWORD",
+        "database_privileges": "",
+        "direct_privileges": "funnel_access_log=INSERT|funnel_access_log_id_seq=USAGE"
+      },
+      {
+        "key": "rollup",
+        "name": "openbrain_logs_rollup",
+        "required": true,
+        "password_env": "OPENBRAIN_LOGS_ROLLUP_PASSWORD",
+        "database_privileges": "TEMPORARY",
+        "direct_privileges": "funnel_access_log=DELETE,SELECT|funnel_access_summary=DELETE,INSERT,SELECT,UPDATE"
+      },
+      {
+        "key": "monitor",
+        "name": "openbrain_monitor",
+        "required": false,
+        "password_env": "OPENBRAIN_MONITOR_PASSWORD",
+        "database_privileges": "",
+        "direct_privileges": "funnel_access_log=SELECT"
+      }
+    ]$role_contract$,
+    false
+  );
+END;
+$contract_setup$ LANGUAGE plpgsql;
+-- ROLE_CONTRACT_JSON_END
 
 -- ---------- 1. No role on this cluster is privileged ----------------------
 -- Excludes the bootstrap superuser (the container's POSTGRES_USER), which is
@@ -63,11 +109,14 @@ $$ LANGUAGE plpgsql;
 -- The relation check keeps the corpus schema from ever being applied here by
 -- mistake (a `thoughts` table on the edge would be the failure this whole
 -- topology exists to prevent). The column check pins the contract consumed by
--- db/summarize_funnel.sql to the sole schema owner, 01-log-sink.sql.
+-- db/summarize_funnel.sql to 01-log-sink.sql plus the status-class migration.
 DO $$
 DECLARE
-  actual   text;
-  expected text;
+  actual          text;
+  expected        text;
+  generation_kind text;
+  generated_type  text;
+  generated_expr  text;
 BEGIN
   SELECT string_agg(c.relname, ', ' ORDER BY c.relname) INTO actual
   FROM pg_class c
@@ -86,11 +135,41 @@ BEGIN
   FROM pg_attribute
   WHERE attrelid = 'public.funnel_access_log'::regclass AND attnum > 0 AND NOT attisdropped;
   expected := 'id,ts,socket,client_ip,method,path,status,duration_ms,bytes_out,'
-           || 'user_agent,host_header,proto,tls_sni,caddy_logger,inserted_at';
+           || 'user_agent,host_header,proto,tls_sni,caddy_logger,inserted_at,'
+           || 'status_class';
   IF actual IS DISTINCT FROM expected THEN
     RAISE EXCEPTION
-      'log sink: funnel_access_log columns drifted from db/log-sink/01-log-sink.sql; expected (%), found (%)',
+      'log sink: funnel_access_log columns drifted from db/log-sink/01-log-sink.sql + db/log-sink/02-log-sink-status-class.sql; expected (%), found (%)',
       expected, actual;
+  END IF;
+
+  SELECT
+    a.attgenerated::text,
+    format_type(a.atttypid, a.atttypmod),
+    btrim(regexp_replace(pg_get_expr(d.adbin, d.adrelid), '[[:space:]]+', ' ', 'g'))
+    INTO generation_kind, generated_type, generated_expr
+  FROM pg_attribute a
+  LEFT JOIN pg_attrdef d
+    ON d.adrelid = a.attrelid
+   AND d.adnum = a.attnum
+  WHERE a.attrelid = 'public.funnel_access_log'::regclass
+    AND a.attname = 'status_class'
+    AND a.attnum > 0
+    AND NOT a.attisdropped;
+  IF generation_kind IS DISTINCT FROM 's' OR generated_type IS DISTINCT FROM 'text' THEN
+    RAISE EXCEPTION
+      'log sink: status_class must be a stored generated text column; found generation (%) type (%)',
+      coalesce(generation_kind, '<missing>'),
+      coalesce(generated_type, '<missing>');
+  END IF;
+  -- Pin the deparsed expression by fingerprint so the executable six-branch
+  -- CASE remains defined only in 02-log-sink-status-class.sql. The boundary
+  -- smoke pins behavior; if a PostgreSQL major changes deparsing, deliberately
+  -- regenerate this value with the same pg_get_expr/md5 expression below.
+  IF md5(coalesce(generated_expr, '')) <> '6201476046af4e199bf241a5ce4589e5' THEN
+    RAISE EXCEPTION
+      'log sink: status_class generated expression drifted; found (%)',
+      coalesce(generated_expr, '<missing>');
   END IF;
 
   SELECT string_agg(attname, ',' ORDER BY attnum) INTO actual
@@ -131,18 +210,12 @@ DECLARE
   expected   text;
 BEGIN
   FOR r IN
-    SELECT rolname,
-           CASE rolname
-             WHEN 'openbrain_ingester' THEN
-               'funnel_access_log=INSERT|funnel_access_log_id_seq=USAGE'
-             WHEN 'openbrain_logs_rollup' THEN
-               'funnel_access_log=DELETE,SELECT|funnel_access_summary=DELETE,INSERT,SELECT,UPDATE'
-             WHEN 'openbrain_monitor' THEN
-               'funnel_access_log=SELECT'
-           END AS want
-    FROM pg_roles
-    WHERE rolname IN ('openbrain_ingester', 'openbrain_logs_rollup', 'openbrain_monitor')
-    ORDER BY rolname
+    SELECT role.rolname, contract.direct_privileges AS want
+    FROM jsonb_to_recordset(
+      current_setting('openbrain.log_sink_role_contract')::jsonb
+    ) AS contract(name text, direct_privileges text)
+    JOIN pg_roles role ON role.rolname = contract.name
+    ORDER BY role.rolname
   LOOP
     WITH acl AS (
       SELECT c.relname, (aclexplode(c.relacl)).*
@@ -184,7 +257,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- ---------- 4. No sink role can add objects to the public schema ----------
+-- ---------- 4. Schema/database creation closed; rollup TEMPORARY pinned ----
 -- The claim is about the three LOGIN roles, not about the schema's ACL in the
 -- abstract: PostgreSQL 15+ ships `public` owned by `pg_database_owner` with
 -- CREATE granted to it, which is the database owner (the bootstrap superuser
@@ -196,11 +269,19 @@ $$ LANGUAGE plpgsql;
 -- has_schema_privilege takes a role, and PUBLIC is not one.
 DO $$
 DECLARE
-  offender text;
+  offender  text;
+  r         record;
+  actual    text;
+  expected  text;
 BEGIN
   SELECT string_agg(rolname, ', ' ORDER BY rolname) INTO offender
   FROM pg_roles
-  WHERE rolname IN ('openbrain_ingester', 'openbrain_logs_rollup', 'openbrain_monitor')
+  WHERE rolname IN (
+    SELECT contract->>'name'
+    FROM jsonb_array_elements(
+      current_setting('openbrain.log_sink_role_contract')::jsonb
+    ) AS roles(contract)
+  )
     AND has_schema_privilege(rolname, 'public', 'CREATE');
 
   IF offender IS NOT NULL THEN
@@ -220,11 +301,16 @@ BEGIN
 
   -- Same question one level up: CREATE on the DATABASE would let a role mint
   -- a fresh schema and put relations outside the public-schema checks above.
-  -- The stock database default (acldefault when datacl is NULL) gives PUBLIC
-  -- CONNECT and TEMP but never CREATE, so both probes pass an untouched init.
+  -- The stock database default gives PUBLIC CONNECT and TEMPORARY but never
+  -- CREATE, so both probes pass an untouched init.
   SELECT string_agg(rolname, ', ' ORDER BY rolname) INTO offender
   FROM pg_roles
-  WHERE rolname IN ('openbrain_ingester', 'openbrain_logs_rollup', 'openbrain_monitor')
+  WHERE rolname IN (
+    SELECT contract->>'name'
+    FROM jsonb_array_elements(
+      current_setting('openbrain.log_sink_role_contract')::jsonb
+    ) AS roles(contract)
+  )
     AND has_database_privilege(rolname, current_database(), 'CREATE');
 
   IF offender IS NOT NULL THEN
@@ -241,6 +327,44 @@ BEGIN
     RAISE EXCEPTION
       'log sink: PUBLIC may CREATE schemas in this database';
   END IF;
+
+  -- TEMPORARY is the one managed database capability. Compare only explicit
+  -- role grants here (including grant option) because PostgreSQL's stock
+  -- PUBLIC TEMPORARY default remains deliberately unpinned. The rollup's
+  -- direct grant is still load-bearing: it must survive a hardened deployment
+  -- revoking that PUBLIC default.
+  FOR r IN
+    SELECT role.oid AS role_oid,
+           role.rolname,
+           contract.database_privileges AS want
+    FROM jsonb_to_recordset(
+      current_setting('openbrain.log_sink_role_contract')::jsonb
+    ) AS contract(name text, database_privileges text)
+    JOIN pg_roles role ON role.rolname = contract.name
+    ORDER BY role.rolname
+  LOOP
+    WITH database_acl AS (
+      SELECT (aclexplode(coalesce(datacl, '{}'::aclitem[]))).*
+      FROM pg_database
+      WHERE datname = current_database()
+    ), mine AS (
+      SELECT DISTINCT
+        privilege_type || CASE WHEN is_grantable THEN '*' ELSE '' END AS privilege
+      FROM database_acl
+      WHERE privilege_type = 'TEMPORARY'
+        AND grantee = r.role_oid
+    )
+    SELECT string_agg(privilege, ',' ORDER BY privilege) INTO actual
+    FROM mine;
+
+    expected := nullif(r.want, '');
+    IF actual IS DISTINCT FROM expected THEN
+      RAISE EXCEPTION
+        'log sink: role % database TEMPORARY privilege drifted; expected (%), found (%)',
+        r.rolname, coalesce(expected, '<none>'), coalesce(actual, '<none>');
+    END IF;
+
+  END LOOP;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -272,7 +396,13 @@ BEGIN
   END IF;
 
   SELECT string_agg(required_role, ', ' ORDER BY required_role) INTO missing
-  FROM unnest(ARRAY['openbrain_ingester', 'openbrain_logs_rollup']) AS wanted(required_role)
+  FROM (
+    SELECT contract.name AS required_role
+    FROM jsonb_to_recordset(
+      current_setting('openbrain.log_sink_role_contract')::jsonb
+    ) AS contract(name text, required boolean)
+    WHERE contract.required
+  ) AS wanted
   WHERE NOT EXISTS (
     SELECT 1 FROM pg_roles WHERE rolname = wanted.required_role
   );
@@ -284,7 +414,12 @@ BEGIN
 
   SELECT string_agg(rolname, ', ' ORDER BY rolname) INTO offender
   FROM pg_roles
-  WHERE rolname IN ('openbrain_ingester', 'openbrain_logs_rollup', 'openbrain_monitor')
+  WHERE rolname IN (
+    SELECT contract->>'name'
+    FROM jsonb_array_elements(
+      current_setting('openbrain.log_sink_role_contract')::jsonb
+    ) AS roles(contract)
+  )
     AND NOT rolcanlogin;
 
   IF offender IS NOT NULL THEN
@@ -296,8 +431,12 @@ BEGIN
   FROM pg_roles
   WHERE rolname NOT LIKE 'pg\_%'
     AND NOT rolsuper
-    AND rolname NOT IN
-      ('openbrain_ingester', 'openbrain_logs_rollup', 'openbrain_monitor');
+    AND rolname NOT IN (
+      SELECT contract->>'name'
+      FROM jsonb_array_elements(
+        current_setting('openbrain.log_sink_role_contract')::jsonb
+      ) AS roles(contract)
+    );
 
   IF offender IS NOT NULL THEN
     RAISE EXCEPTION
@@ -325,18 +464,12 @@ DECLARE
   actual   text;
 BEGIN
   FOR r IN
-    SELECT rolname,
-           CASE rolname
-             WHEN 'openbrain_ingester' THEN
-               'funnel_access_log=INSERT|funnel_access_log_id_seq=USAGE'
-             WHEN 'openbrain_logs_rollup' THEN
-               'funnel_access_log=DELETE,SELECT|funnel_access_summary=DELETE,INSERT,SELECT,UPDATE'
-             WHEN 'openbrain_monitor' THEN
-               'funnel_access_log=SELECT'
-           END AS want
-    FROM pg_roles
-    WHERE rolname IN ('openbrain_ingester', 'openbrain_logs_rollup', 'openbrain_monitor')
-    ORDER BY rolname
+    SELECT role.rolname, contract.direct_privileges AS want
+    FROM jsonb_to_recordset(
+      current_setting('openbrain.log_sink_role_contract')::jsonb
+    ) AS contract(name text, direct_privileges text)
+    JOIN pg_roles role ON role.rolname = contract.name
+    ORDER BY role.rolname
   LOOP
     WITH effective AS (
       SELECT t.relname, p.priv
@@ -439,7 +572,12 @@ BEGIN
     AND a.grantee NOT IN (
       SELECT oid FROM pg_roles
       WHERE rolsuper                                     -- the owner's own entry
-         OR rolname IN ('openbrain_ingester', 'openbrain_logs_rollup', 'openbrain_monitor'));
+         OR rolname IN (
+           SELECT contract->>'name'
+           FROM jsonb_array_elements(
+             current_setting('openbrain.log_sink_role_contract')::jsonb
+           ) AS roles(contract)
+         ));
   IF offender IS NOT NULL THEN
     RAISE EXCEPTION
       'log sink: grant(s) held by unexpected grantee(s) %; only the enumerated roles may appear in an ACL',

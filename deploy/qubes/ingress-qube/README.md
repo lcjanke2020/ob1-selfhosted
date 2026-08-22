@@ -26,12 +26,72 @@ cp .env.example .env && $EDITOR .env     # MCP_UPSTREAM (ConnectTCP forwarder), 
 docker compose up -d
 ```
 
-### Existing sink upgrade: adopt the pre-marker volume first
+### Existing sink upgrade: coordinate the schema and installed rollup
+
+Postgres skips every `initdb.d` mount on an existing `log_sink_data` volume. The
+host timer runs installed copies at `~/funnel_daily_summary.sh` and
+`~/summarize_funnel.sql`, not the checkout. The old SQL fails after the new
+column lands, and the new SQL fails before it lands, so treat them as one
+maintenance window: stop the writer and summary job, refresh both installed
+copies, reapply the idempotent schema/grant owner, stream the generated-column
+migration through the current container, and run the completed-catalog
+assertion:
+
+```sh
+docker compose stop log-ingester
+systemctl --user stop funnel-summary.timer funnel-summary.service
+
+install -m 0755 ../../../scripts/funnel_daily_summary.sh ~/funnel_daily_summary.sh
+install -m 0644 ../../../db/summarize_funnel.sql          ~/summarize_funnel.sql
+
+docker compose exec -T --user postgres log-sink sh -eu -c '
+  PGPASSWORD="$POSTGRES_PASSWORD" exec psql -X -w \
+    -h /var/run/postgresql -U "${POSTGRES_USER:-postgres}" \
+    -d "${POSTGRES_DB:-openbrain_logs}" -v ON_ERROR_STOP=1 -f -
+' < ../../../db/log-sink/01-log-sink.sql
+
+docker compose exec -T --user postgres log-sink sh -eu -c '
+  PGPASSWORD="$POSTGRES_PASSWORD" exec psql -X -w \
+    -h /var/run/postgresql -U "${POSTGRES_USER:-postgres}" \
+    -d "${POSTGRES_DB:-openbrain_logs}" -v ON_ERROR_STOP=1 -f -
+' < ../../../db/log-sink/02-log-sink-status-class.sql
+
+docker compose exec -T --user postgres log-sink sh -eu -c '
+  PGPASSWORD="$POSTGRES_PASSWORD" exec psql -X -w \
+    -h /var/run/postgresql -U "${POSTGRES_USER:-postgres}" \
+    -d "${POSTGRES_DB:-openbrain_logs}" -v ON_ERROR_STOP=1 -f -
+' < ../../../db/log-sink/02-log-sink-assertion.sql
+```
+
+Reapplying `01-log-sink.sql` also grants database `TEMPORARY` directly to
+`openbrain_logs_rollup`, so the new transaction-local projection works even when
+a hardened installation has revoked PostgreSQL's stock `PUBLIC` default. The
+migration then takes an access-exclusive table lock with a 10-second timeout,
+adds one stored generated column, and backfills retained rows in one
+transaction. A busy sink fails without a partial change; leave `log-ingester`
+stopped and retry. A second successful run is a no-op. Do not recreate the
+service or restart the writer unless the assertion prints `invariants OK`.
+
+If the volume already has its completion marker, recreate the sink and then
+continue at
+[Finish either upgrade path](#finish-either-existing-sink-upgrade-path):
+
+```sh
+docker compose --env-file .env up -d --no-deps --force-recreate --wait log-sink
+```
+
+If it predates the marker, keep the writer stopped and continue with the
+adoption step below. Keep it stopped through the marker-gated recreate and the
+foreground rollup in
+[Finish either upgrade path](#finish-either-existing-sink-upgrade-path).
+
+### Older sink upgrade: adopt the pre-marker volume
 
 This step applies only when `log_sink_data` was initialized by a release that
 predates `.openbrain-log-sink-init-complete`. **After updating the checkout but
-before any `docker compose up` that would recreate `log-sink`**, leave the old,
-healthy container running and execute:
+before any `docker compose up` that would recreate `log-sink`**, first apply the
+schema/grant replay and status-class migration above, leave the old healthy
+container running, and execute:
 
 ```sh
 ../../../scripts/adopt-log-sink-marker.sh
@@ -46,7 +106,9 @@ behind its unix socket uses the same `PGDATA`, and creates the marker as the
 `postgres` OS user only after every current invariant passes. It makes no schema
 or row changes. A partial or drifted sink exits nonzero and remains unmarked, so
 the new entrypoint will continue to refuse it. Correct the drift and rerun the
-helper; never substitute `touch` or create the marker yourself.
+helper; never substitute `touch` or create the marker yourself. It does not run
+migrations, which is why the schema/grant replay and status-class step must
+precede it.
 
 The helper defaults to this Compose directory and its `.env`. Set
 `COMPOSE_DIR=/absolute/path/to/the/running/project` only if the checkout and
@@ -54,6 +116,23 @@ running project are deliberately elsewhere. If the marker-gated definition was
 already recreated and is refusing the old volume, do not delete the volume:
 restore/start the previous Compose definition against that same volume, run the
 helper while it is healthy, and then recreate with the current definition.
+
+#### Finish either existing-sink upgrade path
+
+With the current `log-sink` running on the migrated, marker-gated volume, run
+the newly installed rollup once in the foreground. Only after it exits zero,
+re-enable the timer and restart ingestion:
+
+```sh
+FUNNEL_SUMMARY_ENV_FILE=$HOME/.config/funnel-summary.env bash ~/funnel_daily_summary.sh
+systemctl --user enable --now funnel-summary.timer
+docker compose up -d --no-deps log-ingester
+systemctl --user list-timers funnel-summary.timer --no-pager
+```
+
+If the foreground run fails, leave both the timer and writer stopped, correct
+the installation or catalog, and rerun it. This keeps a mixed SQL/schema pair
+from silently disabling summary retention overnight.
 
 There is no `DB_HOST` here any more: the Funnel access log is written to a
 [local sink](#local-log-sink) on this qube, so the internet-facing edge holds no
@@ -208,7 +287,7 @@ qube at all.
 | -------------------------------- | ----------------------------- | ---------------------------------------- |
 | `LOG_SINK_SUPERUSER_PASSWORD`    | `.env`                        | init only — creates the roles and schema |
 | `OPENBRAIN_INGESTER_PASSWORD`    | `.env`                        | INSERT on `funnel_access_log`            |
-| `OPENBRAIN_LOGS_ROLLUP_PASSWORD` | `.env` + `funnel-summary.env` | DML on the two observability tables      |
+| `OPENBRAIN_LOGS_ROLLUP_PASSWORD` | `.env` + `funnel-summary.env` | table DML + database `TEMPORARY`         |
 | `OPENBRAIN_MONITOR_PASSWORD`     | `.env` + `funnel-monitor.env` | SELECT on `funnel_access_log` only       |
 
 The `.env` copy of a role password is what **creates** the role at container
@@ -231,6 +310,13 @@ Caddy's access logs live here, so their store does too. The `log-sink` service
 is this qube's own Postgres, holding `funnel_access_log` and
 `funnel_access_summary` and **nothing else** — no thoughts, no
 `mcp_auth_events`, no pgvector.
+
+The checked [role contract](../../../db/log-sink/role-contract.json) names the
+required `openbrain_ingester` and `openbrain_logs_rollup` identities plus the
+optional `openbrain_monitor`, their exact relation grants, and the rollup's
+database `TEMPORARY` capability. CI validates every unavoidable SQL, Compose,
+script, and primary-runbook literal against that manifest before starting a
+database fixture.
 
 Earlier revisions kept the ingester writing **across** to the db qube on
 `:5432`, documented as a deliberate scoped exception

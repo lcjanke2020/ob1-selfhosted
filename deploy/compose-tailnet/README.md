@@ -296,6 +296,59 @@ transport boundary is in [Security model](../../docs/security-model.md).
 Postgres only runs `db/` init scripts on a **fresh data directory** — schema
 changes after first deploy need manual application.
 
+Pattern B executes the wrapper and rollup SQL directly from this checkout, so
+updating the checkout refreshes both (unlike the ingress-qube installed copies).
+Pause the sink-summary cron/timer from the checkout update through the
+assertion; an accidental run in that mixed-version window fails transactionally,
+and the next run after a completed upgrade can safely cover the same work.
+
+**Existing log-sink status-class migration.** Before recreating an existing
+Pattern-B sink, stop its only writer, reapply the idempotent schema/grant owner,
+and stream the same generated-column migration used by fresh init. Then run the
+completed-catalog assertion:
+
+```sh
+docker compose --env-file .env --profile pattern-b stop log-ingester
+
+docker compose --env-file .env --profile pattern-b exec -T --user postgres log-sink sh -eu -c '
+  PGPASSWORD="$POSTGRES_PASSWORD" exec psql -X -w \
+    -h /var/run/postgresql -U "${POSTGRES_USER:-postgres}" \
+    -d "${POSTGRES_DB:-openbrain_logs}" -v ON_ERROR_STOP=1 -f -
+' < ../../db/log-sink/01-log-sink.sql
+
+docker compose --env-file .env --profile pattern-b exec -T --user postgres log-sink sh -eu -c '
+  PGPASSWORD="$POSTGRES_PASSWORD" exec psql -X -w \
+    -h /var/run/postgresql -U "${POSTGRES_USER:-postgres}" \
+    -d "${POSTGRES_DB:-openbrain_logs}" -v ON_ERROR_STOP=1 -f -
+' < ../../db/log-sink/02-log-sink-status-class.sql
+
+docker compose --env-file .env --profile pattern-b exec -T --user postgres log-sink sh -eu -c '
+  PGPASSWORD="$POSTGRES_PASSWORD" exec psql -X -w \
+    -h /var/run/postgresql -U "${POSTGRES_USER:-postgres}" \
+    -d "${POSTGRES_DB:-openbrain_logs}" -v ON_ERROR_STOP=1 -f -
+' < ../../db/log-sink/02-log-sink-assertion.sql
+```
+
+The schema/grant replay grants database `TEMPORARY` directly to the rollup role,
+so it survives installations that revoke PostgreSQL's stock `PUBLIC` default.
+The generated column backfill and its 10-second lock timeout are one
+transaction; a busy sink fails without a partial change, and a second successful
+run is a no-op. Do not recreate the sink or restart the writer unless the
+assertion prints `invariants OK`. If the existing volume predates
+`.openbrain-log-sink-init-complete`, adopt it before recreation:
+
+```sh
+COMPOSE_DIR="$PWD" ../../scripts/adopt-log-sink-marker.sh
+docker compose --env-file .env --profile pattern-b up -d --no-deps --force-recreate --wait log-sink
+SUMMARY_TARGET=sink ../../scripts/funnel_daily_summary.sh
+docker compose --env-file .env --profile pattern-b up -d --no-deps log-ingester
+```
+
+For a volume that already had the marker, use the same final three commands
+without the adoption helper. Resume the paused summary scheduler only after the
+foreground summary exits zero. The helper validates but never migrates, so the
+schema/grant replay and status-class step always come first.
+
 **Adopting the `COMPOSE_PROJECT_NAME` line** (stacks whose `.env` predates it):
 set it to the name `docker compose ls` reports for your running stack, not
 necessarily the example's default. A changed project name strands the running

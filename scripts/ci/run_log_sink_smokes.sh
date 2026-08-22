@@ -108,6 +108,38 @@ run_family() {
 }
 
 run_preflight() {
+  command -v deno >/dev/null || {
+    echo "deno is required for the log-sink role-contract preflight" >&2
+    return 127
+  }
+  deno test --config server/deno.json --frozen --allow-read \
+    scripts/ci/check_log_sink_roles_test.ts || return
+  deno run --allow-read scripts/ci/check_log_sink_roles.ts || return
+
+  # Prove the checker fails deterministically when the canonical identity
+  # changes but its unavoidable runtime literals have not. Keep the mutation
+  # under the runner-owned scratch directory; the checkout is never touched.
+  local drift_manifest drift_output drift_rc
+  drift_manifest="$(mktemp "$RUNNER_TEMP/log-sink-role-drift.XXXXXX.json")"
+  sed '0,/openbrain_ingester/s//openbrain_ci_drift/' \
+    db/log-sink/role-contract.json > "$drift_manifest"
+  set +e
+  drift_output="$(deno run --allow-read scripts/ci/check_log_sink_roles.ts \
+    --manifest "$drift_manifest" 2>&1)"
+  drift_rc=$?
+  set -e
+  if (( drift_rc == 0 )); then
+    echo "role-contract validator accepted a stale ingester identity" >&2
+    return 1
+  fi
+  grep -Fq "sink assertion contract" <<< "$drift_output" || {
+    echo "role-contract drift failed for an unexpected reason:" >&2
+    echo "$drift_output" >&2
+    return 1
+  }
+  rm -f -- "$drift_manifest"
+  echo "role-contract drift probe rejected stale consumers"
+
   command -v systemd-analyze >/dev/null || {
     echo "systemd-analyze is required for the log-sink preflight family" >&2
     return 127
@@ -150,6 +182,7 @@ start_sink() {
     -v "$GITHUB_WORKSPACE/db/log-sink/log-sink-entrypoint.sh:/usr/local/bin/openbrain-log-sink-entrypoint.sh:ro" \
     -v "$GITHUB_WORKSPACE/db/log-sink/00-log-sink-roles.sh:/docker-entrypoint-initdb.d/00-log-sink-roles.sh:ro" \
     -v "$GITHUB_WORKSPACE/db/log-sink/01-log-sink.sql:/docker-entrypoint-initdb.d/01-log-sink.sql:ro" \
+    -v "$GITHUB_WORKSPACE/db/log-sink/02-log-sink-status-class.sql:/docker-entrypoint-initdb.d/02-log-sink-status-class.sql:ro" \
     -v "$GITHUB_WORKSPACE/db/log-sink/02-log-sink-assertion.sql:/docker-entrypoint-initdb.d/99-log-sink-assertion.sql:ro" \
     -v "$GITHUB_WORKSPACE/db/log-sink/03-log-sink-ready.sh:/docker-entrypoint-initdb.d/zz-log-sink-ready.sh:ro" \
     --entrypoint /bin/sh \

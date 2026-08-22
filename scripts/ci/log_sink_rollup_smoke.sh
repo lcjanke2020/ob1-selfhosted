@@ -281,3 +281,7 @@ test "$verdict" = "39|/a,/b,/c|0" || {
   exit 1
 }
 echo "sketch pinned: exact count 34+5=39; below-third /d stays out; raw retired"
+
+log_sink_step "Rollup leaves the persistent sink contract closed"
+run_sink_assertion | grep -F 'invariants OK'
+echo "post-rollup catalog still has exactly two relations and zero routines/views"

@@ -58,12 +58,17 @@ on:
       - "server/config.ts"
       - "server/session_toml.ts"
       - "server/postgres_deferred_patched.ts"
+      - "server/log_ingester.ts"
       - "server/deno.json"
       - "server/deno.lock"
       - "deploy/compose-local/docker-compose.yml"
+      - "deploy/compose-tailnet/README.md"
       - "deploy/compose-tailnet/docker-compose.pattern-b.yml"
       - "deploy/qubes/app-qube/backup/**"
+      - "deploy/qubes/ingress-qube/README.md"
       - "deploy/qubes/ingress-qube/docker-compose.yml"
+      - "docs/security-model.md"
+      - "scripts/check_pattern_b_compose.nu"
       - "scripts/adopt-log-sink-marker.sh"
       - "scripts/funnel_daily_summary.sh"
       - "scripts/funnel_monitor.sh"
@@ -144,6 +149,11 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.4
 
       - name: Run log-sink smoke families from outside the checkout
         working-directory: ${{ runner.temp }}

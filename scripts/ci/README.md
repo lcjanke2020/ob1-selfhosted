@@ -46,7 +46,7 @@ for that family.
 
 ### Prerequisites
 
-Run from a checkout with Bash 4+, Docker, the Docker Compose plugin, and
+Run from a checkout with Bash 4+, Deno, Docker, the Docker Compose plugin, and
 `systemd-analyze`. No host port is opened: the primary sink and every lifecycle
 fixture use a Unix socket inside a `--network none` container. The image pin is
 derived from the ingress-qube Compose file.
@@ -58,14 +58,14 @@ directory under `/tmp`.
 
 ### Commands
 
-| Family              | Local command                                 | Coverage                                                                                 |
-| ------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| All log-sink checks | `scripts/ci/run_log_sink_smokes.sh all`       | CI-equivalent preflight plus every family below                                          |
-| Preflight           | `scripts/ci/run_log_sink_smokes.sh preflight` | Ingress summary service/timer parsing and calendar                                       |
-| Lifecycle           | `scripts/ci/run_log_sink_smokes.sh lifecycle` | Assertion-gated pre-marker adoption, preserved history, and partial-init restart refusal |
-| Contract            | `scripts/ci/run_log_sink_smokes.sh contract`  | Durable marker, socket-only boundary, exact role grants, SCRAM, mutation matrix          |
-| Rollup              | `scripts/ci/run_log_sink_smokes.sh rollup`    | Late arrivals, retention ordering, snapshot concurrency, and bounded top-3 sketches      |
-| Summary wrapper     | `scripts/ci/run_log_sink_smokes.sh wrapper`   | Target-pinned sink role, socket, SQL, database, retention, and report shape              |
+| Family              | Local command                                 | Coverage                                                                                   |
+| ------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| All log-sink checks | `scripts/ci/run_log_sink_smokes.sh all`       | CI-equivalent preflight plus every family below                                            |
+| Preflight           | `scripts/ci/run_log_sink_smokes.sh preflight` | Role/credential mapping drift rejection plus ingress unit parsing and calendar             |
+| Lifecycle           | `scripts/ci/run_log_sink_smokes.sh lifecycle` | Legacy status backfill, idempotency, assertion-gated adoption, and partial-init refusal    |
+| Contract            | `scripts/ci/run_log_sink_smokes.sh contract`  | Generated status boundaries, marker, socket boundary, exact role grants, SCRAM, mutations  |
+| Rollup              | `scripts/ci/run_log_sink_smokes.sh rollup`    | Shared projection, late arrivals, retention, concurrency, bounded sketches, closed catalog |
+| Summary wrapper     | `scripts/ci/run_log_sink_smokes.sh wrapper`   | Target-pinned sink role, socket, SQL, database, retention, and report shape                |
 
 Multiple primary-container families share one fresh fixture:
 
