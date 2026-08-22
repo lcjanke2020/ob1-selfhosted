@@ -39,8 +39,15 @@ const representativeChanges = [
   "scripts/ci/db_init_auth_smoke.sh",
   ".github/workflows/db-init.yml",
 ];
+const roleContractConsumers = [
+  "server/log_ingester.ts",
+  "scripts/check_pattern_b_compose.nu",
+  "deploy/qubes/ingress-qube/README.md",
+  "deploy/compose-tailnet/README.md",
+  "docs/security-model.md",
+];
 
-for (const candidate of representativeChanges) {
+for (const candidate of [...representativeChanges, ...roleContractConsumers]) {
   assert(
     patterns.some((pattern) =>
       globToRegExp(pattern, { globstar: true }).test(candidate)
@@ -50,5 +57,5 @@ for (const candidate of representativeChanges) {
 }
 
 console.log(
-  `DB-init path contract: ${patterns.length} shared patterns cover ${representativeChanges.length} representative changes`,
+  `DB-init path contract: ${patterns.length} shared patterns cover ${representativeChanges.length} representative changes and ${roleContractConsumers.length} role-contract consumers`,
 );

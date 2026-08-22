@@ -43,7 +43,7 @@
 
 -- The runtime assertion cannot import a host-side JSON file: fresh-init and
 -- adoption stream this SQL through psql in several deployment layouts. Keep
--- the unavoidable embedded copy below byte-for-data equivalent to
+-- the unavoidable embedded copy below byte-for-byte equivalent to
 -- role-contract.json; scripts/ci/check_log_sink_roles.ts compares them before
 -- any Docker fixture starts. Every section below reads this one session-local
 -- contract instead of repeating role arrays or privilege CASE expressions.

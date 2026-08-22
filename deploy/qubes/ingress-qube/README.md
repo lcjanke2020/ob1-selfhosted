@@ -81,7 +81,9 @@ docker compose --env-file .env up -d --no-deps --force-recreate --wait log-sink
 ```
 
 If it predates the marker, keep the writer stopped and continue with the
-adoption step below; restart it only after the marker-gated recreate succeeds.
+adoption step below. Keep it stopped through the marker-gated recreate and the
+foreground rollup in
+[Finish either upgrade path](#finish-either-existing-sink-upgrade-path).
 
 ### Older sink upgrade: adopt the pre-marker volume
 

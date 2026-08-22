@@ -61,7 +61,7 @@ directory under `/tmp`.
 | Family              | Local command                                 | Coverage                                                                                   |
 | ------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | All log-sink checks | `scripts/ci/run_log_sink_smokes.sh all`       | CI-equivalent preflight plus every family below                                            |
-| Preflight           | `scripts/ci/run_log_sink_smokes.sh preflight` | Role-manifest drift rejection plus ingress unit parsing and calendar                       |
+| Preflight           | `scripts/ci/run_log_sink_smokes.sh preflight` | Role/credential mapping drift rejection plus ingress unit parsing and calendar             |
 | Lifecycle           | `scripts/ci/run_log_sink_smokes.sh lifecycle` | Legacy status backfill, idempotency, assertion-gated adoption, and partial-init refusal    |
 | Contract            | `scripts/ci/run_log_sink_smokes.sh contract`  | Generated status boundaries, marker, socket boundary, exact role grants, SCRAM, mutations  |
 | Rollup              | `scripts/ci/run_log_sink_smokes.sh rollup`    | Shared projection, late arrivals, retention, concurrency, bounded sketches, closed catalog |

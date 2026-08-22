@@ -128,6 +128,58 @@ function passwordTokens(text: string): string[] {
   return sorted(text.match(PASSWORD_TOKEN) ?? []);
 }
 
+function bootstrapPasswordBindings(text: string): string[] {
+  const assignments = [...text.matchAll(
+    /--set=([a-z][a-z0-9_]*)="\$([A-Z][A-Z0-9_]*)"/g,
+  )].map((match) => ({ variable: match[1], environment: match[2] }));
+  const consumed = new Set<number>();
+  const bindings: string[] = [];
+
+  for (
+    const statement of text.matchAll(
+      /\bCREATE\s+ROLE\s+([a-z][a-z0-9_]*)\b([^;]*);/g,
+    )
+  ) {
+    const role = statement[1];
+    const passwordVariable = statement[2].match(
+      /\bPASSWORD\s+:'([a-z][a-z0-9_]*)'/,
+    )?.[1];
+    if (!passwordVariable) {
+      bindings.push(`${role}=<missing-password-variable>`);
+      continue;
+    }
+
+    const matchingAssignments = assignments
+      .map((assignment, index) => ({ ...assignment, index }))
+      .filter((assignment) => assignment.variable === passwordVariable);
+    if (matchingAssignments.length === 0) {
+      bindings.push(`${role}=<unbound:${passwordVariable}>`);
+      continue;
+    }
+    for (const assignment of matchingAssignments) {
+      consumed.add(assignment.index);
+      bindings.push(`${role}=${assignment.environment}`);
+    }
+  }
+
+  assignments.forEach((assignment, index) => {
+    if (!consumed.has(index)) {
+      bindings.push(
+        `<unused:${assignment.variable}>=${assignment.environment}`,
+      );
+    }
+  });
+  return sorted(bindings);
+}
+
+function composePasswordBindings(text: string): string[] {
+  return sorted(
+    [...text.matchAll(
+      /^\s*(OPENBRAIN_[A-Z0-9_]+_PASSWORD):\s*\$\{(OPENBRAIN_[A-Z0-9_]+_PASSWORD)(?::[^}]*)?\}\s*$/gm,
+    )].map((match) => `${match[1]}=${match[2]}`),
+  );
+}
+
 function yamlService(text: string, service: string): string {
   const lines = text.split("\n");
   const first = lines.findIndex((line) => line === `  ${service}:`);
@@ -272,9 +324,9 @@ export async function validateLogSinkRoles(
     names,
   );
   expectSet(
-    "role bootstrap password environment (db/log-sink/00-log-sink-roles.sh)",
-    passwordTokens(bootstrap),
-    passwordEnvs,
+    "role bootstrap credential bindings (db/log-sink/00-log-sink-roles.sh)",
+    bootstrapPasswordBindings(bootstrap),
+    contract.roles.map((role) => `${role.name}=${role.password_env}`),
   );
 
   const schema = sqlWithoutComments(await read("db/log-sink/01-log-sink.sql"));
@@ -364,9 +416,9 @@ export async function validateLogSinkRoles(
       [byKey.get("ingester")!.password_env],
     );
     expectSet(
-      `${label} sink credentials (${path})`,
-      passwordTokens(sinkService),
-      passwordEnvs,
+      `${label} sink credential bindings (${path})`,
+      composePasswordBindings(sinkService),
+      passwordEnvs.map((environment) => `${environment}=${environment}`),
     );
   }
 

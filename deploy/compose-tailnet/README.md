@@ -296,16 +296,16 @@ transport boundary is in [Security model](../../docs/security-model.md).
 Postgres only runs `db/` init scripts on a **fresh data directory** — schema
 changes after first deploy need manual application.
 
-**Existing log-sink status-class migration.** Before recreating an existing
-Pattern-B sink, stop its only writer, reapply the idempotent schema/grant owner,
-and stream the same generated-column migration used by fresh init. Then run the
-completed-catalog assertion:
-
 Pattern B executes the wrapper and rollup SQL directly from this checkout, so
 updating the checkout refreshes both (unlike the ingress-qube installed copies).
 Pause the sink-summary cron/timer from the checkout update through the
 assertion; an accidental run in that mixed-version window fails transactionally,
 and the next run after a completed upgrade can safely cover the same work.
+
+**Existing log-sink status-class migration.** Before recreating an existing
+Pattern-B sink, stop its only writer, reapply the idempotent schema/grant owner,
+and stream the same generated-column migration used by fresh init. Then run the
+completed-catalog assertion:
 
 ```sh
 docker compose --env-file .env --profile pattern-b stop log-ingester

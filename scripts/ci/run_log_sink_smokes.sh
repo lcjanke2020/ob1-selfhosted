@@ -112,6 +112,8 @@ run_preflight() {
     echo "deno is required for the log-sink role-contract preflight" >&2
     return 127
   }
+  deno test --config server/deno.json --frozen --allow-read \
+    scripts/ci/check_log_sink_roles_test.ts || return
   deno run --allow-read scripts/ci/check_log_sink_roles.ts || return
 
   # Prove the checker fails deterministically when the canonical identity
