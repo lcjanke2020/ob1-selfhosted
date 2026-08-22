@@ -14,7 +14,7 @@ import {
   makeEmbedDownDeps,
   withEnv,
 } from "./api_test_support.ts";
-import { MAX_SEARCH_QUERY_BYTES } from "./schemas.ts";
+import { MAX_CONTENT_BYTES, MAX_SEARCH_QUERY_BYTES } from "./schemas.ts";
 import { computeContentHash, parseSessionToml } from "./session_toml.ts";
 
 const TEST_ENV = {
@@ -56,6 +56,7 @@ await withEnv([], TEST_ENV, async () => {
     captureThoughtWithMetadata,
     fetchThoughtInScope,
     listSessionsInScope,
+    listThoughtsInScope,
     NotFoundError,
     searchSessionsByQuery,
     searchThoughtsByQuery,
@@ -402,6 +403,59 @@ await withEnv([], TEST_ENV, async () => {
     );
 
     Deno.test(
+      "thought capture: direct callers enforce content and scope before upstream work",
+      async () => {
+        for (
+          const content of [
+            "a".repeat(MAX_CONTENT_BYTES + 1),
+            "é".repeat(MAX_CONTENT_BYTES / 2 + 1),
+          ]
+        ) {
+          const pool = new FakePool(() => {
+            throw new Error("database must not be reached");
+          });
+          const deps = makeDeps();
+          await assertRejects(
+            () =>
+              captureThoughtWithMetadata(
+                asPool(pool),
+                { content, auth: AUTH, via: "rest" },
+                deps,
+              ),
+            ValidationError,
+            `content must be at most ${MAX_CONTENT_BYTES} UTF-8 bytes`,
+          );
+          assertEquals(deps.embedCalls, []);
+          assertEquals(deps.extractCalls, []);
+          assertEquals(pool.connectCalls, 0);
+        }
+
+        const pool = new FakePool(() => {
+          throw new Error("database must not be reached");
+        });
+        const deps = makeDeps();
+        await assertRejects(
+          () =>
+            captureThoughtWithMetadata(
+              asPool(pool),
+              {
+                content: "bounded",
+                scope: { workspace_id: "   " },
+                auth: AUTH,
+                via: "rest",
+              },
+              deps,
+            ),
+          ValidationError,
+          "workspace_id must not be empty",
+        );
+        assertEquals(deps.embedCalls, []);
+        assertEquals(deps.extractCalls, []);
+        assertEquals(pool.connectCalls, 0);
+      },
+    );
+
+    Deno.test(
       "thought capture: embed failure → UpstreamError with the original message",
       async () => {
         const pool = new FakePool(() => undefined);
@@ -635,6 +689,36 @@ await withEnv([], TEST_ENV, async () => {
     );
 
     Deno.test(
+      "thought search: direct callers enforce threshold and result-limit bounds before embedding",
+      async () => {
+        for (
+          const invalid of [
+            { threshold: -0.01 },
+            { threshold: 1.01 },
+            { threshold: Number.NaN },
+            { limit: 0 },
+            { limit: 101 },
+          ]
+        ) {
+          const pool = new FakePool(() => undefined);
+          const deps = makeDeps();
+          await assertRejects(
+            () =>
+              searchThoughtsByQuery(
+                asPool(pool),
+                { query: "quality floor", ...invalid, auth: AUTH },
+                deps,
+              ),
+            ValidationError,
+            "threshold" in invalid ? "threshold" : "limit",
+          );
+          assertEquals(deps.embedCalls, []);
+          assertEquals(pool.connectCalls, 0);
+        }
+      },
+    );
+
+    Deno.test(
       "thought fetch: direct callers reject malformed UUIDs before DB work",
       async () => {
         const pool = new FakePool(() => undefined);
@@ -801,6 +885,23 @@ await withEnv([], TEST_ENV, async () => {
               ),
             ValidationError,
             "threshold",
+          );
+          assertEquals(invalidDeps.embedCalls, []);
+          assertEquals(invalidPool.connectCalls, 0);
+        }
+
+        for (const limit of [0, 51, 1.5, Number.NaN]) {
+          const invalidPool = new FakePool(() => undefined);
+          const invalidDeps = makeDeps();
+          await assertRejects(
+            () =>
+              searchSessionsByQuery(
+                asPool(invalidPool),
+                { query: "quality floor", limit, auth: AUTH },
+                invalidDeps,
+              ),
+            ValidationError,
+            "limit",
           );
           assertEquals(invalidDeps.embedCalls, []);
           assertEquals(invalidPool.connectCalls, 0);
@@ -1150,6 +1251,31 @@ await withEnv([], TEST_ENV, async () => {
     });
 
     Deno.test(
+      "session capture: direct callers enforce the TOML byte cap before parsing or embedding",
+      async () => {
+        const pool = new FakePool(() => {
+          throw new Error("database must not be reached");
+        });
+        const deps = makeDeps();
+        await assertRejects(
+          () =>
+            captureSessionFromToml(
+              asPool(pool),
+              {
+                tomlText: "é".repeat(MAX_CONTENT_BYTES / 2 + 1),
+                auth: AUTH,
+              },
+              deps,
+            ),
+          ValidationError,
+          `toml_text must be at most ${MAX_CONTENT_BYTES} UTF-8 bytes`,
+        );
+        assertEquals(deps.embedCalls, []);
+        assertEquals(pool.connectCalls, 0);
+      },
+    );
+
+    Deno.test(
       "session capture: invalid field types fail before embedding or DB work",
       async () => {
         const invalidDocs = [
@@ -1235,6 +1361,35 @@ await withEnv([], TEST_ENV, async () => {
           "2026-07-30T12:00:00-04:00",
           50,
         ]);
+      },
+    );
+
+    Deno.test(
+      "list services reject direct result-limit bypasses before DB work",
+      async () => {
+        const thoughtPool = new FakePool(() => undefined);
+        await assertRejects(
+          () =>
+            listThoughtsInScope(asPool(thoughtPool), {
+              limit: 101,
+              auth: AUTH,
+            }),
+          ValidationError,
+          "limit",
+        );
+        assertEquals(thoughtPool.connectCalls, 0);
+
+        const sessionPool = new FakePool(() => undefined);
+        await assertRejects(
+          () =>
+            listSessionsInScope(asPool(sessionPool), {
+              limit: 201,
+              auth: AUTH,
+            }),
+          ValidationError,
+          "limit",
+        );
+        assertEquals(sessionPool.connectCalls, 0);
       },
     );
   }

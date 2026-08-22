@@ -9,6 +9,7 @@
 // rest of the suite.
 
 import type { Pool } from "postgres";
+import type { ZodType } from "zod";
 import type { AuthContext } from "./auth_context.ts";
 import type { ThoughtMatch, ThoughtRecord } from "./db.ts";
 import { embed as defaultEmbed } from "./embeddings.ts";
@@ -43,18 +44,20 @@ import {
   type UpdateThoughtOutcome,
 } from "./queries.ts";
 import {
+  captureThoughtShape,
+  fetchThoughtShape,
+  listThoughtsShape,
   type MemoryScopeInput,
   memoryScopeSchema,
+  moveThoughtShape,
   type MoveThoughtTarget,
-  moveThoughtTargetSchema,
-  searchQuerySchema,
-  similarityThresholdSchema,
+  searchThoughtsShape,
+  sessionCaptureShape,
+  sessionListShape,
+  sessionSearchShape,
   THOUGHT_PROVENANCE_SCHEMA_VERSION,
-  thoughtIdSchema,
   type ThoughtProvenanceClaims,
-  thoughtProvenanceClaimsSchema,
   type ThoughtSearchFilter,
-  thoughtSearchFilterSchema,
   updateThoughtShape,
 } from "./schemas.ts";
 import {
@@ -85,43 +88,31 @@ import {
 
 export type { AuthContext } from "./auth_context.ts";
 
-function validateThoughtProvenance(
-  provenance: ThoughtProvenanceClaims | undefined,
-): ThoughtProvenanceClaims | undefined {
-  if (provenance === undefined) return undefined;
-  const parsed = thoughtProvenanceClaimsSchema.safeParse(provenance);
-  if (!parsed.success) {
-    throw new ValidationError(
-      parsed.error.issues.map((issue) => issue.message).join("; "),
-    );
-  }
-  return parsed.data;
+// Exported services are the shared cost/security boundary, not a second copy
+// of every transport parser. Keep the selective contract visible here:
+//
+// | Revalidated input | Why it belongs at this seam |
+// | --- | --- |
+// | thought/update content and session TOML | bounds parser, storage, embedding, and classifier work |
+// | search query/limit/threshold and list limit | bounds paid embedding plus PostgreSQL parser/candidate/result work |
+// | provenance/filter and source/destination scope | prevents claim loss and fail-open audience/auth mistakes |
+// | thought UUID and session-list timestamps | preserves stable pre-DB validation rather than leaking cast errors |
+//
+// Transport envelopes and harmless parameterized scalar filters remain owned
+// by the MCP/REST schemas. Use their field projections below so shared bounds
+// and error text cannot drift, while this helper keeps the policy mechanical.
+function validateServiceInput<Output>(
+  schema: ZodType<Output>,
+  value: unknown,
+  field?: string,
+): Output {
+  const parsed = schema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  const message = parsed.error.issues.map((issue) => issue.message).join("; ");
+  throw new ValidationError(field ? `${field}: ${message}` : message);
 }
 
-function validateThoughtSearchFilter(
-  filter: ThoughtSearchFilter | undefined,
-): ThoughtSearchFilter | undefined {
-  if (filter === undefined) return undefined;
-  const parsed = thoughtSearchFilterSchema.safeParse(filter);
-  if (!parsed.success) {
-    throw new ValidationError(
-      parsed.error.issues.map((issue) => issue.message).join("; "),
-    );
-  }
-  return parsed.data;
-}
-
-function validateSimilarityThreshold(value: number | undefined): number {
-  const parsed = similarityThresholdSchema.safeParse(value);
-  if (!parsed.success) {
-    throw new ValidationError(
-      `threshold: ${
-        parsed.error.issues.map((issue) => issue.message).join("; ")
-      }`,
-    );
-  }
-  return parsed.data;
-}
+const optionalMemoryScopeSchema = memoryScopeSchema.optional();
 
 function validateSessionTimestampBound(
   field: "since" | "until",
@@ -133,48 +124,6 @@ function validateSessionTimestampBound(
   } catch (error) {
     throw new ValidationError((error as Error).message);
   }
-}
-
-function validateSearchQuery(query: string): string {
-  const parsed = searchQuerySchema.safeParse(query);
-  if (!parsed.success) {
-    throw new ValidationError(
-      parsed.error.issues.map((issue) => issue.message).join("; "),
-    );
-  }
-  return parsed.data;
-}
-
-function validateThoughtId(id: string): string {
-  const parsed = thoughtIdSchema.safeParse(id);
-  if (!parsed.success) {
-    throw new ValidationError(
-      `id: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
-    );
-  }
-  return parsed.data;
-}
-
-function validateUpdateContent(content: string): string {
-  const parsed = updateThoughtShape.content.safeParse(content);
-  if (!parsed.success) {
-    throw new ValidationError(
-      `content: ${
-        parsed.error.issues.map((issue) => issue.message).join("; ")
-      }`,
-    );
-  }
-  return parsed.data;
-}
-
-function validateMoveTarget(target: MoveThoughtTarget): MoveThoughtTarget {
-  const parsed = moveThoughtTargetSchema.safeParse(target);
-  if (!parsed.success) {
-    throw new ValidationError(
-      `target: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
-    );
-  }
-  return parsed.data;
 }
 
 // The identity written on revision rows. `subject` is the trusted principal
@@ -209,19 +158,6 @@ function classifiedMetadata(
     delete classified[reserved];
   }
   return classified;
-}
-
-function validateMemoryScope(
-  scope: MemoryScopeInput | undefined,
-): MemoryScopeInput | undefined {
-  if (scope === undefined) return undefined;
-  const parsed = memoryScopeSchema.safeParse(scope);
-  if (!parsed.success) {
-    throw new ValidationError(
-      parsed.error.issues.map((issue) => issue.message).join("; "),
-    );
-  }
-  return parsed.data;
 }
 
 export type ServiceDeps = {
@@ -263,14 +199,24 @@ export async function captureThoughtWithMetadata(
   // exported and can be called directly. Re-validate before any upstream work
   // so internal callers cannot persist an empty or otherwise invalid claims
   // envelope by bypassing the MCP/REST schemas.
-  const provenance = validateThoughtProvenance(input.provenance);
-  const scopeInput = validateMemoryScope(input.scope);
+  const content = validateServiceInput(
+    captureThoughtShape.content,
+    input.content,
+  );
+  const provenance = validateServiceInput(
+    captureThoughtShape.provenance,
+    input.provenance,
+  );
+  const scopeInput = validateServiceInput(
+    captureThoughtShape.scope,
+    input.scope,
+  );
   // Unknown/misspelled registry targets and missing personal principals fail
   // before content reaches either the embedder or metadata extractor.
   const scope = await resolveWriteScope(pool, scopeInput, input.auth);
   const [embedding, extraction] = await Promise.all([
-    embedOrUpstreamError(deps.embed, input.content),
-    deps.extractMetadata(input.content),
+    embedOrUpstreamError(deps.embed, content),
+    deps.extractMetadata(content),
   ]);
   const classified = classifiedMetadata(extraction);
 
@@ -297,7 +243,7 @@ export async function captureThoughtWithMetadata(
     metadata_extraction: extraction.classifier,
   };
   const persisted = await captureThought(pool, {
-    content: input.content,
+    content,
     embedding,
     metadata,
     degradationEvents: extraction.degradation_events,
@@ -324,16 +270,32 @@ export async function searchThoughtsByQuery(
   // MCP and REST validate before this shared seam, but exported service calls
   // receive the same fail-fast contract and cannot trigger embedding work with
   // an oversized query or malformed filter.
-  const query = validateSearchQuery(opts.query);
-  const filter = validateThoughtSearchFilter(opts.filter);
-  const scopeInput = validateMemoryScope(opts.scope);
+  const query = validateServiceInput(searchThoughtsShape.query, opts.query);
+  const limit = validateServiceInput(
+    searchThoughtsShape.limit,
+    opts.limit,
+    "limit",
+  );
+  const threshold = validateServiceInput(
+    searchThoughtsShape.threshold,
+    opts.threshold,
+    "threshold",
+  );
+  const filter = validateServiceInput(
+    searchThoughtsShape.filter,
+    opts.filter,
+  );
+  const scopeInput = validateServiceInput(
+    searchThoughtsShape.scope,
+    opts.scope,
+  );
   const scope = await resolveReadScope(pool, scopeInput, opts.auth);
   const embedding = await embedOrUpstreamError(deps.embed, query);
   return await searchThoughts(pool, {
     query,
     embedding,
-    limit: opts.limit,
-    threshold: opts.threshold,
+    limit,
+    threshold,
     filter,
     scope,
   });
@@ -347,12 +309,17 @@ export async function listThoughtsInScope(
   },
 ): Promise<ThoughtRecord[]> {
   const { scope: requested, auth, ...filters } = opts;
+  const limit = validateServiceInput(
+    listThoughtsShape.limit,
+    filters.limit,
+    "limit",
+  );
   const scope = await resolveReadScope(
     pool,
-    validateMemoryScope(requested),
+    validateServiceInput(optionalMemoryScopeSchema, requested),
     auth,
   );
-  return await listThoughts(pool, filters, scope);
+  return await listThoughts(pool, { ...filters, limit }, scope);
 }
 
 export async function fetchThoughtInScope(
@@ -362,10 +329,10 @@ export async function fetchThoughtInScope(
 ): Promise<ThoughtRecord | null> {
   // MCP and REST validate at their transport boundaries, but preserve the
   // same pre-DB invariant for direct callers of this exported service seam.
-  const thoughtId = validateThoughtId(id);
+  const thoughtId = validateServiceInput(fetchThoughtShape.id, id, "id");
   const scope = await resolveReadScope(
     pool,
-    validateMemoryScope(input.scope),
+    validateServiceInput(fetchThoughtShape.scope, input.scope),
     input.auth,
   );
   return await fetchThought(pool, thoughtId, scope);
@@ -377,7 +344,7 @@ export async function getThoughtStatsInScope(
 ): Promise<Stats> {
   const scope = await resolveReadScope(
     pool,
-    validateMemoryScope(input.scope),
+    validateServiceInput(optionalMemoryScopeSchema, input.scope),
     input.auth,
   );
   return await getStats(pool, scope);
@@ -402,11 +369,15 @@ export async function updateThoughtInScope(
   },
   deps: ServiceDeps = defaultDeps,
 ): Promise<UpdateThoughtOutcome | null> {
-  const thoughtId = validateThoughtId(input.id);
-  const content = validateUpdateContent(input.content);
+  const thoughtId = validateServiceInput(updateThoughtShape.id, input.id, "id");
+  const content = validateServiceInput(
+    updateThoughtShape.content,
+    input.content,
+    "content",
+  );
   const scope = await resolveReadScope(
     pool,
-    validateMemoryScope(input.scope),
+    validateServiceInput(updateThoughtShape.scope, input.scope),
     input.auth,
   );
   // Invisible/unknown ids and identical content are decided HERE, under the
@@ -457,11 +428,15 @@ export async function moveThoughtInScope(
     auth: AuthContext;
   },
 ): Promise<MoveThoughtOutcome | null> {
-  const thoughtId = validateThoughtId(input.id);
-  const target = validateMoveTarget(input.target);
+  const thoughtId = validateServiceInput(moveThoughtShape.id, input.id, "id");
+  const target = validateServiceInput(
+    moveThoughtShape.target,
+    input.target,
+    "target",
+  );
   const scope = await resolveReadScope(
     pool,
-    validateMemoryScope(input.scope),
+    validateServiceInput(moveThoughtShape.scope, input.scope),
     input.auth,
   );
   const destination = await resolveWriteScope(
@@ -509,17 +484,26 @@ export async function searchSessionsByQuery(
   // Transport handlers validate this shape too, but the exported service must
   // not let direct callers borrow a DB client or invoke the embedder with a
   // blank/oversized query.
-  const query = validateSearchQuery(opts.query);
-  const threshold = validateSimilarityThreshold(opts.threshold);
+  const query = validateServiceInput(sessionSearchShape.query, opts.query);
+  const limit = validateServiceInput(
+    sessionSearchShape.limit,
+    opts.limit,
+    "limit",
+  );
+  const threshold = validateServiceInput(
+    sessionSearchShape.threshold,
+    opts.threshold,
+    "threshold",
+  );
   const scope = await resolveReadScope(
     pool,
-    validateMemoryScope(opts.scope),
+    validateServiceInput(sessionSearchShape.scope, opts.scope),
     opts.auth,
   );
   const embedding = await embedOrUpstreamError(deps.embed, query);
   return await searchSessions(pool, {
     embedding,
-    limit: opts.limit,
+    limit,
     threshold,
     status: opts.status,
     repo_url: opts.repo_url,
@@ -532,9 +516,13 @@ export async function captureSessionFromToml(
   input: { tomlText: string; auth: AuthContext },
   deps: ServiceDeps = defaultDeps,
 ): Promise<UpsertOutcome & { reembedded: boolean }> {
+  const tomlText = validateServiceInput(
+    sessionCaptureShape.toml_text,
+    input.tomlText,
+  );
   let parsed: ParsedSessionDoc;
   try {
-    parsed = parseSessionToml(input.tomlText);
+    parsed = parseSessionToml(tomlText);
   } catch (e) {
     throw new ValidationError((e as Error).message);
   }
@@ -596,7 +584,7 @@ export async function getSessionInScope(
 ): Promise<SessionRecord | null> {
   const scope = await resolveReadScope(
     pool,
-    validateMemoryScope(input.scope),
+    validateServiceInput(optionalMemoryScopeSchema, input.scope),
     input.auth,
   );
   return await getSession(pool, id, scope);
@@ -613,7 +601,7 @@ export async function lookupSessionInScope(
 ): Promise<SessionRecord | null> {
   const scope = await resolveReadScope(
     pool,
-    validateMemoryScope(opts.scope),
+    validateServiceInput(optionalMemoryScopeSchema, opts.scope),
     opts.auth,
   );
   return await resumeSession(pool, { id: opts.id, branch: opts.branch }, scope);
@@ -639,12 +627,17 @@ export async function listSessionsInScope(
   const { scope: requested, auth, ...filters } = opts;
   const normalizedFilters = {
     ...filters,
+    limit: validateServiceInput(
+      sessionListShape.limit,
+      filters.limit,
+      "limit",
+    ),
     since: validateSessionTimestampBound("since", filters.since),
     until: validateSessionTimestampBound("until", filters.until),
   };
   const scope = await resolveReadScope(
     pool,
-    validateMemoryScope(requested),
+    validateServiceInput(optionalMemoryScopeSchema, requested),
     auth,
   );
   return await listSessions(pool, normalizedFilters, scope);
@@ -658,7 +651,7 @@ export async function updateSessionStatusInScope(
 ): Promise<{ id: number; status: string } | null> {
   const scope = await resolveReadScope(
     pool,
-    validateMemoryScope(input.scope),
+    validateServiceInput(optionalMemoryScopeSchema, input.scope),
     input.auth,
   );
   return await updateSessionStatus(pool, id, status, scope);
