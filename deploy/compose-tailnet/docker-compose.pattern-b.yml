@@ -146,6 +146,7 @@ services:
       OPENBRAIN_INGESTER_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD:?set OPENBRAIN_INGESTER_PASSWORD (the log-ingester INSERT-only role)}
       OPENBRAIN_LOGS_ROLLUP_PASSWORD: ${OPENBRAIN_LOGS_ROLLUP_PASSWORD:?set OPENBRAIN_LOGS_ROLLUP_PASSWORD (the sink summary/retention role)}
       OPENBRAIN_MONITOR_PASSWORD: ${OPENBRAIN_MONITOR_PASSWORD:-}
+      OPENBRAIN_LOGS_BACKUP_PASSWORD: ${OPENBRAIN_LOGS_BACKUP_PASSWORD:-}
     # Refuse an existing PGDATA unless fresh init or assertion-gated adoption
     # wrote its completion marker; restart must not bless a failed first init.
     # The Qubes pre-marker upgrade uses scripts/adopt-log-sink-marker.sh before

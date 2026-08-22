@@ -35,7 +35,8 @@ super_psql -v ON_ERROR_STOP=1 -tAc \
    WHERE rolname IN (
      'openbrain_ingester',
      'openbrain_monitor',
-     'openbrain_logs_rollup'
+     'openbrain_logs_rollup',
+     'openbrain_logs_backup'
    )" | grep -q t
 super_psql -v ON_ERROR_STOP=1 -tAc \
   "SELECT to_regclass('public.funnel_access_log') IS NULL

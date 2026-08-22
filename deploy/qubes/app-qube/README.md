@@ -463,7 +463,7 @@ publish it existed to narrow. What remains is small:
 | ---------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | [`qubes-firewall-user-script`](qubes-firewall-user-script) | `/rw/config/qubes-firewall-user-script` (chmod +x) | `custom-input` accepts for host services (SSH on `tailscale0`; optional Syncthing)          |
 | [`ob1-app-firewall.service`](ob1-app-firewall.service)     | `/rw/config/ob1-app-firewall.service`              | one-shot that runs the script `After=tailscaled` — the applier on this qube (see below)     |
-| [`rc.local`](rc.local)                                     | `/rw/config/rc.local` (chmod +x)                   | boot order: tailscaled → rootful-docker-off → firewall one-shot → backup timer → forwarders |
+| [`rc.local`](rc.local)                                     | `/rw/config/rc.local` (chmod +x)                   | boot order: tailscaled → rootful-docker-off → firewall → forwarder/corpus backup → Funnel-summary pull |
 
 Two properties do the work the old machinery did:
 
@@ -583,6 +583,107 @@ newest=$(ls -t "$RECV_DIR"/db-*.sql.gz.gpg 2>/dev/null | head -1)
 ```
 
 (On macOS use `stat -f %m`.)
+
+## Encrypted Funnel-summary backup
+
+The second daily backup is an **app-initiated pull** from the ingress qube's
+fixed `openbrain.LogSinkDump` qrexec service. It does not use TCP, a database
+route, or a destination credential on the edge. The ingress side emits an
+uncompressed custom `pg_dump` containing only `funnel_access_summary`; this
+qube treats those bytes as hostile, enforces a 1 KiB–64 MiB bound, the `PGDMP`
+archive signature, and a five-minute timeout, encrypts the stream directly to
+the existing public key, and atomically publishes the encrypted artifact plus
+SHA-256 digest in the existing off-box directory. No plaintext dump is written
+to disk.
+
+The default timer runs at 04:00 with up to 15 minutes of jitter, after the
+03:30 corpus backup. It uses an independent lock and does not depend on the
+app→DB forwarder. Fourteen daily snapshots give a nominal 24-hour RPO (plus
+jitter and replication lag) without extending the edge's raw 30-day IP and
+user-agent retention. The initial restore-drill target is two hours; measure and
+record the actual result rather than treating that target as proof.
+
+Stage the complete set under the same persistent unit directory as the corpus
+backup. `TARGET_QUBE` is the ingress qube's **dom0 identity**, which may differ
+from its DNS/SSH name. Reuse the deployed corpus backup's `PUBKEY` and `OUT_DIR`:
+
+```sh
+sudo install -d -m 0750 /rw/config/openbrain-units
+sudo install -m 0755 \
+  deploy/qubes/app-qube/backup/ob1-funnel-summary-backup.sh \
+  deploy/qubes/app-qube/backup/ob1-bounded-stream.py \
+  /rw/config/openbrain-units/
+sudo install -o root -g qubes -m 0640 \
+  deploy/qubes/app-qube/backup/funnel-summary-backup.env.example \
+  /rw/config/openbrain-units/funnel-summary-backup.env
+sudoedit /rw/config/openbrain-units/funnel-summary-backup.env
+sudo install -m 0644 \
+  deploy/qubes/app-qube/backup/ob1-funnel-summary-backup.service \
+  deploy/qubes/app-qube/backup/ob1-funnel-summary-backup.timer \
+  /rw/config/openbrain-units/
+sudo install -m 0644 \
+  /rw/config/openbrain-units/ob1-funnel-summary-backup.service \
+  /rw/config/openbrain-units/ob1-funnel-summary-backup.timer \
+  /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+Add the same site-specific `OnFailure=` drop-in used by
+`ob1-db-backup.service`, narrowing `ReadWritePaths=` to the exact deployed
+`OUT_DIR` at the same time. Add `/.funnel-summary-*` to the Syncthing folder's
+`.stignore`; that excludes hidden staging/lock names, while final
+`funnel-summary-*.dump.gpg` and `.sha256` files still replicate.
+
+After the ingress handler and dom0 policy are installed, run one foreground
+service and inspect the exact final path it reports:
+
+```sh
+sudo systemctl start ob1-funnel-summary-backup.service
+systemctl show ob1-funnel-summary-backup.service -p Result -p ExecMainStatus
+journalctl -u ob1-funnel-summary-backup.service -n 50 --no-pager
+(cd /the/configured/OUT_DIR && \
+  sha256sum -c funnel-summary-YYYYMMDDTHHMMSSZ.dump.gpg.sha256)
+sudo systemctl enable --now ob1-funnel-summary-backup.timer
+systemctl list-timers ob1-funnel-summary-backup.timer --no-pager
+```
+
+Before enabling the timer, verify all failure cases from the rollout checklist:
+wrong source qube, nonempty service argument, stopped/denied target, empty and
+truncated source, oversized source, timeout, bad recipient, output-directory
+failure, and lock contention. Each must exit nonzero, trigger the notifier, and
+leave no final artifact for that run. The repository tests cover those local
+pipeline invariants; the live checks cover dom0 policy, qrexec, and deployment
+permissions.
+
+The receiving/private-key host closes the asynchronous half of the chain. Alert
+if the newest `funnel-summary-*.dump.gpg` is older than roughly 26 hours, verify
+its digest, and record a successful Syncthing receipt before calling rollout
+complete. A local publish is useful evidence but is not proof of off-box receipt.
+
+### Disposable, no-network restore drill
+
+Run the drill only on the private-key host in a disposable PostgreSQL instance
+with networking disabled and a client/server version compatible with the sink.
+Decrypt into a mode-0700 scratch directory, inspect the archive list, restore
+into an empty database, and verify aggregate row count and day range:
+
+```sh
+restore_dir="$(mktemp -d "${TMPDIR:-/tmp}/ob1-funnel-restore.XXXXXX")"
+chmod 0700 "$restore_dir"
+gpg --decrypt --output "$restore_dir/funnel-summary.dump" \
+  funnel-summary-YYYYMMDDTHHMMSSZ.dump.gpg
+pg_restore --list "$restore_dir/funnel-summary.dump"
+createdb openbrain_logs_restore
+pg_restore --exit-on-error --no-owner --no-privileges \
+  --dbname openbrain_logs_restore "$restore_dir/funnel-summary.dump"
+psql openbrain_logs_restore -c \
+  'SELECT count(*), min(day), max(day) FROM public.funnel_access_summary;'
+```
+
+Destroy the scratch database and decrypted dump when the recorded verification
+is complete. Do not attach the restore instance to a network and do not restore
+the archive over the live sink. A production merge/replacement is a separate,
+explicitly reviewed recovery decision.
 
 ## Verify
 

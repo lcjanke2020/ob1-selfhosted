@@ -16,7 +16,7 @@ type ReadText = (path: string) => Promise<string>;
 
 const ROLE_TOKEN = /\bopenbrain_[a-z][a-z0-9_]*\b/g;
 const PASSWORD_TOKEN = /\bOPENBRAIN_[A-Z0-9_]+_PASSWORD\b/g;
-const EXPECTED_KEYS = ["ingester", "rollup", "monitor"] as const;
+const EXPECTED_KEYS = ["ingester", "rollup", "monitor", "backup"] as const;
 const CONTRACT_FIELDS = ["roles", "version"];
 const ROLE_FIELDS = [
   "database_privileges",
@@ -328,11 +328,15 @@ export async function validateLogSinkRoles(
   if (byKey.get("monitor")?.required !== false) {
     fail("manifest monitor", "monitor must remain optional");
   }
+  if (byKey.get("backup")?.required !== false) {
+    fail("manifest backup", "backup must remain optional");
+  }
   for (
     const [key, expected] of [
       ["ingester", ""],
       ["rollup", "TEMPORARY"],
       ["monitor", ""],
+      ["backup", ""],
     ] as const
   ) {
     if (byKey.get(key)?.database_privileges !== expected) {
@@ -527,17 +531,31 @@ export async function validateLogSinkRoles(
     [named("rollup")],
   );
 
+  const backupProducer = shellWithoutComments(
+    await read("deploy/qubes/ingress-qube/openbrain-log-sink-dump.sh"),
+  );
+  expectSet(
+    "qrexec backup producer identity (deploy/qubes/ingress-qube/openbrain-log-sink-dump.sh)",
+    roleTokens(backupProducer).filter((name) => names.includes(name)),
+    [named("backup")],
+  );
+  expectSet(
+    "qrexec backup producer credential (deploy/qubes/ingress-qube/openbrain-log-sink-dump.sh)",
+    passwordTokens(backupProducer),
+    [byKey.get("backup")!.password_env],
+  );
+
   const ciConsumers: Array<[string, string, string[], string[]?]> = [
     ["CI shared helpers", "scripts/ci/log_sink_common.sh", ["rollup"]],
     [
       "CI contract smoke",
       "scripts/ci/log_sink_contract_smoke.sh",
-      ["ingester", "rollup", "monitor"],
+      ["ingester", "rollup", "monitor", "backup"],
     ],
     [
       "CI lifecycle smoke",
       "scripts/ci/log_sink_lifecycle_smoke.sh",
-      ["ingester", "rollup", "monitor"],
+      ["ingester", "rollup", "monitor", "backup"],
     ],
     ["CI rollup smoke", "scripts/ci/log_sink_rollup_smoke.sh", ["ingester"]],
     [
@@ -593,17 +611,17 @@ export async function validateLogSinkRoles(
     [
       "ingress runbook role contract",
       "deploy/qubes/ingress-qube/README.md",
-      ["ingester", "rollup", "monitor"],
+      ["ingester", "rollup", "monitor", "backup"],
     ],
     [
       "Pattern-B runbook role contract",
       "deploy/compose-tailnet/README.md",
-      ["ingester", "rollup", "monitor"],
+      ["ingester", "rollup", "monitor", "backup"],
     ],
     [
       "security-model role contract",
       "docs/security-model.md",
-      ["ingester", "rollup", "monitor"],
+      ["ingester", "rollup", "monitor", "backup"],
     ],
   ];
   for (const [label, path, roleKeys] of docs) {

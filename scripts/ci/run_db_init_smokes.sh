@@ -98,6 +98,10 @@ run_preflight() {
   run_family "Funnel monitor" bash scripts/funnel_monitor_test.sh
   run_family "encrypted backup publication" \
     bash deploy/qubes/app-qube/backup/ob1-db-backup_test.sh
+  run_family "Funnel summary qrexec pull and publication" \
+    bash deploy/qubes/app-qube/backup/ob1-funnel-summary-backup_test.sh
+  run_family "Funnel summary qrexec producer" \
+    bash deploy/qubes/ingress-qube/openbrain-log-sink-dump_test.sh
 }
 
 start_database() {

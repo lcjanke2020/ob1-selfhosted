@@ -125,3 +125,14 @@ Deno.test("log-sink role validator rejects an extra Compose password key", async
     "Qubes log-ingester Compose identity sink credential keys",
   );
 });
+
+Deno.test("log-sink role validator rejects a widened qrexec producer identity", async () => {
+  const result = await validateWithMutation(
+    "deploy/qubes/ingress-qube/openbrain-log-sink-dump.sh",
+    (text) => text.replaceAll("openbrain_logs_backup", "openbrain_monitor"),
+  );
+  assertStringIncludes(
+    result.errors.join("\n"),
+    "qrexec backup producer identity",
+  );
+});

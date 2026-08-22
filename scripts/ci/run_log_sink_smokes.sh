@@ -10,7 +10,7 @@ export CI_REPO_ROOT GITHUB_WORKSPACE="$CI_REPO_ROOT"
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/ci/run_log_sink_smokes.sh [all|preflight|lifecycle|monitor-absent|contract|rollup|wrapper]...
+Usage: scripts/ci/run_log_sink_smokes.sh [all|preflight|lifecycle|monitor-absent|backup-absent|contract|rollup|wrapper]...
 
 Examples:
   scripts/ci/run_log_sink_smokes.sh lifecycle
@@ -24,7 +24,7 @@ if (( $# == 0 )); then
 fi
 for family in "$@"; do
   case "$family" in
-    all|preflight|lifecycle|monitor-absent|contract|rollup|wrapper) ;;
+    all|preflight|lifecycle|monitor-absent|backup-absent|contract|rollup|wrapper) ;;
     -h|--help)
       usage
       exit 0
@@ -46,6 +46,7 @@ export POSTGRES_PASSWORD=ci_sink_superuser_pw
 export OPENBRAIN_INGESTER_PASSWORD=ci_sink_ingester_pw
 export OPENBRAIN_LOGS_ROLLUP_PASSWORD=ci_sink_rollup_pw
 export OPENBRAIN_MONITOR_PASSWORD=ci_sink_monitor_pw
+export OPENBRAIN_LOGS_BACKUP_PASSWORD=ci_sink_backup_pw
 export LOG_SINK_RUNNER_ACTIVE=1
 # Process-environment values override Compose env files. Scrub every selector
 # that could redirect a lifecycle fixture or its adoption helper to a caller's
@@ -146,7 +147,9 @@ run_preflight() {
   }
   systemd-analyze verify \
     deploy/qubes/ingress-qube/funnel-summary.service \
-    deploy/qubes/ingress-qube/funnel-summary.timer || return
+    deploy/qubes/ingress-qube/funnel-summary.timer \
+    deploy/qubes/app-qube/backup/ob1-funnel-summary-backup.service \
+    deploy/qubes/app-qube/backup/ob1-funnel-summary-backup.timer || return
   systemd-analyze calendar '*-*-* 00:40:00 UTC' >/dev/null
 }
 
@@ -178,7 +181,7 @@ start_sink() {
     -e POSTGRES_INITDB_ARGS="--auth-local=scram-sha-256 --auth-host=scram-sha-256" \
     -e POSTGRES_HOST_AUTH_METHOD=reject \
     -e OPENBRAIN_INGESTER_PASSWORD -e OPENBRAIN_LOGS_ROLLUP_PASSWORD \
-    -e OPENBRAIN_MONITOR_PASSWORD \
+    -e OPENBRAIN_MONITOR_PASSWORD -e OPENBRAIN_LOGS_BACKUP_PASSWORD \
     -v "$GITHUB_WORKSPACE/db/log-sink/log-sink-entrypoint.sh:/usr/local/bin/openbrain-log-sink-entrypoint.sh:ro" \
     -v "$GITHUB_WORKSPACE/db/log-sink/00-log-sink-roles.sh:/docker-entrypoint-initdb.d/00-log-sink-roles.sh:ro" \
     -v "$GITHUB_WORKSPACE/db/log-sink/01-log-sink.sql:/docker-entrypoint-initdb.d/01-log-sink.sql:ro" \
@@ -229,6 +232,21 @@ run_monitor_absent() {
   export OPENBRAIN_MONITOR_PASSWORD=$monitor_password
 }
 
+run_backup_absent() {
+  local primary_container=$LOG_SINK_CONTAINER
+  local backup_password=$OPENBRAIN_LOGS_BACKUP_PASSWORD
+
+  export LOG_SINK_CONTAINER="${LOG_SINK_TOKEN}-backup-absent"
+  unset OPENBRAIN_LOGS_BACKUP_PASSWORD
+  start_sink || return
+  bash scripts/ci/log_sink_contract_smoke.sh backup-absent || return
+  docker rm -f -v "$LOG_SINK_CONTAINER" >/dev/null || return
+  container_started=0
+
+  export LOG_SINK_CONTAINER=$primary_container
+  export OPENBRAIN_LOGS_BACKUP_PASSWORD=$backup_password
+}
+
 requested=("$@")
 run_all=0
 if [[ " ${requested[*]} " == *" all "* ]]; then
@@ -258,6 +276,10 @@ fi
 
 if (( run_all )) || [[ " ${requested[*]} " == *" monitor-absent "* ]]; then
   run_family "monitor-optional fresh init" run_monitor_absent
+fi
+
+if (( run_all )) || [[ " ${requested[*]} " == *" backup-absent "* ]]; then
+  run_family "backup-optional fresh init" run_backup_absent
 fi
 
 main_requested=()

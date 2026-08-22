@@ -926,7 +926,8 @@ BEGIN
   WHERE rolname IN (
     'openbrain_ingester',
     'openbrain_monitor',
-    'openbrain_logs_rollup'
+    'openbrain_logs_rollup',
+    'openbrain_logs_backup'
   );
 
   IF bad_roles IS NOT NULL THEN
@@ -987,7 +988,8 @@ BEGIN
     WHERE ltrim(configured.role_name, '+') IN (
             'openbrain_ingester',
             'openbrain_monitor',
-            'openbrain_logs_rollup'
+            'openbrain_logs_rollup',
+            'openbrain_logs_backup'
           )
        OR left(configured.role_name, 1) IN ('/', '@')
   );

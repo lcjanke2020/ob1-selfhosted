@@ -36,6 +36,8 @@ const representativeChanges = [
   "db/01-schema.sql",
   "server/auth.ts",
   "deploy/qubes/ingress-qube/docker-compose.yml",
+  "deploy/qubes/ingress-qube/openbrain-log-sink-dump_test.sh",
+  "deploy/qubes/app-qube/rc.local",
   "scripts/ci/db_init_auth_smoke.sh",
   ".github/workflows/db-init.yml",
 ];

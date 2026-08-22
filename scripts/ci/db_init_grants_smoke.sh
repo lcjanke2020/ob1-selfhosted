@@ -167,6 +167,11 @@ expect_rejected "sink-only rollup role" \
   "corpus contains sink-only role(s)" "openbrain_logs_rollup"
 super_psql -v ON_ERROR_STOP=1 -c "DROP ROLE openbrain_logs_rollup"
 
+super_psql -v ON_ERROR_STOP=1 -c "CREATE ROLE openbrain_logs_backup LOGIN"
+expect_rejected "sink-only backup role" \
+  "corpus contains sink-only role(s)" "openbrain_logs_backup"
+super_psql -v ON_ERROR_STOP=1 -c "DROP ROLE openbrain_logs_backup"
+
 # A relation name is rejected independently of its shape, including
 # the BIGSERIAL sequence and indexes created by the historical DDL.
 super_psql -v ON_ERROR_STOP=1 -c \

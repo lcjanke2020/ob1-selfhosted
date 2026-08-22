@@ -138,9 +138,10 @@ wrong tool once the point is to put a VM boundary between two of them.
 │  + log sink (unix socket only)                │   socket-only logs DB, and
 │  IP allowlist enforced here                   │   NO path to the db qube
 └───────────────┬───────────────────────────────┘
-                │  qubes.ConnectTCP +8787 (dom0 policy)
+                │  qubes.ConnectTCP +8787 (ingress→app, dom0 policy)
+                │  fixed summary dump qrexec (app call; stdout→app)
 ┌─ app qube ──── ▼ ──────────────────────────────┐
-│  MCP server (+ Ollama) + encrypted backup      │  no network-facing listener;
+│  MCP server (+ Ollama) + encrypted backups     │  no network-facing listener;
 └───────────────┬────────────────────────────────┘  reached ONLY over qrexec
                 │  qubes.ConnectTCP +5432 (dom0 policy)
 ┌─ db qube ───── ▼ ──────────────────────────────┐
@@ -156,6 +157,8 @@ wrong tool once the point is to put a VM boundary between two of them.
   [funnel monitor](ingress-qube/README.md#funnel-monitor-host-side-not-compose)
   and
   [daily rollup](ingress-qube/README.md#daily-rollup-and-retention-host-side-not-compose).
+  It also exposes one fixed, caller-pinned qrexec producer for the aggregate-only
+  backup; it has no schedule, encryption key, or destination.
   It holds **no** memory store and **no** app credential, and **no path to the
   db qube**: every credential it carries belongs to the local sink, whose two
   relations hold Funnel request metadata and nothing else. The unused edge `mcp`
@@ -165,8 +168,9 @@ wrong tool once the point is to put a VM boundary between two of them.
 - **App qube** — the MCP server (+ Ollama), from [`app-qube/`](app-qube/). mcp
   binds loopback only; the ingress qube reaches it exclusively over the
   dom0-policy-gated qubes.ConnectTCP channel. As the trusted DB control-plane it
-  holds the admin + app + readonly credentials and runs the encrypted off-box
-  backup ([`app-qube/backup/`](app-qube/backup/)).
+  holds the admin + app + readonly credentials and runs both encrypted off-box
+  backups: the corpus dump and the bounded aggregate-only pull
+  ([`app-qube/backup/`](app-qube/backup/)).
 - **DB qube** — Postgres + pgvector, **out of docker-compose**, run natively (or
   as a single container), bound to loopback only. Reached by the app qube alone
   (the full app role, plus readonly for backups and the superuser for remote

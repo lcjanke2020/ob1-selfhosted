@@ -21,12 +21,14 @@ super_sql -c \
   "CREATE ROLE openbrain_ingester LOGIN;
    CREATE ROLE openbrain_monitor LOGIN;
    CREATE ROLE openbrain_logs_rollup LOGIN;
+   CREATE ROLE openbrain_logs_backup LOGIN;
    CREATE TABLE funnel_access_log (id BIGSERIAL PRIMARY KEY, marker text);
    CREATE TABLE funnel_access_summary (day date PRIMARY KEY);
    GRANT INSERT ON funnel_access_log TO openbrain_ingester;
    GRANT INSERT ON funnel_access_log TO openbrain_app;
    GRANT USAGE ON SEQUENCE funnel_access_log_id_seq TO openbrain_app;
    GRANT SELECT ON mcp_auth_events TO openbrain_monitor;
+   GRANT SELECT ON funnel_access_summary TO openbrain_logs_backup;
    INSERT INTO funnel_access_log (marker) VALUES ('must-archive');
    INSERT INTO funnel_access_summary (day) VALUES (current_date)" >/dev/null
 
@@ -145,7 +147,8 @@ test "$(super_sql -tAc \
             WHERE rolname IN (
               'openbrain_ingester',
               'openbrain_monitor',
-              'openbrain_logs_rollup'
+              'openbrain_logs_rollup',
+              'openbrain_logs_backup'
             )
           )")" = t
 # Already-retired reapplication is a no-op, and the final invariant

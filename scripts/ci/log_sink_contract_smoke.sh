@@ -11,9 +11,9 @@ source "$SCRIPT_DIR/log_sink_common.sh"
 
 phase="${1:-all}"
 case "$phase" in
-  all|baseline|roles|auth|assertion|monitor-absent) ;;
+  all|baseline|roles|auth|assertion|monitor-absent|backup-absent) ;;
   *)
-    echo "usage: ${0##*/} [all|baseline|roles|auth|assertion|monitor-absent]" >&2
+    echo "usage: ${0##*/} [all|baseline|roles|auth|assertion|monitor-absent|backup-absent]" >&2
     exit 2
     ;;
 esac
@@ -35,6 +35,7 @@ if public_output=$(run_sink_assertion 2>&1); then
   echo "monitor-free assertion missed a GRANT to PUBLIC" >&2
   exit 1
 fi
+
 grep -Fq 'log sink: role openbrain_ingester privileges drifted' \
   <<< "$public_output" || {
   echo "monitor-free PUBLIC drift failed for an unexpected reason" >&2
@@ -88,6 +89,19 @@ run_sink_assertion | \
 echo "same-column view replacement rejected; transaction rolled back cleanly"
 fi
 
+if [[ "$phase" == backup-absent ]]; then
+log_sink_step "Fresh init succeeds without the optional backup identity"
+docker logs "$LOG_SINK_CONTAINER" 2>&1 | grep -F \
+  '[00-log-sink-roles] OPENBRAIN_LOGS_BACKUP_PASSWORD not set; skipping openbrain_logs_backup'
+test "$(sink_super_query "select to_regrole('openbrain_logs_backup') is null")" = t || {
+  echo "backup-free init unexpectedly created openbrain_logs_backup" >&2
+  exit 1
+}
+run_sink_assertion | \
+  grep -F 'log sink: authorization/topology invariants OK'
+echo "backup-free init passed the same closed-world assertion"
+fi
+
 if [[ "$phase" == all || "$phase" == baseline ]]; then
 log_sink_step "Init assertion and durable completion marker both ran"
 # Absence is as meaningful as failure: a silently skipped assertion would let
@@ -138,6 +152,55 @@ sink_sql openbrain_ingester "$OPENBRAIN_INGESTER_PASSWORD" \
   echo "monitor can read the summary table" >&2
   exit 1
 }
+sink_super_sql \
+  "insert into funnel_access_summary
+     (day, socket, status_class, request_count, unique_ips)
+   values ('2000-01-01', 'restore-smoke', '2xx', 7, 3);" >/dev/null
+test "$(sink_query openbrain_logs_backup "$OPENBRAIN_LOGS_BACKUP_PASSWORD" \
+  "select count(*) from funnel_access_summary;")" = 1
+! sink_query openbrain_logs_backup "$OPENBRAIN_LOGS_BACKUP_PASSWORD" \
+  "select count(*) from funnel_access_log;" 2>/dev/null || {
+  echo "backup role can read raw request metadata" >&2
+  exit 1
+}
+for forbidden_statement in \
+  "insert into funnel_access_summary (day, socket, status_class, request_count, unique_ips) values (current_date, 'funnel', '2xx', 1, 1)" \
+  "update funnel_access_summary set request_count = request_count + 1" \
+  "delete from funnel_access_summary"; do
+  ! sink_sql openbrain_logs_backup "$OPENBRAIN_LOGS_BACKUP_PASSWORD" \
+    "$forbidden_statement" 2>/dev/null || {
+    echo "backup role can mutate the summary table" >&2
+    exit 1
+  }
+done
+# Exercise the exact data-access primitive used by openbrain.LogSinkDump.
+backup_dump="$RUNNER_TEMP/funnel-summary-role-smoke.dump"
+docker exec -e PGPASSWORD="$OPENBRAIN_LOGS_BACKUP_PASSWORD" \
+  "$LOG_SINK_CONTAINER" pg_dump -w -h /var/run/postgresql \
+    -U openbrain_logs_backup -d "$POSTGRES_DB" --format=custom \
+    --compress=none --strict-names --no-owner --no-privileges \
+    --table=public.funnel_access_summary > "$backup_dump"
+test "$(head -c 5 "$backup_dump")" = PGDMP
+test "$(stat -c %s "$backup_dump")" -ge 1024
+docker exec -i "$LOG_SINK_CONTAINER" pg_restore --list < "$backup_dump" \
+  | grep -F 'TABLE DATA public funnel_access_summary'
+restore_db="ci_funnel_restore_${UID:-0}_$$"
+sink_super_sql "create database $restore_db;" >/dev/null
+docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" "$LOG_SINK_CONTAINER" \
+  pg_restore -w -h /var/run/postgresql -U "$POSTGRES_USER" \
+    -d "$restore_db" --exit-on-error --no-owner --no-privileges \
+  < "$backup_dump"
+restore_verdict=$(docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" \
+  "$LOG_SINK_CONTAINER" psql -X -w -h /var/run/postgresql \
+    -U "$POSTGRES_USER" -d "$restore_db" -Atc \
+    "select count(*) || '|' || min(day) || '|' || max(day) || '|' ||
+            sum(request_count)
+     from public.funnel_access_summary;")
+test "$restore_verdict" = "1|2000-01-01|2000-01-01|7"
+sink_super_sql "drop database $restore_db;" >/dev/null
+sink_super_sql \
+  "delete from funnel_access_summary where socket = 'restore-smoke';" >/dev/null
+rm -f -- "$backup_dump"
 test "$(sink_query openbrain_monitor "$OPENBRAIN_MONITOR_PASSWORD" \
   'select count(*) from funnel_access_log;')" = 2
 sink_query openbrain_monitor "$OPENBRAIN_MONITOR_PASSWORD" \
@@ -160,7 +223,7 @@ sink_query openbrain_monitor "$OPENBRAIN_MONITOR_PASSWORD" \
 }
 # Routine database hardening revokes the stock PUBLIC TEMPORARY default. The
 # rollup's explicit grant must survive that without giving the capability to
-# the ingester or monitor.
+# the ingester, monitor, or backup identity.
 sink_super_query \
   "revoke temporary on database $POSTGRES_DB from public;" >/dev/null
 ! sink_sql openbrain_ingester "$OPENBRAIN_INGESTER_PASSWORD" \
@@ -175,9 +238,14 @@ sink_sql openbrain_logs_rollup "$OPENBRAIN_LOGS_ROLLUP_PASSWORD" \
   echo "monitor can create temporary tables" >&2
   exit 1
 }
+! sink_sql openbrain_logs_backup "$OPENBRAIN_LOGS_BACKUP_PASSWORD" \
+  "create temporary table backup_temp_forbidden(x int);" 2>/dev/null || {
+  echo "backup role can create temporary tables" >&2
+  exit 1
+}
 sink_super_query \
   "grant temporary on database $POSTGRES_DB to public;" >/dev/null
-echo "ingester INSERT-only, monitor one-table probes, rollup survives revoked PUBLIC TEMPORARY, no role may create persistent objects"
+echo "ingester INSERT-only, monitor raw-only, backup summary-only, rollup survives revoked PUBLIC TEMPORARY, no role may create persistent objects"
 
 log_sink_step "Generated status classification pins every boundary"
 sink_sql openbrain_ingester "$OPENBRAIN_INGESTER_PASSWORD" \
@@ -247,6 +315,14 @@ sink_super_query \
 }
 sink_super_query \
   "revoke select on funnel_access_summary from openbrain_monitor;" >/dev/null
+sink_super_query \
+  "grant select on funnel_access_log to openbrain_logs_backup;" >/dev/null
+! run_sink_assertion 2>/dev/null || {
+  echo "assertion missed raw-table access for the backup role" >&2
+  exit 1
+}
+sink_super_query \
+  "revoke select on funnel_access_log from openbrain_logs_backup;" >/dev/null
 sink_super_query "grant select on funnel_access_log to public;" >/dev/null
 ! run_sink_assertion 2>/dev/null || {
   echo "assertion missed a GRANT to PUBLIC" >&2

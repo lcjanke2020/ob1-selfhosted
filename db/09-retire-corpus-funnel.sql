@@ -102,7 +102,8 @@ BEGIN
     WHERE ltrim(configured.role_name, '+') IN (
             'openbrain_ingester',
             'openbrain_monitor',
-            'openbrain_logs_rollup'
+            'openbrain_logs_rollup',
+            'openbrain_logs_backup'
           )
        OR left(configured.role_name, 1) IN ('/', '@')
   );
@@ -125,7 +126,8 @@ BEGIN
   WHERE usename IN (
           'openbrain_ingester',
           'openbrain_monitor',
-          'openbrain_logs_rollup'
+          'openbrain_logs_rollup',
+          'openbrain_logs_backup'
         )
     AND pid <> pg_backend_pid();
 
@@ -234,5 +236,6 @@ $revoke_historical_grants$ LANGUAGE plpgsql;
 DROP ROLE IF EXISTS openbrain_monitor;
 DROP ROLE IF EXISTS openbrain_ingester;
 DROP ROLE IF EXISTS openbrain_logs_rollup;
+DROP ROLE IF EXISTS openbrain_logs_backup;
 
 COMMIT;

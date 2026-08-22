@@ -36,6 +36,7 @@ services:
       OPENBRAIN_INGESTER_PASSWORD: ${OPENBRAIN_INGESTER_PASSWORD:?OPENBRAIN_INGESTER_PASSWORD is required}
       OPENBRAIN_LOGS_ROLLUP_PASSWORD: ${OPENBRAIN_LOGS_ROLLUP_PASSWORD:?OPENBRAIN_LOGS_ROLLUP_PASSWORD is required}
       OPENBRAIN_MONITOR_PASSWORD: ${OPENBRAIN_MONITOR_PASSWORD:-}
+      OPENBRAIN_LOGS_BACKUP_PASSWORD: ${OPENBRAIN_LOGS_BACKUP_PASSWORD:-}
     entrypoint: ["docker-entrypoint.sh"]
     command: ["postgres", "-c", "listen_addresses="]
     volumes:
@@ -86,7 +87,7 @@ cleanup_adoption() {
 }
 trap 'cleanup_adoption "$?"' EXIT
 
-docker compose "${adoption_compose_opts[@]}" \
+env OPENBRAIN_LOGS_BACKUP_PASSWORD= docker compose "${adoption_compose_opts[@]}" \
   -f "$adoption_root/compose.yml" up -d log-sink
 
 # pg_isready alone can see the init-phase temporary socket server. PID 1
@@ -129,8 +130,9 @@ legacy_database_capabilities=$(docker compose "${adoption_compose_opts[@]}" \
       "SELECT
          has_database_privilege('openbrain_logs_rollup', current_database(), 'TEMPORARY')::int || '|' ||
          has_database_privilege('openbrain_ingester', current_database(), 'TEMPORARY')::int || '|' ||
-         has_database_privilege('openbrain_monitor', current_database(), 'TEMPORARY')::int")
-test "$legacy_database_capabilities" = "0|0|0"
+         has_database_privilege('openbrain_monitor', current_database(), 'TEMPORARY')::int || '|' ||
+         (to_regrole('openbrain_logs_backup') IS NULL)::int")
+test "$legacy_database_capabilities" = "0|0|0|1"
 
 # Preserve a representative historical row across migration/adoption/recreate.
 docker compose "${adoption_compose_opts[@]}" \
@@ -162,9 +164,16 @@ docker compose "${adoption_compose_opts[@]}" \
   exec -T log-sink sh -c \
     'test ! -e "$PGDATA/.openbrain-log-sink-init-complete"'
 
-# Reapply the current schema/grant owner before the generated-column migration.
-# This is what gives a hardened existing sink the rollup's newly-required
-# TEMPORARY capability without returning it to PUBLIC.
+# Existing PGDATA never reruns initdb.d. Provision the new optional backup role
+# explicitly, then reapply the current schema/grant owner before the generated-
+# column migration. This gives the role only summary SELECT and gives a hardened
+# existing sink the rollup's newly-required TEMPORARY capability without
+# returning it to PUBLIC.
+docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
+  exec -T -e OPENBRAIN_LOGS_BACKUP_PASSWORD="$OPENBRAIN_LOGS_BACKUP_PASSWORD" \
+    log-sink sh -s \
+  < "$CI_REPO_ROOT/db/log-sink/provision-backup-role.sh"
 docker compose "${adoption_compose_opts[@]}" \
   -f "$adoption_root/compose.yml" \
   exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" log-sink \
@@ -180,8 +189,17 @@ upgraded_database_capabilities=$(docker compose "${adoption_compose_opts[@]}" \
       "SELECT
          has_database_privilege('openbrain_logs_rollup', current_database(), 'TEMPORARY')::int || '|' ||
          has_database_privilege('openbrain_ingester', current_database(), 'TEMPORARY')::int || '|' ||
-         has_database_privilege('openbrain_monitor', current_database(), 'TEMPORARY')::int")
-test "$upgraded_database_capabilities" = "1|0|0"
+         has_database_privilege('openbrain_monitor', current_database(), 'TEMPORARY')::int || '|' ||
+         has_database_privilege('openbrain_logs_backup', current_database(), 'TEMPORARY')::int")
+test "$upgraded_database_capabilities" = "1|0|0|0"
+backup_upgrade_grants=$(docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
+  exec -T -e PGPASSWORD="$OPENBRAIN_LOGS_BACKUP_PASSWORD" log-sink \
+    psql -X -w -h /var/run/postgresql -U openbrain_logs_backup \
+      -d "$POSTGRES_DB" -Atc \
+      "SELECT has_table_privilege(current_user, 'public.funnel_access_summary', 'SELECT')::int || '|' ||
+              has_table_privilege(current_user, 'public.funnel_access_log', 'SELECT')::int")
+test "$backup_upgrade_grants" = "1|0"
 
 # The prior installed rollup grouped by its CASE alias. That shape is valid on
 # the legacy catalog, while the current rollup is not; after migration the
