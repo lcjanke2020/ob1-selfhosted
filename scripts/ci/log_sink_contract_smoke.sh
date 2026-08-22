@@ -22,7 +22,8 @@ if [[ "$phase" == all || "$phase" == baseline ]]; then
 log_sink_step "Init assertion and durable completion marker both ran"
 # Absence is as meaningful as failure: a silently skipped assertion would let
 # every later check pass against an unverified schema.
-docker logs "$LOG_SINK_CONTAINER" 2>&1 | grep -F 'log sink: invariants OK'
+docker logs "$LOG_SINK_CONTAINER" 2>&1 | \
+  grep -F 'log sink: authorization/topology invariants OK'
 docker logs "$LOG_SINK_CONTAINER" 2>&1 | \
   grep -F 'log sink: init completion marker written'
 
@@ -164,7 +165,8 @@ fi
 
 if [[ "$phase" == all || "$phase" == assertion ]]; then
 log_sink_step "Completed-catalog assertion passes before mutation probes"
-run_sink_assertion | grep -F 'invariants OK'
+run_sink_assertion | \
+  grep -F 'log sink: authorization/topology invariants OK'
 
 log_sink_step "Assertion rejects widened grants and foreign grantees"
 sink_super_query \
@@ -248,7 +250,37 @@ sink_super_query "grant pg_read_all_data to openbrain_ingester;" >/dev/null
 }
 sink_super_query "revoke pg_read_all_data from openbrain_ingester;" >/dev/null
 
+log_sink_step "Assertion names every unsafe managed-role attribute"
+for role_attribute in \
+  SUPERUSER CREATEDB CREATEROLE REPLICATION BYPASSRLS; do
+  sink_super_query \
+    "alter role openbrain_monitor $role_attribute;" >/dev/null
+  if role_output=$(run_sink_assertion 2>&1); then
+    echo "assertion missed openbrain_monitor $role_attribute" >&2
+    exit 1
+  fi
+  grep -Fq "openbrain_monitor=$role_attribute" <<< "$role_output" || {
+    echo "assertion did not identify openbrain_monitor=$role_attribute" >&2
+    echo "$role_output" >&2
+    exit 1
+  }
+  sink_super_query \
+    "alter role openbrain_monitor NO$role_attribute;" >/dev/null
+done
+
 log_sink_step "Assertion rejects stray relations, schemas, and database CREATE"
+sink_super_query "alter table funnel_access_summary set unlogged;" >/dev/null
+if relation_output=$(run_sink_assertion 2>&1); then
+  echo "assertion missed an unlogged sink table" >&2
+  exit 1
+fi
+grep -Fq 'data relations must be permanent base tables' \
+  <<< "$relation_output" || {
+  echo "assertion did not identify an unlogged sink table" >&2
+  echo "$relation_output" >&2
+  exit 1
+}
+sink_super_query "alter table funnel_access_summary set logged;" >/dev/null
 sink_super_query "create table thoughts(id int);" >/dev/null
 ! run_sink_assertion 2>/dev/null || {
   echo "assertion missed a stray relation" >&2
@@ -271,7 +303,7 @@ sink_super_query "create schema ci_extra authorization openbrain_ingester;" \
 }
 sink_super_query "drop schema ci_extra;" >/dev/null
 
-log_sink_step "Assertion rejects stray and repointed routines or views"
+log_sink_step "Assertion rejects routines in application schemas"
 sink_super_query \
   "create function public.ci_probe() returns bigint language sql security definer as 'select count(*) from funnel_access_log';" \
   >/dev/null
@@ -280,52 +312,7 @@ sink_super_query \
   exit 1
 }
 sink_super_query "drop function public.ci_probe();" >/dev/null
-sink_super_query \
-  "create function pg_catalog.ci_leak() returns bigint language sql security definer as 'select count(*) from funnel_access_log';" \
-  >/dev/null
-! run_sink_assertion 2>/dev/null || {
-  echo "assertion missed a pg_catalog definer function" >&2
-  exit 1
-}
-sink_super_query "drop function pg_catalog.ci_leak();" >/dev/null
-sink_super_query \
-  "create function information_schema.ci_leak() returns int language sql as 'select 1';" \
-  >/dev/null
-! run_sink_assertion 2>/dev/null || {
-  echo "assertion missed an information_schema routine" >&2
-  exit 1
-}
-sink_super_query "drop function information_schema.ci_leak();" >/dev/null
-sink_super_query \
-  "create view information_schema.ci_leak_view as select 1 as x;" >/dev/null
-! run_sink_assertion 2>/dev/null || {
-  echo "assertion missed an information_schema view" >&2
-  exit 1
-}
-sink_super_query "drop view information_schema.ci_leak_view;" >/dev/null
-
-# In-place catalog changes that keep the object's low OID (CREATE OR REPLACE /
-# ALTER), which the assertion's age test cannot see on its own.
-sink_super_query \
-  "alter function information_schema._pg_expandarray(anyarray) security definer;" \
-  >/dev/null
-! run_sink_assertion 2>/dev/null || {
-  echo "assertion missed an existing routine flipped to SECURITY DEFINER" >&2
-  exit 1
-}
-sink_super_query \
-  "alter function information_schema._pg_expandarray(anyarray) security invoker;" \
-  >/dev/null
-sink_super_query \
-  "create or replace view information_schema.information_schema_catalog_name as select (select count(*) from funnel_access_log)::text::information_schema.sql_identifier as catalog_name;" \
-  >/dev/null
-! run_sink_assertion 2>/dev/null || {
-  echo "assertion missed a catalog view repointed at the sink tables" >&2
-  exit 1
-}
-sink_super_query \
-  "create or replace view information_schema.information_schema_catalog_name as select current_database()::information_schema.sql_identifier as catalog_name;" \
-  >/dev/null
-run_sink_assertion | grep -F 'invariants OK'
-echo "assertion catches widened grants, grant options, memberships, missing/disabled/foreign roles, database CREATE/direct-TEMPORARY drift, stray relations, stray schemas, stray routines (including system-schema definer functions and views), in-place SECURITY DEFINER flips, catalog views repointed at sink tables, and PUBLIC"
+run_sink_assertion | \
+  grep -F 'log sink: authorization/topology invariants OK'
+echo "assertion catches widened grants, grant options, unsafe attributes, memberships, missing/disabled/foreign roles, database CREATE/direct-TEMPORARY drift, stray relations, stray schemas, non-system routines, and PUBLIC"
 fi

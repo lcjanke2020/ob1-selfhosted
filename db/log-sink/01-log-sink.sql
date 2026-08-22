@@ -2,8 +2,10 @@
 --
 -- A separate Postgres cluster from the canonical corpus, living on the
 -- internet-facing qube so that qube needs no network path to the database
--- qube at all. It holds exactly the two Funnel-access relations and nothing
--- else: no `thoughts`, no `sessions`, no `mcp_auth_events`, no pgvector.
+-- qube at all. Its only application data tables are the two permanent
+-- Funnel-access tables; supporting sequences/indexes are outside that
+-- two-table count. No `thoughts`, no `sessions`, no `mcp_auth_events`, no
+-- pgvector.
 -- See deploy/qubes/ingress-qube/README.md § Local log sink.
 --
 -- WHAT AN ATTACKER GETS BY OWNING THIS CLUSTER: up to 30 days of request

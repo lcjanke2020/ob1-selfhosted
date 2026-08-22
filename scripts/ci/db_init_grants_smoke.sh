@@ -69,6 +69,24 @@ super_psql -v ON_ERROR_STOP=1 -tAc \
    FROM pg_roles WHERE rolname = 'openbrain_token_admin'" | grep -q t
 run_assertion >/dev/null
 
+# The two long-lived corpus roles have actor-specific attribute contracts: the
+# app is a plain role, while readonly has only the BYPASSRLS needed by pg_dump.
+super_psql -v ON_ERROR_STOP=1 -c \
+  "ALTER ROLE openbrain_app SUPERUSER CREATEDB CREATEROLE REPLICATION BYPASSRLS"
+expect_rejected "app privilege flags" \
+  "openbrain_app has unsafe cluster-level role attributes" \
+  "SUPERUSER, CREATEDB, CREATEROLE, REPLICATION, BYPASSRLS"
+super_psql -v ON_ERROR_STOP=1 -c \
+  "ALTER ROLE openbrain_app NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+
+super_psql -v ON_ERROR_STOP=1 -c \
+  "ALTER ROLE openbrain_readonly SUPERUSER CREATEDB CREATEROLE REPLICATION"
+expect_rejected "readonly privilege flags" \
+  "openbrain_readonly has unsafe cluster-level role attributes beyond required BYPASSRLS" \
+  "SUPERUSER, CREATEDB, CREATEROLE, REPLICATION"
+super_psql -v ON_ERROR_STOP=1 -c \
+  "ALTER ROLE openbrain_readonly NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS"
+
 # Direct flags are not the only way to reach BYPASSRLS: membership
 # would also confer inherited privileges and allow SET ROLE.
 super_psql -v ON_ERROR_STOP=1 -c \
@@ -77,6 +95,49 @@ expect_rejected "app role membership" \
   "openbrain_app is a member of" "openbrain_readonly"
 super_psql -v ON_ERROR_STOP=1 -c \
   "REVOKE openbrain_readonly FROM openbrain_app"
+
+# Current PUBLIC ACLs are a role-independent exposure, not a special case of
+# whichever managed role happens to inherit them. The assertion names the
+# object and privilege directly.
+super_psql -v ON_ERROR_STOP=1 -c \
+  "GRANT SELECT ON public.mcp_auth_events TO PUBLIC"
+expect_rejected "current PUBLIC relation privilege" \
+  "PUBLIC can access current non-system relations or columns" \
+  "public.mcp_auth_events=SELECT"
+super_psql -v ON_ERROR_STOP=1 -c \
+  "REVOKE SELECT ON public.mcp_auth_events FROM PUBLIC"
+
+super_psql -v ON_ERROR_STOP=1 -c \
+  "GRANT SELECT (subject) ON public.mcp_auth_events TO PUBLIC"
+expect_rejected "current PUBLIC column privilege" \
+  "PUBLIC can access current non-system relations or columns" \
+  "public.mcp_auth_events.subject=SELECT"
+super_psql -v ON_ERROR_STOP=1 -c \
+  "REVOKE SELECT (subject) ON public.mcp_auth_events FROM PUBLIC"
+
+super_psql -v ON_ERROR_STOP=1 -c \
+  "GRANT USAGE ON SEQUENCE public.thought_revisions_id_seq TO PUBLIC"
+expect_rejected "current PUBLIC sequence privilege" \
+  "PUBLIC can access current non-system relations or columns" \
+  "public.thought_revisions_id_seq=USAGE"
+super_psql -v ON_ERROR_STOP=1 -c \
+  "REVOKE USAGE ON SEQUENCE public.thought_revisions_id_seq FROM PUBLIC"
+
+# An application-owned SECURITY DEFINER routine must not keep PostgreSQL's
+# default PUBLIC EXECUTE grant. Revoking that route restores the valid catalog.
+super_psql -v ON_ERROR_STOP=1 -c \
+  "CREATE FUNCTION public.ci_public_definer() RETURNS integer
+     LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog
+     AS 'SELECT 1';
+   ALTER FUNCTION public.ci_public_definer() OWNER TO openbrain_app"
+expect_rejected "PUBLIC SECURITY DEFINER execution" \
+  "PUBLIC can execute non-system SECURITY DEFINER routines" \
+  "ci_public_definer()"
+super_psql -v ON_ERROR_STOP=1 -c \
+  "REVOKE ALL ON FUNCTION public.ci_public_definer() FROM PUBLIC"
+run_assertion >/dev/null
+super_psql -v ON_ERROR_STOP=1 -c \
+  "DROP FUNCTION public.ci_public_definer()"
 
 # PUBLIC default ACLs are delayed grants: no current table need expose
 # them, but the next migration would materialize the privilege.
@@ -155,4 +216,4 @@ docker exec "$DB_INIT_CONTAINER" rm -f "$hba_role_file"
 super_psql -tAc "SELECT pg_reload_conf()" | grep -q t
 
 run_assertion >/dev/null
-echo "protected-role assertions accepted the clean catalog and rejected role, relation, HBA, default-ACL, token-admin, and app-membership drift"
+echo "protected-role assertions accepted the clean catalog and rejected role attributes/membership, current and default PUBLIC access, PUBLIC SECURITY DEFINER execution, retired topology, and HBA drift"

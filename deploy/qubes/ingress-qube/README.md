@@ -9,10 +9,10 @@ and runs Caddy (the header-discriminated perimeter), the log-ingester, and a
 **no** memory store and **no** app credential.
 
 **This qube has no network path to the [db qube](../db-qube/) at all** — no
-address for it, no credential on it, no firewall rule toward it. Its three
-database credentials are all for the local sink, whose entire contents are
-Funnel request metadata. The canonical Postgres remains on the db qube, reached
-only by the app qube.
+address for it, no credential on it, no firewall rule toward it. All database
+credentials here are for the local sink, whose entire contents are Funnel
+request metadata. The canonical Postgres remains on the db qube, reached only by
+the app qube.
 
 Build this qube with the shared bind-dirs / SELinux / systemd-persistence
 mechanics from the [Qubes README](../README.md) first; this directory is the
@@ -70,7 +70,8 @@ migration then takes an access-exclusive table lock with a 10-second timeout,
 adds one stored generated column, and backfills retained rows in one
 transaction. A busy sink fails without a partial change; leave `log-ingester`
 stopped and retry. A second successful run is a no-op. Do not recreate the
-service or restart the writer unless the assertion prints `invariants OK`.
+service or restart the writer unless the assertion prints
+`log sink: authorization/topology invariants OK`.
 
 If the volume already has its completion marker, recreate the sink and then
 continue at
@@ -283,12 +284,12 @@ authenticates against the db qube, and the db qube's
 [`pg_hba`](../db-qube/pg_hba.snippet.conf) deliberately carries no line for this
 qube at all.
 
-| Credential                       | Lives in                      | Role on the sink                         |
-| -------------------------------- | ----------------------------- | ---------------------------------------- |
-| `LOG_SINK_SUPERUSER_PASSWORD`    | `.env`                        | init only — creates the roles and schema |
-| `OPENBRAIN_INGESTER_PASSWORD`    | `.env`                        | INSERT on `funnel_access_log`            |
-| `OPENBRAIN_LOGS_ROLLUP_PASSWORD` | `.env` + `funnel-summary.env` | table DML + database `TEMPORARY`         |
-| `OPENBRAIN_MONITOR_PASSWORD`     | `.env` + `funnel-monitor.env` | SELECT on `funnel_access_log` only       |
+| Credential                       | Lives in                      | Role on the sink                               |
+| -------------------------------- | ----------------------------- | ---------------------------------------------- |
+| `LOG_SINK_SUPERUSER_PASSWORD`    | `.env`                        | trusted administration; never a client service |
+| `OPENBRAIN_INGESTER_PASSWORD`    | `.env`                        | INSERT on `funnel_access_log`                  |
+| `OPENBRAIN_LOGS_ROLLUP_PASSWORD` | `.env` + `funnel-summary.env` | table DML + database `TEMPORARY`               |
+| `OPENBRAIN_MONITOR_PASSWORD`     | `.env` + `funnel-monitor.env` | SELECT on `funnel_access_log` only             |
 
 The `.env` copy of a role password is what **creates** the role at container
 init; the `~/.config/*.env` copy is what the host-side job **authenticates**
@@ -490,7 +491,7 @@ SQL
 # point it at the repo checkout three levels up.
 docker compose exec -T -e PGPASSWORD log-sink \
   psql -U "$SINK_SUPER" -d "$SINK_DB" -v ON_ERROR_STOP=1 \
-  -f - < ../../../db/log-sink/02-log-sink-assertion.sql   # must print "invariants OK"
+  -f - < ../../../db/log-sink/02-log-sink-assertion.sql   # must print "log sink: authorization/topology invariants OK"
 unset PGPASSWORD
 ```
 
@@ -656,15 +657,19 @@ On a brand-new volume, additionally prove that `initdb.d` reached the assertion
 and then its lexically-last marker script:
 
 ```sh
-docker compose logs log-sink | grep -E 'invariants OK|init completion marker written'
+docker compose logs log-sink | grep -E 'log sink: authorization/topology invariants OK|init completion marker written'
 ```
 
-`invariants OK` comes from
+`log sink: authorization/topology invariants OK` comes from
 [`db/log-sink/02-log-sink-assertion.sql`](../../../db/log-sink/02-log-sink-assertion.sql),
-which runs immediately before the marker script and **fails the init** if the
-sink ever holds a third relation, a role with cluster-level privileges, an
-unenumerated grant, or a `GRANT … TO PUBLIC`. The entrypoint refuses every later
-start unless the marker exists. On a fresh volume, either log line's absence is
-meaningful. On an adopted volume, the helper's successful assertion and
+which runs immediately before the marker script. On fresh init, it prevents the
+marker when the completed catalog contains an unexpected application table/view,
+a role with cluster-level privileges, an unenumerated grant, or a
+`GRANT … TO PUBLIC`. The entrypoint refuses every later start unless the marker
+exists. On a fresh volume, either log line's absence is meaningful. On an
+adopted volume, the helper's successful assertion and
 `pre-marker volume adopted after current invariants passed` line are the
-corresponding evidence; init scripts correctly do not rerun on recreation.
+corresponding evidence; init scripts correctly do not rerun on recreation. The
+marker proves that this trusted gate passed once, not that the catalog has been
+continuously attested since. A full database superuser can skip or undo the same
+check and is outside its authorization boundary.

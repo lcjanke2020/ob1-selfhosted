@@ -292,7 +292,8 @@ adoption_output=$(COMPOSE_DIR="$adoption_root" \
   COMPOSE_FILE="$adoption_root/compose.yml" \
   COMPOSE_PROJECT_NAME="$adoption_project" \
   "$CI_REPO_ROOT/scripts/adopt-log-sink-marker.sh" 2>&1)
-grep -Fq 'log sink: invariants OK' <<< "$adoption_output"
+grep -Fq 'log sink: authorization/topology invariants OK' \
+  <<< "$adoption_output"
 grep -Fq 'pre-marker volume adopted after current invariants passed' \
   <<< "$adoption_output"
 docker compose "${adoption_compose_opts[@]}" \
@@ -342,7 +343,8 @@ post_rollup_assertion=$(docker compose "${adoption_compose_opts[@]}" \
     psql -X -w -h /var/run/postgresql -U "$POSTGRES_USER" \
       -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f - \
     < "$CI_REPO_ROOT/db/log-sink/02-log-sink-assertion.sql")
-grep -Fq 'log sink: invariants OK' <<< "$post_rollup_assertion"
+grep -Fq 'log sink: authorization/topology invariants OK' \
+  <<< "$post_rollup_assertion"
 echo "legacy/current rollup incompatibility pinned; grant contract replayed; status migration idempotent with history intact; assertion-gated adoption, wrapper restart, and foreground rollup passed"
 
 cleanup_adoption 0

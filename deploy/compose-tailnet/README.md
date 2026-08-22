@@ -239,10 +239,12 @@ stack measures it without giving an edge parser a route to the corpus.
   including verified identities on admitted requests.
 
 The sink is intentionally disposable request metadata: raw rows retain 30 days
-and daily aggregates 365. It has its own init-only superuser, INSERT-only
-ingester, DML rollup, and optional one-table monitor credentials. None is passed
-to the corpus container. Create the configured `LOG_SINK_SOCKET_DIR` before
-first start and keep its absolute path short enough for a unix socket.
+and daily aggregates 365. It has its own administrative-only superuser,
+INSERT-only ingester, DML rollup, and optional one-table monitor credentials.
+The superuser is used for init, adoption, upgrades, and explicit checks, but is
+never passed to a long-running client service. No sink credential is passed to
+the corpus container. Create the configured `LOG_SINK_SOCKET_DIR` before first
+start and keep its absolute path short enough for a unix socket.
 
 **What's NOT logged:** no `Authorization`/`x-brain-key`/`Cookie` values
 (redacted by Caddy's `format filter`), no request bodies, no query strings, and
@@ -334,8 +336,9 @@ so it survives installations that revoke PostgreSQL's stock `PUBLIC` default.
 The generated column backfill and its 10-second lock timeout are one
 transaction; a busy sink fails without a partial change, and a second successful
 run is a no-op. Do not recreate the sink or restart the writer unless the
-assertion prints `invariants OK`. If the existing volume predates
-`.openbrain-log-sink-init-complete`, adopt it before recreation:
+assertion prints `log sink: authorization/topology invariants OK`. If the
+existing volume predates `.openbrain-log-sink-init-complete`, adopt it before
+recreation:
 
 ```sh
 COMPOSE_DIR="$PWD" ../../scripts/adopt-log-sink-marker.sh
@@ -399,7 +402,7 @@ optional monitor passwords. Then:
    docker compose --env-file .env build log-ingester
    mkdir -p /the/exact/absolute/path/set-as-LOG_SINK_SOCKET_DIR
    docker compose --env-file .env --profile pattern-b up -d --wait log-sink
-   docker compose --env-file .env logs log-sink | grep -E 'invariants OK|init completion marker written'
+   docker compose --env-file .env logs log-sink | grep -E 'log sink: authorization/topology invariants OK|init completion marker written'
    docker compose --env-file .env --profile pattern-b up -d --no-deps log-ingester
    ```
 
@@ -507,12 +510,12 @@ docker compose --env-file .env exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/03-grants-assertion.sql
 ```
 
-A non-zero exit means a grant drifted. Prefer a targeted fix (e.g.
-`REVOKE DELETE ON public.thoughts FROM openbrain_app;`). To re-sync wholesale,
-re-apply `01-schema.sql` → `02-observability.sql`, apply any pending later
-schema migrations (`04`, `05`, `06`, `07`, `08`, `09`, and future files), then
-run `03-grants-assertion.sql` **last** — never `01` alone, since its REVOKE-all
-block strips observability grants until `02` restores them.
+A non-zero exit means a completed-catalog invariant failed. Prefer a targeted
+fix (e.g. `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). To re-sync
+wholesale, re-apply `01-schema.sql` → `02-observability.sql`, apply any pending
+later schema migrations (`04`, `05`, `06`, `07`, `08`, `09`, and future files),
+then run `03-grants-assertion.sql` **last** — never `01` alone, since its
+REVOKE-all block strips observability grants until `02` restores them.
 
 To retire the unused historical thought-search RPC without a full schema replay,
 run

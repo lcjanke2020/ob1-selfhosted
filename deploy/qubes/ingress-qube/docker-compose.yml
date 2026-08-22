@@ -31,7 +31,7 @@
 # reach.
 #
 # Credentials: this qube holds the INSERT-only ingester credential, the sink's
-# init-only superuser, and the rollup role — all three for a LOCAL cluster
+# administrative-only superuser, and the rollup role — all three for a LOCAL cluster
 # whose entire contents are request metadata. It carries no credential of any
 # kind for the corpus. Note the deliberate absence of anything named
 # OPENBRAIN_APP_PASSWORD: the sink's rollup role is openbrain_logs_rollup
@@ -167,11 +167,12 @@ services:
   # which still demands scram. Verify with `ss -tlnp` on the host (no 5432) and
   # `docker inspect` (networks: none).
   #
-  # Contents: `funnel_access_log` + `funnel_access_summary` and nothing else —
-  # see db/log-sink/01-log-sink.sql, whose companion assertion FAILS INIT if a
-  # third relation or an unenumerated grant ever appears. No `thoughts`, no
-  # `mcp_auth_events`, no pgvector; plain postgres keeps that extension's
-  # supply chain off the internet-facing qube.
+  # Application tables: exactly two permanent request-metadata tables;
+  # sequences/indexes are outside that two-table count. The companion assertion
+  # FAILS INIT if another application table/view or an unenumerated grant
+  # appears. No `thoughts`, no
+  # `mcp_auth_events`, no pgvector; plain postgres keeps that extension's supply
+  # chain off the internet-facing qube.
   #
   # The data is explicitly DISPOSABLE — 30-day raw, 365-day aggregate, no
   # backup. Losing it costs request metadata that was already this qube's to
@@ -190,11 +191,12 @@ services:
     environment:
       POSTGRES_DB: ${LOG_SINK_DB:-openbrain_logs}
       POSTGRES_USER: ${LOG_SINK_SUPERUSER:-postgres}
-      # Init-only credential. `:?` so a blank value fails at `docker compose
-      # config` time — with local scram (below) a passwordless superuser can no
-      # longer connect at all, so an empty value here bricks init rather than
-      # silently opening a door.
-      POSTGRES_PASSWORD: ${LOG_SINK_SUPERUSER_PASSWORD:?set LOG_SINK_SUPERUSER_PASSWORD (the log sink's init-only superuser)}
+      # Administrative-only credential. It also drives adoption, upgrades, and
+      # explicit assertions; no long-running client service receives it. `:?`
+      # makes a blank value fail at `docker compose config` time — with local
+      # scram (below) a passwordless superuser cannot connect, so an empty value
+      # here bricks init rather than silently opening a door.
+      POSTGRES_PASSWORD: ${LOG_SINK_SUPERUSER_PASSWORD:?set LOG_SINK_SUPERUSER_PASSWORD (the log sink's administrative superuser)}
       # THE non-obvious one. The image's stock pg_hba is `local all all trust`,
       # which would let anything able to reach the socket connect as ANY role
       # — including the superuser — with no password, making the INSERT-only

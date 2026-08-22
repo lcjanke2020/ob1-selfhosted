@@ -311,15 +311,12 @@ version. Apply migrations before the roll, not with it.
 4. Reconcile `.env` against `.env.example`. `docker compose config --quiet` is a
    cheap dry run — it fails on a missing required variable without touching the
    running container.
-5. **Install host-side consumers before replaying SQL that narrows a grant.**
-   Several credentials in this topology live outside the compose project: the
-   Funnel monitor's role on the ingress qube, the rollup's role here. Replaying
-   a `REVOKE` before the matching script is updated leaves that consumer failing
-   on its own timer cadence until it catches up — silently, if it only writes to
-   a local log. The reverse order is safe, because a new script is written
-   against both the old and the new grant set. See
-   [the v3 → v4 Funnel monitor upgrade](../ingress-qube/README.md#funnel-monitor-host-side-not-compose)
-   for a worked example.
+5. **Install host-side consumers before replaying SQL that changes their
+   contract.** The current Funnel monitor and rollup roles live only on the
+   ingress qube's separate sink; corpus migrations must never recreate or grant
+   to them. Coordinate a sink schema/grant change through the
+   [existing-sink upgrade](../ingress-qube/README.md#existing-sink-upgrade-coordinate-the-schema-and-installed-rollup)
+   before its timers resume.
 6. Stop `mcp`, apply the migrations in ascending order, then run
    `db/03-grants-assertion.sql`. It must exit 0. It reads the completed catalog,
    so a partial migration or a widened role fails it loudly.

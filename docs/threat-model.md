@@ -173,7 +173,10 @@ configuration this project is built not to foreclose. The full comparison table
   for remote DB admin — a deliberate trade-off giving a compromised app qube
   full DB admin, including an app→db OS pivot. Tracked in
   [#15](https://github.com/lcjanke2020/ob1-selfhosted/issues/15); the
-  migrator-role scope-down is the planned structural fix.
+  migrator-role scope-down is the planned structural fix. A full database
+  superuser is therefore trusted and outside the SQL authorization boundary:
+  catalog assertions can gate a trusted workflow or detect drift when invoked,
+  but cannot constrain an actor that can skip or rewrite them.
   ([`security-model.md` § Database layer](security-model.md#database-layer))
 - **The ingress qube keeps no path to the db qube.** It formerly held one
   INSERT-only exception; the Funnel log now goes to an edge-local socket-only

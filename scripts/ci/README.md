@@ -21,16 +21,16 @@ intentional caller override.
 
 ### Commands
 
-| Family            | Local command                                 | Coverage                                                                      |
-| ----------------- | --------------------------------------------- | ----------------------------------------------------------------------------- |
-| All corpus checks | `scripts/ci/run_db_init_smokes.sh all`        | CI-equivalent preflight plus every family below                               |
-| Preflight         | `scripts/ci/run_db_init_smokes.sh preflight`  | Workflow paths, Funnel monitor, encrypted backup publication                  |
-| Schema/data       | `scripts/ci/run_db_init_smokes.sh schema`     | Fresh-init shape, metadata upgrade, spaces, thought mutations, read-only dump |
-| Auth              | `scripts/ci/run_db_init_smokes.sh auth`       | Native tokens, audit emitter, pre-1.20 upgrade, middleware seam               |
-| Grants            | `scripts/ci/run_db_init_smokes.sh grants`     | Corpus role, membership, default-ACL, HBA, and retired-shape rejection        |
-| Retirement        | `scripts/ci/run_db_init_smokes.sh retirement` | Archive gates, concurrency, restrictive drop, idempotency                     |
-| Search            | `scripts/ci/run_db_init_smokes.sh search`     | Session HNSW/order plus thought-filter and hybrid plans                       |
-| Summary           | `scripts/ci/run_db_init_smokes.sh summary`    | App-qube and Compose target-pinned summary wrappers                           |
+| Family            | Local command                                 | Coverage                                                                             |
+| ----------------- | --------------------------------------------- | ------------------------------------------------------------------------------------ |
+| All corpus checks | `scripts/ci/run_db_init_smokes.sh all`        | CI-equivalent preflight plus every family below                                      |
+| Preflight         | `scripts/ci/run_db_init_smokes.sh preflight`  | Workflow paths, Funnel monitor, encrypted backup publication                         |
+| Schema/data       | `scripts/ci/run_db_init_smokes.sh schema`     | Fresh-init shape, metadata upgrade, spaces, thought mutations, read-only dump        |
+| Auth              | `scripts/ci/run_db_init_smokes.sh auth`       | Native tokens, audit emitter, pre-1.20 upgrade, middleware seam                      |
+| Grants            | `scripts/ci/run_db_init_smokes.sh grants`     | Role attributes/membership, current/default PUBLIC ACLs, definer, HBA, retired shape |
+| Retirement        | `scripts/ci/run_db_init_smokes.sh retirement` | Archive gates, concurrency, restrictive drop, idempotency                            |
+| Search            | `scripts/ci/run_db_init_smokes.sh search`     | Session HNSW/order plus thought-filter and hybrid plans                              |
+| Summary           | `scripts/ci/run_db_init_smokes.sh summary`    | App-qube and Compose target-pinned summary wrappers                                  |
 
 Multiple families can share one fresh fixture:
 
@@ -58,14 +58,14 @@ directory under `/tmp`.
 
 ### Commands
 
-| Family              | Local command                                 | Coverage                                                                                   |
-| ------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| All log-sink checks | `scripts/ci/run_log_sink_smokes.sh all`       | CI-equivalent preflight plus every family below                                            |
-| Preflight           | `scripts/ci/run_log_sink_smokes.sh preflight` | Role/credential mapping drift rejection plus ingress unit parsing and calendar             |
-| Lifecycle           | `scripts/ci/run_log_sink_smokes.sh lifecycle` | Legacy status backfill, idempotency, assertion-gated adoption, and partial-init refusal    |
-| Contract            | `scripts/ci/run_log_sink_smokes.sh contract`  | Generated status boundaries, marker, socket boundary, exact role grants, SCRAM, mutations  |
-| Rollup              | `scripts/ci/run_log_sink_smokes.sh rollup`    | Shared projection, late arrivals, retention, concurrency, bounded sketches, closed catalog |
-| Summary wrapper     | `scripts/ci/run_log_sink_smokes.sh wrapper`   | Target-pinned sink role, socket, SQL, database, retention, and report shape                |
+| Family              | Local command                                 | Coverage                                                                                                       |
+| ------------------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| All log-sink checks | `scripts/ci/run_log_sink_smokes.sh all`       | CI-equivalent preflight plus every family below                                                                |
+| Preflight           | `scripts/ci/run_log_sink_smokes.sh preflight` | Role/credential mapping drift rejection plus ingress unit parsing and calendar                                 |
+| Lifecycle           | `scripts/ci/run_log_sink_smokes.sh lifecycle` | Legacy status backfill, idempotency, assertion-gated adoption, and partial-init refusal                        |
+| Contract            | `scripts/ci/run_log_sink_smokes.sh contract`  | Deployment gate, role attributes, exact grants, PUBLIC, socket/SCRAM, status boundaries                        |
+| Rollup              | `scripts/ci/run_log_sink_smokes.sh rollup`    | Shared projection, late arrivals, retention, concurrency, bounded sketches, closed table/view/routine contract |
+| Summary wrapper     | `scripts/ci/run_log_sink_smokes.sh wrapper`   | Target-pinned sink role, socket, SQL, database, retention, and report shape                                    |
 
 Multiple primary-container families share one fresh fixture:
 

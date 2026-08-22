@@ -1,30 +1,34 @@
--- Invariant assertions for the ingress qube's local log sink.
+-- Completed-catalog assertions for the ingress qube's local log sink.
 --
 -- Run as the final catalog check during init (the entrypoint sees it as 99-…;
 -- only the zz- completion-marker script follows), and re-run by hand after any
 -- change to 01-log-sink.sql or 02-log-sink-status-class.sql. Counterpart to
--- db/03-grants-assertion.sql on the corpus, but the claim here is stronger
--- and simpler to state: this cluster contains TWO relations, TWO required
--- roles, and at most one optional monitor role;
+-- db/03-grants-assertion.sql on the corpus. This is a trusted deployment gate
+-- and a point-in-time drift check, not a control over the superuser that runs
+-- it: a full database superuser can read or alter the sink, skip this file, or
+-- undo its result. This SQL validates database authorization and topology;
+-- runtime containment also depends on the separately verified socket/SCRAM
+-- boundary.
+--
+-- The checked contract is intentionally ordinary and enforceable: this
+-- cluster contains TWO persistent data tables, TWO required roles, and at most
+-- one optional monitor role;
 -- every table, sequence, and column privilege those roles hold is exactly
 -- enumerated, grant options included (section 3), none of them holds a
 -- cluster-level privilege (section 1), none has a CREATE route into schema
 -- public or into this database (section 4), and the role set itself is
 -- closed — nothing exists beyond the bootstrap superuser, the two required
--- roles, and the optional monitor (section 5). Sections 6-9 close the indirect
--- routes the
--- direct-ACL comparison cannot see: effective privileges arriving via role
--- membership, memberships themselves, ownership, default ACLs, grants
--- parked on a grantee outside the enumerated set, stray schemas, and stray
--- routines or relations — including ones planted in the system schemas, and
--- the two in-place catalog changes that preserve an object's OID (a routine
--- flipped to SECURITY DEFINER, a view repointed at the sink tables). EXECUTE
--- defaults to PUBLIC and a definer body runs as its owner, so a routine or
--- view is a data path that needs no table grant at all.
+-- roles, and the optional monitor (section 5). Sections 6-9 close indirect
+-- routes the direct-ACL comparison cannot see: effective privileges arriving
+-- via role membership, memberships themselves, ownership, default ACLs,
+-- grants parked on a grantee outside the enumerated set, stray schemas, and
+-- stray non-system routines or tables/views. EXECUTE defaults to PUBLIC and a
+-- definer body runs as its owner, so a user-created routine is a data path that
+-- needs no table grant at all.
 --
 -- Deliberately NOT asserted: PostgreSQL's stock PUBLIC defaults — database
 -- CONNECT/TEMP, USAGE on schema public, EXECUTE on built-in functions. None
--- of those reaches the two relations (section 3 pins their ACLs exactly);
+-- of those reaches the two data tables (section 3 pins their ACLs exactly);
 -- asserting them away would mean fighting harmless defaults on every major
 -- version instead of guarding the promise that matters. Section 4 separately
 -- pins a direct TEMPORARY grant for the rollup so hardening PUBLIC cannot break
@@ -35,11 +39,11 @@
 -- that popping the edge yields *only* request metadata. An accidental
 -- `GRANT ALL ... TO PUBLIC`, a stray table, or a role that quietly became
 -- superuser would each break that promise silently. These checks make it
--- break loudly, at init, instead.
+-- break loudly at a trusted catalog gate instead.
 --
--- Every check is a NEGATIVE one: it enumerates what is permitted and rejects
--- the rest, so a relation or privilege added later is caught without this
--- file having to learn about it first.
+-- Every boundary is closed-world: the file enumerates what is required and
+-- permitted, then rejects the rest. An application table/view or privilege
+-- added later is therefore caught without a growing denylist.
 
 -- The runtime assertion cannot import a host-side JSON file: fresh-init and
 -- adoption stream this SQL through psql in several deployment layouts. Keep
@@ -87,25 +91,40 @@ $contract_setup$ LANGUAGE plpgsql;
 
 -- ---------- 1. No role on this cluster is privileged ----------------------
 -- Excludes the bootstrap superuser (the container's POSTGRES_USER), which is
--- necessarily super and only ever used by init.
+-- necessarily super and reserved for trusted administration, including init,
+-- adoption, upgrades, and manual assertion runs.
 DO $$
 DECLARE
   offender text;
 BEGIN
-  SELECT string_agg(rolname, ', ' ORDER BY rolname) INTO offender
-  FROM pg_roles
-  WHERE rolname LIKE 'openbrain%'
-    AND (rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb OR rolreplication);
+  SELECT string_agg(
+           format('%I=%s', role.rolname, unsafe.attributes),
+           ', ' ORDER BY role.rolname
+         )
+    INTO offender
+  FROM pg_roles role
+  CROSS JOIN LATERAL (
+    SELECT concat_ws(
+      '+',
+      CASE WHEN role.rolsuper THEN 'SUPERUSER' END,
+      CASE WHEN role.rolcreatedb THEN 'CREATEDB' END,
+      CASE WHEN role.rolcreaterole THEN 'CREATEROLE' END,
+      CASE WHEN role.rolreplication THEN 'REPLICATION' END,
+      CASE WHEN role.rolbypassrls THEN 'BYPASSRLS' END
+    ) AS attributes
+  ) unsafe
+  WHERE role.rolname LIKE 'openbrain%'
+    AND unsafe.attributes <> '';
 
   IF offender IS NOT NULL THEN
     RAISE EXCEPTION
-      'log sink: role(s) % hold cluster-level privileges; the sink''s roles must be plain LOGIN roles',
+      'log sink: role attribute drift (%); the sink''s managed roles must be plain LOGIN roles',
       offender;
   END IF;
 END;
 $$ LANGUAGE plpgsql;
 
--- ---------- 2. Exactly two relations, with exactly these columns ----------
+-- ---------- 2. Exactly two persistent data tables, with these columns -----
 -- The relation check keeps the corpus schema from ever being applied here by
 -- mistake (a `thoughts` table on the edge would be the failure this whole
 -- topology exists to prevent). The column check pins the contract consumed by
@@ -114,6 +133,7 @@ DO $$
 DECLARE
   actual          text;
   expected        text;
+  invalid_tables  text;
   generation_kind text;
   generated_type  text;
   generated_expr  text;
@@ -129,6 +149,28 @@ BEGIN
     RAISE EXCEPTION
       'log sink: expected exactly (funnel_access_log, funnel_access_summary), found (%)',
       coalesce(actual, '<none>');
+  END IF;
+
+  SELECT string_agg(
+           format(
+             '%I.%I(kind=%s,persistence=%s)',
+             n.nspname,
+             c.relname,
+             c.relkind,
+             c.relpersistence
+           ),
+           ', ' ORDER BY c.relname
+         )
+    INTO invalid_tables
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'public'
+    AND c.relname IN ('funnel_access_log', 'funnel_access_summary')
+    AND (c.relkind <> 'r' OR c.relpersistence <> 'p');
+  IF invalid_tables IS NOT NULL THEN
+    RAISE EXCEPTION
+      'log sink: data relations must be permanent base tables; found %',
+      invalid_tables;
   END IF;
 
   SELECT string_agg(attname, ',' ORDER BY attnum) INTO actual
@@ -286,7 +328,7 @@ BEGIN
 
   IF offender IS NOT NULL THEN
     RAISE EXCEPTION
-      'log sink: role(s) % may CREATE in schema public; the sink must hold two relations and no more',
+      'log sink: role(s) % may CREATE in schema public; the sink must hold two persistent data tables and no more',
       offender;
   END IF;
 
@@ -371,7 +413,7 @@ $$ LANGUAGE plpgsql;
 -- ---------- 5. The role set itself is closed ------------------------------
 -- Sections 1 and 3 reason about roles they can NAME: 1 scans 'openbrain%',
 -- 3 compares the three enumerated. A role outside both patterns — created by
--- the init-only superuser, or by drift nobody noticed — would pass every
+-- the administrative superuser, or by drift nobody noticed — would pass every
 -- check above while falsifying the header's closed role set. Three closures
 -- fix that: exactly one superuser (the bootstrap role init connects as), both
 -- required sink roles present and login-capable, and no role at all beyond the
@@ -586,7 +628,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- ---------- 9. The schema and routine sets are closed ----------------------
+-- ---------- 9. The non-system schema and routine sets are closed -----------
 -- Section 2's census walks RELATIONS in non-system schemas; these close what
 -- it cannot see. A stray SCHEMA — above all one AUTHORIZED to a sink role —
 -- is a workshop where that role may CREATE at will, outside section 4's
@@ -596,33 +638,14 @@ $$ LANGUAGE plpgsql;
 -- default, and a SECURITY DEFINER body runs with its OWNER's authority — a
 -- superuser-owned helper selecting funnel_access_log hands every role that
 -- can call it a read path despite holding no table grant. This sink defines
--- ZERO routines, so the closure is total: none may exist. (DO blocks are
--- anonymous — running this file stores nothing in pg_proc.)
---
--- The system schemas cannot be excluded by NAME: `allow_system_table_mods` is
--- off, but that still lets the bootstrap superuser CREATE FUNCTION into
--- pg_catalog or information_schema, and a view into information_schema — each
--- a definer/EXECUTE-to-PUBLIC route the name-based exclusions above would wave
--- through. The discriminator is object age: every catalog object initdb ships
--- has an OID below FirstNormalObjectId (16384); anything at or above it was
--- created after initdb. This sink installs no extension, so in a system schema
--- that can only be user drift. (The OID threshold is in fact how PostgreSQL
--- ITSELF distinguishes built-ins: modern versions carry NO pin rows in
--- pg_depend at all — `deptype='p'` returns zero cluster-wide on stock
--- postgres:17 — so a "reject anything unpinned" check would flag every
--- catalog object. The OID line flags exactly the post-initdb objects and
--- nothing stock.)
---
--- The OID test detects objects CREATED after initdb; it cannot see an
--- existing low-OID catalog object changed IN PLACE, because CREATE OR REPLACE
--- and ALTER preserve the OID. This sink is disposable, so a byte-for-byte
--- catalog integrity baseline would be out of proportion — but the two in-place
--- changes that would actually hand a sink role access it lacks are closed
--- directly and OID-independently below (a routine flipped to SECURITY DEFINER,
--- and a view repointed at the sink tables).
+-- ZERO non-system routines, so the closure is total for objects a migration or
+-- least-privilege role can legitimately introduce. (DO blocks are anonymous —
+-- running this file stores nothing in pg_proc.) System-catalog/OID fingerprint
+-- probes are deliberately absent: they would be detection-only heuristics run
+-- by the same superuser they purport to constrain, not an authorization
+-- boundary.
 DO $$
 DECLARE
-  first_normal_oid CONSTANT oid := 16384;   -- FirstNormalObjectId (access/transam.h)
   offender text;
 BEGIN
   SELECT string_agg(nspname, ', ' ORDER BY nspname) INTO offender
@@ -645,76 +668,21 @@ BEGIN
       offender;
   END IF;
 
-  -- No routine anywhere: none in a user schema (the sink defines none), and
-  -- none post-initdb in a system schema (the pg_catalog/information_schema
-  -- definer-function route). oid < 16384 leaves the stock catalog untouched.
+  -- A routine in an application schema is an unreviewed path around the exact
+  -- relation ACLs, especially when the default PUBLIC EXECUTE grant and
+  -- SECURITY DEFINER are combined.
   SELECT string_agg(n.nspname || '.' || p.proname, ', '
                     ORDER BY n.nspname, p.proname) INTO offender
   FROM pg_proc p
   JOIN pg_namespace n ON n.oid = p.pronamespace
   WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-     OR p.oid >= first_normal_oid;
+    AND n.nspname !~ '^pg_';
   IF offender IS NOT NULL THEN
     RAISE EXCEPTION
-      'log sink: unexpected routine(s) %; this sink defines no functions or procedures at all',
-      offender;
-  END IF;
-
-  -- No user-created relation in a system schema (section 2 already pins the
-  -- non-system relation set to exactly the two tables). Catches the
-  -- information_schema view/table variant of the NEW-object drift.
-  SELECT string_agg(n.nspname || '.' || c.relname, ', '
-                    ORDER BY n.nspname, c.relname) INTO offender
-  FROM pg_class c
-  JOIN pg_namespace n ON n.oid = c.relnamespace
-  WHERE n.nspname IN ('pg_catalog', 'information_schema')
-    AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
-    AND c.oid >= first_normal_oid;
-  IF offender IS NOT NULL THEN
-    RAISE EXCEPTION
-      'log sink: user-created relation(s) % in a system schema; the catalog must stay stock',
-      offender;
-  END IF;
-
-  -- IN-PLACE catalog changes the OID test cannot see (CREATE OR REPLACE /
-  -- ALTER keep the OID). A routine flipped to SECURITY DEFINER runs with its
-  -- superuser owner's rights, so a low-OID catalog function repurposed to read
-  -- the sink tables would leak them to any caller with EXECUTE (PUBLIC by
-  -- default). Stock PostgreSQL ships ZERO SECURITY DEFINER routines, so any is
-  -- drift — this holds regardless of OID or create-vs-replace.
-  SELECT string_agg(n.nspname || '.' || p.proname, ', '
-                    ORDER BY n.nspname, p.proname) INTO offender
-  FROM pg_proc p
-  JOIN pg_namespace n ON n.oid = p.pronamespace
-  WHERE p.prosecdef;
-  IF offender IS NOT NULL THEN
-    RAISE EXCEPTION
-      'log sink: SECURITY DEFINER routine(s) %; a definer body runs with its owner''s rights and this sink defines none',
-      offender;
-  END IF;
-
-  -- The other in-place route: a view (any schema, so any low-OID
-  -- information_schema view repointed by CREATE OR REPLACE VIEW) reads the
-  -- underlying tables with the VIEW OWNER's rights — superuser, for a catalog
-  -- view — for every grantee. Nothing but the enumerated roles may reach the
-  -- sink tables, so no view or matview may depend on them at all. Section 2
-  -- already forbids views in the non-system schema; this also covers the
-  -- catalog ones the relation check treats as stock by OID.
-  SELECT string_agg(DISTINCT v.relname, ', ' ORDER BY v.relname) INTO offender
-  FROM pg_depend d
-  JOIN pg_rewrite rw ON rw.oid = d.objid
-  JOIN pg_class v ON v.oid = rw.ev_class
-  JOIN pg_class t ON t.oid = d.refobjid
-  WHERE d.refclassid = 'pg_class'::regclass
-    AND t.relname IN ('funnel_access_log', 'funnel_access_summary')
-    AND v.relkind IN ('v', 'm')
-    AND v.oid <> t.oid;
-  IF offender IS NOT NULL THEN
-    RAISE EXCEPTION
-      'log sink: view(s) % read the sink tables; only the enumerated roles may reach them',
+      'log sink: unexpected non-system routine(s) %; this sink defines no application functions or procedures',
       offender;
   END IF;
 END;
 $$ LANGUAGE plpgsql;
 
-\echo 'log sink: invariants OK (2 relations, 1 schema, 0 routines, no SECURITY DEFINER or table-facing view, closed role set, exactly-enumerated direct and effective grants)'
+\echo 'log sink: authorization/topology invariants OK (2 persistent data tables, 1 application schema, 0 non-system routines, closed role set, exactly-enumerated direct and effective grants)'

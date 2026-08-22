@@ -222,7 +222,8 @@ detection:
 its own `postgres`, `openbrain_app`, `openbrain_readonly`, and
 `openbrain_token_admin`. `openbrain_ingester`, `openbrain_monitor`, and
 `openbrain_logs_rollup` are roles on a **separate cluster**: a socket-only
-Funnel-log sink holding two request-metadata relations and nothing else
+Funnel-log sink whose only application data tables are two permanent
+request-metadata tables (supporting sequences/indexes are outside that count)
 ([`deploy/qubes/ingress-qube/README.md`](../deploy/qubes/ingress-qube/README.md#local-log-sink)).
 Their required/optional status, relation grants, and managed database
 capabilities are single-sourced in
@@ -240,6 +241,26 @@ single host this is a container/process boundary, not a VM boundary: host-root
 compromise still reaches both volumes, but a compromised networkless ingester
 has no database transport toward the corpus.
 
+Catalog checks are actor-relative. **E (runtime-enforced)** means PostgreSQL or
+network policy denies the named non-superuser actor even when no assertion runs;
+**G (trusted deployment gate)** means an untampered final assertion aborts the
+documented init, migration, or adoption workflow; **D (detection-only)** means a
+trusted standalone rerun reports current drift; and **O (out of scope)** means
+no authorization guarantee is claimed.
+
+| Actor or condition                                     | Corpus cluster                                                                                      | Log-sink cluster                                                                                              |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Honest post-deployment configuration drift             | **D** when a trusted operator runs the assertion; no continuous attestation                         | **D** on a trusted standalone rerun; the existing marker does not attest current state                        |
+| Compromised cluster-local least-privilege runtime role | **E:** app RLS, column/ACL, role-attribute/membership, token isolation, and reviewed routine grants | **E:** exact ingester, rollup, and optional-monitor grants; no persistent CREATE, membership, or grant option |
+| Trusted migration/admin mistake                        | **G:** the completed-catalog check refuses handoff after a partial or widened migration             | **G:** the assertion runs last on upgrade; fresh-init/adoption markers remain unreachable until it passes     |
+| Full database superuser                                | **O** as an authorization boundary; at most **D** when a separately trusted checkout runs the check | **O** as an authorization boundary; at most **D** from a separately trusted check                             |
+
+These grants bound object reach, not misuse inside an allowed surface: a
+compromised ingester can forge or flood raw request rows, the monitor can read
+all retained raw request metadata, and the rollup can delete raw rows or rewrite
+summaries. Availability and integrity within those capabilities remain outside
+the database-role boundary.
+
 `db/06-spaces.sql` forces RLS on thoughts, sessions, and artifacts for the
 application role. Missing transaction context matches no rows, personal rows
 require the current trusted principal, and project/workspace rows must match the
@@ -250,8 +271,10 @@ PostgreSQL's default `PUBLIC` execute grant; returned content is rechecked
 through the RLS-protected table. The trusted read-only backup role has SELECT
 grants plus `BYPASSRLS`, which PostgreSQL's full `pg_dump` requires after it
 sets `row_security=off`; it has no permissive RLS policy and no DML. The grants
-assertion requires `openbrain_app` to have neither direct bypass flags nor any
-role membership, closing both inherited-privilege and `SET ROLE` paths.
+assertion pins all five unsafe cluster-level attributes off for `openbrain_app`
+and forbids any role membership, closing direct, inherited-privilege, and
+`SET ROLE` paths. The backup role keeps only its required `BYPASSRLS`, with the
+other four unsafe attributes off.
 
 `db/07-metadata-degradation.sql` records only thought/capture identifiers,
 finite outcome/reason codes, status, timestamp, and credential-scrubbed endpoint
@@ -298,22 +321,29 @@ and the history table's grants and forced policy; the boot probe requires the
 function and the table.
 
 `db/01-schema.sql` actively REVOKEs historical broad grants (idempotent, safe on
-live DBs), and `db/03-grants-assertion.sql` is a read-only **superuser**
-invariant check you can run any time — superuser is needed to inspect
-`pg_hba_file_rules`, not to mutate the catalog. Because init scripts only run on
-a fresh data directory, a tightened grant **does not** reach an existing
-deployment by itself. Arc B inverts the old monitor allowlist: the corpus
-assertion rejects all three sink-only role names, every `public.funnel_access_*`
-relation, standing default table/sequence grants to `PUBLIC`, matching HBA
-rules, and regex/`@file` HBA user tokens whose exclusion of the sink roles
-cannot be proven. Any HBA parse error likewise fails closed. The HBA view reads
-the installed file; operators still reload separately before restoring service.
-The runbook archives first; the archive-gated `db/09` migration then locks both
-canonical tables before its emptiness check and drops the old shape without
-`CASCADE`. The separate sink assertion independently pins its exact roles,
-relations, and grants. PostgreSQL grants function execution to `PUBLIC` by
-default, so any future `SECURITY DEFINER` routine must revoke that default and
-receive a separate security review.
+live DBs), and `db/03-grants-assertion.sql` is a read-only **superuser** check.
+It is **G** when the trusted workflow runs it last and **D** when an operator
+runs it later; superuser is needed to inspect `pg_hba_file_rules`, not because
+the assertion can constrain that actor. Because init scripts only run on a fresh
+data directory, a tightened grant **does not** reach an existing deployment by
+itself. The corpus check rejects all three sink-only role names, every
+`public.funnel_access_*` relation, current and standing default table/sequence
+grants to `PUBLIC`, matching HBA rules, and regex/`@file` HBA user tokens whose
+exclusion of sink roles cannot be proven. Any HBA parse error likewise fails
+closed. The HBA view reads the installed file; operators still reload separately
+before restoring service. The runbook archives first; the archive-gated `db/09`
+migration then locks both canonical tables before its emptiness check and drops
+the old shape without `CASCADE`.
+
+The separate sink assertion is likewise **G/D**, while the exact ACLs and role
+capabilities it validates are **E** against its least-privilege clients. The
+fresh-init/adoption marker proves that a trusted completed-catalog check passed
+once; it is not continuous catalog attestation. System-schema OID fingerprints
+are intentionally not part of readiness: a full superuser can modify stock
+catalogs, skip or replace the assertion, and undo its result. PostgreSQL grants
+function execution to `PUBLIC` by default, so any future application
+`SECURITY DEFINER` routine must revoke that default and receive a separate
+security review.
 
 ### Container layer
 

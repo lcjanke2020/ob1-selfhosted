@@ -301,10 +301,10 @@ docker compose up -d                     # services: mcp, ollama
 The ingress qube terminates the Tailscale Funnel and runs Caddy, the
 log-ingester, and its own **local socket-only Postgres log sink**, with **no**
 memory store and **no** app credential. It carries only sink credentials — the
-sink superuser (init only), the INSERT-only ingester, the rollup role, and the
-optional SELECT-only monitor — and **no** path to the db qube at all. Caddy
-reverse-proxies to the app qube's mcp through the host-side ConnectTCP forwarder
-(`MCP_UPSTREAM=<this-qube-ip>:18787` — see
+administrative-only sink superuser, the INSERT-only ingester, the rollup role,
+and the optional SELECT-only monitor — and **no** path to the db qube at all.
+Caddy reverse-proxies to the app qube's mcp through the host-side ConnectTCP
+forwarder (`MCP_UPSTREAM=<this-qube-ip>:18787` — see
 [the ingress→app hop](ingress-qube/README.md#the-ingressapp-hop-qubesconnecttcp)).
 The log-ingester writes its `funnel_access_log` rows to the
 [local sink](ingress-qube/README.md#local-log-sink) over a unix socket
