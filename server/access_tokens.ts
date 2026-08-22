@@ -6,12 +6,12 @@
 // presented digest with the stored digest in constant time. Unknown prefixes
 // still perform the same digest comparison against a fixed dummy value.
 
-import { timingSafeEqual } from "node:crypto";
 import type { Pool } from "postgres";
 import {
   isNativeTokenLabel,
   MAX_NATIVE_TOKEN_LABEL_LENGTH,
 } from "./auth_context.ts";
+import { constantTimeEqual } from "./constant_time.ts";
 import { getClient } from "./db_pool.ts";
 
 const TOKEN_PREFIX_RANDOM_BYTES = 6;
@@ -156,7 +156,7 @@ export async function authenticateAccessToken(
     const expectedHash = row && isStoredHash(row.token_hash)
       ? row.token_hash
       : UNKNOWN_TOKEN_HASH;
-    const matches = timingSafeEqual(presentedHash, expectedHash);
+    const matches = constantTimeEqual(presentedHash, expectedHash);
     if (!matches || !row || row.revoked_at !== null) return null;
 
     try {

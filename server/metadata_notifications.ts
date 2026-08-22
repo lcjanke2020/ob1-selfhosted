@@ -8,6 +8,7 @@
 // thought that triggered the alert.
 
 import type { Pool, PoolClient } from "postgres";
+import { boundedFetch, type FetchLike } from "./bounded_fetch.ts";
 import { getClient } from "./db_pool.ts";
 
 export type MetadataNotificationSeverity = "normal" | "high";
@@ -23,8 +24,6 @@ export interface MetadataNotificationAdapter {
   send(notification: MetadataNotification): Promise<void>;
 }
 
-type FetchLike = typeof fetch;
-
 async function cancelBody(response: Response): Promise<void> {
   try {
     await response.body?.cancel();
@@ -34,23 +33,27 @@ async function cancelBody(response: Response): Promise<void> {
   }
 }
 
-async function boundedFetch(
+async function requestNotification(
   fetchFn: FetchLike,
   input: string,
   init: RequestInit,
   timeoutMs: number,
   adapterName: MetadataNotificationAdapter["name"],
-): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+): Promise<{ ok: boolean; status: number }> {
   try {
-    return await fetchFn(input, { ...init, signal: controller.signal });
+    return await boundedFetch(
+      input,
+      { timeoutMs, init, fetchFn },
+      async (response) => {
+        const result = { ok: response.ok, status: response.status };
+        await cancelBody(response);
+        return result;
+      },
+    );
   } catch {
     // Deliberately discard the underlying fetch message: ntfy topics and
     // tokens are credentials, and runtimes commonly include the URL in it.
     throw new Error(`${adapterName} request failed or timed out`);
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -73,7 +76,7 @@ export class PushoverMetadataNotificationAdapter
       message: notification.message,
       priority: notification.severity === "high" ? "1" : "0",
     });
-    const response = await boundedFetch(
+    const response = await requestNotification(
       this.fetchFn,
       "https://api.pushover.net/1/messages.json",
       {
@@ -84,10 +87,8 @@ export class PushoverMetadataNotificationAdapter
       this.timeoutMs,
       this.name,
     );
-    const status = response.status;
-    await cancelBody(response);
     if (!response.ok) {
-      throw new Error(`pushover returned HTTP ${status}`);
+      throw new Error(`pushover returned HTTP ${response.status}`);
     }
   }
 }
@@ -119,16 +120,16 @@ export class NtfyMetadataNotificationAdapter
     };
     if (this.token) headers.authorization = `Bearer ${this.token}`;
 
-    const response = await boundedFetch(
+    const response = await requestNotification(
       this.fetchFn,
       `${this.serverUrl}/${encodeURIComponent(this.topic)}`,
       { method: "POST", headers, body: notification.message },
       this.timeoutMs,
       this.name,
     );
-    const status = response.status;
-    await cancelBody(response);
-    if (!response.ok) throw new Error(`ntfy returned HTTP ${status}`);
+    if (!response.ok) {
+      throw new Error(`ntfy returned HTTP ${response.status}`);
+    }
   }
 }
 

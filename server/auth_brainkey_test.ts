@@ -19,7 +19,7 @@
 // (which would change the expectations here). The x-brain-key door being OFF
 // (a presented header ignored) is covered separately in auth_oauth_only_test.ts.
 
-import { assertEquals, assertFalse } from "jsr:@std/assert@1";
+import { assertEquals, assertFalse } from "@std/assert";
 import {
   assertUnauthorized401,
   makeAuthTestApp as makeApp,
@@ -141,7 +141,7 @@ Deno.test("requireAuth (x-brain-key door enabled, OAuth disabled — compose-loc
       },
     );
 
-    // ─── safeEqual / checkBrainKey (via requireAuth) ──────────────────
+    // ─── constantTimeEqual / checkBrainKey (via requireAuth) ──────────
     await t.step(
       "brain-key compare: length-mismatched provided value still rejected (no early-return leak)",
       async () => {

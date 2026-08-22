@@ -4,68 +4,71 @@ import {
   FETCH_TIMEOUT_MS,
   OLLAMA_URL,
 } from "./config.ts";
+import { boundedFetch, BoundedFetchTimeoutError } from "./bounded_fetch.ts";
 
 // Ollama's /api/embed (plural) returns { embeddings: [[...]] }. Older
 // /api/embeddings (singular) returns { embedding: [...] } and is deprecated;
 // we use the newer endpoint for compatibility with batch use later.
 export async function embed(text: string): Promise<number[]> {
   const truncated = text.slice(0, 8000);
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const url = `${OLLAMA_URL}/api/embed`;
 
   try {
-    const r = await fetch(`${OLLAMA_URL}/api/embed`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: EMBED_MODEL, input: truncated }),
-      signal: controller.signal,
-    });
-
-    if (!r.ok) {
-      let detail = "";
-      try {
-        detail = await r.text();
-      } catch (e) {
-        // Preserve the best-effort error detail behavior, but do not swallow
-        // the request deadline while an error response body is stalled.
-        if ((e as Error).name === "AbortError") throw e;
-      }
-      throw new Error(
-        `Ollama embed failed: ${r.status} ${detail.slice(0, 300)}`,
-      );
-    }
-    const data = await r.json();
-    const vec = data?.embeddings?.[0];
-    if (!Array.isArray(vec)) {
-      throw new Error("Ollama returned no embedding vector");
-    }
-    if (vec.length !== EMBED_DIM) {
-      throw new Error(
-        `Embedding dim mismatch: model "${EMBED_MODEL}" returned ${vec.length}, ` +
-          `but EMBED_DIM is ${EMBED_DIM}. Update EMBED_DIM and the vector(N) ` +
-          `column in db/01-schema.sql to match.`,
-      );
-    }
-    // pgvector's behavior on non-finite floats is undefined — a NaN/Infinity
-    // slipping into the index can corrupt distance results silently. Refuse
-    // loudly instead.
-    if (!vec.every((v) => typeof v === "number" && Number.isFinite(v))) {
-      throw new Error(
-        `Embedding from model "${EMBED_MODEL}" contains non-finite values ` +
-          `(NaN/Infinity); refusing to store.`,
-      );
-    }
-    return vec;
+    return await boundedFetch(
+      url,
+      {
+        timeoutMs: FETCH_TIMEOUT_MS,
+        init: {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: EMBED_MODEL, input: truncated }),
+        },
+      },
+      async (r) => {
+        if (!r.ok) {
+          let detail = "";
+          try {
+            detail = await r.text();
+          } catch (e) {
+            // Preserve the best-effort error detail behavior, but do not
+            // swallow the request deadline while an error body is stalled.
+            if ((e as Error).name === "AbortError") throw e;
+          }
+          throw new Error(
+            `Ollama embed failed: ${r.status} ${detail.slice(0, 300)}`,
+          );
+        }
+        const data = await r.json();
+        const vec = data?.embeddings?.[0];
+        if (!Array.isArray(vec)) {
+          throw new Error("Ollama returned no embedding vector");
+        }
+        if (vec.length !== EMBED_DIM) {
+          throw new Error(
+            `Embedding dim mismatch: model "${EMBED_MODEL}" returned ${vec.length}, ` +
+              `but EMBED_DIM is ${EMBED_DIM}. Update EMBED_DIM and the vector(N) ` +
+              `column in db/01-schema.sql to match.`,
+          );
+        }
+        // pgvector's behavior on non-finite floats is undefined — a
+        // NaN/Infinity slipping into the index can corrupt distance results
+        // silently. Refuse loudly instead.
+        if (!vec.every((v) => typeof v === "number" && Number.isFinite(v))) {
+          throw new Error(
+            `Embedding from model "${EMBED_MODEL}" contains non-finite values ` +
+              `(NaN/Infinity); refusing to store.`,
+          );
+        }
+        return vec;
+      },
+    );
   } catch (e) {
-    if ((e as Error).name === "AbortError") {
+    if (e instanceof BoundedFetchTimeoutError) {
       throw new Error(
-        `Ollama embed timed out after ${FETCH_TIMEOUT_MS}ms at ${OLLAMA_URL}/api/embed`,
+        `Ollama embed timed out after ${FETCH_TIMEOUT_MS}ms at ${url}`,
       );
     }
     throw e;
-  } finally {
-    clearTimeout(timer);
   }
 }
 

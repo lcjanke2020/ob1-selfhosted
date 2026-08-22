@@ -14,6 +14,7 @@ import { parse } from "@std/toml";
 import {
   MEMORY_VISIBILITIES,
   type MemoryVisibility,
+  parseScopeId,
 } from "./scope_contract.ts";
 
 // Single source of truth for the lifecycle enum, shared by the zod input
@@ -157,15 +158,7 @@ function toStrOrNull(field: string, v: unknown): string | null {
 
 function toScopeIdOrNull(field: string, v: unknown): string | null {
   if (v === null || v === undefined) return null;
-  if (typeof v !== "string") {
-    throw new Error(`${field} must be a string`);
-  }
-  const value = v.trim();
-  if (!value) throw new Error(`${field} must not be empty`);
-  if (value.length > 128) {
-    throw new Error(`${field} must be at most 128 characters`);
-  }
-  return value;
+  return parseScopeId(field, v);
 }
 
 function parseVisibility(v: unknown): MemoryVisibility | null {

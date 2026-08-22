@@ -21,11 +21,7 @@
 // Run with: `deno task test` (or `deno test --allow-env
 // --allow-net=127.0.0.1 auth_jwks_boot_probe_test.ts`).
 
-import {
-  assertEquals,
-  assertRejects,
-  assertStringIncludes,
-} from "jsr:@std/assert@1";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { withEnv } from "./api_test_support.ts";
 
 const JWKS_URL = "https://test.invalid/.well-known/jwks.json";
@@ -172,6 +168,38 @@ async function testJwksProbeFailures(t: Deno.TestContext): Promise<void> {
             "includes the underlying network error",
           );
           assertStringIncludes(err.message, JWKS_URL, "names the URL");
+        } finally {
+          restore();
+        }
+      },
+    );
+
+    await t.step(
+      "timeout while consuming a 200 body stays a reachability failure",
+      async () => {
+        const restore = installFetchMock((request) => {
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              request.signal.addEventListener(
+                "abort",
+                () => controller.error(request.signal.reason),
+                { once: true },
+              );
+            },
+          });
+          return new Response(body, {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        });
+        try {
+          const err = await assertRejects(
+            () => probeJwksReachability(JWKS_URL, 20),
+            Error,
+          );
+          assertStringIncludes(err.message, "failed to reach");
+          assertStringIncludes(err.message, "request timed out after 20ms");
+          assertEquals(err.message.includes("non-JSON"), false);
         } finally {
           restore();
         }

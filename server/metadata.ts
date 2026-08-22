@@ -9,6 +9,7 @@ import {
   FALLBACK_CHAT_API_KEY,
   FALLBACK_CHAT_MODEL,
 } from "./config.ts";
+import { boundedFetch } from "./bounded_fetch.ts";
 import { z } from "zod";
 
 const SYSTEM_PROMPT =
@@ -123,85 +124,82 @@ async function classifyOnce(
   text: string,
   { base, key, model }: ChatEndpoint,
 ): Promise<ClassificationAttempt> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), CHAT_TIMEOUT_MS);
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (key) headers.Authorization = `Bearer ${key}`;
 
   try {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (key) headers.Authorization = `Bearer ${key}`;
+    return await boundedFetch(
+      `${base}/chat/completions`,
+      {
+        timeoutMs: CHAT_TIMEOUT_MS,
+        init: {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            model,
+            temperature: 0,
+            response_format: {
+              type: "json_schema",
+              json_schema: THOUGHT_METADATA_SCHEMA,
+            },
+            messages: [
+              { role: "system", content: SYSTEM_PROMPT },
+              { role: "user", content: text },
+            ],
+          }),
+        },
+      },
+      async (r, signal): Promise<ClassificationAttempt> => {
+        if (!r.ok) {
+          // Cancel the unconsumed error body so Deno doesn't leak the response
+          // stream / hold the connection open longer than necessary.
+          try {
+            await r.body?.cancel();
+          } catch {
+            // Status is authoritative; cleanup failure must not hide it.
+          }
+          return { ok: false, reason: "non_2xx", status: r.status };
+        }
 
-    let r: Response;
-    try {
-      r = await fetch(`${base}/chat/completions`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          model,
-          temperature: 0,
-          response_format: {
-            type: "json_schema",
-            json_schema: THOUGHT_METADATA_SCHEMA,
-          },
-          messages: [
-            { role: "system", content: SYSTEM_PROMPT },
-            { role: "user", content: text },
-          ],
-        }),
-        signal: controller.signal,
-      });
-    } catch {
-      return { ok: false, reason: "transport_or_timeout" };
-    }
+        let d: unknown;
+        try {
+          d = await r.json();
+        } catch (error) {
+          // A timeout can fire after headers arrive while the body is still
+          // being read. Invalid JSON is a response-shape failure.
+          return {
+            ok: false,
+            reason: signal.aborted || !(error instanceof SyntaxError)
+              ? "transport_or_timeout"
+              : "invalid_response",
+          };
+        }
+        const choices = typeof d === "object" && d !== null
+          ? (d as Record<string, unknown>).choices
+          : undefined;
+        const content = Array.isArray(choices)
+          ? choices[0]?.message?.content
+          : undefined;
+        if (typeof content !== "string") {
+          return { ok: false, reason: "invalid_response" };
+        }
 
-    if (!r.ok) {
-      // Cancel the unconsumed error body so Deno doesn't leak the response
-      // stream / hold the connection open longer than necessary.
-      try {
-        await r.body?.cancel();
-      } catch {
-        // The response status is already authoritative; cleanup failure must
-        // not hide the non-2xx reason or break capture.
-      }
-      return { ok: false, reason: "non_2xx", status: r.status };
-    }
-
-    let d: unknown;
-    try {
-      d = await r.json();
-    } catch (error) {
-      // A timeout can fire after headers arrive while the body is still being
-      // read. Invalid JSON is instead a response-shape failure.
-      return {
-        ok: false,
-        reason: controller.signal.aborted || !(error instanceof SyntaxError)
-          ? "transport_or_timeout"
-          : "invalid_response",
-      };
-    }
-    const choices = typeof d === "object" && d !== null
-      ? (d as Record<string, unknown>).choices
-      : undefined;
-    const content = Array.isArray(choices)
-      ? choices[0]?.message?.content
-      : undefined;
-    if (typeof content !== "string") {
-      return { ok: false, reason: "invalid_response" };
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(content);
-    } catch {
-      return { ok: false, reason: "unparseable_output" };
-    }
-    const validated = THOUGHT_METADATA_RUNTIME_SCHEMA.safeParse(parsed);
-    return validated.success
-      ? { ok: true, metadata: validated.data }
-      : { ok: false, reason: "schema_rejection" };
-  } finally {
-    clearTimeout(timer);
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(content);
+        } catch {
+          return { ok: false, reason: "unparseable_output" };
+        }
+        const validated = THOUGHT_METADATA_RUNTIME_SCHEMA.safeParse(parsed);
+        return validated.success
+          ? { ok: true, metadata: validated.data }
+          : { ok: false, reason: "schema_rejection" };
+      },
+    );
+  } catch {
+    return { ok: false, reason: "transport_or_timeout" };
   }
 }
 

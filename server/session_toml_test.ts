@@ -1,7 +1,7 @@
 // hermetic unit tests for session TOML parsing + content hashing.
 // No DB, no network: pure logic over session_toml.ts.
 
-import { assertEquals, assertNotEquals, assertThrows } from "jsr:@std/assert@1";
+import { assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 import { computeContentHash, parseSessionToml } from "./session_toml.ts";
 
 Deno.test("parseSessionToml maps front matter and artifacts to columns", () => {
@@ -211,6 +211,27 @@ Deno.test("parseSessionToml rejects invalid scalar and collection types", () => 
       `${field}[0] must be a string`,
     );
   }
+});
+
+Deno.test("parseSessionToml shares the bounded scope-id contract", () => {
+  assertEquals(
+    parseSessionToml('title = "scope"\nworkspace_id = "  default  "')
+      .session.workspace_id,
+    "default",
+  );
+  assertThrows(
+    () => parseSessionToml('title = "scope"\nworkspace_id = "   "'),
+    Error,
+    "workspace_id must not be empty",
+  );
+  assertThrows(
+    () =>
+      parseSessionToml(
+        `title = "scope"\nproject_id = "${"x".repeat(129)}"`,
+      ),
+    Error,
+    "project_id must be at most 128 characters",
+  );
 });
 
 Deno.test("parseSessionToml rejects malformed artifacts without rewriting them", () => {

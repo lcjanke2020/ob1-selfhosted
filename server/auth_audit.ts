@@ -16,9 +16,9 @@
 //     test env). config.ts validates DB_PASSWORD at module load, so this
 //     branch is mostly for unit tests that dynamic-import auth.ts after
 //     setting only the minimum env they care about.
-//   - `OBS_AUTH_EVENTS_ENABLED` is set to "false". Defaults to enabled
-//     in production; tests opt out so they don't need an mcp_auth_events
-//     table to assert against the response shape.
+//   - `OBS_AUTH_EVENTS_ENABLED` is set to "false". It accepts only true/false
+//     and defaults to enabled in production; tests opt out so they don't need
+//     an mcp_auth_events table to assert against the response shape.
 //
 // Sensitive-data discipline: this module accepts a finite-set `reason`
 // code (not user-controlled text), the matched Hono route `path`, the
@@ -30,34 +30,23 @@
 
 import { Pool, type PoolClient } from "postgres";
 import { getClient } from "./db_pool.ts";
+import { parseAuthAuditRuntimeConfig, parseDbPort } from "./runtime_config.ts";
 
 // Read env locally rather than importing config.ts so this module can be
 // loaded by tests that haven't set the full mcp env (e.g., AUTH0_*).
 // Default matches config.ts ("127.0.0.1") so a bare dev run gets a
 // consistent target for both the main pool and the audit pool.
 const DB_HOST = Deno.env.get("DB_HOST")?.trim() || "127.0.0.1";
-// Defensive DB_PORT parse: an empty / malformed value would otherwise yield
-// NaN here and cause confusing failures later when the pool tries to
-// connect ("dial: invalid port"). Fall back to the well-known port if the
-// env var is absent OR malformed; only refuse to start on garbage that
-// would otherwise be silently swallowed.
-function parseDbPortOr5432(raw: string | undefined): number {
-  const trimmed = raw?.trim();
-  if (!trimmed) return 5432;
-  const n = Number.parseInt(trimmed, 10);
-  if (!Number.isInteger(n) || n <= 0 || n > 65535) {
-    throw new Error(`Invalid DB_PORT: "${trimmed}" (expected integer 1-65535)`);
-  }
-  return n;
-}
-const DB_PORT = parseDbPortOr5432(Deno.env.get("DB_PORT"));
+const DB_PORT = parseDbPort(Deno.env.get("DB_PORT"));
 const DB_NAME = Deno.env.get("DB_NAME")?.trim() || "openbrain";
 const DB_USER = Deno.env.get("DB_USER")?.trim() || "openbrain_app";
 const DB_PASSWORD = Deno.env.get("DB_PASSWORD")?.trim() ?? "";
 
-const FORCE_DISABLED =
-  (Deno.env.get("OBS_AUTH_EVENTS_ENABLED")?.trim().toLowerCase() ?? "true") ===
-    "false";
+const AUTH_AUDIT_CONFIG = parseAuthAuditRuntimeConfig({
+  enabled: Deno.env.get("OBS_AUTH_EVENTS_ENABLED"),
+  maxInFlight: Deno.env.get("OBS_AUTH_EVENTS_MAX_IN_FLIGHT"),
+});
+const FORCE_DISABLED = !AUTH_AUDIT_CONFIG.enabled;
 
 // In-flight cap on the audit insert microtask queue. Each
 // call to logAuthFailure() schedules one microtask that pool.connect()s
@@ -66,25 +55,10 @@ const FORCE_DISABLED =
 // microtask queue to unbounded memory growth, OOMing the mcp container
 // (no `mem_limit` set in compose). 500 in-flight is generous — at the
 // pool size of 2 and Postgres's local insert latency, normal traffic
-// never approaches it. Tunable via env for stress-test scenarios.
-function readMaxInFlight(): number {
-  const raw = Deno.env.get("OBS_AUTH_EVENTS_MAX_IN_FLIGHT")?.trim();
-  if (!raw) return 500;
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isInteger(n) || n <= 0) {
-    throw new Error(
-      `Invalid OBS_AUTH_EVENTS_MAX_IN_FLIGHT: "${raw}" (expected positive integer)`,
-    );
-  }
-  return n;
-}
-// Gate the parse behind the same condition as the pool construction
-// below — a typo'd OBS_AUTH_EVENTS_MAX_IN_FLIGHT shouldn't take the
-// whole server down if audit emission is disabled or DB_PASSWORD is
-// missing (i.e. the audit insert path is dead anyway).
-const MAX_IN_FLIGHT = (!FORCE_DISABLED && DB_PASSWORD)
-  ? readMaxInFlight()
-  : 500;
+// never approaches it. Tunable via env for stress-test scenarios. Parse the
+// explicit typed surface even when emission is disabled so a typo cannot lie
+// dormant until a later restart enables the path.
+const MAX_IN_FLIGHT = AUTH_AUDIT_CONFIG.maxInFlight;
 
 let inFlight = 0;
 let droppedTotal = 0;

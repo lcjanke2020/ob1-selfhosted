@@ -7,6 +7,22 @@ export const MEMORY_VISIBILITIES = [
   "workspace",
 ] as const;
 
+export const MAX_SCOPE_ID_CHARS = 128;
+
+export function parseScopeId(field: string, raw: unknown): string {
+  if (typeof raw !== "string") {
+    throw new Error(`${field} must be a string`);
+  }
+  const value = raw.trim();
+  if (!value) throw new Error(`${field} must not be empty`);
+  if (value.length > MAX_SCOPE_ID_CHARS) {
+    throw new Error(
+      `${field} must be at most ${MAX_SCOPE_ID_CHARS} characters`,
+    );
+  }
+  return value;
+}
+
 export type MemoryVisibility = (typeof MEMORY_VISIBILITIES)[number];
 
 export type ScopeInput = {

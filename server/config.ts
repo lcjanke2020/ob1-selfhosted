@@ -1,9 +1,21 @@
-// Environment-driven configuration. All knobs live here so the rest of the
-// server reads typed constants instead of poking Deno.env directly.
+// Environment-driven configuration for the main MCP process. Its knobs live
+// here so request-path modules read typed constants instead of poking Deno.env
+// directly. Smaller companion processes read only their own keys and reuse the
+// pure contracts in runtime_config.ts; importing this module would trigger
+// unrelated required auth/database settings.
 //
 // All values are validated at module load. Misconfiguration crashes fast
 // with a clear error rather than producing NaN, empty strings, or other
 // silent failure modes deep in request handlers.
+
+import {
+  MAX_TIMER_DELAY_MS,
+  parseAuthRuntimeConfig,
+  parseBooleanSetting,
+  parseDbPort,
+  parsePositiveIntegerSetting,
+} from "./runtime_config.ts";
+import { parseScopeId } from "./scope_contract.ts";
 
 function required(name: string): string {
   const v = Deno.env.get(name)?.trim();
@@ -11,25 +23,17 @@ function required(name: string): string {
   return v;
 }
 
-const MAX_TIMER_DELAY_MS = 2_147_483_647;
-
 function requiredInt(
   name: string,
   fallback: number,
   max = Number.MAX_SAFE_INTEGER,
 ): number {
-  const raw = Deno.env.get(name)?.trim();
-  if (!raw) return fallback;
-  if (!/^[0-9]+$/.test(raw)) {
-    throw new Error(`${name} must be a complete positive decimal integer`);
-  }
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value <= 0 || value > max) {
-    throw new Error(
-      `${name} must be a positive integer no greater than ${max}`,
-    );
-  }
-  return value;
+  return parsePositiveIntegerSetting(
+    name,
+    Deno.env.get(name),
+    fallback,
+    max,
+  );
 }
 
 function optionalTrimmed(name: string): string {
@@ -37,7 +41,7 @@ function optionalTrimmed(name: string): string {
 }
 
 export const DB_HOST = optionalTrimmed("DB_HOST") || "127.0.0.1";
-export const DB_PORT = requiredInt("DB_PORT", 5432);
+export const DB_PORT = parseDbPort(Deno.env.get("DB_PORT"));
 export const DB_NAME = optionalTrimmed("DB_NAME") || "openbrain";
 export const DB_USER = optionalTrimmed("DB_USER") || "openbrain_app";
 export const DB_PASSWORD = required("DB_PASSWORD");
@@ -45,24 +49,12 @@ export const DB_POOL_SIZE = requiredInt("DB_POOL_SIZE", 10);
 
 // Omitted request scope resolves to exactly this registered workspace — never
 // to every workspace. db/06-spaces.sql seeds `default`; operators may select a
-// different pre-registered workspace. Keep the same bounded, trimmed ID shape
-// as the shared Zod/SQL contract so a bad default fails at boot, not per call.
-function validatedScopeId(
-  value: string,
-  name: string,
-  fallback: string,
-): string {
-  value ||= fallback;
-  if (value.length > 128) {
-    throw new Error(`${name} must be at most 128 characters`);
-  }
-  return value;
-}
-
-export const DEFAULT_WORKSPACE_ID = validatedScopeId(
-  optionalTrimmed("DEFAULT_WORKSPACE_ID"),
+// different pre-registered workspace. Reuse the same bounded, trimmed ID
+// parser as the Zod and session-TOML contracts so a bad default fails at boot,
+// not per call.
+export const DEFAULT_WORKSPACE_ID = parseScopeId(
   "DEFAULT_WORKSPACE_ID",
-  "default",
+  optionalTrimmed("DEFAULT_WORKSPACE_ID") || "default",
 );
 
 export const OLLAMA_URL = optionalTrimmed("OLLAMA_URL") ||
@@ -85,16 +77,11 @@ export const CHAT_MODEL = optionalTrimmed("CHAT_MODEL");
 // misconfigured or fronted by a dangerous transport can't fire on the hot
 // capture path — e.g. a qrexec forwarder whose call would auto-start a downed
 // GPU qube. Set to "true" only once the primary endpoint is known-good.
-const PRIMARY_EXTRACTION_SETTING = optionalTrimmed(
+const PRIMARY_EXTRACTION_OPT_IN = parseBooleanSetting(
   "ENABLE_PRIMARY_EXTRACTION",
-).toLowerCase();
-if (
-  PRIMARY_EXTRACTION_SETTING &&
-  !["true", "false"].includes(PRIMARY_EXTRACTION_SETTING)
-) {
-  throw new Error("ENABLE_PRIMARY_EXTRACTION must be true or false");
-}
-const PRIMARY_EXTRACTION_OPT_IN = PRIMARY_EXTRACTION_SETTING === "true";
+  optionalTrimmed("ENABLE_PRIMARY_EXTRACTION"),
+  false,
+);
 if (PRIMARY_EXTRACTION_OPT_IN && (!CHAT_API_BASE || !CHAT_MODEL)) {
   throw new Error(
     "ENABLE_PRIMARY_EXTRACTION=true requires CHAT_API_BASE and CHAT_MODEL",
@@ -292,21 +279,22 @@ if (
 // (compose-local sets it, and the compose-tailnet overlay inherits it); the
 // Qubes deployment deliberately leaves it unset — its posture is
 // minimum-attack-surface, and the MCP transport is the only surface it
-// needs. Same exactly-"true" contract as ENABLE_PRIMARY_EXTRACTION above.
-export const ENABLE_REST_API =
-  optionalTrimmed("ENABLE_REST_API").toLowerCase() === "true";
+// needs. Same strict true/false contract as ENABLE_PRIMARY_EXTRACTION above.
+export const ENABLE_REST_API = parseBooleanSetting(
+  "ENABLE_REST_API",
+  optionalTrimmed("ENABLE_REST_API"),
+  false,
+);
 
 // Native rotatable tokens share the non-OIDC x-brain-key header with the
 // legacy static key, but are independently enabled so public OAuth deployments
 // can pin the entire native door off. The server default is deliberately off;
 // compose-local opts in and the Funnel override pins false.
-const NATIVE_TOKEN_SETTING = optionalTrimmed(
+export const ENABLE_NATIVE_TOKENS = parseBooleanSetting(
   "ENABLE_NATIVE_TOKENS",
-).toLowerCase();
-if (NATIVE_TOKEN_SETTING && !["true", "false"].includes(NATIVE_TOKEN_SETTING)) {
-  throw new Error("ENABLE_NATIVE_TOKENS must be true or false");
-}
-export const ENABLE_NATIVE_TOKENS = NATIVE_TOKEN_SETTING === "true";
+  optionalTrimmed("ENABLE_NATIVE_TOKENS"),
+  false,
+);
 
 // MCP_ACCESS_KEY enables the static x-brain-key auth door. It is OPTIONAL:
 // set it to turn the legacy static matcher ON, or leave it empty to disable
@@ -317,8 +305,8 @@ export const ENABLE_NATIVE_TOKENS = NATIVE_TOKEN_SETTING === "true";
 //
 // When set, a minimum length is enforced. `.env.example` documents
 // `openssl rand -hex 32` (64 hex chars = 256 bits) as the generator; a weak key
-// would turn the (correct) `safeEqual` defense against timing enumeration into
-// theatre. MIN 32 admits `openssl rand -hex 16` (32 chars, still 128 bits, well
+// would turn the constant-time comparison defense against timing enumeration
+// into theatre. MIN 32 admits `openssl rand -hex 16` (32 chars, still 128 bits, well
 // above any realistic brute-force horizon) while rejecting the weak literals an
 // operator would type in a hurry. The constant is intentionally not exported:
 // rotating it later is a one-line edit here.
@@ -555,6 +543,13 @@ export const CHAT_TIMEOUT_MS = requiredInt(
   60_000,
   MAX_TIMER_DELAY_MS,
 );
+
+// Auth-failure body reads have their own small typed surface so the timeout uses
+// the same complete-decimal, timer-safe contract as the other process knobs.
+const AUTH_RUNTIME_CONFIG = parseAuthRuntimeConfig({
+  bodyReadTimeoutMs: optionalTrimmed("AUTH_BODY_READ_TIMEOUT_MS"),
+});
+export const AUTH_BODY_READ_TIMEOUT_MS = AUTH_RUNTIME_CONFIG.bodyReadTimeoutMs;
 
 // Wall-clock cap on JWKS fetches. Two surfaces:
 //   1. Passed to jose's `createRemoteJWKSet` as `timeoutDuration`, bounding

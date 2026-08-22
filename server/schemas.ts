@@ -12,7 +12,13 @@ import {
   SESSION_STATUSES,
   SESSION_TIMESTAMP_FORMAT_MESSAGE,
 } from "./session_toml.ts";
-import { MEMORY_VISIBILITIES } from "./scope_contract.ts";
+import {
+  MAX_SCOPE_ID_CHARS,
+  MEMORY_VISIBILITIES,
+  parseScopeId,
+} from "./scope_contract.ts";
+
+export { MAX_SCOPE_ID_CHARS } from "./scope_contract.ts";
 
 // Hard cap on captured content at 100 000 UTF-8 bytes (≈97.7 KiB;
 // round-decimal limit, not a binary KiB). Downstream paths fan out through
@@ -29,8 +35,6 @@ export const MAX_CONTENT_BYTES = 100_000;
 // parser/planner workload. This is a UTF-8 byte bound for the same reason as
 // captured content: request cost follows bytes, not JavaScript code units.
 export const MAX_SEARCH_QUERY_BYTES = 8 * 1024;
-export const MAX_SCOPE_ID_CHARS = 128;
-
 // Module-level shared TextEncoder so the byte-cap refine doesn't
 // allocate a fresh instance on every capture call.
 const UTF8_ENCODER = new TextEncoder();
@@ -142,10 +146,16 @@ export const thoughtSearchFilterSchema = z.object({
 export type ThoughtSearchFilter = z.infer<typeof thoughtSearchFilterSchema>;
 
 const scopeId = (field: string) =>
-  z.string().trim().min(1, `${field} must not be empty`).max(
-    MAX_SCOPE_ID_CHARS,
-    `${field} must be at most ${MAX_SCOPE_ID_CHARS} characters`,
-  );
+  z.string().trim().superRefine((value, ctx) => {
+    try {
+      parseScopeId(field, value);
+    } catch (error) {
+      ctx.addIssue({
+        code: "custom",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }).meta({ minLength: 1, maxLength: MAX_SCOPE_ID_CHARS });
 
 // Strict nested object: a misspelled workspace/project/visibility must never be
 // stripped into omitted scope (which resolves to `default`). Field names align

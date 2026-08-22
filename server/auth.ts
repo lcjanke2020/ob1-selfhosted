@@ -27,6 +27,7 @@ import {
   AUTH0_AUDIENCE,
   AUTH0_ISSUER,
   AUTH0_JWKS_URI,
+  AUTH_BODY_READ_TIMEOUT_MS,
   ENABLE_BRAIN_KEY,
   ENABLE_NATIVE_TOKENS,
   ENABLE_OAUTH,
@@ -40,6 +41,8 @@ import {
   logAuthFailure,
   logAuthSuccess,
 } from "./auth_audit.ts";
+import { boundedFetch } from "./bounded_fetch.ts";
+import { constantTimeEqual } from "./constant_time.ts";
 import { parseInetCandidate } from "./inet.ts";
 
 // Best-effort source-IP extraction for the audit emitter. Caddy
@@ -57,20 +60,6 @@ function clientIpFor(c: Context): string | undefined {
   if (!xff) return undefined;
   const first = xff.split(",")[0];
   return parseInetCandidate(first);
-}
-
-// Constant-time comparison so timing attacks can't enumerate the key one byte
-// at a time. The loop always runs `expected.length` iterations regardless of
-// the provided value's length, and any length mismatch is folded into the
-// diff accumulator instead of short-circuiting. `charCodeAt` returns NaN past
-// the end of a string; `| 0` coerces that to 0, so length-mismatched inputs
-// still XOR cleanly without an early return that would leak length.
-function safeEqual(provided: string, expected: string): boolean {
-  let diff = provided.length ^ expected.length;
-  for (let i = 0; i < expected.length; i++) {
-    diff |= (provided.charCodeAt(i) | 0) ^ expected.charCodeAt(i);
-  }
-  return diff === 0;
 }
 
 // JWKS set is created once at module load when OAuth is enabled. `jose`
@@ -121,9 +110,41 @@ export async function probeJwksReachability(
   url: string,
   timeoutMs: number,
 ): Promise<void> {
-  let res: Response;
+  type ProbeResult =
+    | { kind: "http_error"; status: number }
+    | { kind: "non_json"; reason: string }
+    | { kind: "json"; body: unknown };
+
+  let result: ProbeResult;
   try {
-    res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    result = await boundedFetch(
+      url,
+      { timeoutMs },
+      async (response, signal): Promise<ProbeResult> => {
+        if (response.status !== 200) {
+          try {
+            await response.body?.cancel();
+          } catch {
+            // Status remains authoritative.
+          }
+          return { kind: "http_error", status: response.status };
+        }
+        try {
+          return { kind: "json", body: await response.json() };
+        } catch (error) {
+          // A deadline can fire after headers while response.json() is still
+          // consuming the body. Keep that in the probe's network/timeout
+          // category instead of misreporting it as a non-JSON response.
+          if (signal.aborted || (error as Error).name === "AbortError") {
+            throw error;
+          }
+          return {
+            kind: "non_json",
+            reason: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
+    );
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     throw new Error(
@@ -132,24 +153,21 @@ export async function probeJwksReachability(
         `confirm outbound HTTPS to Auth0 is permitted.`,
     );
   }
-  if (res.status !== 200) {
+  if (result.kind === "http_error") {
     throw new Error(
-      `JWKS boot probe got HTTP ${res.status} from ${url}. ` +
+      `JWKS boot probe got HTTP ${result.status} from ${url}. ` +
         `Expected 200 with a {keys: [...]} JSON body. ` +
         `Check AUTH0_JWKS_URI — a typo or stale tenant URL will land here.`,
     );
   }
-  let body: unknown;
-  try {
-    body = await res.json();
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+  if (result.kind === "non_json") {
     throw new Error(
-      `JWKS boot probe got non-JSON response from ${url}: ${reason}. ` +
+      `JWKS boot probe got non-JSON response from ${url}: ${result.reason}. ` +
         `Expected a {keys: [...]} JSON body. A 200 OK with HTML usually ` +
         `means a reverse-proxy or CDN is intercepting the request.`,
     );
   }
+  const body = result.body;
   if (
     !body ||
     typeof body !== "object" ||
@@ -206,7 +224,7 @@ export const PROTECTED_RESOURCE_METADATA_PATH: string | null = metadata?.path ??
 // keeps the type honest and the function safe in isolation.
 function checkBrainKey(provided: string | undefined): boolean {
   if (!provided || MCP_ACCESS_KEY === null) return false;
-  return safeEqual(provided, MCP_ACCESS_KEY);
+  return constantTimeEqual(provided, MCP_ACCESS_KEY);
 }
 
 export type NativeAccessTokenVerifier = (
@@ -334,18 +352,9 @@ const MAX_BODY_FOR_ID_EXTRACTION_BYTES = 64 * 1024;
 // slot open under the size cap (chunked encoding, dribbled bytes, ...).
 // Default 2 s is generous for a well-formed JSON-RPC request whose
 // headers already arrived and tight enough that a deliberately-slow
-// client can't pin resources. `AUTH_BODY_READ_TIMEOUT_MS` env var is
-// the tuning knob — left unset in production; tests override it down
-// to ~150 ms so the slow-stream regression test runs quickly.
-function parseAuthBodyReadTimeoutMs(raw: string | undefined): number {
-  if (!raw) return 2000;
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n) || n <= 0) return 2000;
-  return n;
-}
-const BODY_READ_TIMEOUT_MS = parseAuthBodyReadTimeoutMs(
-  Deno.env.get("AUTH_BODY_READ_TIMEOUT_MS"),
-);
+// client can't pin resources. `AUTH_BODY_READ_TIMEOUT_MS` is parsed on the
+// typed config surface — tests override it down to ~150 ms so the slow-stream
+// regression test runs quickly.
 
 // Methods we choose not to read a body for. HTTP technically permits a
 // request body on GET/DELETE/OPTIONS (semantics are undefined / largely
@@ -355,7 +364,7 @@ const BODY_READ_TIMEOUT_MS = parseAuthBodyReadTimeoutMs(
 const BODYLESS_METHODS = new Set(["GET", "HEAD", "DELETE", "OPTIONS"]);
 
 // Read up to MAX_BODY_FOR_ID_EXTRACTION_BYTES of the request body as
-// text, bounded by BODY_READ_TIMEOUT_MS. Returns null when the body is
+// text, bounded by AUTH_BODY_READ_TIMEOUT_MS. Returns null when the body is
 // missing, exceeds the cap (Content-Length or discovered mid-stream
 // under chunked encoding), times out, or read fails. Caller falls back
 // to id: null. Always cancels the upstream stream on early exit so
@@ -390,7 +399,7 @@ async function readBodyForJsonRpcId(req: Request): Promise<string | null> {
     reader.cancel("body-read timed out").catch(() => {
       // already cancelled / released — ignore
     });
-  }, BODY_READ_TIMEOUT_MS);
+  }, AUTH_BODY_READ_TIMEOUT_MS);
   try {
     while (true) {
       const { done, value } = await reader.read();

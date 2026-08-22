@@ -15,7 +15,7 @@ import {
   type RecordingDeps,
   withEnv,
 } from "./api_test_support.ts";
-import { MAX_SEARCH_QUERY_BYTES } from "./schemas.ts";
+import { MAX_SCOPE_ID_CHARS, MAX_SEARCH_QUERY_BYTES } from "./schemas.ts";
 
 const TEST_ENV = {
   DB_PASSWORD: "test-password",
@@ -129,6 +129,18 @@ Deno.test("capture_thought publishes provenance and scope contracts", async () =
       Object.keys(scope.properties as Record<string, unknown>).sort(),
       ["project_id", "visibility", "workspace_id"],
     );
+    const scopeProperties = scope.properties as Record<
+      string,
+      Record<string, unknown>
+    >;
+    assertEquals(scopeProperties.workspace_id.minLength, 1);
+    assertEquals(scopeProperties.workspace_id.maxLength, MAX_SCOPE_ID_CHARS);
+    const projectIdString = (
+      scopeProperties.project_id.anyOf as Array<Record<string, unknown>>
+    ).find((variant) => variant.type === "string");
+    assert(projectIdString, "project_id must publish its string alternative");
+    assertEquals(projectIdString.minLength, 1);
+    assertEquals(projectIdString.maxLength, MAX_SCOPE_ID_CHARS);
   });
 });
 
