@@ -36,7 +36,11 @@
 import { Pool } from "postgres";
 import { getClient } from "./db_pool.ts";
 import { parseInetCandidate } from "./inet.ts";
-import { parseDbPort, parsePositiveIntegerSetting } from "./runtime_config.ts";
+import {
+  MAX_TIMER_DELAY_MS,
+  parseDbPort,
+  parsePositiveIntegerSetting,
+} from "./runtime_config.ts";
 
 // Local env reads only — intentionally NOT importing from ./config.ts so
 // the ingester doesn't get tangled in the mcp server's startup validation
@@ -51,8 +55,13 @@ function required(name: string): string {
 function optional(name: string, fallback: string): string {
   return Deno.env.get(name)?.trim() || fallback;
 }
-function optionalInt(name: string, fallback: number): number {
-  return parsePositiveIntegerSetting(name, Deno.env.get(name), fallback);
+function optionalTimerMs(name: string, fallback: number): number {
+  return parsePositiveIntegerSetting(
+    name,
+    Deno.env.get(name),
+    fallback,
+    MAX_TIMER_DELAY_MS,
+  );
 }
 
 const DB_HOST = required("DB_HOST");
@@ -117,7 +126,7 @@ const FILES: ReadonlyArray<{ path: string; socket: "funnel" | "tailnet" }> = [
 
 // Polling cadence. 5s gives near-real-time visibility without busy-looping.
 // Bump via env for testing or for very low-volume installs.
-const POLL_INTERVAL_MS = optionalInt("INGESTER_POLL_INTERVAL_MS", 5000);
+const POLL_INTERVAL_MS = optionalTimerMs("INGESTER_POLL_INTERVAL_MS", 5000);
 
 // Defensive user-agent truncation. Real bots send multi-kilobyte UAs.
 const UA_MAX_LEN = 200;

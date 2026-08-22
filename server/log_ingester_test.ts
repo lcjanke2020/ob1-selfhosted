@@ -18,9 +18,11 @@ import {
   assert,
   assertEquals,
   assertNotEquals,
+  assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { withEnv } from "./api_test_support.ts";
+import { runConfigSubprocess, withEnv } from "./api_test_support.ts";
+import { MAX_TIMER_DELAY_MS } from "./runtime_config.ts";
 
 // Snapshot + restore the env around a test body, with DB_PASSWORD set so
 // the dynamic import of log_ingester.ts succeeds. (Only the first import
@@ -44,6 +46,28 @@ async function withIngesterEnv(
 }
 
 const FRESH = { offset: 0, dev: null, ino: null };
+
+Deno.test("ingester poll interval is bounded by the platform timer maximum", async () => {
+  const script = 'await import("./log_ingester.ts"); console.log("loaded");';
+  const baseEnv = {
+    DB_HOST: "/var/run/postgresql",
+    DB_PASSWORD: "test-password",
+    INGESTER_CURSOR_DIR: CURSOR_TMP,
+  };
+
+  const boundary = await runConfigSubprocess(script, baseEnv, {
+    INGESTER_POLL_INTERVAL_MS: String(MAX_TIMER_DELAY_MS),
+  });
+  assertEquals(boundary.code, 0, boundary.stderr);
+  assertEquals(boundary.stdout, "loaded");
+
+  const overflow = await runConfigSubprocess(script, baseEnv, {
+    INGESTER_POLL_INTERVAL_MS: String(MAX_TIMER_DELAY_MS + 1),
+  });
+  assertEquals(overflow.code, 1);
+  assertStringIncludes(overflow.stderr, "INGESTER_POLL_INTERVAL_MS");
+  assertStringIncludes(overflow.stderr, String(MAX_TIMER_DELAY_MS));
+});
 
 Deno.test("readNewLines: cursor uses raw byte count, not re-encoded string length", async () => {
   await withIngesterEnv(async ({ readNewLines }) => {
