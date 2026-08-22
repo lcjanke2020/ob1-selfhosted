@@ -226,7 +226,8 @@ qube from sending content anywhere else, `alert` to permit the configured
 fallback only with a notification channel, or `allow` to permit fallback without
 requiring delivery. Configure `FALLBACK_CHAT_*` only for the latter two choices.
 See [`app-qube/.env.example`](app-qube/.env.example) for the full block and the
-`ENABLE_PRIMARY_EXTRACTION` safety gate (off unless exactly `true`).
+`ENABLE_PRIMARY_EXTRACTION` safety gate (set to case-insensitive `true` to
+enable it; every other nonblank value must be `true` or `false`).
 
 ## 6. Host RAM on the GPU qube — size it generously
 
