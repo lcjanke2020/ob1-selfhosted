@@ -248,12 +248,18 @@ documented init, migration, or adoption workflow; **D (detection-only)** means a
 trusted standalone rerun reports current drift; and **O (out of scope)** means
 no authorization guarantee is claimed.
 
-| Actor or condition                                     | Corpus cluster                                                                                      | Log-sink cluster                                                                                              |
-| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Honest post-deployment configuration drift             | **D** when a trusted operator runs the assertion; no continuous attestation                         | **D** on a trusted standalone rerun; the existing marker does not attest current state                        |
-| Compromised cluster-local least-privilege runtime role | **E:** app RLS, column/ACL, role-attribute/membership, token isolation, and reviewed routine grants | **E:** exact ingester, rollup, and optional-monitor grants; no persistent CREATE, membership, or grant option |
-| Trusted migration/admin mistake                        | **G:** the completed-catalog check refuses handoff after a partial or widened migration             | **G:** the assertion runs last on upgrade; fresh-init/adoption markers remain unreachable until it passes     |
-| Full database superuser                                | **O** as an authorization boundary; at most **D** when a separately trusted checkout runs the check | **O** as an authorization boundary; at most **D** from a separately trusted check                             |
+| Actor or condition                                     | Corpus cluster                                                                                                                            | Log-sink cluster                                                                                                 |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Honest post-deployment configuration drift             | **D** when a trusted operator runs the assertion; no continuous attestation                                                               | **D** on a trusted standalone rerun; the existing marker does not attest current state                           |
+| Compromised cluster-local least-privilege runtime role | **E:** app RLS, column/ACL, role-attribute/membership, token isolation, and reviewed routine grants                                       | **E:** exact ingester, rollup, and optional-monitor grants; no persistent CREATE, membership, or grant option    |
+| Trusted migration/admin mistake                        | **G:** the completed-catalog check refuses handoff after a partial or widened migration                                                   | **G:** the assertion runs last on upgrade; fresh-init/adoption markers remain unreachable until it passes        |
+| Full database superuser                                | **O** as an authorization boundary; a separately trusted rerun can only **D** ordinary grant/attribute/topology drift, not catalog tamper | **O** as an authorization boundary; a separately trusted rerun can **D** ordinary grant/attribute/topology drift |
+
+The repository deliberately retains no catalog-tamper fixture or assertion arm.
+Those shapes remain **O**, not **D**; the detection labels above cover only the
+ordinary catalog state explicitly inspected by the checked-in assertions.
+Retired catalog-tamper evidence is kept outside the repository and cannot enter
+init, adoption, upgrade, CI, or completion-marker paths.
 
 These grants bound object reach, not misuse inside an allowed surface: a
 compromised ingester can forge or flood raw request rows, the monitor can read

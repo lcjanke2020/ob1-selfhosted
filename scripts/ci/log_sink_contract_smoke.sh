@@ -11,12 +11,41 @@ source "$SCRIPT_DIR/log_sink_common.sh"
 
 phase="${1:-all}"
 case "$phase" in
-  all|baseline|roles|auth|assertion) ;;
+  all|baseline|roles|auth|assertion|monitor-absent) ;;
   *)
-    echo "usage: ${0##*/} [all|baseline|roles|auth|assertion]" >&2
+    echo "usage: ${0##*/} [all|baseline|roles|auth|assertion|monitor-absent]" >&2
     exit 2
     ;;
 esac
+
+if [[ "$phase" == monitor-absent ]]; then
+log_sink_step "Fresh init succeeds without the optional monitor"
+docker logs "$LOG_SINK_CONTAINER" 2>&1 | grep -F \
+  '[00-log-sink-roles] OPENBRAIN_MONITOR_PASSWORD not set; skipping openbrain_monitor'
+test "$(sink_super_query "select to_regrole('openbrain_monitor') is null")" = t || {
+  echo "monitor-free init unexpectedly created openbrain_monitor" >&2
+  exit 1
+}
+run_sink_assertion | \
+  grep -F 'log sink: authorization/topology invariants OK'
+
+log_sink_step "Monitor-free assertion still rejects PUBLIC table access"
+sink_super_query "grant select on funnel_access_log to public;" >/dev/null
+if public_output=$(run_sink_assertion 2>&1); then
+  echo "monitor-free assertion missed a GRANT to PUBLIC" >&2
+  exit 1
+fi
+grep -Fq 'log sink: role openbrain_ingester privileges drifted' \
+  <<< "$public_output" || {
+  echo "monitor-free PUBLIC drift failed for an unexpected reason" >&2
+  echo "$public_output" >&2
+  exit 1
+}
+sink_super_query "revoke select on funnel_access_log from public;" >/dev/null
+run_sink_assertion | \
+  grep -F 'log sink: authorization/topology invariants OK'
+echo "monitor-free init passed; PUBLIC drift was rejected and clean state restored"
+fi
 
 if [[ "$phase" == all || "$phase" == baseline ]]; then
 log_sink_step "Init assertion and durable completion marker both ran"

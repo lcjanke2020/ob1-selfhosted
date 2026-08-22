@@ -132,7 +132,7 @@ super_psql -v ON_ERROR_STOP=1 -c \
    ALTER FUNCTION public.ci_public_definer() OWNER TO openbrain_app"
 expect_rejected "PUBLIC SECURITY DEFINER execution" \
   "PUBLIC can execute non-system SECURITY DEFINER routines" \
-  "ci_public_definer()"
+  "public.ci_public_definer()"
 super_psql -v ON_ERROR_STOP=1 -c \
   "REVOKE ALL ON FUNCTION public.ci_public_definer() FROM PUBLIC"
 run_assertion >/dev/null

@@ -151,6 +151,9 @@ BEGIN
       coalesce(actual, '<none>');
   END IF;
 
+  -- This is a trusted-deployment G check, not an authorization boundary: an
+  -- owner/superuser can replace either relation, but the final gate catches a
+  -- same-name view or unlogged-table mistake before a migration is handed off.
   SELECT string_agg(
            format(
              '%I.%I(kind=%s,persistence=%s)',

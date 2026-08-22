@@ -58,14 +58,15 @@ directory under `/tmp`.
 
 ### Commands
 
-| Family              | Local command                                 | Coverage                                                                                                       |
-| ------------------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| All log-sink checks | `scripts/ci/run_log_sink_smokes.sh all`       | CI-equivalent preflight plus every family below                                                                |
-| Preflight           | `scripts/ci/run_log_sink_smokes.sh preflight` | Role/credential mapping drift rejection plus ingress unit parsing and calendar                                 |
-| Lifecycle           | `scripts/ci/run_log_sink_smokes.sh lifecycle` | Legacy status backfill, idempotency, assertion-gated adoption, and partial-init refusal                        |
-| Contract            | `scripts/ci/run_log_sink_smokes.sh contract`  | Deployment gate, role attributes, exact grants, PUBLIC, socket/SCRAM, status boundaries                        |
-| Rollup              | `scripts/ci/run_log_sink_smokes.sh rollup`    | Shared projection, late arrivals, retention, concurrency, bounded sketches, closed table/view/routine contract |
-| Summary wrapper     | `scripts/ci/run_log_sink_smokes.sh wrapper`   | Target-pinned sink role, socket, SQL, database, retention, and report shape                                    |
+| Family              | Local command                                      | Coverage                                                                                                       |
+| ------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| All log-sink checks | `scripts/ci/run_log_sink_smokes.sh all`            | CI-equivalent preflight plus every family below                                                                |
+| Preflight           | `scripts/ci/run_log_sink_smokes.sh preflight`      | Role/credential mapping drift rejection plus ingress unit parsing and calendar                                 |
+| Lifecycle           | `scripts/ci/run_log_sink_smokes.sh lifecycle`      | Legacy status backfill, idempotency, assertion-gated adoption, and partial-init refusal                        |
+| Monitor absent      | `scripts/ci/run_log_sink_smokes.sh monitor-absent` | Fresh init without the optional monitor, assertion pass, and PUBLIC-grant rejection                            |
+| Contract            | `scripts/ci/run_log_sink_smokes.sh contract`       | Deployment gate, role attributes, exact grants, PUBLIC, socket/SCRAM, status boundaries                        |
+| Rollup              | `scripts/ci/run_log_sink_smokes.sh rollup`         | Shared projection, late arrivals, retention, concurrency, bounded sketches, closed table/view/routine contract |
+| Summary wrapper     | `scripts/ci/run_log_sink_smokes.sh wrapper`        | Target-pinned sink role, socket, SQL, database, retention, and report shape                                    |
 
 Multiple primary-container families share one fresh fixture:
 

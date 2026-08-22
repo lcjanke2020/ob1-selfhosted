@@ -39,7 +39,8 @@
 -- Invariants checked:
 --   (a) `openbrain_app` must have no role memberships and must not be a
 --       superuser or hold any cluster-level privilege; `openbrain_readonly`
---       must hold BYPASSRLS for pg_dump and no other unsafe attribute.
+--       must hold BYPASSRLS for pg_dump and no other unsafe attribute; and
+--       `openbrain_token_admin` must have no memberships or unsafe attributes.
 --   (b) `openbrain_app` must NOT have DELETE on `public.thoughts`.
 --   (c) `openbrain_app` MUST have SELECT and INSERT on `public.thoughts`,
 --       plus UPDATE on its content columns only — and no UPDATE (table-wide or
@@ -313,7 +314,7 @@ BEGIN
       COALESCE(
         relation.relacl,
         acldefault(
-          (CASE WHEN relation.relkind = 'S' THEN 'S' ELSE 'r' END)::"char",
+          (CASE WHEN relation.relkind = 'S' THEN 's' ELSE 'r' END)::"char",
           relation.relowner
         )
       )
@@ -358,7 +359,7 @@ BEGIN
       COALESCE(
         relation.relacl,
         acldefault(
-          (CASE WHEN relation.relkind = 'S' THEN 'S' ELSE 'r' END)::"char",
+          (CASE WHEN relation.relkind = 'S' THEN 's' ELSE 'r' END)::"char",
           relation.relowner
         )
       )
@@ -399,8 +400,15 @@ BEGIN
   -- revoked. An unknown definer that keeps PostgreSQL's default PUBLIC EXECUTE
   -- grant is a real least-privilege bypass, independent of any one role name.
   SELECT string_agg(
-           routine.oid::regprocedure::text,
-           ', ' ORDER BY routine.oid::regprocedure::text
+           format(
+             '%I.%I(%s)',
+             namespace.nspname,
+             routine.proname,
+             pg_get_function_identity_arguments(routine.oid)
+           ),
+           ', ' ORDER BY namespace.nspname,
+                         routine.proname,
+                         pg_get_function_identity_arguments(routine.oid)
          )
     INTO bad_public_definers
   FROM pg_proc routine
@@ -545,8 +553,17 @@ BEGIN
       bad;
   END IF;
 
-  SELECT string_agg(routine.oid::regprocedure::text, ', '
-                    ORDER BY routine.oid::regprocedure::text)
+  SELECT string_agg(
+           format(
+             '%I.%I(%s)',
+             namespace.nspname,
+             routine.proname,
+             pg_get_function_identity_arguments(routine.oid)
+           ),
+           ', ' ORDER BY namespace.nspname,
+                         routine.proname,
+                         pg_get_function_identity_arguments(routine.oid)
+         )
     INTO bad
   FROM pg_proc routine
   JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
@@ -647,7 +664,7 @@ BEGIN
       COALESCE(
         relation.relacl,
         acldefault(
-          (CASE WHEN relation.relkind = 'S' THEN 'S' ELSE 'r' END)::"char",
+          (CASE WHEN relation.relkind = 'S' THEN 's' ELSE 'r' END)::"char",
           relation.relowner
         )
       )
@@ -721,7 +738,7 @@ BEGIN
       COALESCE(
         relation.relacl,
         acldefault(
-          (CASE WHEN relation.relkind = 'S' THEN 'S' ELSE 'r' END)::"char",
+          (CASE WHEN relation.relkind = 'S' THEN 's' ELSE 'r' END)::"char",
           relation.relowner
         )
       )
