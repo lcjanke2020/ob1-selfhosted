@@ -134,7 +134,8 @@ BEGIN ISOLATION LEVEL REPEATABLE READ;
 -- A day is classified exactly as before:
 --   * no finalized summary yet -> full recompute;
 --   * a strictly past-horizon day finalized by an earlier run -> additive merge;
---   * any other day with a finalized marker -> leave its raw rows untouched.
+--   * any other finalized day -> neither recompute nor merge it; retention can
+--     still retire its raw rows past the horizon, as before.
 -- The final case preserves the old boundary behavior even for imported or
 -- otherwise inconsistent summary metadata.
 CREATE TEMP TABLE funnel_rollup_batch

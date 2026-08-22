@@ -108,7 +108,7 @@ $$ LANGUAGE plpgsql;
 -- The relation check keeps the corpus schema from ever being applied here by
 -- mistake (a `thoughts` table on the edge would be the failure this whole
 -- topology exists to prevent). The column check pins the contract consumed by
--- db/summarize_funnel.sql to the sole schema owner, 01-log-sink.sql.
+-- db/summarize_funnel.sql to 01-log-sink.sql plus the status-class migration.
 DO $$
 DECLARE
   actual          text;
@@ -138,7 +138,7 @@ BEGIN
            || 'status_class';
   IF actual IS DISTINCT FROM expected THEN
     RAISE EXCEPTION
-      'log sink: funnel_access_log columns drifted from db/log-sink/01-log-sink.sql; expected (%), found (%)',
+      'log sink: funnel_access_log columns drifted from db/log-sink/01-log-sink.sql + db/log-sink/02-log-sink-status-class.sql; expected (%), found (%)',
       expected, actual;
   END IF;
 
@@ -163,7 +163,8 @@ BEGIN
   END IF;
   -- Pin the deparsed expression by fingerprint so the executable six-branch
   -- CASE remains defined only in 02-log-sink-status-class.sql. The boundary
-  -- smoke prints every branch when this fingerprint ever needs regeneration.
+  -- smoke pins behavior; if a PostgreSQL major changes deparsing, deliberately
+  -- regenerate this value with the same pg_get_expr/md5 expression below.
   IF md5(coalesce(generated_expr, '')) <> '6201476046af4e199bf241a5ce4589e5' THEN
     RAISE EXCEPTION
       'log sink: status_class generated expression drifted; found (%)',

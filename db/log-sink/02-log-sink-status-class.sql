@@ -1,7 +1,7 @@
 -- Idempotent raw-log classification migration.
 --
 -- Fresh sinks run this after 01-log-sink.sql and before the completed-catalog
--- assertion. Existing Arc-B sinks run the same file explicitly while the
+-- assertion. Existing Arc B sinks run the same file explicitly while the
 -- log-ingester is stopped, then run 02-log-sink-assertion.sql before bringing
 -- the writer back. ADD COLUMN backfills every retained row inside the same
 -- transaction; IF NOT EXISTS makes a verified second run a no-op.
