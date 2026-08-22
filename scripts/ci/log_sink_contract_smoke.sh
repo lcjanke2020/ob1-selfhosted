@@ -87,7 +87,26 @@ sink_query openbrain_monitor "$OPENBRAIN_MONITOR_PASSWORD" \
   echo "a sink role can CREATE in public" >&2
   exit 1
 }
-echo "ingester INSERT-only, monitor one-table real probes, no role may CREATE"
+# Routine database hardening revokes the stock PUBLIC TEMPORARY default. The
+# rollup's explicit grant must survive that without giving the capability to
+# the ingester or monitor.
+sink_super_query \
+  "revoke temporary on database $POSTGRES_DB from public;" >/dev/null
+! sink_sql openbrain_ingester "$OPENBRAIN_INGESTER_PASSWORD" \
+  "create temporary table ingester_temp_forbidden(x int);" 2>/dev/null || {
+  echo "ingester can create temporary tables" >&2
+  exit 1
+}
+sink_sql openbrain_logs_rollup "$OPENBRAIN_LOGS_ROLLUP_PASSWORD" \
+  "create temporary table rollup_temp_allowed(x int);" >/dev/null
+! sink_sql openbrain_monitor "$OPENBRAIN_MONITOR_PASSWORD" \
+  "create temporary table monitor_temp_forbidden(x int);" 2>/dev/null || {
+  echo "monitor can create temporary tables" >&2
+  exit 1
+}
+sink_super_query \
+  "grant temporary on database $POSTGRES_DB to public;" >/dev/null
+echo "ingester INSERT-only, monitor one-table probes, rollup survives revoked PUBLIC TEMPORARY, no role may create persistent objects"
 
 log_sink_step "Generated status classification pins every boundary"
 sink_sql openbrain_ingester "$OPENBRAIN_INGESTER_PASSWORD" \
@@ -178,6 +197,28 @@ sink_super_query "grant select on funnel_access_log to pg_monitor;" >/dev/null
   exit 1
 }
 sink_super_query "revoke select on funnel_access_log from pg_monitor;" >/dev/null
+
+log_sink_step "Assertion pins database TEMPORARY to the rollup role"
+sink_super_query \
+  "revoke temporary on database $POSTGRES_DB from openbrain_logs_rollup;" \
+  >/dev/null
+! run_sink_assertion 2>/dev/null || {
+  echo "assertion missed a missing rollup TEMPORARY privilege" >&2
+  exit 1
+}
+sink_super_query \
+  "grant temporary on database $POSTGRES_DB to openbrain_logs_rollup;" \
+  >/dev/null
+sink_super_query \
+  "grant temporary on database $POSTGRES_DB to openbrain_logs_rollup with grant option;" \
+  >/dev/null
+! run_sink_assertion 2>/dev/null || {
+  echo "assertion missed grant option on rollup TEMPORARY" >&2
+  exit 1
+}
+sink_super_query \
+  "revoke grant option for temporary on database $POSTGRES_DB from openbrain_logs_rollup;" \
+  >/dev/null
 
 log_sink_step "Assertion rejects missing, disabled, stray, or inherited roles"
 sink_super_query "create role intruder login;" >/dev/null
@@ -286,5 +327,5 @@ sink_super_query \
   "create or replace view information_schema.information_schema_catalog_name as select current_database()::information_schema.sql_identifier as catalog_name;" \
   >/dev/null
 run_sink_assertion | grep -F 'invariants OK'
-echo "assertion catches widened grants, grant options, memberships, missing/disabled/foreign roles, database CREATE, stray relations, stray schemas, stray routines (including system-schema definer functions and views), in-place SECURITY DEFINER flips, catalog views repointed at sink tables, and PUBLIC"
+echo "assertion catches widened grants, grant options, memberships, missing/disabled/foreign roles, database CREATE/direct-TEMPORARY drift, stray relations, stray schemas, stray routines (including system-schema definer functions and views), in-place SECURITY DEFINER flips, catalog views repointed at sink tables, and PUBLIC"
 fi

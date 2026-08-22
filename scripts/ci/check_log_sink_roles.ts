@@ -3,6 +3,7 @@ type Role = {
   name: string;
   required: boolean;
   password_env: string;
+  database_privileges: string;
   direct_privileges: string;
 };
 
@@ -18,6 +19,7 @@ const PASSWORD_TOKEN = /\bOPENBRAIN_[A-Z0-9_]+_PASSWORD\b/g;
 const EXPECTED_KEYS = ["ingester", "rollup", "monitor"] as const;
 const CONTRACT_FIELDS = ["roles", "version"];
 const ROLE_FIELDS = [
+  "database_privileges",
   "direct_privileges",
   "key",
   "name",
@@ -62,6 +64,7 @@ function parseContract(text: string, manifestPath: string): RoleContract {
       typeof candidate.name !== "string" ||
       typeof candidate.required !== "boolean" ||
       typeof candidate.password_env !== "string" ||
+      typeof candidate.database_privileges !== "string" ||
       typeof candidate.direct_privileges !== "string"
     ) {
       throw new Error(
@@ -73,6 +76,7 @@ function parseContract(text: string, manifestPath: string): RoleContract {
       name: candidate.name,
       required: candidate.required,
       password_env: candidate.password_env,
+      database_privileges: candidate.database_privileges,
       direct_privileges: candidate.direct_privileges,
     };
   });
@@ -197,6 +201,18 @@ export async function validateLogSinkRoles(
     if (!role.direct_privileges) {
       fail(`manifest role ${role.key}`, "direct_privileges must not be empty");
     }
+    const databasePrivileges = role.database_privileges
+      ? role.database_privileges.split(",")
+      : [];
+    if (
+      databasePrivileges.some((privilege) => privilege !== "TEMPORARY") ||
+      databasePrivileges.join(",") !== sorted(databasePrivileges).join(",")
+    ) {
+      fail(
+        `manifest role ${role.key}`,
+        `database_privileges must be a canonical comma-separated subset of TEMPORARY; found ${role.database_privileges}`,
+      );
+    }
   }
 
   const byKey = new Map(contract.roles.map((role) => [role.key, role]));
@@ -215,6 +231,20 @@ export async function validateLogSinkRoles(
   }
   if (byKey.get("monitor")?.required !== false) {
     fail("manifest monitor", "monitor must remain optional");
+  }
+  for (
+    const [key, expected] of [
+      ["ingester", ""],
+      ["rollup", "TEMPORARY"],
+      ["monitor", ""],
+    ] as const
+  ) {
+    if (byKey.get(key)?.database_privileges !== expected) {
+      fail(
+        `manifest ${key}`,
+        `database_privileges must be ${expected || "empty"}`,
+      );
+    }
   }
 
   const expectSet = (
@@ -252,6 +282,16 @@ export async function validateLogSinkRoles(
     "sink schema role literals (db/log-sink/01-log-sink.sql)",
     roleTokens(schema),
     names,
+  );
+  expectSet(
+    "sink schema database TEMPORARY grants (db/log-sink/01-log-sink.sql)",
+    captures(
+      schema,
+      /\bGRANT\s+TEMPORARY\s+ON\s+DATABASE\s+%I\s+TO\s+([a-z][a-z0-9_]*)\b/g,
+    ),
+    contract.roles
+      .filter((role) => role.database_privileges === "TEMPORARY")
+      .map((role) => role.name),
   );
 
   const assertion = await read("db/log-sink/02-log-sink-assertion.sql");
@@ -381,7 +421,11 @@ export async function validateLogSinkRoles(
       "scripts/ci/log_sink_contract_smoke.sh",
       ["ingester", "rollup", "monitor"],
     ],
-    ["CI lifecycle smoke", "scripts/ci/log_sink_lifecycle_smoke.sh", []],
+    [
+      "CI lifecycle smoke",
+      "scripts/ci/log_sink_lifecycle_smoke.sh",
+      ["ingester", "rollup", "monitor"],
+    ],
     ["CI rollup smoke", "scripts/ci/log_sink_rollup_smoke.sh", ["ingester"]],
     [
       "CI wrapper smoke",

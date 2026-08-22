@@ -19,7 +19,9 @@ adoption_project="$LOG_SINK_TOKEN-adoption"
 
 # Omitting the generated-column migration, current assertion, wrapper, and
 # durable marker reconstructs the prior deployed catalog/PGDATA shape. The
-# current adoption helper must refuse it until the explicit migration lands.
+# fixture later removes the current rollup TEMPORARY grant to model a hardened
+# legacy sink. The current adoption helper must refuse it until the explicit
+# schema-contract replay and migration land.
 cat > "$adoption_root/compose.yml" <<'YAML'
 services:
   log-sink:
@@ -108,6 +110,28 @@ docker compose "${adoption_compose_opts[@]}" \
   exec -T log-sink sh -c \
     'test ! -e "$PGDATA/.openbrain-log-sink-init-complete"'
 
+# A previously valid hardened sink may have revoked PostgreSQL's stock PUBLIC
+# TEMPORARY grant. Model that pre-upgrade posture by revoking it and removing
+# the new direct rollup grant that current 01-log-sink.sql applied during
+# fixture init.
+docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
+  exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" log-sink \
+    psql -X -w -h /var/run/postgresql -U "$POSTGRES_USER" \
+      -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
+      -c "REVOKE TEMPORARY ON DATABASE \"$POSTGRES_DB\" FROM PUBLIC; REVOKE TEMPORARY ON DATABASE \"$POSTGRES_DB\" FROM openbrain_logs_rollup" \
+      >/dev/null
+legacy_database_capabilities=$(docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
+  exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" log-sink \
+    psql -X -w -h /var/run/postgresql -U "$POSTGRES_USER" \
+      -d "$POSTGRES_DB" -Atc \
+      "SELECT
+         has_database_privilege('openbrain_logs_rollup', current_database(), 'TEMPORARY')::int || '|' ||
+         has_database_privilege('openbrain_ingester', current_database(), 'TEMPORARY')::int || '|' ||
+         has_database_privilege('openbrain_monitor', current_database(), 'TEMPORARY')::int")
+test "$legacy_database_capabilities" = "0|0|0"
+
 # Preserve a representative historical row across migration/adoption/recreate.
 docker compose "${adoption_compose_opts[@]}" \
   -f "$adoption_root/compose.yml" \
@@ -137,6 +161,27 @@ docker compose "${adoption_compose_opts[@]}" \
   -f "$adoption_root/compose.yml" \
   exec -T log-sink sh -c \
     'test ! -e "$PGDATA/.openbrain-log-sink-init-complete"'
+
+# Reapply the current schema/grant owner before the generated-column migration.
+# This is what gives a hardened existing sink the rollup's newly-required
+# TEMPORARY capability without returning it to PUBLIC.
+docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
+  exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" log-sink \
+    psql -X -w -h /var/run/postgresql -U "$POSTGRES_USER" \
+      -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f - \
+    < "$CI_REPO_ROOT/db/log-sink/01-log-sink.sql" \
+    >/dev/null
+upgraded_database_capabilities=$(docker compose "${adoption_compose_opts[@]}" \
+  -f "$adoption_root/compose.yml" \
+  exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" log-sink \
+    psql -X -w -h /var/run/postgresql -U "$POSTGRES_USER" \
+      -d "$POSTGRES_DB" -Atc \
+      "SELECT
+         has_database_privilege('openbrain_logs_rollup', current_database(), 'TEMPORARY')::int || '|' ||
+         has_database_privilege('openbrain_ingester', current_database(), 'TEMPORARY')::int || '|' ||
+         has_database_privilege('openbrain_monitor', current_database(), 'TEMPORARY')::int")
+test "$upgraded_database_capabilities" = "1|0|0"
 
 # Run the exact deployed migration twice. The first execution backfills the
 # retained row; the second proves idempotency. Both are one transaction.
@@ -231,7 +276,7 @@ history_rows=$(docker compose "${adoption_compose_opts[@]}" \
       "SELECT count(*) FROM public.funnel_access_log
        WHERE path = '/pre-marker-history'")
 test "$history_rows" = 1
-echo "legacy status migration idempotent with history intact; current assertion gated adoption; drifted volume refused; wrapper restart passed"
+echo "legacy grant contract replayed; status migration idempotent with history intact; current assertion gated adoption; drifted volume refused; wrapper restart passed"
 
 cleanup_adoption 0
 trap - EXIT

@@ -6,6 +6,7 @@
       "name": "openbrain_ingester",
       "required": true,
       "password_env": "OPENBRAIN_INGESTER_PASSWORD",
+      "database_privileges": "",
       "direct_privileges": "funnel_access_log=INSERT|funnel_access_log_id_seq=USAGE"
     },
     {
@@ -13,6 +14,7 @@
       "name": "openbrain_logs_rollup",
       "required": true,
       "password_env": "OPENBRAIN_LOGS_ROLLUP_PASSWORD",
+      "database_privileges": "TEMPORARY",
       "direct_privileges": "funnel_access_log=DELETE,SELECT|funnel_access_summary=DELETE,INSERT,SELECT,UPDATE"
     },
     {
@@ -20,6 +22,7 @@
       "name": "openbrain_monitor",
       "required": false,
       "password_env": "OPENBRAIN_MONITOR_PASSWORD",
+      "database_privileges": "",
       "direct_privileges": "funnel_access_log=SELECT"
     }
   ]

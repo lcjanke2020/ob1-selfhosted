@@ -30,11 +30,17 @@ docker compose up -d
 
 Postgres skips every `initdb.d` mount on an existing `log_sink_data` volume.
 Before recreating an existing sink with this definition, stop its only writer,
-stream the idempotent migration through the current container, and run the
-completed-catalog assertion:
+reapply the idempotent schema/grant owner, stream the generated-column migration
+through the current container, and run the completed-catalog assertion:
 
 ```sh
 docker compose stop log-ingester
+
+docker compose exec -T --user postgres log-sink sh -eu -c '
+  PGPASSWORD="$POSTGRES_PASSWORD" exec psql -X -w \
+    -h /var/run/postgresql -U "${POSTGRES_USER:-postgres}" \
+    -d "${POSTGRES_DB:-openbrain_logs}" -v ON_ERROR_STOP=1 -f -
+' < ../../../db/log-sink/01-log-sink.sql
 
 docker compose exec -T --user postgres log-sink sh -eu -c '
   PGPASSWORD="$POSTGRES_PASSWORD" exec psql -X -w \
@@ -49,7 +55,10 @@ docker compose exec -T --user postgres log-sink sh -eu -c '
 ' < ../../../db/log-sink/02-log-sink-assertion.sql
 ```
 
-The migration takes an access-exclusive table lock with a 10-second timeout,
+Reapplying `01-log-sink.sql` also grants database `TEMPORARY` directly to
+`openbrain_logs_rollup`, so the new transaction-local projection works even when
+a hardened installation has revoked PostgreSQL's stock `PUBLIC` default. The
+migration then takes an access-exclusive table lock with a 10-second timeout,
 adds one stored generated column, and backfills retained rows in one
 transaction. A busy sink fails without a partial change; leave `log-ingester`
 stopped and retry. A second successful run is a no-op. Do not recreate the
@@ -70,8 +79,8 @@ adoption step below; restart it only after the marker-gated recreate succeeds.
 This step applies only when `log_sink_data` was initialized by a release that
 predates `.openbrain-log-sink-init-complete`. **After updating the checkout but
 before any `docker compose up` that would recreate `log-sink`**, first apply the
-status-class migration above, leave the old healthy container running, and
-execute:
+schema/grant replay and status-class migration above, leave the old healthy
+container running, and execute:
 
 ```sh
 ../../../scripts/adopt-log-sink-marker.sh
@@ -88,7 +97,8 @@ behind its unix socket uses the same `PGDATA`, and creates the marker as the
 or row changes. A partial or drifted sink exits nonzero and remains unmarked, so
 the new entrypoint will continue to refuse it. Correct the drift and rerun the
 helper; never substitute `touch` or create the marker yourself. It does not run
-migrations, which is why the status-class step must precede it.
+migrations, which is why the schema/grant replay and status-class step must
+precede it.
 
 The helper defaults to this Compose directory and its `.env`. Set
 `COMPOSE_DIR=/absolute/path/to/the/running/project` only if the checkout and
@@ -250,7 +260,7 @@ qube at all.
 | -------------------------------- | ----------------------------- | ---------------------------------------- |
 | `LOG_SINK_SUPERUSER_PASSWORD`    | `.env`                        | init only — creates the roles and schema |
 | `OPENBRAIN_INGESTER_PASSWORD`    | `.env`                        | INSERT on `funnel_access_log`            |
-| `OPENBRAIN_LOGS_ROLLUP_PASSWORD` | `.env` + `funnel-summary.env` | DML on the two observability tables      |
+| `OPENBRAIN_LOGS_ROLLUP_PASSWORD` | `.env` + `funnel-summary.env` | table DML + database `TEMPORARY`         |
 | `OPENBRAIN_MONITOR_PASSWORD`     | `.env` + `funnel-monitor.env` | SELECT on `funnel_access_log` only       |
 
 The `.env` copy of a role password is what **creates** the role at container
@@ -276,7 +286,8 @@ is this qube's own Postgres, holding `funnel_access_log` and
 
 The checked [role contract](../../../db/log-sink/role-contract.json) names the
 required `openbrain_ingester` and `openbrain_logs_rollup` identities plus the
-optional `openbrain_monitor`. CI validates every unavoidable SQL, Compose,
+optional `openbrain_monitor`, their exact relation grants, and the rollup's
+database `TEMPORARY` capability. CI validates every unavoidable SQL, Compose,
 script, and primary-runbook literal against that manifest before starting a
 database fixture.
 

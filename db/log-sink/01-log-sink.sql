@@ -114,6 +114,10 @@ CREATE INDEX IF NOT EXISTS idx_funnel_access_summary_day ON funnel_access_summar
 -- ---------- Grants ---------------------------------------------------------
 -- PUBLIC gets nothing. Every role below is named explicitly, and
 -- 02-log-sink-assertion.sql fails the init if any of them acquires more.
+-- Database TEMPORARY is granted directly to the rollup role: its
+-- transaction-local projection needs temporary-table access, and the direct
+-- grant keeps hardened installs working after they revoke the stock PUBLIC
+-- default.
 --
 -- The `public` SCHEMA itself: PostgreSQL 15+ already revokes CREATE from
 -- PUBLIC, so the three roles can use the schema but not add objects to it.
@@ -121,6 +125,12 @@ CREATE INDEX IF NOT EXISTS idx_funnel_access_summary_day ON funnel_access_summar
 -- claim is "these two tables and nothing else".
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO openbrain_ingester, openbrain_logs_rollup;
+
+DO $$
+BEGIN
+  EXECUTE format('GRANT TEMPORARY ON DATABASE %I TO openbrain_logs_rollup', current_database());
+END;
+$$ LANGUAGE plpgsql;
 
 -- openbrain_ingester: INSERT-only on the raw table. This role is sink-only;
 -- the corpus assertion rejects the role name and has no matching relation.
@@ -133,7 +143,8 @@ GRANT USAGE  ON SEQUENCE funnel_access_log_id_seq TO openbrain_ingester;
 -- openbrain_logs_rollup: the DML db/summarize_funnel.sql needs — SELECT and
 -- DELETE on raw, SELECT/INSERT/UPDATE/DELETE on the aggregate. No sequence
 -- grant: the rollup never INSERTs into funnel_access_log, only reads and
--- retires it.
+-- retires it. Its TEMPORARY database capability above is required by the
+-- transaction-local aggregate projection and is pinned by the assertion.
 GRANT SELECT, DELETE                         ON funnel_access_log     TO openbrain_logs_rollup;
 GRANT SELECT, INSERT, UPDATE, DELETE         ON funnel_access_summary TO openbrain_logs_rollup;
 

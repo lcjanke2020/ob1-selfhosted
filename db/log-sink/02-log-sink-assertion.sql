@@ -26,7 +26,9 @@
 -- CONNECT/TEMP, USAGE on schema public, EXECUTE on built-in functions. None
 -- of those reaches the two relations (section 3 pins their ACLs exactly);
 -- asserting them away would mean fighting harmless defaults on every major
--- version instead of guarding the promise that matters.
+-- version instead of guarding the promise that matters. Section 4 separately
+-- pins a direct TEMPORARY grant for the rollup so hardening PUBLIC cannot break
+-- its transaction-local projection.
 --
 -- Why assert at all on a cluster whose contents are disposable: the sink sits
 -- on the internet-facing qube. Its value is not the data — it is the promise
@@ -56,6 +58,7 @@ BEGIN
         "name": "openbrain_ingester",
         "required": true,
         "password_env": "OPENBRAIN_INGESTER_PASSWORD",
+        "database_privileges": "",
         "direct_privileges": "funnel_access_log=INSERT|funnel_access_log_id_seq=USAGE"
       },
       {
@@ -63,6 +66,7 @@ BEGIN
         "name": "openbrain_logs_rollup",
         "required": true,
         "password_env": "OPENBRAIN_LOGS_ROLLUP_PASSWORD",
+        "database_privileges": "TEMPORARY",
         "direct_privileges": "funnel_access_log=DELETE,SELECT|funnel_access_summary=DELETE,INSERT,SELECT,UPDATE"
       },
       {
@@ -70,6 +74,7 @@ BEGIN
         "name": "openbrain_monitor",
         "required": false,
         "password_env": "OPENBRAIN_MONITOR_PASSWORD",
+        "database_privileges": "",
         "direct_privileges": "funnel_access_log=SELECT"
       }
     ]$role_contract$,
@@ -250,7 +255,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- ---------- 4. No sink role can add objects to the public schema ----------
+-- ---------- 4. Schema/database creation closed; rollup TEMPORARY pinned ----
 -- The claim is about the three LOGIN roles, not about the schema's ACL in the
 -- abstract: PostgreSQL 15+ ships `public` owned by `pg_database_owner` with
 -- CREATE granted to it, which is the database owner (the bootstrap superuser
@@ -262,7 +267,10 @@ $$ LANGUAGE plpgsql;
 -- has_schema_privilege takes a role, and PUBLIC is not one.
 DO $$
 DECLARE
-  offender text;
+  offender  text;
+  r         record;
+  actual    text;
+  expected  text;
 BEGIN
   SELECT string_agg(rolname, ', ' ORDER BY rolname) INTO offender
   FROM pg_roles
@@ -291,8 +299,8 @@ BEGIN
 
   -- Same question one level up: CREATE on the DATABASE would let a role mint
   -- a fresh schema and put relations outside the public-schema checks above.
-  -- The stock database default (acldefault when datacl is NULL) gives PUBLIC
-  -- CONNECT and TEMP but never CREATE, so both probes pass an untouched init.
+  -- The stock database default gives PUBLIC CONNECT and TEMPORARY but never
+  -- CREATE, so both probes pass an untouched init.
   SELECT string_agg(rolname, ', ' ORDER BY rolname) INTO offender
   FROM pg_roles
   WHERE rolname IN (
@@ -317,6 +325,44 @@ BEGIN
     RAISE EXCEPTION
       'log sink: PUBLIC may CREATE schemas in this database';
   END IF;
+
+  -- TEMPORARY is the one managed database capability. Compare only explicit
+  -- role grants here (including grant option) because PostgreSQL's stock
+  -- PUBLIC TEMPORARY default remains deliberately unpinned. The rollup's
+  -- direct grant is still load-bearing: it must survive a hardened deployment
+  -- revoking that PUBLIC default.
+  FOR r IN
+    SELECT role.oid AS role_oid,
+           role.rolname,
+           contract.database_privileges AS want
+    FROM jsonb_to_recordset(
+      current_setting('openbrain.log_sink_role_contract')::jsonb
+    ) AS contract(name text, database_privileges text)
+    JOIN pg_roles role ON role.rolname = contract.name
+    ORDER BY role.rolname
+  LOOP
+    WITH database_acl AS (
+      SELECT (aclexplode(coalesce(datacl, '{}'::aclitem[]))).*
+      FROM pg_database
+      WHERE datname = current_database()
+    ), mine AS (
+      SELECT DISTINCT
+        privilege_type || CASE WHEN is_grantable THEN '*' ELSE '' END AS privilege
+      FROM database_acl
+      WHERE privilege_type = 'TEMPORARY'
+        AND grantee = r.role_oid
+    )
+    SELECT string_agg(privilege, ',' ORDER BY privilege) INTO actual
+    FROM mine;
+
+    expected := nullif(r.want, '');
+    IF actual IS DISTINCT FROM expected THEN
+      RAISE EXCEPTION
+        'log sink: role % database TEMPORARY privilege drifted; expected (%), found (%)',
+        r.rolname, coalesce(expected, '<none>'), coalesce(actual, '<none>');
+    END IF;
+
+  END LOOP;
 END;
 $$ LANGUAGE plpgsql;
 
