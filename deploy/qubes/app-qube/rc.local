@@ -6,8 +6,9 @@
 # /etc/systemd/system is wiped on every AppVM reboot, so units that must persist
 # are stashed under /rw/config and (re)installed + enabled here at each boot.
 # Boot order: tailscaled → re-assert rootful docker OFF → custom-input firewall
-# one-shot → db forwarder (required, readiness-gated — must precede the backup
-# timer) → encrypted-backup timer → GPU-offload forwarder (optional).
+# one-shot → db forwarder (required, readiness-gated — must precede its backup
+# timer) → encrypted corpus backup timer → independent encrypted Funnel-summary
+# pull timer → GPU-offload forwarder (optional).
 #
 # What is deliberately ABSENT: any docker start. The app stack runs under the
 # operator account's ROOTLESS dockerd (a systemd --user unit; storage in
@@ -131,6 +132,29 @@ if [ -d /rw/config/openbrain-units ]; then
 	else
 		echo "WARNING: db forwarder not ready — ob1-db-backup.timer NOT enabled this boot; fix the forwarder, then run 'systemctl enable --now ob1-db-backup.timer' (or reboot)"
 	fi
+fi
+
+# --- Encrypted Funnel-summary pull timer (optional, independent of DB_HOST) ---
+# The source is a fixed qrexec service on the ingress qube. It deliberately
+# does not share the db-forwarder readiness gate: no corpus connection is used.
+# Treat a completely absent install as "feature not deployed" but call out a
+# partial install, which would otherwise create a silent backup gap.
+if [ -x /rw/config/openbrain-units/ob1-funnel-summary-backup.sh ] \
+	&& [ -x /rw/config/openbrain-units/ob1-bounded-stream.py ] \
+	&& [ -r /rw/config/openbrain-units/funnel-summary-backup.env ] \
+	&& [ -f /etc/systemd/system/ob1-funnel-summary-backup.service ] \
+	&& [ -f /etc/systemd/system/ob1-funnel-summary-backup.timer ]; then
+	if ! systemctl enable --now ob1-funnel-summary-backup.timer; then
+		echo "ERROR: ob1-funnel-summary-backup.timer failed to enable"
+		BOOT_FAIL=1
+	fi
+elif [ -e /rw/config/openbrain-units/ob1-funnel-summary-backup.sh ] \
+	|| [ -e /rw/config/openbrain-units/ob1-bounded-stream.py ] \
+	|| [ -e /rw/config/openbrain-units/funnel-summary-backup.env ] \
+	|| [ -e /rw/config/openbrain-units/ob1-funnel-summary-backup.service ] \
+	|| [ -e /rw/config/openbrain-units/ob1-funnel-summary-backup.timer ]; then
+	echo "ERROR: Funnel-summary backup is only partially staged — ob1-funnel-summary-backup.timer NOT enabled"
+	BOOT_FAIL=1
 fi
 
 # --- GPU-offload forwarder (optional; see ../gpu-offload-transport.md) ---

@@ -290,6 +290,7 @@ qube at all.
 | `OPENBRAIN_INGESTER_PASSWORD`    | `.env`                        | INSERT on `funnel_access_log`                  |
 | `OPENBRAIN_LOGS_ROLLUP_PASSWORD` | `.env` + `funnel-summary.env` | table DML + database `TEMPORARY`               |
 | `OPENBRAIN_MONITOR_PASSWORD`     | `.env` + `funnel-monitor.env` | SELECT on `funnel_access_log` only             |
+| `OPENBRAIN_LOGS_BACKUP_PASSWORD` | `.env`                        | SELECT on `funnel_access_summary` only         |
 
 The `.env` copy of a role password is what **creates** the role at container
 init; the `~/.config/*.env` copy is what the host-side job **authenticates**
@@ -314,10 +315,10 @@ is this qube's own Postgres, holding `funnel_access_log` and
 
 The checked [role contract](../../../db/log-sink/role-contract.json) names the
 required `openbrain_ingester` and `openbrain_logs_rollup` identities plus the
-optional `openbrain_monitor`, their exact relation grants, and the rollup's
-database `TEMPORARY` capability. CI validates every unavoidable SQL, Compose,
-script, and primary-runbook literal against that manifest before starting a
-database fixture.
+optional `openbrain_monitor` and `openbrain_logs_backup`, their exact relation
+grants, and the rollup's database `TEMPORARY` capability. CI validates every
+unavoidable SQL, Compose, script, and primary-runbook literal against that
+manifest before starting a database fixture.
 
 Earlier revisions kept the ingester writing **across** to the db qube on
 `:5432`, documented as a deliberate scoped exception
@@ -348,11 +349,84 @@ docker inspect "$log_sink_container" \
   --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}'   # → none
 ```
 
-**Data posture: disposable.** 30-day raw, 365-day aggregate (the same retention
-the central store enforced), and **no backup**. Losing this cluster costs
-request metadata that was already this qube's to lose; adding the perimeter to
-the backup pipeline would create a new data path _out_ of it, which is the
-opposite of the point. Plan on rebuilding it rather than restoring it.
+**Data posture: raw remains disposable; aggregates are backed up.** Raw IP and
+user-agent rows live here for 30 days and never enter the backup stream. The
+365-day `funnel_access_summary` is pulled nightly by the app qube over the fixed
+qrexec service below and encrypted there. The edge receives no destination,
+encryption key, timer, or ability to initiate a transfer. A lost sink can still
+be rebuilt immediately; the aggregate backup is the bounded continuity and
+forensic record, with a nominal 24-hour RPO.
+
+### Aggregate-only backup producer (app-initiated qrexec)
+
+[`openbrain-log-sink-dump.sh`](openbrain-log-sink-dump.sh) is an executable
+Qubes RPC service, not a listener and not `qubes.ConnectTCP`. The app qube calls
+`openbrain.LogSinkDump` with an empty service argument. The producer rejects a
+wrong caller or service identity, closes stdin, and runs one fixed custom-format
+uncompressed `pg_dump` of `public.funnel_access_summary` as
+`openbrain_logs_backup`. The app consumer requires its `PGDMP` signature before
+publication. That role
+has summary `SELECT` only: it cannot read `funnel_access_log`, mutate either
+table, create temporary objects, or reach the corpus.
+
+For a fresh sink, set a new `OPENBRAIN_LOGS_BACKUP_PASSWORD` in `.env` before
+the first `docker compose up`. For an existing volume, stop ingestion, put the
+new value in `.env`, recreate only `log-sink` so the handler can receive the
+container environment, provision the role transactionally, replay its grant
+owner, and run the completed-catalog assertion:
+
+```sh
+docker compose stop log-ingester
+docker compose --env-file .env up -d --no-deps --force-recreate --wait log-sink
+docker compose exec -T log-sink sh -s \
+  < ../../../db/log-sink/provision-backup-role.sh
+docker compose exec -T --user postgres log-sink sh -eu -c '
+  PGPASSWORD="$POSTGRES_PASSWORD" exec psql -X -w \
+    -h /var/run/postgresql -U "${POSTGRES_USER:-postgres}" \
+    -d "${POSTGRES_DB:-openbrain_logs}" -v ON_ERROR_STOP=1 -f -
+' < ../../../db/log-sink/01-log-sink.sql
+docker compose exec -T --user postgres log-sink sh -eu -c '
+  PGPASSWORD="$POSTGRES_PASSWORD" exec psql -X -w \
+    -h /var/run/postgresql -U "${POSTGRES_USER:-postgres}" \
+    -d "${POSTGRES_DB:-openbrain_logs}" -v ON_ERROR_STOP=1 -f -
+' < ../../../db/log-sink/02-log-sink-assertion.sql
+docker compose up -d --no-deps log-ingester
+```
+
+Install an operator-reviewed handler copy in persistent storage, replacing both
+placeholders with the app qube's **dom0 name** and this Compose directory's
+absolute path. Then stage the live service; [`rc.local`](rc.local) repeats the
+last install after every AppVM reboot:
+
+```sh
+sudo install -m 0755 openbrain-log-sink-dump.sh \
+  /rw/config/openbrain-log-sink-dump.sh
+sudoedit /rw/config/openbrain-log-sink-dump.sh
+sudo install -o root -g root -m 0755 \
+  /rw/config/openbrain-log-sink-dump.sh \
+  /etc/qubes-rpc/openbrain.LogSinkDump
+```
+
+The human-reviewed dom0 policy should have one exact empty-argument allow and a
+catch-all deny, in this order (for example in
+`/etc/qubes/policy.d/30-openbrain-log-sink-dump.policy`):
+
+```text
+openbrain.LogSinkDump + <app-qube> <ingress-qube> allow user=user autostart=no
+openbrain.LogSinkDump * * * deny
+```
+
+In dom0, lint the installed policy before testing it:
+
+```sh
+qubes-policy-lint /etc/qubes/policy.d/30-openbrain-log-sink-dump.policy
+```
+
+Do not replace `+` with `*` on the allow line: `+` means exactly the empty
+service argument. `autostart=no` makes a stopped edge a visible backup failure
+instead of waking it unexpectedly. Verify from the app qube only after its
+bounded/encrypted consumer is staged; do not save a plaintext production dump
+there. Also prove an unrelated qube and a nonempty service argument are denied.
 
 **One consequence, stated plainly.** Funnel access logs and the thought corpus
 are now separate databases, so "which requests preceded this thought write" is
@@ -625,9 +699,10 @@ systemctl --user list-timers funnel-summary.timer --no-pager
 wrapper rejects the retired free-form SQL/role knobs and any TCP host before it
 starts `psql`.
 
-Reports contain request metadata, so they land in a mode-0700 local directory.
-Replicating them off this qube is a new outbound path from the perimeter; the
-sink's disposable-data posture deliberately avoids one.
+Text reports contain request metadata, so they stay in a mode-0700 local
+directory. They are not the backup transport. Only the aggregate table crosses
+the app-initiated, dom0-policy-gated service above; raw rows and report files do
+not.
 
 ## Verify
 

@@ -12,13 +12,13 @@
 --
 -- The checked contract is intentionally ordinary and enforceable: this
 -- cluster contains TWO persistent data tables, TWO required roles, and at most
--- one optional monitor role;
+-- two optional read roles (monitor and aggregate-only backup);
 -- every table, sequence, and column privilege those roles hold is exactly
 -- enumerated, grant options included (section 3), none of them holds a
 -- cluster-level privilege (section 1), none has a CREATE route into schema
 -- public or into this database (section 4), and the role set itself is
 -- closed — nothing exists beyond the bootstrap superuser, the two required
--- roles, and the optional monitor (section 5). Sections 6-9 close indirect
+-- roles, plus the optional monitor and backup roles (section 5). Sections 6-9 close indirect
 -- routes the direct-ACL comparison cannot see: effective privileges arriving
 -- via role membership, memberships themselves, ownership, default ACLs,
 -- grants parked on a grantee outside the enumerated set, stray schemas, and
@@ -81,6 +81,14 @@ BEGIN
         "password_env": "OPENBRAIN_MONITOR_PASSWORD",
         "database_privileges": "",
         "direct_privileges": "funnel_access_log=SELECT"
+      },
+      {
+        "key": "backup",
+        "name": "openbrain_logs_backup",
+        "required": false,
+        "password_env": "OPENBRAIN_LOGS_BACKUP_PASSWORD",
+        "database_privileges": "",
+        "direct_privileges": "funnel_access_summary=SELECT"
       }
     ]$role_contract$,
     false
@@ -242,7 +250,7 @@ $$ LANGUAGE plpgsql;
 -- forward their access.
 --
 -- Grants to PUBLIC (grantee OID 0) are folded into every role's actual set:
--- PUBLIC never appears in pg_auth_members but reaches all three roles, so a
+-- PUBLIC never appears in pg_auth_members but reaches every managed role, so a
 -- `GRANT ... TO PUBLIC` would otherwise slip past a per-role comparison.
 --
 -- The bootstrap superuser owns both relations and therefore appears in relacl
@@ -415,7 +423,7 @@ $$ LANGUAGE plpgsql;
 
 -- ---------- 5. The role set itself is closed ------------------------------
 -- Sections 1 and 3 reason about roles they can NAME: 1 scans 'openbrain%',
--- 3 compares the three enumerated. A role outside both patterns — created by
+-- 3 compares the enumerated set. A role outside both patterns — created by
 -- the administrative superuser, or by drift nobody noticed — would pass every
 -- check above while falsifying the header's closed role set. Three closures
 -- fix that: exactly one superuser (the bootstrap role init connects as), both
@@ -424,8 +432,8 @@ $$ LANGUAGE plpgsql;
 -- predefined pg_* roles (the pg_ prefix is reserved by the server — even a
 -- superuser cannot CREATE ROLE under it, so the exclusion is not a loophole).
 --
--- The monitor role is OPTIONAL (00-log-sink-roles.sh creates it only when
--- OPENBRAIN_MONITOR_PASSWORD is set): this check permits its absence and
+-- The monitor and backup roles are OPTIONAL (00-log-sink-roles.sh creates
+-- each only when its password is set): this check permits either absence and
 -- forbids additions, matching that contract.
 DO $$
 DECLARE

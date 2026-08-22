@@ -175,10 +175,9 @@ services:
   # `mcp_auth_events`, no pgvector; plain postgres keeps that extension's supply
   # chain off the internet-facing qube.
   #
-  # The data is explicitly DISPOSABLE — 30-day raw, 365-day aggregate, no
-  # backup. Losing it costs request metadata that was already this qube's to
-  # lose; adding the perimeter to the backup pipeline would create a new data
-  # path OUT of it, which is the opposite of the point.
+  # Raw rows remain disposable and edge-local (30 days). The 365-day aggregate
+  # is optionally exported by a fixed, app-initiated qrexec service and encrypted
+  # on the app qube; this container gets no network, destination, key, or timer.
   log-sink:
     # Image-only pin: bumping it also requires updating KNOWN_NON_DENO_IMAGES
     # in server/scripts/check_allow_env.ts (the allow-env drift gate).
@@ -216,6 +215,9 @@ services:
       # monitor grant. Plain ${VAR} (not `:?`) so a sink without the host-side
       # funnel monitor still comes up.
       OPENBRAIN_MONITOR_PASSWORD: ${OPENBRAIN_MONITOR_PASSWORD:-}
+      # Optional aggregate-only backup role used by the fixed qrexec dump
+      # service. It cannot read raw IP/user-agent rows.
+      OPENBRAIN_LOGS_BACKUP_PASSWORD: ${OPENBRAIN_LOGS_BACKUP_PASSWORD:-}
     # Socket only: an empty listen_addresses is a valid Postgres setting and
     # opens no TCP socket. (The init-phase temp server is socket-only
     # regardless — docker_temp_server_start appends its own

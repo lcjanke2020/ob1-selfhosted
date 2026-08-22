@@ -5,7 +5,7 @@
 # cluster from the canonical corpus, holding request metadata and nothing
 # else. See deploy/qubes/ingress-qube/README.md § Local log sink.
 #
-# Three roles, all least-privilege; the sink has no application role and no
+# Four roles, all least-privilege; the sink has no application role and no
 # `openbrain_readonly`, because there is nothing here worth a read-everything
 # credential. Table grants land in 01-log-sink.sql.
 #
@@ -18,16 +18,18 @@
 #                           that name here, so no file on the internet-facing
 #                           qube ever holds a secret called
 #                           OPENBRAIN_APP_PASSWORD.
+#   openbrain_logs_backup   SELECT-only on the aggregate table. Optional and
+#                           deliberately unable to read raw IP/user-agent rows;
+#                           a fixed qrexec service uses it for summary backup.
 #
 # Passwords are passed to psql via --set and substituted with :'var' (which
 # auto-quotes and escapes) rather than interpolated into the SQL text via
 # bash, so passwords containing quotes or backslashes work correctly.
 #
 # Note: docker-entrypoint-initdb.d scripts run only on a freshly-initialized
-# data directory, so plain CREATE ROLE is sufficient. To re-create roles, wipe
-# the sink's volume and let init re-run — the sink is explicitly disposable
-# (30-day raw / 365-day aggregate, no backup), so that is a cheap operation
-# here in a way it never is on the corpus.
+# data directory, so plain CREATE ROLE is sufficient here. Existing sinks add
+# or rotate the optional backup identity with provision-backup-role.sh, then
+# replay 01-log-sink.sql and the assertion; never wipe PGDATA just to add it.
 set -euo pipefail
 
 : "${OPENBRAIN_INGESTER_PASSWORD:?OPENBRAIN_INGESTER_PASSWORD must be set in the ingress qube .env}"
@@ -57,4 +59,18 @@ if [ -n "${OPENBRAIN_MONITOR_PASSWORD:-}" ]; then
 EOSQL
 else
   echo "[00-log-sink-roles] OPENBRAIN_MONITOR_PASSWORD not set; skipping openbrain_monitor (no host-side funnel monitor)"
+fi
+
+# The off-box summary backup is optional. Keeping its role absent when the
+# qrexec pull path is not deployed avoids minting an unused edge credential.
+if [ -n "${OPENBRAIN_LOGS_BACKUP_PASSWORD:-}" ]; then
+  psql -v ON_ERROR_STOP=1 \
+    --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+    --set=backup_password="$OPENBRAIN_LOGS_BACKUP_PASSWORD" \
+    <<-'EOSQL'
+    CREATE ROLE openbrain_logs_backup LOGIN NOSUPERUSER NOCREATEDB
+      NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD :'backup_password';
+EOSQL
+else
+  echo "[00-log-sink-roles] OPENBRAIN_LOGS_BACKUP_PASSWORD not set; skipping openbrain_logs_backup (no qrexec summary backup)"
 fi

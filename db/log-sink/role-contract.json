@@ -24,6 +24,14 @@
       "password_env": "OPENBRAIN_MONITOR_PASSWORD",
       "database_privileges": "",
       "direct_privileges": "funnel_access_log=SELECT"
+    },
+    {
+      "key": "backup",
+      "name": "openbrain_logs_backup",
+      "required": false,
+      "password_env": "OPENBRAIN_LOGS_BACKUP_PASSWORD",
+      "database_privileges": "",
+      "direct_privileges": "funnel_access_summary=SELECT"
     }
   ]
 }

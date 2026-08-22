@@ -1,0 +1,22 @@
+[Unit]
+Description=OB1 encrypted off-box Funnel summary backup
+After=qubes-qrexec-agent.service
+Wants=qubes-qrexec-agent.service
+# Production should add the same site-specific failure notifier used by
+# ob1-db-backup.service, for example via an OnFailure= drop-in.
+
+[Service]
+Type=oneshot
+User=user
+UMask=0077
+ExecStart=/usr/bin/bash /rw/config/openbrain-units/ob1-funnel-summary-backup.sh
+TimeoutStartSec=6min
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+# Narrow this with a deployment drop-in when OUT_DIR is known exactly.
+ReadWritePaths=/home/user
+
+[Install]
+WantedBy=multi-user.target

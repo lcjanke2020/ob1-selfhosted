@@ -102,7 +102,8 @@ generic subject mapping, and a browserless verification command are covered in
 Copy your filled-in `.env` into this directory (including the required
 `METADATA_FALLBACK_POLICY`; Pattern B also needs the `AUTH0_*` trio,
 `OPENBRAIN_INGESTER_PASSWORD`, `LOG_SINK_SUPERUSER_PASSWORD`,
-`OPENBRAIN_LOGS_ROLLUP_PASSWORD`, and an absolute `LOG_SINK_SOCKET_DIR`) and
+`OPENBRAIN_LOGS_ROLLUP_PASSWORD`, and an absolute `LOG_SINK_SOCKET_DIR`; set
+`OPENBRAIN_LOGS_BACKUP_PASSWORD` only when installing an aggregate backup) and
 uncomment `COMPOSE_FILE` + `COMPOSE_PROFILES` at its bottom. Then either run
 with explicit flags:
 
@@ -228,8 +229,9 @@ stack measures it without giving an edge parser a route to the corpus.
 **Two clusters, no shared Funnel schema**
 
 - **Corpus `postgres`** holds memories, sessions, and `mcp_auth_events`. It
-  deliberately has no `funnel_access_*` relation and rejects the
-  `openbrain_ingester` / `openbrain_monitor` role names.
+  deliberately has no `funnel_access_*` relation and rejects the sink-only
+  `openbrain_ingester`, `openbrain_monitor`, `openbrain_logs_rollup`, and
+  `openbrain_logs_backup` role names.
 - **`log-sink`** is plain `postgres:17-alpine` with exactly `funnel_access_log`
   and `funnel_access_summary`. It uses `network_mode: none`,
   `listen_addresses=`, no published port, and SCRAM on its shared unix socket.
@@ -238,9 +240,12 @@ stack measures it without giving an edge parser a route to the corpus.
   `mcp_auth_events` records the application-side auth decision separately,
   including verified identities on admitted requests.
 
-The sink is intentionally disposable request metadata: raw rows retain 30 days
-and daily aggregates 365. It has its own administrative-only superuser,
-INSERT-only ingester, DML rollup, and optional one-table monitor credentials.
+Raw request metadata is intentionally disposable after 30 days; daily
+aggregates retain 365 days. The sink has its own administrative-only superuser,
+INSERT-only ingester, DML rollup, optional raw-table monitor, and optional
+aggregate-only `openbrain_logs_backup` credentials. The Qubes deployment uses
+that last identity through a fixed app-initiated qrexec service; this single-host
+Pattern B recipe does not install a scheduler or transport for it by default.
 The superuser is used for init, adoption, upgrades, and explicit checks, but is
 never passed to a long-running client service. No sink credential is passed to
 the corpus container. Create the configured `LOG_SINK_SOCKET_DIR` before first

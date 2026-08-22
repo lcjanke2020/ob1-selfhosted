@@ -1,0 +1,12 @@
+[Unit]
+Description=OB1 encrypted off-box Funnel summary backup (daily)
+
+[Timer]
+# Run after the canonical corpus backup. The measured production summary dump
+# is only a few KiB, so nightly full-table snapshots are intentionally simple.
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -6,7 +6,7 @@
 # /etc/systemd/system is wiped on every AppVM reboot, so units that must persist
 # are stashed under /rw/config and (re)installed + enabled here at each boot.
 # Boot order: tailscaled → re-assert rootful docker OFF → custom-input firewall
-# one-shot → mcp forwarder.
+# one-shot → fixed Funnel-summary qrexec producer → mcp forwarder.
 #
 # What is deliberately ABSENT: any docker start, and any compose self-heal. The
 # ingress stack runs under the operator account's ROOTLESS dockerd; the user
@@ -53,6 +53,23 @@ else
 	echo "WARNING: ob1-ingress-firewall.service or qubes-firewall-user-script not staged in /rw/config — custom-input accepts (tailnet SSH) NOT applied this boot"
 fi
 
+# --- Fixed Funnel-summary qrexec producer (optional) ---
+# qrexec service files under /etc are template-backed and disappear on AppVM
+# reboot. The operator-reviewed /rw/config copy contains the exact allowed
+# caller and Compose directory; this boot hook only restores it. There is no
+# timer or destination on the ingress qube: the app qube initiates every pull.
+if [ -x /rw/config/openbrain-log-sink-dump.sh ]; then
+	if ! install -o root -g root -m 0755 \
+		/rw/config/openbrain-log-sink-dump.sh \
+		/etc/qubes-rpc/openbrain.LogSinkDump; then
+		echo "ERROR: failed to restore /etc/qubes-rpc/openbrain.LogSinkDump"
+		BOOT_FAIL=1
+	fi
+elif [ -e /rw/config/openbrain-log-sink-dump.sh ]; then
+	echo "ERROR: /rw/config/openbrain-log-sink-dump.sh exists but is not executable — qrexec summary export unavailable"
+	BOOT_FAIL=1
+fi
+
 # --- OB1 mcp forwarder (Caddy → app qube over qubes.ConnectTCP) ---
 # See ob1-mcp-forward.sh; Caddy's MCP_UPSTREAM points at it. Restart=always
 # converges if anything it needs isn't up yet. Guarded: absent file = not
@@ -62,3 +79,5 @@ if [ -f /rw/config/ob1-mcp-forward.service ]; then
 	systemctl daemon-reload
 	systemctl enable --now ob1-mcp-forward.service
 fi
+
+exit "${BOOT_FAIL:-0}"
