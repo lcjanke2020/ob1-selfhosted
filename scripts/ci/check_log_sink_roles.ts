@@ -128,48 +128,92 @@ function passwordTokens(text: string): string[] {
   return sorted(text.match(PASSWORD_TOKEN) ?? []);
 }
 
-function bootstrapPasswordBindings(text: string): string[] {
-  const assignments = [...text.matchAll(
-    /--set=([a-z][a-z0-9_]*)="\$([A-Z][A-Z0-9_]*)"/g,
-  )].map((match) => ({ variable: match[1], environment: match[2] }));
-  const consumed = new Set<number>();
-  const bindings: string[] = [];
+function psqlHeredocs(text: string): Array<{ command: string; sql: string }> {
+  const lines = text.split("\n");
+  const invocations: Array<{ command: string; sql: string }> = [];
 
-  for (
-    const statement of text.matchAll(
-      /\bCREATE\s+ROLE\s+([a-z][a-z0-9_]*)\b([^;]*);/g,
-    )
-  ) {
-    const role = statement[1];
-    const passwordVariable = statement[2].match(
-      /\bPASSWORD\s+:'([a-z][a-z0-9_]*)'/,
-    )?.[1];
-    if (!passwordVariable) {
-      bindings.push(`${role}=<missing-password-variable>`);
-      continue;
+  for (let index = 0; index < lines.length; index++) {
+    if (!/^\s*psql\b/.test(lines[index])) continue;
+
+    const command: string[] = [];
+    let delimiter: string | undefined;
+    for (; index < lines.length; index++) {
+      command.push(lines[index]);
+      delimiter = lines[index].match(
+        /<<-?['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?\s*$/,
+      )?.[1];
+      if (delimiter) break;
     }
 
-    const matchingAssignments = assignments
-      .map((assignment, index) => ({ ...assignment, index }))
-      .filter((assignment) => assignment.variable === passwordVariable);
-    if (matchingAssignments.length === 0) {
-      bindings.push(`${role}=<unbound:${passwordVariable}>`);
-      continue;
+    const sql: string[] = [];
+    if (delimiter) {
+      index++;
+      for (
+        ;
+        index < lines.length && lines[index].trim() !== delimiter;
+        index++
+      ) {
+        sql.push(lines[index]);
+      }
     }
-    for (const assignment of matchingAssignments) {
-      consumed.add(assignment.index);
-      bindings.push(`${role}=${assignment.environment}`);
-    }
+    invocations.push({ command: command.join("\n"), sql: sql.join("\n") });
   }
 
-  assignments.forEach((assignment, index) => {
-    if (!consumed.has(index)) {
-      bindings.push(
-        `<unused:${assignment.variable}>=${assignment.environment}`,
-      );
+  return invocations;
+}
+
+function bootstrapPasswordBindings(text: string): string[] {
+  const bindings: string[] = [];
+
+  for (const invocation of psqlHeredocs(text)) {
+    const assignments = [...invocation.command.matchAll(
+      /--set=([a-z][a-z0-9_]*)="\$([A-Z][A-Z0-9_]*)"/g,
+    )].map((match) => ({ variable: match[1], environment: match[2] }));
+    const consumed = new Set<number>();
+
+    for (
+      const statement of invocation.sql.matchAll(
+        /\bCREATE\s+ROLE\s+([a-z][a-z0-9_]*)\b([^;]*);/g,
+      )
+    ) {
+      const role = statement[1];
+      const passwordVariable = statement[2].match(
+        /\bPASSWORD\s+:'([a-z][a-z0-9_]*)'/,
+      )?.[1];
+      if (!passwordVariable) {
+        bindings.push(`${role}=<missing-password-variable>`);
+        continue;
+      }
+
+      const matchingAssignments = assignments
+        .map((assignment, index) => ({ ...assignment, index }))
+        .filter((assignment) => assignment.variable === passwordVariable);
+      if (matchingAssignments.length === 0) {
+        bindings.push(`${role}=<unbound:${passwordVariable}>`);
+        continue;
+      }
+      for (const assignment of matchingAssignments) {
+        consumed.add(assignment.index);
+        bindings.push(`${role}=${assignment.environment}`);
+      }
     }
-  });
+
+    assignments.forEach((assignment, index) => {
+      if (!consumed.has(index)) {
+        bindings.push(
+          `<unused:${assignment.variable}>=${assignment.environment}`,
+        );
+      }
+    });
+  }
   return sorted(bindings);
+}
+
+function composePasswordKeys(text: string): string[] {
+  return captures(
+    text,
+    /^\s*(OPENBRAIN_[A-Z0-9_]+_PASSWORD)\s*:/gm,
+  );
 }
 
 function composePasswordBindings(text: string): string[] {
@@ -415,11 +459,28 @@ export async function validateLogSinkRoles(
       passwordTokens(ingesterService),
       [byKey.get("ingester")!.password_env],
     );
-    expectSet(
-      `${label} sink credential bindings (${path})`,
-      composePasswordBindings(sinkService),
-      passwordEnvs.map((environment) => `${environment}=${environment}`),
+    checks++;
+    const actualKeys = composePasswordKeys(sinkService);
+    if (!sameStrings(actualKeys, passwordEnvs)) {
+      fail(
+        `${label} sink credential keys (${path})`,
+        `expected [${sorted(passwordEnvs).join(", ")}], found [${
+          actualKeys.join(", ")
+        }]`,
+      );
+    }
+    const expectedBindings = passwordEnvs.map((environment) =>
+      `${environment}=${environment}`
     );
+    const actualBindings = composePasswordBindings(sinkService);
+    if (!sameStrings(actualBindings, expectedBindings)) {
+      fail(
+        `${label} sink credential bindings (${path})`,
+        `expected [${sorted(expectedBindings).join(", ")}], found [${
+          actualBindings.join(", ")
+        }]`,
+      );
+    }
   }
 
   const ingester = await read("server/log_ingester.ts");

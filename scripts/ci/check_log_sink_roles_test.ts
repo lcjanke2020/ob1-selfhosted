@@ -68,6 +68,33 @@ Deno.test("log-sink role validator rejects a role bound to the wrong psql variab
   );
 });
 
+Deno.test("log-sink role validator keeps psql variables invocation-local", async () => {
+  const result = await validateWithMutation(
+    "db/log-sink/00-log-sink-roles.sh",
+    (text) => {
+      const monitorAssignment =
+        '    --set=monitor_password="$OPENBRAIN_MONITOR_PASSWORD" ' +
+        "\\" + "\n";
+      const rollupAssignment =
+        '  --set=rollup_password="$OPENBRAIN_LOGS_ROLLUP_PASSWORD" ' +
+        "\\" + "\n";
+      const movedMonitorAssignment =
+        '  --set=monitor_password="$OPENBRAIN_MONITOR_PASSWORD" ' +
+        "\\" + "\n";
+      return text
+        .replace(monitorAssignment, "")
+        .replace(
+          rollupAssignment,
+          rollupAssignment + movedMonitorAssignment,
+        );
+    },
+  );
+  assertStringIncludes(
+    result.errors.join("\n"),
+    "role bootstrap credential bindings",
+  );
+});
+
 Deno.test("log-sink role validator rejects a miswired Compose secret", async () => {
   const result = await validateWithMutation(
     "deploy/qubes/ingress-qube/docker-compose.yml",
@@ -80,5 +107,21 @@ Deno.test("log-sink role validator rejects a miswired Compose secret", async () 
   assertStringIncludes(
     result.errors.join("\n"),
     "Qubes log-ingester Compose identity sink credential bindings",
+  );
+});
+
+Deno.test("log-sink role validator rejects an extra Compose password key", async () => {
+  const result = await validateWithMutation(
+    "deploy/qubes/ingress-qube/docker-compose.yml",
+    (text) =>
+      text.replace(
+        "      OPENBRAIN_MONITOR_PASSWORD: ${OPENBRAIN_MONITOR_PASSWORD:-}",
+        "      OPENBRAIN_MONITOR_PASSWORD: ${OPENBRAIN_MONITOR_PASSWORD:-}\n" +
+          "      OPENBRAIN_APP_PASSWORD: $OPENBRAIN_APP_PASSWORD",
+      ),
+  );
+  assertStringIncludes(
+    result.errors.join("\n"),
+    "Qubes log-ingester Compose identity sink credential keys",
   );
 });
