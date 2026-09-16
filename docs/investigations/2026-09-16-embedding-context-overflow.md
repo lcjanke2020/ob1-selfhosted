@@ -92,7 +92,7 @@ behavior. The live tests show that truncation works for some inputs and fails
 for others.
 
 In the
-[0.24.0 embedding handler](https://github.com/ollama/ollama/blob/v0.24.0/server/routes.go#L713),
+[0.24.0 embedding handler](https://github.com/ollama/ollama/blob/v0.24.0/server/routes.go#L762-L802),
 an overlong input is tokenized, clipped, decoded back to text, then embedded one
 more time. The decoded text is not checked in a loop before that final attempt.
 Tokenization of decoded text can expand again. The observed content-dependent
@@ -104,7 +104,7 @@ tokenizer's intermediate arrays, so the exact expansion for each probe remains
 an inference rather than a measured token trace.
 
 The
-[0.24.0 model loader](https://github.com/ollama/ollama/blob/v0.24.0/llm/server.go#L156)
+[0.24.0 model loader](https://github.com/ollama/ollama/blob/v0.24.0/llm/server.go#L166-L171)
 clamps context to the GGUF training-context metadata. The live metadata,
 resident context, warning logs and explicit 8192 request agree. Setting a larger
 number alone cannot fix this deployment. The model's advertised long-context
@@ -161,6 +161,16 @@ Successful Ollama-side truncation can narrow coverage further, without any
 coverage signal returned by `session_capture`. The hash represents the text
 OpenBrain submitted, not necessarily every token the model finally consumed.
 Neither model identity nor embedding-strategy version is included in this hash.
+
+Thoughts have a separate deduplication fingerprint in
+`server/queries.ts:FINGERPRINT_SQL`: SHA-256 over the UTF-8 encoding of the
+**full body**, after whitespace collapsing, trimming and lowercasing. It is not
+the session prefix hash or an embedding cache key. A changed thought body,
+including an edit entirely after the 8000-unit boundary, still invokes `embed()`
+through `services.ts:updateThoughtContentService`; the embedder continues to see
+only the unchanged prefix in that case. Exact unchanged-body updates return
+before embedding. A future index-version/hash migration must preserve these
+distinct deduplication and embedding-refresh responsibilities.
 
 For sessions, `services.ts:captureSessionFromToml` waits for embedding before
 calling `upsertSession`. A known embedding error therefore prevents the session
