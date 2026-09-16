@@ -117,6 +117,36 @@ not validate search quality or make that defective runtime deployable. The
 original historically rejected session payload was not recovered; synthetic
 fixtures do not claim byte-for-byte incident replay.
 
+### Tested replacement: Ollama 0.34.1
+
+Ollama **0.34.1** passed an isolated CPU test on Linux amd64 with the **same
+Nomic model manifest** as the deployment. Both Compose stacks now pin the
+multi-platform image index
+`sha256:0c0a83210471fb50226bcdc2d6611d20ab13ae87e024cc304c94a6a5765c5e65`. The
+tested amd64 manifest is
+`sha256:8eb6c4d16138c8320f2598f03e01b3549f6ed2e41fe6ac16329a5a921b314914`; arm64
+was not tested. This is a tested replacement candidate, not a statement that
+production has been upgraded.
+
+The actual app runtime gate passed. Upper/lowercase versions of the same phrase
+had cosine 1; unrelated uppercase phrases were distinct (cosine about 0.252).
+The accent-normalization pair also matched. The effective context remained 2048
+tokens: 2046 repetitions plus special tokens fitted, while 2047 were rejected in
+strict mode. All seven chunk-fit cases completed inside the 15-second budget in
+this fixture. Three synthetic retrieval checks ranked the intended document
+first using its final passage. These are bounded smoke tests, not a multilingual
+or corpus-wide quality certification, nor a latency guarantee on another host.
+
+See the
+[recorded results](investigations/2026-09-16-ollama-0341-validation.jsonl) and
+[reusable probe](../scripts/probe-embedding-runtime.ts). The upstream
+[uppercase issue](https://github.com/ollama/ollama/issues/13942#issuecomment-4617769764)
+already reported corrected behavior in 0.30.0/0.30.3. The still-open truncation
+PR is not a prerequisite for our strict chunking path. Before cutover, repeat
+the checks on the target CPU and evaluate representative approved records. Do
+not upgrade the runtime beneath an app serving the old vectors: schedule
+runtime, full-corpus rebuild, and app activation as one maintenance operation.
+
 ## Reviewed offline migration and cutover
 
 This change does not automatically migrate, backfill or deploy an existing

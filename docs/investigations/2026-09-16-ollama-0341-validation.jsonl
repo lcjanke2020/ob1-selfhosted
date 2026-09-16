@@ -1,0 +1,20 @@
+{"stage":"fixture","date":"2026-09-16","platform":"linux/amd64","cpu_limit":4,"memory_limit_gib":4,"image":"ollama/ollama:0.34.1@sha256:0c0a83210471fb50226bcdc2d6611d20ab13ae87e024cc304c94a6a5765c5e65","amd64_manifest":"sha256:8eb6c4d16138c8320f2598f03e01b3549f6ed2e41fe6ac16329a5a921b314914","production_changed":false}
+{"stage":"identity","runtime":"0.34.1","model":"nomic-embed-text:latest","digest":"0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f","same_model":true}
+{"stage":"runtime_canary","contract":"ab5681147ac1b45f65f99c175c86de9a75899fa8f6ce405aad7c0f464adb9c28","ms":2439}
+{"stage":"casing","same_phrase_cosine":1,"different_phrase_cosine":0.25164884132415716,"different_phrase_equal":false}
+{"stage":"accent","same_phrase_cosine":1}
+{"stage":"strict_boundary","repetitions":2046,"ok":true,"dim":768}
+{"stage":"strict_boundary","repetitions":2047,"ok":false,"error":"embedding input exceeds model context"}
+{"stage":"strict_boundary","repetitions":8190,"ok":false,"error":"embedding input exceeds model context"}
+{"stage":"strict_boundary","repetitions":8191,"ok":false,"error":"embedding input exceeds model context"}
+{"name":"prose","source_bytes":11700,"source_units":11700,"chunks":3,"dim":768,"ms":2902}
+{"name":"code","source_bytes":10440,"source_units":10440,"chunks":3,"dim":768,"ms":5700}
+{"name":"cjk","source_bytes":12000,"source_units":4000,"chunks":2,"dim":768,"ms":4200}
+{"name":"combining","source_bytes":12000,"source_units":9000,"chunks":3,"dim":768,"ms":3594}
+{"name":"nonbmp","source_bytes":16100,"source_units":10500,"chunks":3,"dim":768,"ms":2107}
+{"name":"boundary2046","source_bytes":4092,"source_units":4092,"chunks":1,"dim":768,"ms":2003}
+{"name":"boundary2047","source_bytes":4094,"source_units":4094,"chunks":2,"dim":768,"ms":2703}
+{"stage":"retrieval","expected":"pump","top":"pump","pass":true,"best_chunk":2,"chunks":3,"scores":[{"id":"pump","score":0.5938685674519604,"best_chunk":2,"chunks":3},{"id":"orchard","score":0.39753912294566895,"best_chunk":2,"chunks":3},{"id":"sheet","score":0.3704460140920946,"best_chunk":0,"chunks":3}]}
+{"stage":"retrieval","expected":"sheet","top":"sheet","pass":true,"best_chunk":2,"chunks":3,"scores":[{"id":"sheet","score":0.662374649843611,"best_chunk":2,"chunks":3},{"id":"orchard","score":0.48924240989291135,"best_chunk":2,"chunks":3},{"id":"pump","score":0.4347781191757731,"best_chunk":2,"chunks":3}]}
+{"stage":"retrieval","expected":"orchard","top":"orchard","pass":true,"best_chunk":2,"chunks":3,"scores":[{"id":"orchard","score":0.6867452613613483,"best_chunk":2,"chunks":3},{"id":"pump","score":0.4482433364342443,"best_chunk":2,"chunks":3},{"id":"sheet","score":0.4434230435173432,"best_chunk":2,"chunks":3}]}
+{"stage":"resident","models":[{"name":"nomic-embed-text:latest","digest":"0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f","context_length":2048,"size_vram":0}]}

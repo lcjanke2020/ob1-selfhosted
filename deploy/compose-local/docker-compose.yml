@@ -378,12 +378,12 @@ services:
       start_period: 5s
 
   ollama:
-    # Pinned to the version currently in production (0.24.0). Bump
-    # deliberately when you're ready to re-test embeddings/chat output —
-    # `:latest` is a supply-chain risk and a silent-upgrade footgun.
+    # Validated with the existing Nomic model; see docs/embedding-limits.md.
+    # Runtime changes require offline full-corpus reindexing before cutover.
+    # Pin the multi-platform image index; amd64 was tested on CPU.
     # Image-only pin: bumping it also requires updating KNOWN_NON_DENO_IMAGES
     # in server/scripts/check_allow_env.ts (the allow-env drift gate).
-    image: ollama/ollama:0.24.0
+    image: ollama/ollama:0.34.1@sha256:0c0a83210471fb50226bcdc2d6611d20ab13ae87e024cc304c94a6a5765c5e65
     restart: unless-stopped
     # Light hardening: no-new-privileges is safe across the board. Skipping
     # cap_drop because the nvidia-container-runtime path has its own

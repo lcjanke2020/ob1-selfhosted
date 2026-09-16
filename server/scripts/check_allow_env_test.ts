@@ -208,7 +208,10 @@ Deno.test("image-only Compose services fail closed on unresolved launchers", () 
 
 Deno.test("reviewed non-Deno images pass only on their unmodified defaults", () => {
   for (
-    const image of ["pgvector/pgvector:0.8.6-pg16", "ollama/ollama:0.24.0"]
+    const image of [
+      "pgvector/pgvector:0.8.6-pg16",
+      "ollama/ollama:0.34.1@sha256:0c0a83210471fb50226bcdc2d6611d20ab13ae87e024cc304c94a6a5765c5e65",
+    ]
   ) {
     assertEquals(
       parseComposeTargets(

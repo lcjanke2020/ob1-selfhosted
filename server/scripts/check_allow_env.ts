@@ -1099,7 +1099,7 @@ const KNOWN_NON_DENO_IMAGES = new Set([
   // runtime, so their unresolvable launcher defaults cannot start a Deno
   // process. Any other image-only service fails closed until its pin is
   // reviewed and added here.
-  "ollama/ollama:0.24.0",
+  "ollama/ollama:0.34.1@sha256:0c0a83210471fb50226bcdc2d6611d20ab13ae87e024cc304c94a6a5765c5e65",
   "pgvector/pgvector:0.8.6-pg16",
   // The ingress qube's local Funnel-log sink. Plain postgres, not pgvector:
   // the sink holds two request-metadata tables and needs no vector type, so
