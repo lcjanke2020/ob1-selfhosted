@@ -1544,12 +1544,19 @@ $$ LANGUAGE plpgsql;
 -- moves. The generation marker is operator-owned; app credentials cannot
 -- declare a partially rebuilt corpus ready.
 DO $$
-DECLARE rel regclass; helper regprocedure;
+DECLARE rel regclass; helper regprocedure; expected record;
 BEGIN
-  FOREACH rel IN ARRAY ARRAY[
-    to_regclass('public.thought_embedding_index'),
-    to_regclass('sessions.embedding_index')
-  ] LOOP
+  -- regclass renders the parent exactly as pg_get_expr does for the caller's
+  -- search_path; only whitespace is normalized in the stored expressions.
+  FOR expected IN SELECT * FROM (VALUES
+    ('public.thought_embedding_index', 'thought_embedding_audience',
+      format('(EXISTS ( SELECT 1 FROM %s t WHERE (t.id = thought_embedding_index.thought_id)))',
+        'public.thoughts'::regclass)),
+    ('sessions.embedding_index', 'session_embedding_audience',
+      format('(EXISTS ( SELECT 1 FROM %s s WHERE (s.id = embedding_index.session_id)))',
+        'sessions.session'::regclass))
+  ) AS policies(table_name, policy_name, parent_check) LOOP
+    rel := to_regclass(expected.table_name);
     IF rel IS NULL OR NOT EXISTS (
       SELECT 1 FROM pg_class WHERE oid=rel AND relrowsecurity AND relforcerowsecurity
     ) OR NOT has_table_privilege('openbrain_app',rel,'SELECT')
@@ -1560,6 +1567,16 @@ BEGIN
       OR has_table_privilege('openbrain_readonly',rel,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
       OR (SELECT count(*) FROM pg_policy WHERE polrelid=rel) <> 1 THEN
       RAISE EXCEPTION 'grants assertion failed: embedding index must be parent-gated FORCE RLS with app SELECT/INSERT/UPDATE and readonly SELECT';
+    END IF;
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_policy
+      WHERE polrelid = rel AND polname = expected.policy_name
+        AND polcmd = '*' AND polpermissive
+        AND polroles = ARRAY['openbrain_app'::regrole::oid]
+        AND regexp_replace(pg_get_expr(polqual, polrelid), '\s+', ' ', 'g') = expected.parent_check
+        AND regexp_replace(pg_get_expr(polwithcheck, polrelid), '\s+', ' ', 'g') = expected.parent_check
+    ) THEN
+      RAISE EXCEPTION 'grants assertion failed: embedding index policy must enforce its parent audience on % (name, app role, permissive ALL, USING and WITH CHECK)', expected.table_name;
     END IF;
   END LOOP;
   rel := to_regclass('memory_scope.embedding_generation');
