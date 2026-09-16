@@ -121,6 +121,11 @@ Deno.test("probeDbAtBoot: success path validates connectivity and hybrid schema"
   assertEquals(queries[0], "SELECT 1");
   assert(queries[1].includes("idx_thoughts_content_tsv"));
   assert(queries[1].includes("idx_thoughts_content_trgm"));
+  assert(queries[1].includes("thought_embedding_index"));
+  assert(queries[1].includes("sessions.embedding_index"));
+  assert(queries[1].includes("memory_scope.embedding_generation"));
+  assert(queries[1].includes("memory_scope.embedding_ready(text)"));
+  assert(queries[1].includes("boolean,jsonb,jsonb,integer,text)"));
   assert(queries[1].includes("metadata_degradation_events_id_seq"));
   assert(queries[1].includes("metadata_degradation_outbox"));
   assert(queries[1].includes("last_delivery_attempt_at"));
@@ -175,6 +180,20 @@ Deno.test("probeDbAtBoot: success path validates connectivity and hybrid schema"
   assert(queries[4].includes("FROM oauth_auth.allowed_subject"));
   assert(queries[5].includes("metadata_degradation_notification_state"));
   assert(queries[6].includes("memory_scope.workspace"));
+  assertEquals(client.releaseCalls, 1);
+});
+
+Deno.test("probeDbAtBoot: missing passage schema names migration and activation", async () => {
+  const schema: RequiredSchema = [...COMPLETE_SCHEMA];
+  schema[6] = false;
+  const { pool: fakePool, client } = makeFakePool(bootQueryHandler(schema));
+  const err = await assertRejects(
+    () => probeDbAtBoot(fakePool, "db:5432"),
+    Error,
+  );
+  assertStringIncludes(err.message, "db/15-embedding-index.sql");
+  assertStringIncludes(err.message, "db/03-grants-assertion.sql");
+  assertStringIncludes(err.message, "offline backfill");
   assertEquals(client.releaseCalls, 1);
 });
 
