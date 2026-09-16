@@ -1,5 +1,8 @@
 # Open Brain — Self-Hosted
 
+Embedding changes in server 1.28 require a validated runtime and a reviewed
+[full-corpus index migration](docs/embedding-limits.md) before startup.
+
 [![CI](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/ci.yml)
 [![Leak gate](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/leak-gate.yml/badge.svg?branch=main)](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/leak-gate.yml)
 [![Allowlist guard](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/allowlist-guard.yml/badge.svg?branch=main)](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/allowlist-guard.yml)

@@ -63,6 +63,8 @@ on:
       - "server/scope_contract.ts"
       - "server/db_pool.ts"
       - "server/embeddings.ts"
+      - "server/embedding_*.ts"
+      - "server/services.ts"
       - "server/config.ts"
       - "server/session_toml.ts"
       - "server/postgres_deferred_patched.ts"

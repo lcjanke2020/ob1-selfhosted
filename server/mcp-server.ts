@@ -292,7 +292,8 @@ export function createMcpServer(
     // Requires migration 13; OAuth-enabled upgrades import or enroll subjects
     // with subject-admin before the server roll. Legacy env lists cannot admit.
     // 1.27.0: stable native-token principals and proxy-confined tailnet auth.
-    version: "1.27.0",
+    // 1.28.0: full-source strict passage embeddings; offline index cutover required.
+    version: "1.28.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -523,7 +524,7 @@ export function createMcpServer(
     {
       title: "Capture Thought",
       description:
-        "Save a new thought in a fail-closed workspace/project/visibility audience. The seeded sensitive workspace is personal-only. Generates an embedding and optional metadata; provenance claims remain separate from verified transport identity.",
+        "Save a new thought in a fail-closed workspace/project/visibility audience. The seeded sensitive workspace is personal-only. Indexes full content in strict-fit passages while retaining one canonical record; returns full embedding coverage and optional metadata; provenance claims remain separate from verified transport identity.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
@@ -563,6 +564,13 @@ export function createMcpServer(
             captured.project_id ? `/${captured.project_id}` : ""
           } (${captured.visibility})`,
         );
+        if (captured.embedding_coverage) {
+          parts.push(
+            `| Full embedding coverage: ${
+              JSON.stringify(captured.embedding_coverage)
+            }`,
+          );
+        }
         parts.push(`(id: ${id})`);
         return text(parts.join(" "));
       } catch (e) {
@@ -663,7 +671,7 @@ export function createMcpServer(
     {
       title: "Capture Session",
       description:
-        "Ingest or refresh an agent work session from its TOML front matter. Upserts the session and its artifacts, re-embeds only when the embedded content changed, and stamps provenance/server-owned personal identity. Returns {id, session_id, status, created, reembedded, workspace_id, project_id, visibility} — `id` is the canonical key; write it and the stored scope back into fresh TOML to refresh the same session. String fields are not coerced, list fields contain only strings, and artifacts must use a [[artifacts]] array-of-tables with kind and title required and detail optional. See the 'Session TOML schema' resource for the full front-matter contract, including the personal-only sensitive workspace.",
+        "Ingest or refresh an agent work session from its TOML front matter. Upserts the session and its artifacts, indexes the complete title/goal/summary/resume_context in strict-fit passages, re-embeds when that source or the runtime/model contract changes, and stamps provenance/server-owned personal identity. Returns {id, session_id, status, created, reembedded, workspace_id, project_id, visibility, embedding_coverage?} — `id` is the canonical key; write it and the stored scope back into fresh TOML to refresh the same session. String fields are not coerced, list fields contain only strings, and artifacts must use a [[artifacts]] array-of-tables with kind and title required and detail optional. See the 'Session TOML schema' resource for the full front-matter contract, including the personal-only sensitive workspace.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,
@@ -696,6 +704,9 @@ export function createMcpServer(
           status: res.status,
           created: res.created,
           reembedded: res.reembedded,
+          ...(res.embedding_coverage
+            ? { embedding_coverage: res.embedding_coverage }
+            : {}),
           workspace_id: res.workspace_id,
           project_id: res.project_id,
           visibility: res.visibility,

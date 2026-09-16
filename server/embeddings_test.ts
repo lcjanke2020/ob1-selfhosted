@@ -118,7 +118,7 @@ async function testEmbeddingTimeout(t: Deno.TestContext): Promise<void> {
           `embed() rejected with a non-Error value: ${String(outcome.error)}`,
         );
         const expectedMessage =
-          `Ollama embed timed out after ${FETCH_TIMEOUT_MS}ms at ${OLLAMA_URL}/api/embed`;
+          `Ollama embed timed out after ${FETCH_TIMEOUT_MS}ms`;
         assert(
           outcome.error.message === expectedMessage,
           `expected "${expectedMessage}", got "${outcome.error.message}"`,

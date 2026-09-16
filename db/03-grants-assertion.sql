@@ -1,6 +1,8 @@
 -- Invariant assertions for protected corpus grants and topology: openbrain_app
 -- must be a standalone, non-bypass role with its intended memory access, while
 -- Funnel relations, sink-only roles, and matching pg_hba rules must be absent.
+
+
 --
 -- Why this is its own file:
 --
@@ -1539,3 +1541,49 @@ BEGIN
   END LOOP;
 END;
 $$ LANGUAGE plpgsql;
+
+-- Passage vectors inherit the canonical parent's RLS audience, including
+-- moves. The generation marker is operator-owned; app credentials cannot
+-- declare a partially rebuilt corpus ready.
+DO $$
+DECLARE rel regclass; helper regprocedure;
+BEGIN
+  FOREACH rel IN ARRAY ARRAY[
+    to_regclass('public.thought_embedding_index'),
+    to_regclass('sessions.embedding_index')
+  ] LOOP
+    IF rel IS NULL OR NOT EXISTS (
+      SELECT 1 FROM pg_class WHERE oid=rel AND relrowsecurity AND relforcerowsecurity
+    ) OR NOT has_table_privilege('openbrain_app',rel,'SELECT')
+      OR NOT has_table_privilege('openbrain_app',rel,'INSERT')
+      OR NOT has_table_privilege('openbrain_app',rel,'UPDATE')
+      OR has_table_privilege('openbrain_app',rel,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      OR NOT has_table_privilege('openbrain_readonly',rel,'SELECT')
+      OR has_table_privilege('openbrain_readonly',rel,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      OR (SELECT count(*) FROM pg_policy WHERE polrelid=rel) <> 1 THEN
+      RAISE EXCEPTION 'grants assertion failed: embedding index must be parent-gated FORCE RLS with app SELECT/INSERT/UPDATE and readonly SELECT';
+    END IF;
+  END LOOP;
+  rel := to_regclass('memory_scope.embedding_generation');
+  IF rel IS NULL OR NOT has_table_privilege('openbrain_app',rel,'SELECT')
+    OR has_table_privilege('openbrain_app',rel,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') THEN
+    RAISE EXCEPTION 'grants assertion failed: embedding generation is read-only to the app';
+  END IF;
+  FOREACH helper IN ARRAY ARRAY[
+    to_regprocedure('memory_scope.embedding_ready(text)'),
+    to_regprocedure('memory_scope.invalidate_embedding_index()'),
+    to_regprocedure('memory_scope.search_thought_candidates(vector,double precision,text,text,boolean,jsonb,jsonb,integer,text)')
+  ] LOOP
+    IF helper IS NULL OR NOT EXISTS (
+      SELECT 1 FROM pg_proc p JOIN pg_class t ON t.oid='public.thoughts'::regclass
+      WHERE p.oid=helper AND p.prosecdef AND p.proowner=t.relowner
+        AND p.proconfig=ARRAY['search_path=pg_catalog']
+    ) OR EXISTS (
+      SELECT 1 FROM pg_proc p, LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+      WHERE p.oid=helper AND a.grantee=0
+    ) THEN
+      RAISE EXCEPTION 'grants assertion failed: embedding helper must be owner-owned, fixed-search-path SECURITY DEFINER without PUBLIC access';
+    END IF;
+  END LOOP;
+END;
+$$;

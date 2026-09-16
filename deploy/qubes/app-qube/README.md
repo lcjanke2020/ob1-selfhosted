@@ -1,5 +1,10 @@
 # app qube — mcp + Ollama
 
+For server 1.28, apply the
+[embedding index migration and offline
+backfill](../../../docs/embedding-limits.md) after validating the runtime. The
+new startup gate rejects an incomplete or incompatible index.
+
 The **app** qube of the [three-qube split](../three-qube-design.md): it runs the
 application half (the MCP server + Ollama embeddings) and nothing else. The
 public edge (Funnel + Caddy + log-ingester) lives on the

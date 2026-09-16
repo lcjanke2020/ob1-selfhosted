@@ -1,5 +1,10 @@
 # Hybrid thought search
 
+Server 1.28 uses the strict full-source passage index described in
+[embedding limits](embedding-limits.md). Its vector leg performs exact
+best-passage scoring before canonical-record RRF; legacy HNSW details below
+describe the retained pre-cutover query path. Lexical semantics are unchanged.
+
 Thought recall combines two independent candidate lists:
 
 1. **Vector leg** — pgvector cosine nearest neighbors, gated by `threshold`.
@@ -40,20 +45,19 @@ can still return a semantically relevant row containing that term. Use
 `filter.exclude` for provenance constraints that must apply to both legs. Search
 queries are limited to 8 KiB of UTF-8 input before embedding or SQL parsing.
 
-The vector and lexical legs each inspect at least 50 candidates, or the
-requested final `limit` when it is larger. Each search raises transaction-local
-`hnsw.ef_search` to that candidate depth; filtered searches also enable
-`hnsw.iterative_scan = strict_order`. Both legs apply the same provenance
-include/exclude predicates and the same resolved memory-space audience _before_
-assigning ranks.
+The vector and lexical legs each return at most `max(50, limit)` candidates.
+Both apply the same provenance filters and resolved audience before assigning
+ranks. Server 1.28 scores all eligible passages exactly, collapses them to the
+best score for each canonical record, and then applies the candidate bound. A
+transaction-local 5-second statement timeout bounds SQL execution. Neither a
+candidate limit nor an index declaration bounds the rows scanned or sorted.
 
-pgvector still bounds an iterative HNSW leg with `hnsw.max_scan_tuples` and its
-scan-memory allowance. Thought search treats that as an approximate candidate
-bound before hybrid fusion. Session semantic search uses the same iterative
-settings for its fast path, but owns a stronger cardinality contract: when ANN
-returns fewer rows than requested, it retries through a materialized exact path
-over the RLS-visible, filter-eligible rows. Thus a selective session query does
-not silently underfill merely because the approximate scan reached its bound.
+The retained single-vector query path used before 1.28 sets `hnsw.ef_search` to
+that candidate depth and uses `hnsw.iterative_scan = strict_order`. Its thought
+leg is approximate; its session leg retries underfilled ANN results through an
+exact materialized path. The passage path uses exact scoring directly and does
+not use those HNSW controls. Its scope, uniqueness and rank semantics have
+separate deterministic database regression coverage.
 
 The production fusion is:
 

@@ -199,7 +199,7 @@ export const similarityThresholdSchema = z.number().min(0).max(1).optional()
 
 export const searchThoughtsShape = {
   query: searchQuerySchema.describe(
-    "Natural-language or literal text to search for. The lexical leg supports quoted phrases, OR, and -term web-search syntax.",
+    "Natural-language or literal text to search for. The lexical leg supports quoted phrases, OR, and -term web-search syntax. Queries must fit the model context in one strict request and at most 8192 UTF-8 bytes; overflow is rejected, never truncated.",
   ),
   limit: z.number().int().min(1).max(100).optional().default(10),
   threshold: similarityThresholdSchema.describe(
@@ -302,10 +302,10 @@ export const moveThoughtShape = {
 // ---- sessions ---------------------------------------------------------
 
 export const sessionCaptureShape = {
-  // Same UTF-8 byte cap as capture_thought: the full doc is embedded and
-  // stored, so bound it in bytes, not UTF-16 code units.
+  // Same UTF-8 byte cap as capture_thought: full TOML is stored; only
+  // title/goal/summary/resume_context are embedded. Bound storage in bytes.
   toml_text: boundedUtf8String("toml_text").describe(
-    "The session's TOML front matter (optionally inside a +++ fence)",
+    "The complete session TOML (at most 100000 UTF-8 bytes, optionally inside +++). Indexing covers title, goal, summary and resume_context only; artifacts/lists remain stored. A failed embedding writes no canonical record or partial index.",
   ),
 };
 

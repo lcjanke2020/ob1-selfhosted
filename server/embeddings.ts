@@ -5,49 +5,84 @@ import {
   OLLAMA_URL,
 } from "./config.ts";
 import { boundedFetch, BoundedFetchTimeoutError } from "./bounded_fetch.ts";
+import { EmbeddingContextError } from "./embedding_index.ts";
+import {
+  embeddingResponseJson,
+  embeddingResponseText,
+} from "./embedding_response.ts";
+
+let inFlight = 0;
 
 // Ollama's /api/embed (plural) returns { embeddings: [[...]] }. Older
 // /api/embeddings (singular) returns { embedding: [...] } and is deprecated;
 // we use the newer endpoint for compatibility with batch use later.
-export async function embed(text: string): Promise<number[]> {
-  const truncated = text.slice(0, 8000);
+export async function embed(
+  text: string,
+  options?: { deadline: number },
+): Promise<number[]> {
   const url = `${OLLAMA_URL}/api/embed`;
+  const timeoutMs = options
+    ? Math.min(
+      FETCH_TIMEOUT_MS,
+      Math.ceil(options.deadline - performance.now()),
+    )
+    : FETCH_TIMEOUT_MS;
+  if (timeoutMs <= 0) throw new Error("embedding request deadline exceeded");
+  if (inFlight >= 2) throw new Error("embedding backend busy; retry later");
+  inFlight++;
 
   try {
     return await boundedFetch(
       url,
       {
-        timeoutMs: FETCH_TIMEOUT_MS,
+        timeoutMs,
         init: {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model: EMBED_MODEL, input: truncated }),
+          body: JSON.stringify({
+            model: EMBED_MODEL,
+            input: text,
+            truncate: false,
+          }),
         },
       },
       async (r) => {
         if (!r.ok) {
           let detail = "";
           try {
-            detail = await r.text();
+            detail = await embeddingResponseText(r, 8192);
           } catch (e) {
             // Preserve the best-effort error detail behavior, but do not
             // swallow the request deadline while an error body is stalled.
             if ((e as Error).name === "AbortError") throw e;
           }
-          throw new Error(
-            `Ollama embed failed: ${r.status} ${detail.slice(0, 300)}`,
-          );
+          // Never reflect upstream bodies: they may echo private input.
+          if (r.status === 400) {
+            try {
+              if (
+                JSON.parse(detail).error ===
+                  "the input length exceeds the context length"
+              ) {
+                throw new EmbeddingContextError(
+                  "embedding input exceeds model context",
+                );
+              }
+            } catch (error) {
+              if (error instanceof EmbeddingContextError) throw error;
+            }
+          }
+          throw new Error(`Ollama embed failed: HTTP ${r.status}`);
         }
-        const data = await r.json();
+        const data = await embeddingResponseJson(r);
         const vec = data?.embeddings?.[0];
-        if (!Array.isArray(vec)) {
+        if (!Array.isArray(vec) || data.embeddings.length !== 1) {
           throw new Error("Ollama returned no embedding vector");
         }
         if (vec.length !== EMBED_DIM) {
           throw new Error(
             `Embedding dim mismatch: model "${EMBED_MODEL}" returned ${vec.length}, ` +
               `but EMBED_DIM is ${EMBED_DIM}. Update EMBED_DIM and the vector(N) ` +
-              `column in db/01-schema.sql to match.`,
+              `columns and index checks in db/01-schema.sql, db/04-sessions.sql and db/15-embedding-index.sql to match.`,
           );
         }
         // pgvector's behavior on non-finite floats is undefined — a
@@ -59,16 +94,21 @@ export async function embed(text: string): Promise<number[]> {
               `(NaN/Infinity); refusing to store.`,
           );
         }
+        if (!vec.some((v) => v !== 0)) {
+          throw new Error("Ollama returned a zero embedding vector");
+        }
         return vec;
       },
     );
   } catch (e) {
     if (e instanceof BoundedFetchTimeoutError) {
       throw new Error(
-        `Ollama embed timed out after ${FETCH_TIMEOUT_MS}ms at ${url}`,
+        `Ollama embed timed out after ${timeoutMs}ms`,
       );
     }
     throw e;
+  } finally {
+    inFlight--;
   }
 }
 

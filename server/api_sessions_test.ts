@@ -92,6 +92,14 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
         project_id: null,
         visibility: "workspace",
         reembedded: true,
+        embedding_coverage: {
+          complete: true,
+          fields: ["title", "goal", "summary", "resume_context"],
+          utf8_bytes: 8,
+          utf16_units: 8,
+          chunks: 1,
+          contract: "a".repeat(64),
+        },
       });
     });
 
@@ -104,8 +112,8 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
         // embedCalls assertion below is vacuous (round-1 review finding).
         const deps = makeDeps();
         const api = makeApi((sql) => {
-          if (sql.includes("SELECT content_hash")) {
-            return { rows: [{ content_hash: hash }] };
+          if (sql.includes("AS content_hash")) {
+            return { rows: [{ content_hash: hash, contract: "a".repeat(64) }] };
           }
           if (sql.includes("UPDATE sessions.session SET")) {
             return { rows: [capturedSessionRow("done")] };
@@ -126,7 +134,7 @@ Deno.test("REST /api/v1 — session routes", async (t) => {
 
     await t.step("POST /sessions (unknown id) → 404", async () => {
       const api = makeApi((sql) =>
-        sql.includes("SELECT content_hash") ? { rows: [] } : undefined
+        sql.includes("AS content_hash") ? { rows: [] } : undefined
       );
       const res = await api.request(
         "/sessions",

@@ -15,6 +15,7 @@ import {
   type RecordingDeps,
   withEnv,
 } from "./api_test_support.ts";
+import { EmbeddingContextError } from "./embedding_index.ts";
 import { MAX_SCOPE_ID_CHARS, MAX_SEARCH_QUERY_BYTES } from "./schemas.ts";
 
 const TEST_ENV = {
@@ -67,7 +68,7 @@ Deno.test("MCP publishes server and session-lifecycle metadata", async () => {
   await withMcpFixture(() => undefined, async ({ client }) => {
     assertEquals(client.getServerVersion(), {
       name: "open-brain-homelab",
-      version: "1.27.0",
+      version: "1.28.0",
     });
     const listed = await client.listTools();
     const sessionLookup = listed.tools.find((tool) =>
@@ -309,6 +310,7 @@ Deno.test("search_thoughts publishes and executes its filter contract", async ()
           },
         ]),
         50,
+        "a".repeat(64),
       ]);
 
       const invalidEnvelope = await client.callTool({
@@ -452,6 +454,29 @@ Deno.test("session_list publishes date bounds and rejects invalid dates", async 
       pool.connectCalls,
       0,
       "invalid session-list bounds must fail before DB borrowing",
+    );
+  });
+});
+
+Deno.test("MCP query overflow reports stage, measured units, and no payload", async () => {
+  await withMcpFixture(() => undefined, async ({ client, deps, pool }) => {
+    deps.embed = () => Promise.reject(new EmbeddingContextError());
+    const result = await client.callTool({
+      name: "search_thoughts",
+      arguments: { query: "private query text" },
+    });
+    assertEquals(result.isError, true);
+    const message = JSON.stringify(result.content);
+    assert(message.includes("fields=query"));
+    assert(message.includes("utf8_bytes=18"));
+    assert(message.includes("search=not_started"));
+    assert(!message.includes("private query text"));
+    assert(
+      !pool.clients.some((c) =>
+        c.queryObjectCalls.some((call) =>
+          call.sql.includes("search_thought_candidates")
+        )
+      ),
     );
   });
 });

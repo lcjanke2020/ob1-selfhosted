@@ -166,8 +166,11 @@ and never validates or joins on them; it is not a foreign-key reference.
   preserving the authored spelling; `raw_toml` preserves that original text. A
   timestamp supplied for `session_date` stores its UTC calendar date.
 - **Embedded-for-search content** is `title` / `goal` / `summary` /
-  `resume_context`; the server re-embeds only when that content changes
-  (`content_hash`).
+  `resume_context`; the server indexes the complete selected source as passages
+  and re-embeds when its full-source hash or runtime/model contract changes. One
+  session remains one canonical record; artifacts and list fields are stored but
+  not embedded. See
+  [embedding limits and recovery](../../docs/embedding-limits.md).
 
 **Server-stamped — never author these:** `owner_subject`, `source`,
 `source_node`, `content_hash`, `created_at`, `updated_at`. The server sets
@@ -418,7 +421,12 @@ retain existing fields and artifacts.
    via `session_lookup(branch="…")` / `session_search` — and **include it on
    every later capture.** The `id` makes the call _update_ the same record
    (`created: false`); re-embedding happens only if
-   `title`/`goal`/`summary`/`resume_context` changed.
+   `title`/`goal`/`summary`/`resume_context` or the runtime/model contract
+   changed. Supported long fields are fully indexed without shortening them. A
+   failed chunk changes neither the canonical record nor its artifacts/index.
+   Context-overflow queries must be shortened; a transport timeout still
+   requires reconciliation. [Embedding limits](../../docs/embedding-limits.md)
+   define byte, chunk and deadline bounds.
 
    > ⚠️ **Omitting `id` on a re-capture creates a duplicate session, not an
    > update.** The "never author `id`" rule means _never invent one_ — only ever

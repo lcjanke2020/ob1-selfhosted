@@ -1,5 +1,12 @@
 # Threat model — one page
 
+The passage index inherits each canonical record's audience through forced RLS.
+Index replacement shares the canonical write transaction; source drift or an
+incomplete/incompatible generation makes search fail closed. Runtime identity
+checks assume an immutable, trusted embedding backend; the targeted tokenizer
+canary detects the measured collision and is not a general model certification.
+See [embedding limits](embedding-limits.md).
+
 The security documentation in this repo is deliberately distributed: each doc
 owns the layer it describes. This page assembles the whole model in one place —
 assets, attackers, trust boundaries, defense layers, residual risk — and links

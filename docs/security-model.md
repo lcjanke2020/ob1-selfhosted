@@ -1,5 +1,12 @@
 # Security model
 
+Passage vectors are dependent index data protected by forced RLS through their
+canonical thought/session parent. Source changes invalidate vectors atomically;
+audience moves immediately change their visibility. The app can read the active
+embedding generation but cannot activate one. See the
+[embedding migration contract](embedding-limits.md) for the owner-only offline
+backfill, whole-corpus readiness gate and runtime/model identity boundary.
+
 What this stack trusts, what it doesn't, and what each layer is allowed to do
 after the layer above it fails. The companion doc
 [`funnel-mcp-perimeter.md`](funnel-mcp-perimeter.md) covers the transferable

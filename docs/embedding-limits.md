@@ -1,0 +1,165 @@
+# Embedding coverage, limits, and index migration
+
+Server 1.28 indexes full supported thoughts and session embedding fields as
+passages. Each thought/session remains **one canonical record**, with its
+original ID, full content or TOML, and artifacts. Chunks are dependent index
+data; lookup and search never return separate passage records.
+
+## Source and retrieval contract
+
+Thoughts embed their complete stored content. Fingerprint deduplication still
+retains the original canonical text, including its original case/whitespace;
+recapture embeds that retained text. Content updates embed the full replacement.
+Session source is `title`, `goal`, `summary`, `resume_context`, in that order,
+joined by three NUL delimiters. Arrays, artifacts, repository, branch and other
+fields remain stored and **are not embedded**. SHA-256 covers the entire
+selected source, including text beyond the old 8000 UTF-16-unit prefix.
+
+Version `passages-v1-no-prefix` uses unmodified text and no task prefixes. The
+model's special tokens count against its context automatically: every request
+uses `truncate:false`. The first split targets 4096 UTF-16 units at grapheme
+boundaries. This is a request-size heuristic, **not a token guarantee**. Only
+HTTP 400 with the exact Ollama context-overflow error causes recursive
+splitting. No other error is retried. A grapheme that cannot fit is rejected;
+surrogate pairs, combining sequences and emoji clusters are never split.
+
+The index stores separate passage vectors in one vector-array row per parent.
+Search scores a record by its **maximum passage cosine similarity**, then ranks
+distinct canonical IDs. This preserves late-passage matches without multiplying
+results. Pooling was rejected for this contract: for orthogonal synthetic
+passages, one distinctive passage among many unrelated passages has best-passage
+cosine 1, while their average approaches the unrelated direction. This explains
+the choice; it is not a model-quality measurement. Maximum similarity can favor
+longer documents with more chances to match, which requires corpus evaluation.
+
+Initial passage retrieval uses exact distance scoring, with a transaction-local
+5-second SQL statement timeout. It scans eligible passage vectors and groups
+before limiting records; `LIMIT` bounds returned candidates, not database work.
+It does not use the legacy HNSW indexes. Thought lexical parsing, negative-term
+gates, trigram fallback, provenance filters and RRF remain as described in
+[hybrid search](hybrid-search.md). The vector leg ranks canonical records before
+fusion. Session filters apply before passage scoring. Search uses a repeatable
+read transaction so readiness and retrieval observe one corpus snapshot.
+
+Search queries have one embedding. A query that exceeds the actual model context
+is rejected with a validation error asking for a shorter query. Queries are
+never truncated, split into an OR, or silently changed before lexical parsing.
+
+## Bounds and reporting
+
+| Stage                               | Bound and outcome                                                                                                                        |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Thought content / full session TOML | 100,000 UTF-8 bytes each; rejected before embedding if oversized                                                                         |
+| Selected embedding source           | 100,000 UTF-8 bytes; malformed Unicode rejected                                                                                          |
+| Query text                          | 8192 UTF-8 bytes and one strict model-context fit; byte fit alone does not promise token fit                                             |
+| Initial document passage            | Target 4096 UTF-16 units at a grapheme boundary; overflow splits further                                                                 |
+| One document index                  | At most 128 successful chunks and 255 embedding attempts                                                                                 |
+| Embedding job                       | 15 seconds total for source embedding plus runtime/model checks; each HTTP request also respects `FETCH_TIMEOUT_MS` (default 15 seconds) |
+| Concurrency                         | Two embedding jobs and at most two embedding HTTP requests per process; overload rejects without an unbounded queue                      |
+| Upstream response                   | 64 KiB embedding JSON; 8 KiB error body; 256 KiB identity response                                                                       |
+| SQL search                          | 5 seconds per statement; exact scan costs grow with visible passage count                                                                |
+| Authenticated HTTP body             | 1 MiB for REST/MCP; source-field limits apply inside that envelope                                                                       |
+| MCP result                          | 120,000 serialized UTF-8 bytes, including JSON escaping; oversized results report omissions and recovery guidance                        |
+
+Canonical records remain complete even when the MCP serialization budget
+requires field omission; use the reported REST recovery path to retrieve the
+full record.
+
+A successful embedding covers the complete selected source. Capture and changed
+thought updates return `embedding_coverage` (MCP thought capture includes it in
+its text result): `complete`, contributing `fields`, `utf8_bytes`,
+`utf16_units`, `chunks`, and `contract`. Session refreshes that reuse an
+unchanged index omit this optional field and return `reembedded:false`.
+
+Embedding errors identify document/query stage, contributing fields, measured
+UTF-8 bytes and UTF-16 units, and `write=not_started` or `search=not_started`.
+HTTP status, timeout and context overflow are distinct; upstream error bodies
+are never echoed. REST uses 400 for a context-overflow query and 502 for
+upstream failure; MCP returns a tool error. A transport timeout after a request
+was sent still has an **unknown** write outcome: reconcile by lookup before
+retrying.
+
+All required vectors exist before the canonical write begins. Canonical fields,
+passage vectors, artifacts, revisions and degradation events commit together. A
+failed chunk writes nothing; a failed index write rolls the transaction back.
+Unchanged session refreshes recheck their source/contract under the parent lock,
+so a concurrent edit cannot pair old vectors with new fields. Source-changing
+SQL or an old writer invalidates the dependent index in the same transaction.
+
+The index uses forced parent-gated RLS. A thought move changes the parent
+audience and immediately changes vector visibility; owner deletion cascades. No
+copied workspace/owner fields can drift from the canonical row.
+
+## Runtime identity and the known tokenizer defect
+
+The embedding contract hashes strategy version, model name, model manifest
+digest, dimensions and reported Ollama runtime version. Both document and query
+paths verify that identity before/after work. Sessions reuse an index only when
+its full-source hash and contract both match. Rebuild the whole corpus for a
+model/runtime/prefix/strategy change; a mutable model tag is insufficient.
+
+A distinct-input canary rejects the uppercase collision reproduced in the
+[September investigation](investigations/2026-09-16-embedding-context-overflow.md).
+This detects that particular corruption; it does not certify arbitrary tokenizer
+behavior. Custom runtime builds must expose a distinct version, and the backend
+must remain immutable during service operation. Before any rollout, separately
+validate the selected runtime/model with casing, unknown-token, multilingual,
+boundary and representative retrieval probes. Nomic's
+[model card](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5#usage)
+recommends task prefixes; introducing them is a separate, versioned contract
+change requiring retrieval evaluation and another rebuild.
+
+The tested Ollama 0.24.0 runtime still fails the canary. Read-only tests of
+strict chunk **fit** succeeded for prose, code/UUIDs, CJK, combining characters,
+emoji, and the measured boundary; see
+[recorded results](investigations/2026-09-16-chunk-fit.jsonl). Those results do
+not validate search quality or make that defective runtime deployable. The
+original historically rejected session payload was not recovered; synthetic
+fixtures do not claim byte-for-byte incident replay.
+
+## Reviewed offline migration and cutover
+
+This change does not automatically migrate, backfill or deploy an existing
+installation. Fresh databases also need an activated generation, even when
+empty. Operator approval of the migration and rollout is separate from code
+review.
+
+1. Back up the corpus and preserve the old app/runtime images. Stop all writers
+   and search consumers for maintenance. Validate the chosen corrected runtime
+   and keep its model manifest and version immutable.
+2. Apply `db/15-embedding-index.sql` as the database owner after migrations
+   01–14, then run `db/03-grants-assertion.sql`. Existing canonical records and
+   legacy vectors are retained; the migration initializes no active generation.
+3. Run `server/embedding_backfill.ts` in the new app checkout/image with the
+   corpus owner connection and configured Ollama backend. It uses the existing
+   server environment/configuration and is **read-only by default**. It reports
+   the contract and counts needing rebuild, without printing payloads. For
+   example, from `server/`, using the operator-supplied environment:
+
+   ```sh
+   deno run --allow-env --allow-net embedding_backfill.ts
+   ```
+
+4. Review the plan and runtime evidence, then explicitly run the same command
+   with `--apply`. The tool reads one canonical row at a time, computes all its
+   vectors, and commits its index under a parent lock with full-source hash
+   verification. It never creates replacement canonical records or rewrites
+   session artifacts/timestamps. It skips matching source/contract pairs on
+   rerun. Legacy session `content_hash` becomes the full-source hash on the next
+   ordinary refresh; the new index's `source_hash` is authoritative meanwhile.
+5. After every canonical record has an index, the tool locks both canonical
+   tables, checks full coverage, and activates the contract atomically. Any
+   unsupported input, failed embedding, source race or identity drift prevents
+   activation. A partially completed backfill can resume; it is not a usable
+   mixed-generation search index. Keep the service offline throughout.
+6. Start server 1.28 with the same runtime/model. Startup and every search fail
+   closed unless the active contract and the entire corpus agree. Verify a
+   long-record capture, late-passage search, scoped lookup and failed refresh
+   using approved fixtures before ending maintenance.
+
+Backfill commits per record, not per corpus. If it fails, keep maintenance in
+place and resume or restore the pre-migration backup and old images. Do not
+declare a generation active manually or fall back to searching a mixture. After
+new-version writes, an app-only rollback is insufficient; restore the
+coordinated corpus/runtime/app backup or conduct a separately reviewed reverse
+rebuild.

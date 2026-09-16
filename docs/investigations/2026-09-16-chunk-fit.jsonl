@@ -1,0 +1,8 @@
+{"stage":"runtime_canary","collision":true}
+{"name":"prose","source_bytes":11700,"source_units":11700,"chunks":3,"dim":768,"ms":3859}
+{"name":"code","source_bytes":10440,"source_units":10440,"chunks":3,"dim":768,"ms":10085}
+{"name":"cjk","source_bytes":12000,"source_units":4000,"chunks":2,"dim":768,"ms":8984}
+{"name":"combining","source_bytes":12000,"source_units":9000,"chunks":3,"dim":768,"ms":5580}
+{"name":"nonbmp","source_bytes":16100,"source_units":10500,"chunks":3,"dim":768,"ms":2085}
+{"name":"boundary2046","source_bytes":4092,"source_units":4092,"chunks":1,"dim":768,"ms":4200}
+{"name":"boundary2047","source_bytes":4094,"source_units":4094,"chunks":2,"dim":768,"ms":3600}

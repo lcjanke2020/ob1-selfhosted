@@ -5,6 +5,12 @@
 import { Pool } from "postgres";
 import type { AuthDoor } from "./auth_context.ts";
 import { toVectorLiteral } from "./embeddings.ts";
+import { type EmbeddingIndex } from "./embedding_index.ts";
+import {
+  putEmbeddingIndex,
+  requireEmbeddingReady,
+} from "./embedding_queries.ts";
+import { ConflictError } from "./errors.ts";
 import { withScopeClient } from "./scoped_db.ts";
 import type {
   MemoryVisibility,
@@ -43,6 +49,8 @@ export type SessionUpsertInput = {
   contentHash: string;
   // null => content unchanged: keep the existing embedding (COALESCE).
   embedding: number[] | null;
+  index?: EmbeddingIndex | null;
+  contract?: string;
   provenance: SessionProvenance;
   rawToml: string;
   scope: ResolvedWriteScope;
@@ -158,13 +166,20 @@ export async function getSessionContentHash(
   pool: Pool,
   id: number,
   scope: ResolvedReadScope,
-): Promise<{ hash: string | null } | null> {
+): Promise<{ hash: string | null; contract: string | null } | null> {
   return await withScopeClient(pool, scope, async (client) => {
-    const r = await client.queryObject<{ content_hash: string | null }>(
-      `SELECT content_hash FROM sessions.session WHERE id = $1`,
+    const r = await client.queryObject<
+      { content_hash: string | null; contract: string | null }
+    >(
+      `SELECT i.source_hash AS content_hash, i.contract FROM sessions.session s
+       LEFT JOIN sessions.embedding_index i ON i.session_id = s.id
+         AND i.source_hash = memory_scope.session_embedding_hash(s.title,s.goal,s.summary,s.resume_context)
+       WHERE s.id = $1`,
       [id],
     );
-    return r.rows.length ? { hash: r.rows[0].content_hash } : null;
+    return r.rows.length
+      ? { hash: r.rows[0].content_hash, contract: r.rows[0].contract }
+      : null;
   });
 }
 
@@ -301,6 +316,24 @@ export async function upsertSession(
   const isUpdate = s.id != null;
 
   return await withScopeClient(pool, input.scope, async (client) => {
+    if (isUpdate && input.contract && !input.index) {
+      const locked = await client.queryObject<
+        { content_hash: string; contract: string }
+      >(
+        `SELECT i.source_hash AS content_hash, i.contract FROM sessions.session s
+         JOIN sessions.embedding_index i ON i.session_id = s.id
+         WHERE s.id = $1 AND i.source_hash = memory_scope.session_embedding_hash(s.title,s.goal,s.summary,s.resume_context) FOR UPDATE OF s`,
+        [s.id],
+      );
+      if (
+        locked.rows[0]?.content_hash !== input.contentHash ||
+        locked.rows[0]?.contract !== input.contract
+      ) {
+        throw new ConflictError(
+          "session changed during refresh; prior record and artifacts preserved; retry capture",
+        );
+      }
+    }
     const res = isUpdate
       ? await client.queryObject<UpsertRow>(updateSql, [...cols, s.id])
       : await client.queryObject<UpsertRow>(insertSql, cols);
@@ -311,6 +344,9 @@ export async function upsertSession(
     // Bind the BIGINT key as a JS number for the artifact FK (same lossless
     // bound as the returned id); deno-postgres decodes RETURNING id as BigInt.
     const sessionPk = Number(row.id);
+    if (input.index) {
+      await putEmbeddingIndex(client, "session", sessionPk, input.index);
+    }
 
     // Reconcile artifact children: a qualified (WHERE session_pk) delete then
     // re-insert, keyed on the BIGINT canonical key.
@@ -392,6 +428,7 @@ export async function searchSessions(
   pool: Pool,
   opts: {
     embedding: number[];
+    contract?: string;
     limit?: number;
     threshold?: number;
     status?: string;
@@ -405,7 +442,7 @@ export async function searchSessions(
   const embStr = toVectorLiteral(embedding);
   const params: unknown[] = [embStr];
   let p = 2;
-  const cond: string[] = ["embedding IS NOT NULL"];
+  const cond: string[] = [opts.contract ? "true" : "embedding IS NOT NULL"];
   if (status) {
     cond.push(`status = $${p++}::sessions.session_status`);
     params.push(status);
@@ -442,6 +479,30 @@ export async function searchSessions(
      ORDER BY embedding <=> $1::vector
      LIMIT $${p}`;
   return await withScopeClient(pool, scope, async (client) => {
+    if (opts.contract) {
+      await requireEmbeddingReady(client, opts.contract);
+      // Score all visible passages, collapse by canonical ID, then rank.
+      // Exact scoring makes late-passage and duplicate suppression deterministic.
+      const result = await client.queryObject<
+        Omit<SessionSearchRow, "id" | "score"> & { id: bigint; score: string }
+      >(
+        `WITH eligible AS MATERIALIZED (
+           SELECT id, session_id, title, status, last_update, workspace_id, project_id, visibility
+           FROM sessions.session WHERE ${cond.join(" AND ")}
+         ), scored AS (
+           SELECT s.*, 1 - (SELECT min(v <=> $1::vector) FROM unnest(i.vectors) AS v) AS score
+           FROM eligible s JOIN sessions.embedding_index i ON i.session_id = s.id
+           WHERE i.contract = $${p + 1}
+         ) SELECT * FROM scored ORDER BY score DESC, id LIMIT $${p}`,
+        [...searchParams, opts.contract],
+      );
+      return result.rows.map((row) => ({
+        ...row,
+        id: Number(row.id),
+        score: Number(row.score),
+      }))
+        .filter((row) => row.score >= threshold);
+    }
     // RLS and the optional status/repository/tag predicates are residual
     // filters on the HNSW scan. Without iterative scanning, all of the first
     // approximate candidates can be discarded before a farther visible match
@@ -488,7 +549,7 @@ export async function searchSessions(
         score: Number(row.score),
       }))
       .filter((row) => row.score >= threshold);
-  });
+  }, Boolean(opts.contract));
 }
 
 export async function listSessions(

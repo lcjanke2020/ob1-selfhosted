@@ -93,6 +93,7 @@ services:
       - ../../db/12-auth-audit-grants.sql:/docker-entrypoint-initdb.d/12-auth-audit-grants.sql:ro
       - ../../db/13-oauth-subjects.sql:/docker-entrypoint-initdb.d/13-oauth-subjects.sql:ro
       - ../../db/14-native-token-principals.sql:/docker-entrypoint-initdb.d/14-native-token-principals.sql:ro
+      - ../../db/15-embedding-index.sql:/docker-entrypoint-initdb.d/15-embedding-index.sql:ro
       # Keep the stable source filename, but run the catalog assertion last so
       # later/future schemas and topology invariants are covered.
       - ../../db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro

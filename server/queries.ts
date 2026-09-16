@@ -5,6 +5,14 @@ import type { Pool, PoolClient } from "postgres";
 import { getClient } from "./db_pool.ts";
 import type { ThoughtMatch, ThoughtRecord } from "./db.ts";
 import { toVectorLiteral } from "./embeddings.ts";
+import {
+  type EmbeddingCoverage,
+  type EmbeddingIndex,
+} from "./embedding_index.ts";
+import {
+  putEmbeddingIndex,
+  requireEmbeddingReady,
+} from "./embedding_queries.ts";
 import { ConflictError } from "./errors.ts";
 import type { MetadataDegradationEvent } from "./metadata.ts";
 import { withScopeClient } from "./scoped_db.ts";
@@ -21,6 +29,7 @@ import type {
 export type SearchOptions = {
   query: string;
   embedding: number[];
+  contract?: string;
   limit?: number;
   threshold?: number;
   filter?: ThoughtSearchFilter;
@@ -161,6 +170,21 @@ export async function searchThoughts(
     candidateLimit,
   ];
   return await withScopeClient(pool, scope, async (client) => {
+    if (opts.contract) {
+      await requireEmbeddingReady(client, opts.contract);
+      const result = await client.queryObject<HybridCandidate>(
+        `SELECT thoughts.id, thoughts.content, thoughts.metadata,
+                thoughts.workspace_id, thoughts.project_id, thoughts.visibility,
+                thoughts.created_at, candidates.similarity,
+                candidates.vector_rank, candidates.lexical_rank, candidates.lexical_source_priority
+         FROM memory_scope.search_thought_candidates(
+           $1::vector, $2::double precision, $3::text, $4::text, $5::boolean,
+           $6::jsonb, $7::jsonb, $8::int, $9::text
+         ) candidates JOIN thoughts ON thoughts.id = candidates.candidate_id`,
+        [...params, opts.contract],
+      );
+      return fuseHybridCandidates(result.rows, limit);
+    }
     // hnsw.ef_search defaults to 40, which would silently cap an unfiltered
     // vector leg below the documented minimum of 50 candidates. Scope the
     // per-request depth to this transaction; set_config accepts a bound value
@@ -205,7 +229,7 @@ export async function searchThoughts(
       params,
     );
     return fuseHybridCandidates(result.rows, limit);
-  });
+  }, Boolean(opts.contract));
 }
 
 export type ListOptions = {
@@ -276,18 +300,43 @@ export async function fetchThought(
 export type CaptureInput = {
   content: string;
   embedding: number[];
+  index?: EmbeddingIndex;
   metadata: Record<string, unknown>;
   degradationEvents: MetadataDegradationEvent[];
   scope: ResolvedWriteScope;
 };
 
 export type CaptureOutcome = {
+  embedding_coverage?: EmbeddingCoverage;
   id: string;
   metadata: Record<string, unknown>;
   workspace_id: string;
   project_id: string | null;
   visibility: "personal" | "project" | "workspace";
 };
+
+export async function thoughtEmbeddingSource(
+  pool: Pool,
+  content: string,
+  scope: ResolvedWriteScope,
+): Promise<string> {
+  return await withScopeClient(pool, scope, async (client) => {
+    const result = await client.queryObject<{ content: string }>(
+      `SELECT content AS content FROM thoughts
+       WHERE content_fingerprint = ${FINGERPRINT_SQL("$1")}
+         AND workspace_id = $2 AND project_id IS NOT DISTINCT FROM $3
+         AND visibility = $4::memory_scope.visibility AND owner_subject IS NOT DISTINCT FROM $5`,
+      [
+        content,
+        scope.workspaceId,
+        scope.projectId,
+        scope.visibility,
+        scope.ownerSubject,
+      ],
+    );
+    return result.rows[0]?.content ?? content;
+  });
+}
 
 // Upsert by content fingerprint. The fingerprint is a SHA256 of the
 // trimmed/lowercased/whitespace-collapsed content, computed inline so dedupe
@@ -339,6 +388,13 @@ export async function captureThought(
     const persisted = result.rows[0];
     if (!persisted) {
       throw new Error("thought upsert returned no row");
+    }
+
+    // The trigger compares the full retained canonical text's SHA-256. A
+    // concurrent dedupe/content change therefore rolls this entire capture
+    // back instead of installing vectors for the wrong source.
+    if (input.index) {
+      await putEmbeddingIndex(client, "thought", persisted.id, input.index);
     }
 
     await recordDegradationEvents(
@@ -420,6 +476,7 @@ export type UpdateThoughtInput = {
   id: string;
   content: string;
   embedding: number[];
+  index?: EmbeddingIndex;
   // Fresh classifier output plus the new metadata_extraction stamp; the
   // preserved capture keys are merged in SQL from the row's current state so a
   // concurrent edit cannot be clobbered by a stale read.
@@ -430,6 +487,7 @@ export type UpdateThoughtInput = {
 };
 
 export type UpdateThoughtOutcome = ThoughtRecord & {
+  embedding_coverage?: EmbeddingCoverage;
   outcome: "updated" | "unchanged";
   // Number of revision rows on record after this call.
   revision: number;
@@ -675,6 +733,10 @@ export async function updateThoughtContent(
     }
     await client.queryArray("RELEASE SAVEPOINT thought_mutation");
     if (!row) throw new Error("thought update returned no row");
+
+    if (input.index) {
+      await putEmbeddingIndex(client, "thought", row.id, input.index);
+    }
 
     await recordDegradationEvents(client, row.id, input.degradationEvents);
 
