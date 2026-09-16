@@ -1,0 +1,21 @@
+{"kind":"deployment","at":"2026-09-16T16:15:58.171Z","model":"nomic-embed-text","version":"0.24.0","parameters":"num_ctx                        8192","model_info":{"general.architecture":"nomic-bert","nomic-bert.context_length":2048,"nomic-bert.embedding_length":768,"tokenizer.ggml.model":"bert"}}
+{"kind":"probe","name":"tiny","utf16_units":5,"utf8_bytes":5,"status":200,"prompt_eval_count":3,"dimensions":768,"error":null,"elapsed_ms":20}
+{"kind":"probe","name":"ascii-2045-strict","utf16_units":4090,"utf8_bytes":4090,"truncate":false,"status":200,"prompt_eval_count":2047,"dimensions":768,"error":null,"elapsed_ms":4619}
+{"kind":"probe","name":"ascii-2046-strict","utf16_units":4092,"utf8_bytes":4092,"truncate":false,"status":200,"prompt_eval_count":2048,"dimensions":768,"error":null,"elapsed_ms":4145}
+{"kind":"probe","name":"ascii-2047-strict","utf16_units":4094,"utf8_bytes":4094,"truncate":false,"status":400,"prompt_eval_count":null,"dimensions":null,"error":"the input length exceeds the context length","elapsed_ms":9}
+{"kind":"probe","name":"ascii-2100-default","utf16_units":4200,"utf8_bytes":4200,"status":200,"prompt_eval_count":2048,"dimensions":768,"error":null,"elapsed_ms":4157}
+{"kind":"probe","name":"ascii-2100-truncate","utf16_units":4200,"utf8_bytes":4200,"truncate":true,"status":200,"prompt_eval_count":2048,"dimensions":768,"error":null,"elapsed_ms":4153}
+{"kind":"probe","name":"ascii-2100-strict","utf16_units":4200,"utf8_bytes":4200,"truncate":false,"status":400,"prompt_eval_count":null,"dimensions":null,"error":"the input length exceeds the context length","elapsed_ms":7}
+{"kind":"probe","name":"ascii-2100-context8192","utf16_units":4200,"utf8_bytes":4200,"truncate":false,"options":{"num_ctx":8192},"status":400,"prompt_eval_count":null,"dimensions":null,"error":"the input length exceeds the context length","elapsed_ms":9}
+{"kind":"probe","name":"prose-8000","utf16_units":8000,"utf8_bytes":8000,"status":200,"prompt_eval_count":1510,"dimensions":768,"error":null,"elapsed_ms":2992}
+{"kind":"probe","name":"paths-8000","utf16_units":8000,"utf8_bytes":8000,"status":200,"prompt_eval_count":2048,"dimensions":768,"error":null,"elapsed_ms":4189}
+{"kind":"probe","name":"cjk-2045-strict","utf16_units":2045,"utf8_bytes":6135,"truncate":false,"status":200,"prompt_eval_count":2047,"dimensions":768,"error":null,"elapsed_ms":4635}
+{"kind":"probe","name":"cjk-2046-strict","utf16_units":2046,"utf8_bytes":6138,"truncate":false,"status":200,"prompt_eval_count":2048,"dimensions":768,"error":null,"elapsed_ms":4135}
+{"kind":"probe","name":"cjk-2047-default","utf16_units":2047,"utf8_bytes":6141,"status":400,"prompt_eval_count":null,"dimensions":null,"error":"the input length exceeds the context length","elapsed_ms":10}
+{"kind":"probe","name":"cjk-3000-default","utf16_units":3000,"utf8_bytes":9000,"status":400,"prompt_eval_count":null,"dimensions":null,"error":"the input length exceeds the context length","elapsed_ms":11}
+{"kind":"probe","name":"cjk-3000-truncate","utf16_units":3000,"utf8_bytes":9000,"truncate":true,"status":400,"prompt_eval_count":null,"dimensions":null,"error":"the input length exceeds the context length","elapsed_ms":9}
+{"kind":"probe","name":"combining-6000","utf16_units":6000,"utf8_bytes":8000,"status":200,"prompt_eval_count":2002,"dimensions":768,"error":null,"elapsed_ms":4447}
+{"kind":"probe","name":"nonbmp-6000","utf16_units":6000,"utf8_bytes":10000,"status":200,"prompt_eval_count":2002,"dimensions":768,"error":null,"elapsed_ms":4441}
+{"kind":"probe","name":"code-8000","utf16_units":8000,"utf8_bytes":8100,"status":400,"prompt_eval_count":null,"dimensions":null,"error":"the input length exceeds the context length","elapsed_ms":9}
+{"kind":"probe","name":"uuid-8000","utf16_units":8000,"utf8_bytes":8000,"status":200,"prompt_eval_count":2048,"dimensions":768,"error":null,"elapsed_ms":4159}
+{"kind":"probe","name":"session-8000","utf16_units":8000,"utf8_bytes":8680,"status":400,"prompt_eval_count":null,"dimensions":null,"error":"the input length exceeds the context length","elapsed_ms":10}
