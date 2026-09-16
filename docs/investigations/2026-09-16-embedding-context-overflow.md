@@ -1,9 +1,12 @@
 # OpenBrain embedding context overflow — live investigation, 2026-09-16
 
-The reported error is reproducible in the deployed `embed()` function. There are
-two interacting problems: OpenBrain clips text by UTF-16 code units rather than
-model tokens, and Ollama's default token truncation fails for some inputs. A
-larger `num_ctx` setting does not enlarge this deployment's effective context.
+The reported error is reproducible in the deployed `embed()` function. OpenBrain
+clips text by UTF-16 code units rather than model tokens; Ollama 0.24.0's
+token-to-text truncation retry can overflow again when the retained prefix
+contains unknown tokens. The same runtime also mishandles uppercase text: two
+unrelated short uppercase phrases produced identical embeddings in live probes.
+Chunking alone does not correct that defect. A larger `num_ctx` setting does not
+enlarge this deployment's effective context.
 
 This is an investigation and reproducer, not a deployed correction. No service
 configuration, model, database record or schema was changed during the probes.
@@ -71,7 +74,10 @@ requests provide no measured token count.
 
 The strict repeat probes establish a 2048-token accepted boundary and two tokens
 of overhead for those inputs. They do not establish a universal character budget
-or prove that CJK/emoji are represented meaningfully by this vocabulary.
+or prove that CJK/emoji are represented meaningfully by this vocabulary. The
+combining-mark and emoji cases consume only 2002 tokens; neither exercises
+truncation. In the follow-up run they also produce identical vector hashes,
+which illustrates why HTTP 200 does not establish meaningful representation.
 
 Separately, importing `/app/embeddings.ts` inside the running app container and
 calling its exported `embed()` produced:
@@ -84,6 +90,32 @@ calling its exported `embed()` produced:
 
 No OpenBrain capture API or database mutation was used for these reproductions.
 
+### Follow-up: unknown-token placement and casing
+
+[Follow-up results](2026-09-16-embedding-context-followup.jsonl) contain 16
+requests: eight repeated controls and eight new cases on the same runtime and
+model. Eleven succeeded and five reproduced the overflow. Successful responses
+include `embedding_sha256`, SHA-256 of the UTF-8 JSON serialization of the
+returned numeric array; raw vectors are not published. Equal hashes here compare
+exact numeric arrays, not retrieval quality or a cross-runtime similarity
+threshold. The original 20-result artifact remains unchanged.
+
+| New synthetic input                                 | Default-policy result                                                           |
+| --------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `x` + space, repeated 2047 times                    | 200, 2048 tokens                                                                |
+| 2100 repetitions of `x` + space, then emoji         | 200, 2048 tokens; same hash as the strict 2046-repeat control                   |
+| Emoji + space, then 2100 repetitions of `x` + space | 400, context overflow                                                           |
+| `X` + space, then 2099 repetitions of `x` + space   | 400, context overflow                                                           |
+| `REPLACE SUMP PUMP` / `CREATE A SPREADSHEET`        | Both 200, five tokens each, **identical vectors**                               |
+| `replace sump pump` / `create a spreadsheet`        | Both 200, six / seven tokens; distinct from each other and the uppercase vector |
+
+Reading `/api/show` with `verbose:true` also verified the deployed vocabulary:
+30,522 entries; `[UNK]=100`, `[CLS]=101`, `[SEP]=102`, `▁[=1031`, `▁]=1033`,
+`▁x=1060`, and `▁we=2057`. The `▁` prefix marks a word boundary. There are no
+ASCII-uppercase vocabulary entries outside bracketed special tokens; `▁X`,
+`▁We`, `▁数`, `▁😀`, and `▁é` are absent. These are selected vocabulary lookups,
+not captured intermediate token arrays.
+
 ## Why `truncate:true` and `num_ctx:8192` do not fix it
 
 [Ollama documents](https://docs.ollama.com/api/embed) truncation as enabled by
@@ -93,15 +125,30 @@ for others.
 
 In the
 [0.24.0 embedding handler](https://github.com/ollama/ollama/blob/v0.24.0/server/routes.go#L762-L802),
-an overlong input is tokenized, clipped, decoded back to text, then embedded one
-more time. The decoded text is not checked in a loop before that final attempt.
-Tokenization of decoded text can expand again. The observed content-dependent
-failure is consistent with that mechanism and
+an overlong input is tokenized without special tokens, clipped to 2046 content
+tokens after reserving BOS/EOS, decoded back to text, then embedded once more.
+The decoded text is not checked in a loop before that final attempt.
+
+The tagged
+[WordPiece decoder](https://github.com/ollama/ollama/blob/v0.24.0/tokenizer/wordpiece.go#L35-L55)
+writes token 100 as literal `[UNK]`. Its
+[encoder](https://github.com/ollama/ollama/blob/v0.24.0/tokenizer/wordpiece.go#L57-L150)
+splits punctuation before vocabulary lookup: `[UNK]` becomes `[`, unknown `UNK`,
+and `]`, expanding one token to three. For a full retained prefix of otherwise
+stable `x` tokens with `u` unknowns, the retry therefore needs `2048 + 2u`
+tokens including BOS/EOS. One retained unknown predicts 2050; 2046 unknowns, as
+in the repeated `数` case, predict 6140. These counts are source-derived, **not
+measured `prompt_eval_count` values** from failed requests. No intermediate
+arrays were instrumented in the deployed runner.
+
+The new placement probes confirm the predicted success/failure distinction: an
+unknown discarded beyond the cutoff is harmless to that retry; one retained at
+the beginning causes it to overflow. This is a concrete mechanism for the tested
+failures, not an exhaustive characterization of every possible decode/re-encode
+transformation. It agrees with
 [upstream issue #14186](https://github.com/ollama/ollama/issues/14186).
 [PR #14230](https://github.com/ollama/ollama/pull/14230) proposes a verification
-loop and was still open when checked. We did not instrument the deployed
-tokenizer's intermediate arrays, so the exact expansion for each probe remains
-an inference rather than a measured token trace.
+loop and was still open when checked on 2026-09-16.
 
 The
 [0.24.0 model loader](https://github.com/ollama/ollama/blob/v0.24.0/llm/server.go#L166-L171)
@@ -109,6 +156,32 @@ clamps context to the GGUF training-context metadata. The live metadata,
 resident context, warning logs and explicit 8192 request agree. Setting a larger
 number alone cannot fix this deployment. The model's advertised long-context
 capability does not override the loaded artifact and runtime behavior.
+
+## Uppercase inputs also affect successful embeddings
+
+The
+[0.24.0 Nomic BERT constructor](https://github.com/ollama/ollama/blob/v0.24.0/model/models/nomicbert/model.go#L200-L221)
+passes `lowercase=false` to WordPiece despite the uncased vocabulary. With this
+encoder, tested capitalized ASCII words such as `We` and `X` cannot be matched;
+an unmatched word becomes `[UNK]`. This also explains the uppercase overflow
+discriminator and the three-word uppercase collision above. The source-selected
+tokenizer matches the observed `--ollama-engine` runner.
+
+This affects short successful requests as well as long documents. The live
+collision proves loss of distinction for those phrases; it does not quantify
+corpus-wide recall or prove that every stored vector is unusable. The original
+20 probes did not distinguish correct from incorrect case normalization.
+
+[Upstream issue #13942](https://github.com/ollama/ollama/issues/13942) documents
+the same uppercase collision. The direct lowercase-change proposal,
+[PR #13943](https://github.com/ollama/ollama/pull/13943), was closed
+**unmerged**. A later
+[upstream version comparison](https://github.com/ollama/ollama/issues/13942#issuecomment-4617769764)
+reports matching lower/uppercase results on 0.30.0 and 0.30.3, with numerical
+changes even for lowercase input relative to earlier runtimes. That is upstream
+evidence, not a replacement-runtime test performed here. Validate a selected
+runtime/model combination before relying on it; do not infer a deployed fix from
+a closed issue or unmerged patch.
 
 ## OpenBrain limits relevant to this failure
 
@@ -160,7 +233,9 @@ edit entirely after the 8000-unit boundary does not trigger re-embedding.
 Successful Ollama-side truncation can narrow coverage further, without any
 coverage signal returned by `session_capture`. The hash represents the text
 OpenBrain submitted, not necessarily every token the model finally consumed.
-Neither model identity nor embedding-strategy version is included in this hash.
+Neither model identity, runtime/tokenizer identity nor embedding-strategy
+version is included in this hash. Fixing the runtime can therefore change
+embeddings without changing the session hash, even with identical model bytes.
 
 Thoughts have a separate deduplication fingerprint in
 `server/queries.ts:FINGERPRINT_SQL`: SHA-256 over the UTF-8 encoding of the
@@ -192,23 +267,34 @@ independent user-visible thoughts or sessions. Make embedding input preparation
 an explicit, versioned contract shared by thought and session writes and search
 queries:
 
-1. Embed supported chunks with `truncate:false`; verify fit using the actual
+1. Validate a corrected embedding runtime/model **before or together with**
+   chunking. Repeat boundary, unknown-token, casing and representative retrieval
+   checks; choose the tokenizer, normalization and task-prefix contract
+   together. The
+   [Nomic model card](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5#usage)
+   specifies `search_document:` and `search_query:` prefixes, which OpenBrain
+   currently omits. Include prefixes and special tokens in each chunk's budget.
+   Chunking or lowercasing alone is not a validated repair of this runtime.
+2. Embed supported chunks with `truncate:false`; verify fit using the actual
    tokenizer or bounded splitting on the specific context-overflow rejection.
    Preserve Unicode boundaries and never drop a chunk silently. Do not retry
    unrelated 400s, transport failures or timeouts as if they were length errors.
-2. Decide how document chunks participate in retrieval. Per-chunk vectors
+3. Decide how document chunks participate in retrieval. Per-chunk vectors
    preserve matching passages but require schema/query work. Pooling chunk
    vectors avoids that schema change but may dilute a distinctive passage;
    evaluate recall before choosing it. Keep query handling consistent with the
    chosen strategy.
-3. Replace the silent 8000-unit prefix loss with explicit supported-record and
+4. Replace the silent 8000-unit prefix loss with explicit supported-record and
    chunk limits, coverage reporting, and hashing of the full chosen source. A
-   changed strategy/model needs a deliberate re-embedding plan for existing
-   records, not just new writes.
-4. Return actionable overflow/coverage information in correct units, naming
+   changed strategy/model/runtime/tokenizer needs a versioned index identity and
+   a **full-corpus re-embedding plan**, including unchanged records. Preserve
+   thought deduplication separately. Do not build the new chunk index using the
+   defective runtime and then rebuild it again after an upgrade. Coordinate
+   corpus rebuild and query cutover so incompatible vector spaces are not mixed.
+5. Return actionable overflow/coverage information in correct units, naming
    contributing fields and whether the write committed. Retain complete source
    records and exclude private content from diagnostic messages.
-5. Cover creation and refresh failure preserving existing rows/artifacts,
+6. Cover creation and refresh failure preserving existing rows/artifacts,
    thought updates, both search paths, Unicode boundaries, hash alignment,
    request deadlines, and REST/MCP error reporting. Publish the complete limits
    contract and update session-tracker/tool guidance as part of that correction.
@@ -237,5 +323,59 @@ Adjust the URL and network permission to the endpoint being tested. To select a
 short check, append `tiny cjk-2047-default code-8000` after the script path.
 HTTP error responses are recorded observations, not a nonzero script exit;
 network/parse/metadata failures abort. No input text or vectors are printed. The
-script was formatted/type-checked with Deno and executed against the live
-configured model; the adjacent JSONL preserves that run.
+script now contains 28 cases. The original artifact records the initial 20; the
+follow-up artifact records this selected run:
+
+```sh
+OLLAMA_URL=http://127.0.0.1:11434 EMBED_MODEL=nomic-embed-text \
+  deno run --allow-env=OLLAMA_URL,EMBED_MODEL --allow-net=127.0.0.1:11434 \
+  scripts/probe-embedding-context.ts \
+  tiny ascii-2046-strict ascii-2100-default cjk-2047-default \
+  combining-6000 nonbmp-6000 code-8000 session-8000 \
+  ascii-2047-default unknown-after-cut unknown-before-cut uppercase-before-cut \
+  uppercase-pump uppercase-spreadsheet lowercase-pump lowercase-spreadsheet
+```
+
+To reproduce the exported-function check, run the following from the deployed
+repository using its Compose file. The existing container supplies the app's
+required environment; importing configuration reads those settings but does not
+print credentials or open a database connection. The three calls only perform
+synthetic embedding inference. Adjust the Compose file for the stack being
+tested.
+
+```sh
+docker compose --env-file deploy/qubes/app-qube/.env \
+  -f deploy/qubes/app-qube/docker-compose.yml exec -T mcp \
+  deno run --cached-only --allow-env --allow-net --allow-read /dev/stdin <<'JS'
+const { embed } = await import("file:///app/embeddings.ts");
+const cases = [
+  ["short", "hello"],
+  ["cjk-3000", "数据库嵌入".repeat(600)],
+  [
+    "code-8800",
+    "const foo_bar = await svc.session_capture({toml_text: payload}); // réembedding\n"
+      .repeat(120).slice(0, 8800),
+  ],
+];
+for (const [name, input] of cases) {
+  try {
+    const vector = await embed(input);
+    console.log(JSON.stringify({ name, utf16_units: input.length, dimensions: vector.length }));
+  } catch (error) {
+    console.log(JSON.stringify({ name, utf16_units: input.length, error: String(error) }));
+  }
+}
+JS
+```
+
+The function check was repeated during review: `short` returned 768 dimensions;
+`cjk-3000` and `code-8800` both returned the reported Ollama context error. The
+probe is a point-in-time diagnostic, not a CI inference test. Repository
+formatting/lint CI covers it, but the existing type-check job does not target
+this script. Validation here used Deno 2.9.4 from the repository root:
+
+```sh
+deno fmt --check
+deno lint
+deno check scripts/probe-embedding-context.ts
+```

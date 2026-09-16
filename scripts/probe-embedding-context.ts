@@ -1,7 +1,7 @@
 // Read-only synthetic inference probe. Never calls OpenBrain capture/update APIs.
 // Requires explicit OLLAMA_URL and EMBED_MODEL environment variables.
 // Run all cases with no arguments, or pass case names to select a subset.
-// Output contains sizes, statuses and model metadata, not inputs or vectors.
+// Output contains sizes, statuses, vector hashes and metadata, not raw vectors.
 
 type Probe = {
   name: string;
@@ -72,6 +72,14 @@ const probes: Probe[] = [
         .repeat(80),
     ].join("\0").slice(0, 8000),
   },
+  { name: "ascii-2047-default", input: "x ".repeat(2047) },
+  { name: "unknown-after-cut", input: "x ".repeat(2100) + "😀" },
+  { name: "unknown-before-cut", input: "😀 " + "x ".repeat(2100) },
+  { name: "uppercase-before-cut", input: "X " + "x ".repeat(2099) },
+  { name: "uppercase-pump", input: "REPLACE SUMP PUMP" },
+  { name: "uppercase-spreadsheet", input: "CREATE A SPREADSHEET" },
+  { name: "lowercase-pump", input: "replace sump pump" },
+  { name: "lowercase-spreadsheet", input: "create a spreadsheet" },
 ];
 
 const selected = new Set(Deno.args);
@@ -86,6 +94,20 @@ if (!base || !model) {
   throw new Error("Set OLLAMA_URL and EMBED_MODEL explicitly");
 }
 const encoder = new TextEncoder();
+
+// Compare exact numeric arrays without publishing 768 floating-point values.
+// This fingerprint is not a measure of retrieval quality or cross-runtime drift.
+async function vectorHash(vector: unknown): Promise<string | null> {
+  if (!Array.isArray(vector)) return null;
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    encoder.encode(JSON.stringify(vector)),
+  );
+  return Array.from(
+    new Uint8Array(digest),
+    (byte) => byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
 
 async function request(route: string, body?: unknown) {
   const response = await fetch(`${base}/api/${route}`, {
@@ -132,6 +154,7 @@ for (const { name, input, ...options } of probes) {
     status,
     prompt_eval_count: data.prompt_eval_count ?? null,
     dimensions: data.embeddings?.[0]?.length ?? null,
+    embedding_sha256: await vectorHash(data.embeddings?.[0]),
     error: data.error ?? null,
     elapsed_ms: Math.round(performance.now() - start),
   }));
