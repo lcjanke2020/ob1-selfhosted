@@ -10,6 +10,10 @@ export const MAX_EMBEDDING_DURATION_MS = 15_000;
 
 export class EmbeddingContextError extends Error {}
 
+// Locally formatted document failures already include source units and write
+// status. The service layer preserves that diagnostic when mapping its type.
+export class EmbeddingDocumentError extends Error {}
+
 export type EmbedOne = (
   text: string,
   options?: { deadline: number },
@@ -48,7 +52,7 @@ export async function sourceHash(source: string): Promise<string> {
   ).join("");
 }
 
-// Never split a surrogate pair, combining sequence, or emoji grapheme. A
+// Never split a surrogate pair, combining sequence, or emoji grapheme.
 // Prefer a boundary at/before the target, then the first boundary after it.
 // Zero means there is no interior boundary, not merely no earlier boundary.
 function splitPoint(text: string, target: number): number {
@@ -72,8 +76,10 @@ export async function buildEmbeddingIndex(
   const context = `fields=${
     fields.join(",")
   }; utf8_bytes=${bytes}; utf16_units=${source.length}`;
-  const fail = (reason: string): Error =>
-    new Error(`embedding document: ${reason}; ${context}; write=not_started`);
+  const fail = (reason: string): EmbeddingDocumentError =>
+    new EmbeddingDocumentError(
+      `embedding document: ${reason}; ${context}; write=not_started`,
+    );
   if (!source.isWellFormed()) throw fail("invalid Unicode");
   if (bytes > MAX_EMBEDDING_SOURCE_BYTES) {
     throw fail(`source exceeds ${MAX_EMBEDDING_SOURCE_BYTES} UTF-8 bytes`);

@@ -15,6 +15,7 @@ import {
   withEnv,
 } from "./api_test_support.ts";
 import { MAX_CONTENT_BYTES, MAX_SEARCH_QUERY_BYTES } from "./schemas.ts";
+import { EmbeddingContextError } from "./embedding_index.ts";
 import { computeContentHash, parseSessionToml } from "./session_toml.ts";
 
 const TEST_ENV = {
@@ -473,6 +474,35 @@ await withEnv([], TEST_ENV, async () => {
           UpstreamError,
           message,
         );
+      },
+    );
+
+    Deno.test(
+      "thought capture: document failure reports context once and never mutates storage",
+      async () => {
+        const mutations: string[] = [];
+        const pool = new FakePool((sql) => {
+          if (/\b(INSERT|UPDATE|DELETE)\b/.test(sql)) mutations.push(sql);
+          return undefined;
+        });
+        const deps = makeDeps();
+        deps.embed = () => {
+          throw new EmbeddingContextError("context overflow");
+        };
+        const error = await assertRejects(
+          () =>
+            captureThoughtWithMetadata(
+              asPool(pool),
+              { content: "e\u0301", auth: AUTH, via: "rest" },
+              deps,
+            ),
+          UpstreamError,
+        );
+        assertEquals(
+          error.message,
+          "embedding document: one grapheme exceeds model context; fields=content; utf8_bytes=3; utf16_units=2; write=not_started",
+        );
+        assertEquals(mutations, []);
       },
     );
 

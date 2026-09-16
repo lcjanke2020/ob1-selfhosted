@@ -19,6 +19,7 @@ import {
   EmbeddingContextError,
   type EmbeddingCoverage,
   embeddingCoverage,
+  EmbeddingDocumentError,
   type EmbeddingIndex,
   type EmbedOne,
   MAX_EMBEDDING_DURATION_MS,
@@ -224,7 +225,9 @@ async function embeddingJob<T>(
       );
     }
     throw new UpstreamError(
-      `embedding ${stage}: ${(error as Error).message}; ${context}`,
+      error instanceof EmbeddingDocumentError
+        ? error.message
+        : `embedding ${stage}: ${(error as Error).message}; ${context}`,
     );
   } finally {
     embeddingJobs--;
