@@ -40,6 +40,45 @@ Deno.test("unrelated failure on a late chunk aborts without retry or partial res
   assertEquals(calls, 2);
 });
 
+Deno.test("overflow splits after a first grapheme that crosses the midpoint", async () => {
+  for (const first of ["e" + "\u0301".repeat(8), "👨‍👩‍👧‍👦"]) {
+    const source = first + "ab";
+    const successful: string[] = [];
+    const index = await buildEmbeddingIndex(source, ["content"], (text) => {
+      if (text.length > first.length) {
+        return Promise.reject(new EmbeddingContextError());
+      }
+      successful.push(text);
+      return Promise.resolve([1, 0]);
+    }, "c");
+    assertEquals(successful, [first, "ab"]);
+    assertEquals(successful.join(""), source);
+    assertEquals(index.vectors.length, 2);
+  }
+});
+
+Deno.test("a grapheme beyond the initial size target is tested intact", async () => {
+  const first = "e" + "\u0301".repeat(4999);
+  const successful: string[] = [];
+  await buildEmbeddingIndex(first + " tail", ["content"], (text) => {
+    successful.push(text);
+    return Promise.resolve([1, 0]);
+  }, "c");
+  assertEquals(successful, [first, " tail"]);
+
+  let calls = 0;
+  await assertRejects(
+    () =>
+      buildEmbeddingIndex(first, ["content"], () => {
+        calls++;
+        return Promise.reject(new EmbeddingContextError());
+      }, "c"),
+    Error,
+    "one grapheme exceeds model context",
+  );
+  assertEquals(calls, 1);
+});
+
 Deno.test("source, attempt, grapheme and deadline bounds reject explicitly", async () => {
   const overflow = () => Promise.reject(new EmbeddingContextError());
   await assertRejects(

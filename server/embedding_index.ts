@@ -49,12 +49,13 @@ export async function sourceHash(source: string): Promise<string> {
 }
 
 // Never split a surrogate pair, combining sequence, or emoji grapheme. A
-// single oversized grapheme is rejected rather than corrupted or omitted.
+// Prefer a boundary at/before the target, then the first boundary after it.
+// Zero means there is no interior boundary, not merely no earlier boundary.
 function splitPoint(text: string, target: number): number {
   let point = 0;
   const segmenter = new Intl.Segmenter("und", { granularity: "grapheme" });
   for (const segment of segmenter.segment(text)) {
-    if (segment.index > target) break;
+    if (segment.index > target) return point || segment.index;
     point = segment.index;
   }
   return point;
@@ -84,18 +85,16 @@ export async function buildEmbeddingIndex(
     if (vectors.length >= MAX_EMBEDDING_CHUNKS) {
       throw fail(`exceeds ${MAX_EMBEDDING_CHUNKS} chunks`);
     }
-    // Bound individual requests before involving the tokenizer. Further
-    // splitting is exclusively a response to its specific overflow signal.
+    // This is a size target, not a second context limit. An indivisible
+    // grapheme is sent intact, subject to the source-byte/job bounds; only
+    // the strict model response can establish whether that grapheme fits.
     if (text.length > INITIAL_CHUNK_UNITS) {
       const point = splitPoint(text, INITIAL_CHUNK_UNITS);
-      if (point === 0) {
-        throw fail(
-          `grapheme exceeds ${INITIAL_CHUNK_UNITS} UTF-16 unit request bound`,
-        );
+      if (point > 0) {
+        await visit(text.slice(0, point));
+        await visit(text.slice(point));
+        return;
       }
-      await visit(text.slice(0, point));
-      await visit(text.slice(point));
-      return;
     }
     if (++attempts > MAX_EMBEDDING_ATTEMPTS) {
       throw fail(`exceeds ${MAX_EMBEDDING_ATTEMPTS} embedding attempts`);
