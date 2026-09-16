@@ -242,10 +242,10 @@ Thoughts have a separate deduplication fingerprint in
 **full body**, after whitespace collapsing, trimming and lowercasing. It is not
 the session prefix hash or an embedding cache key. A changed thought body,
 including an edit entirely after the 8000-unit boundary, still invokes `embed()`
-through `services.ts:updateThoughtContentService`; the embedder continues to see
-only the unchanged prefix in that case. Exact unchanged-body updates return
-before embedding. A future index-version/hash migration must preserve these
-distinct deduplication and embedding-refresh responsibilities.
+through `services.ts:updateThoughtInScope`; the embedder continues to see only
+the unchanged prefix in that case. Exact unchanged-body updates return before
+embedding. A future index-version/hash migration must preserve these distinct
+deduplication and embedding-refresh responsibilities.
 
 For sessions, `services.ts:captureSessionFromToml` waits for embedding before
 calling `upsertSession`. A known embedding error therefore prevents the session
