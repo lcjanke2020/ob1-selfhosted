@@ -22,12 +22,25 @@ MCP_ACCESS_KEY=
 MCP_ACCESS_KEY_PRINCIPAL=
 ```
 
-Start the stack and create a token using its restricted administration
-container:
+Complete the remaining config and CPU/GPU prerequisites in the
+[local setup guide](../deploy/compose-local/README.md#setup), then prepare the
+embedding runtime and database:
 
 ```bash
 cd deploy/compose-local
-docker compose --env-file .env up -d
+docker compose --env-file .env up -d ollama
+docker compose --env-file .env exec ollama ollama pull nomic-embed-text
+docker compose --env-file .env up -d --wait postgres
+docker compose --env-file .env build mcp
+```
+
+Before starting MCP, run the
+[superuser backfill plan and activation](embedding-limits.md#compose-backfill-runner).
+This is required even for an empty database. Once it prints `activated`, start
+MCP and create a token using its restricted administration container:
+
+```bash
+docker compose --env-file .env up -d --no-deps mcp
 docker compose --env-file .env --profile tools run --rm token-admin \
   create "laptop client" --principal native:laptop
 ```
