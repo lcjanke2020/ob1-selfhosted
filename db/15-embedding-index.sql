@@ -1,4 +1,4 @@
--- Index-only passage vectors. Run as the database owner, then use the
+-- Index-only passage vectors. Run as a PostgreSQL superuser, then use the
 -- reviewed backfill/cutover procedure in docs/embedding-limits.md. This
 -- migration never embeds text and never activates an incomplete generation.
 BEGIN;

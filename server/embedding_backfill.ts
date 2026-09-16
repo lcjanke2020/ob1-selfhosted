@@ -1,5 +1,5 @@
 // Maintenance-only operator tool. Default is read-only planning. --apply
-// requires an offline corpus and the database owner; never use app credentials
+// requires an offline corpus and a PostgreSQL superuser; never use app credentials
 // or turn this into an automatically run migration.
 import { Pool, type PoolClient } from "postgres";
 import { DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER } from "./config.ts";
@@ -26,7 +26,7 @@ export async function backfillEmbeddingIndex(
   );
   if (!access.rows[0]?.owner) {
     throw new Error(
-      "backfill requires the corpus database owner/superuser to include every audience",
+      "backfill requires a PostgreSQL superuser (rolsuper) to include every audience; database ownership alone is insufficient",
     );
   }
   const contract = await deps.contract();

@@ -159,6 +159,7 @@ sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
 #   db/12-auth-audit-grants.sql
 #   db/13-oauth-subjects.sql
 #   db/14-native-token-principals.sql
+#   db/15-embedding-index.sql
 #   db/03-grants-assertion.sql  # always last
 ```
 
@@ -168,6 +169,13 @@ Superuser is required to inspect `pg_hba_file_rules`; the file does not mutate
 the catalog. Run it last during native provisioning, and rerun it after every
 later schema migration so new relations, retired role names, default ACLs, and
 HBA topology are checked together.
+
+Server 1.28.0 also requires **embedding-generation activation**, even for an
+empty database. Schema initialization alone does not activate it. Keep MCP
+stopped and run the
+[superuser backfill plan and activation from the app qube](../../../docs/embedding-limits.md#compose-backfill-runner)
+using its existing ConnectTCP database route and validated embedding backend. Do
+not install an embedding runtime on the database qube for this step.
 
 Apply `pg_hba.snippet.conf` and `postgresql.local.conf` after the roles exist —
 including the snippet header's removal of the stock broad loopback lines (first
@@ -224,12 +232,16 @@ Pushover/ntfy worker are documented in
 [Metadata degradation monitoring](../../../docs/metadata-degradation-monitoring.md).
 
 Then apply [`db/08-access-tokens.sql`](../../../db/08-access-tokens.sql) as the
-database owner, followed by subsequent migrations including 13 and 14, then
+database owner, followed by subsequent migrations including 13, 14 and 15, then
 `db/03-grants-assertion.sql` last. Version 1.27.0 requires the per-token
 principal schema even when native authentication is off. Credential
 administration uses the restricted tools role over the existing ConnectTCP/HBA
 path; see
 [Native access tokens](../../../docs/native-access-tokens.md#split-qubes-deployment).
+
+Version 1.28.0 adds `db/15-embedding-index.sql` and the offline full-corpus
+rebuild/activation above. Apply all pending migrations before the final
+assertion; complete activation before starting the replacement MCP.
 
 Server 1.25.0 adds the `openbrain_auth_rollup` login. On a fresh cluster, create
 it from the exact definition in `db/00-roles.sh`; on an existing split install,

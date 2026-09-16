@@ -1,8 +1,6 @@
 -- Invariant assertions for protected corpus grants and topology: openbrain_app
 -- must be a standalone, non-bypass role with its intended memory access, while
 -- Funnel relations, sink-only roles, and matching pg_hba rules must be absent.
-
-
 --
 -- Why this is its own file:
 --
@@ -21,7 +19,7 @@
 --   1. Fresh init: the Compose/CI paths mount this source file as
 --      99-grants-assertion.sql, after every schema migration. Native
 --      provisioning applies 01-, 02-, 04-, 05-, 06-, 07-, 08-, 09-, 10-,
---      11-, and 12-, then invokes
+--      11-, 12-, 13-, 14-, and 15-, then invokes
 --      this stable source path last. In both cases the assertion sees the
 --      completed catalog, so an init file that widens a protected role fails
 --      loudly.

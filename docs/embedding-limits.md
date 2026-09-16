@@ -20,8 +20,10 @@ model's special tokens count against its context automatically: every request
 uses `truncate:false`. The first split targets 4096 UTF-16 units at grapheme
 boundaries. This is a request-size heuristic, **not a token guarantee**. Only
 HTTP 400 with the exact Ollama context-overflow error causes recursive
-splitting. No other error is retried. A grapheme that cannot fit is rejected;
-surrogate pairs, combining sequences and emoji clusters are never split.
+splitting. No other error is retried. A single grapheme longer than the initial
+target is tested intact against the model. A grapheme that cannot fit is
+rejected; surrogate pairs, combining sequences and emoji clusters are never
+split.
 
 The index stores separate passage vectors in one vector-array row per parent.
 Search scores a record by its **maximum passage cosine similarity**, then ranks
@@ -64,6 +66,14 @@ never truncated, split into an OR, or silently changed before lexical parsing.
 Canonical records remain complete even when the MCP serialization budget
 requires field omission; use the reported REST recovery path to retrieve the
 full record.
+
+The 100,000-byte bound is an admission ceiling, not a promise that every input
+below it finishes. The model's throughput, token density, cold-load time and
+concurrent load determine how much text fits into the 15-second job budget. That
+budget is a compile-time constant; raising `FETCH_TIMEOUT_MS` does not raise it.
+A slower backend can reject a smaller document on deadline, before any
+canonical/index write. Size the maintenance window from representative
+measurements rather than the byte ceiling.
 
 A successful embedding covers the complete selected source. Capture and changed
 thought updates return `embedding_coverage` (MCP thought capture includes it in
@@ -157,18 +167,19 @@ review.
 1. Back up the corpus and preserve the old app/runtime images. Stop all writers
    and search consumers for maintenance. Validate the chosen corrected runtime
    and keep its model manifest and version immutable.
-2. Apply `db/15-embedding-index.sql` as the database owner after migrations
+2. Apply `db/15-embedding-index.sql` as a PostgreSQL superuser after migrations
    01–14, then run `db/03-grants-assertion.sql`. Existing canonical records and
    legacy vectors are retained; the migration initializes no active generation.
-3. Run `server/embedding_backfill.ts` in the new app checkout/image with the
-   corpus owner connection and configured Ollama backend. It uses the existing
-   server environment/configuration and is **read-only by default**. It reports
-   the contract and counts needing rebuild, without printing payloads. For
-   example, from `server/`, using the operator-supplied environment:
-
-   ```sh
-   deno run --allow-env --allow-net embedding_backfill.ts
-   ```
+3. Run `server/embedding_backfill.ts` in the new app checkout/image with an
+   explicitly selected **PostgreSQL superuser** connection and the validated
+   Ollama backend. This tool checks `rolsuper`; database ownership or BYPASSRLS
+   alone is not supported. Never inherit the request server's `openbrain_app`
+   credentials. Planning is **read-only by default** and reports the contract
+   and counts needing rebuild without printing payloads. Use the
+   [Compose runner below](#compose-backfill-runner), also for the Qubes app
+   service. A direct Deno invocation must supply the same `DB_*` superuser
+   connection plus the existing required auth/model/privacy settings from
+   `server/config.ts`; the tool shares that configuration but starts no server.
 
 4. Review the plan and runtime evidence, then explicitly run the same command
    with `--apply`. The tool reads one canonical row at a time, computes all its
@@ -193,3 +204,53 @@ declare a generation active manually or fall back to searching a mixture. After
 new-version writes, an app-only rollback is insufficient; restore the
 coordinated corpus/runtime/app backup or conduct a separately reviewed reverse
 rebuild.
+
+### Compose backfill runner
+
+Use this for a **fresh empty database too**: migration 15 creates an inactive
+generation and `--apply` activates it only after checking coverage. Starting MCP
+before activation fails its startup gate. For an upgrade, keep MCP and all other
+corpus writers/search consumers stopped throughout this procedure.
+
+First complete migrations 01–15 and the final grants assertion, start only the
+database and validated embedding backend, and build the new `mcp` image. Run the
+block below from the deployment's Compose directory. Local Compose uses
+`deploy/compose-local`; Pattern B uses `deploy/compose-tailnet` with its
+existing `COMPOSE_FILE`/`COMPOSE_PROFILES` settings; Qubes uses
+`deploy/qubes/app-qube` and its existing database forwarder. Confirm `DB_HOST`,
+`DB_PORT`, `DB_NAME`, `OLLAMA_URL` and model selection target the intended
+corpus/runtime.
+
+The example uses the standard corpus superuser `postgres`. If renamed, replace
+`DB_USER=postgres` with that superuser's name. Enter its current password (the
+corpus `POSTGRES_PASSWORD`, not the app or log-sink password). The temporary
+container inherits the app's normal configuration with **only its database
+identity overridden**. `--no-deps` prevents it from starting MCP/dependencies,
+and `run` does not publish the service's ports. The password leaves the shell
+when the subshell exits and is not written into the app's configuration.
+
+```bash
+(
+set -euo pipefail
+read -r -s -p 'Corpus PostgreSQL superuser password: ' DB_PASSWORD
+printf '\n'
+export DB_PASSWORD
+docker compose --env-file .env run --rm --no-deps -T \
+  -e DB_USER=postgres -e DB_PASSWORD mcp \
+  deno run --cached-only --frozen --allow-env --allow-net embedding_backfill.ts
+
+# Review the plan, backup, validated runtime and stopped-writer state first.
+read -r -p 'Apply the reviewed rebuild and activate it? Type rebuild: ' rebuild_review
+test "$rebuild_review" = rebuild
+docker compose --env-file .env run --rm --no-deps -T \
+  -e DB_USER=postgres -e DB_PASSWORD mcp \
+  deno run --cached-only --frozen --allow-env --allow-net embedding_backfill.ts --apply
+)
+```
+
+Require successful exit and the final `activated` record before starting MCP.
+Failure leaves the service in maintenance; correct the cause and rerun with the
+same immutable runtime/model. Matching records are reused. Then return to the
+deployment guide's MCP start and smoke checks. Do not start an old app with the
+corrected runtime against its old vectors, or present this offline tool as an
+online background migration.
