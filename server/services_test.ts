@@ -1108,7 +1108,7 @@ await withEnv([], TEST_ENV, async () => {
       async () => {
         const pool = new FakePool((sql) => {
           if (
-            (sql.includes("AS content_hash") || sql.includes("AS content_hash"))
+            sql.includes("AS content_hash")
           ) return { rows: [] };
           return undefined;
         });
@@ -1135,7 +1135,7 @@ await withEnv([], TEST_ENV, async () => {
         // SQL placeholders are 1-based: $17 = status; $28 = content_hash.
         const pool = new FakePool((sql, params) => {
           if (
-            (sql.includes("AS content_hash") || sql.includes("AS content_hash"))
+            sql.includes("AS content_hash")
           ) {
             return {
               rows: [{
@@ -1216,7 +1216,7 @@ await withEnv([], TEST_ENV, async () => {
         let updateParams: unknown[] = [];
         const pool = new FakePool((sql, params) => {
           if (
-            (sql.includes("AS content_hash") || sql.includes("AS content_hash"))
+            sql.includes("AS content_hash")
           ) {
             return { rows: [{ content_hash: hash, contract: "a".repeat(64) }] };
           }
@@ -1251,7 +1251,7 @@ await withEnv([], TEST_ENV, async () => {
       async () => {
         const pool = new FakePool((sql) => {
           if (
-            (sql.includes("AS content_hash") || sql.includes("AS content_hash"))
+            sql.includes("AS content_hash")
           ) {
             return { rows: [{ content_hash: "something-else" }] };
           }
