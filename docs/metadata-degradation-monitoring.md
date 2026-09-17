@@ -124,8 +124,15 @@ alerts for the deleted queue entries, including fallback events. Review the
 audit first. Afterward, the guarded stub-history prune above can remove matching
 stub rows if desired.
 
-Existing databases must apply migration 07 as the database owner and run
-`db/03-grants-assertion.sql` last before starting server 1.16.0. The boot probe
+Migration 07 introduced the required audit schema in server 1.16.0. For a
+current upgrade, follow the complete
+[local Compose](../deploy/compose-local/README.md#upgrading-an-existing-database),
+[Pattern B](../deploy/compose-tailnet/README.md#upgrading-an-existing-deployment),
+or
+[split Qubes](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
+procedure. These apply all pending migrations through 15 before the final grants
+assertion and keep corpus writers/search consumers stopped through offline
+superuser embedding backfill and activation before MCP starts. The boot probe
 fails closed when an audit/outbox relation, required column/constraint,
 sequence, or the singleton ledger row is missing. Reapplying migration 07 also
 converges the earlier preview schema: because its unsafe sequence cursor cannot
@@ -190,7 +197,8 @@ infrastructure identifiers. Fallback counts are labeled `fallback`, not
 Keep any existing log monitor running until the durable path has completed one
 real end-to-end delivery:
 
-1. Apply migration 07 and the grant assertion before starting server 1.16.0.
+1. Complete the deployment upgrade linked above, including all required
+   migrations and embedding activation, before starting MCP.
 2. Confirm egress **from inside the MCP container** before depending on the
    worker. For Pushover, for example, run
 

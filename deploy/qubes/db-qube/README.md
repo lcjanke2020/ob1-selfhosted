@@ -191,6 +191,14 @@ app qube** through the ConnectTCP channel instead of on this qube — e.g.
 IP, where the forwarder listens) — which is the point of the superuser
 remote-admin lines above.
 
+For an existing deployment, follow the app-qube's
+[complete upgrade procedure](../app-qube/README.md#upgrading-an-existing-deployment),
+using either its superuser ConnectTCP route or this qube's local socket for SQL.
+Keep all corpus writers/search consumers stopped while applying pending
+migrations through 15, the final grants assertion, and the offline superuser
+embedding backfill/activation before MCP restarts. The feature-specific notes
+below explain individual prerequisites; they are not standalone upgrade recipes.
+
 Filtered provenance search requires pgvector `0.8.0` or newer. Before updating
 an existing deployment, run
 `SELECT extversion FROM pg_extension WHERE extname = 'vector';` in `openbrain`.
@@ -213,14 +221,15 @@ package must include that contrib extension. See
 
 After hybrid search, apply the idempotent
 [`db/06-spaces.sql`](../../../db/06-spaces.sql) migration in the same
-maintenance window and run `db/03-grants-assertion.sql` last. Spaces requires
-PostgreSQL 15 or newer and a PostgreSQL superuser (the documented local or
-tailnet-restricted `postgres` path). It backfills legacy rows into the `default`
-workspace, rebuilds audience-aware fingerprint uniqueness, and forces RLS on
-thoughts, sessions, and artifacts. Reapplication rebuilds that fingerprint index
-too, so it needs the same table-lock window and index headroom. It must land
-before the scoped app server starts; the server boot probe refuses a partial
-catalog. See [Memory spaces](../../../docs/spaces.md).
+maintenance window; run the final grants assertion only after all pending
+migrations. Spaces requires PostgreSQL 15 or newer and a PostgreSQL superuser
+(the documented local or tailnet-restricted `postgres` path). It backfills
+legacy rows into the `default` workspace, rebuilds audience-aware fingerprint
+uniqueness, and forces RLS on thoughts, sessions, and artifacts. Reapplication
+rebuilds that fingerprint index too, so it needs the same table-lock window and
+index headroom. It must land before the scoped app server starts; the server
+boot probe refuses a partial catalog. See
+[Memory spaces](../../../docs/spaces.md).
 
 Next, apply
 [`db/07-metadata-degradation.sql`](../../../db/07-metadata-degradation.sql) as
@@ -248,9 +257,10 @@ it from the exact definition in `db/00-roles.sh`; on an existing split install,
 set `OPENBRAIN_AUTH_ROLLUP_PASSWORD` in the app qube `.env` and run
 `scripts/upgrade-enable-auth-rollup-role.sh deploy/qubes/app-qube` from the
 checkout root. Install and reload this directory's current HBA snippet, apply
-[`db/12-auth-audit-grants.sql`](../../../db/12-auth-audit-grants.sql), and run
-`db/03-grants-assertion.sql` last. The role has SELECT/DELETE on
-`mcp_auth_events` only; the request-path app role is reduced to SELECT/INSERT.
+[`db/12-auth-audit-grants.sql`](../../../db/12-auth-audit-grants.sql), and
+finish all pending migrations before the final grants assertion as above. The
+role has SELECT/DELETE on `mcp_auth_events` only; the request-path app role is
+reduced to SELECT/INSERT.
 
 ## Migrating an existing install to ConnectTCP
 
@@ -404,8 +414,15 @@ socket-only sink.
    ```sh
    psql -X -v ON_ERROR_STOP=1 -f db/02-observability.sql
    psql -X -v ON_ERROR_STOP=1 -f db/09-retire-corpus-funnel.sql
-   psql -X -v ON_ERROR_STOP=1 -f db/03-grants-assertion.sql
    ```
+
+   Then continue the
+   [complete app-qube upgrade](../app-qube/README.md#upgrading-an-existing-deployment)
+   through the remaining migrations, including 15, before running the current
+   grants assertion. Keep MCP stopped until the offline superuser embedding
+   backfill and activation succeed and the retirement checks below pass. The two
+   commands above only retire the legacy Funnel schema; they do not complete the
+   current server upgrade.
 
    Migration 09 takes `ACCESS EXCLUSIVE` locks on both canonical legacy tables
    before checking emptiness, and uses no `CASCADE` or `DROP OWNED`. A nonempty

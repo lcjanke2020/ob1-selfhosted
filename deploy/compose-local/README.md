@@ -432,10 +432,12 @@ represented in the token inventory and cannot be revoked there.
 
 ## Database-backed OAuth admission
 
-Before starting the current server, apply migration 13 and import or explicitly
-enroll existing OAuth subjects with the tools-profile `subject-admin` CLI.
-Follow [OAuth subject admission](../../docs/oauth-subjects.md) for the complete
-transactional upgrade, dedicated administrator setup, verification and rollback.
+Use the [complete upgrade procedure](#upgrading-an-existing-database), including
+migrations through 15 and embedding activation before MCP starts. At its
+admission stage, import or explicitly enroll existing OAuth subjects with the
+tools-profile `subject-admin` CLI. Follow
+[OAuth subject admission](../../docs/oauth-subjects.md) for the dedicated
+administrator setup, identity verification and authentication rollback details.
 Legacy `OAUTH_ALLOWED_SUBJECTS` / `OAUTH_SERVICE_ACCOUNT_SUBJECTS` values are
 transition inputs only; they no longer authorize or classify requests. After
 import, remove them from the deployment environment. Enrollment and revocation

@@ -53,16 +53,25 @@ not change ownership or memory-space access.
 
 ## Upgrade an existing database
 
-Server 1.26.0 requires migration 13 even when OAuth is disabled. Init scripts
-run only on fresh data directories. For existing data, preserve the previous
-server image and operator configuration, take and verify a backup, and perform
-the following during a deployment window. Keep admission changes frozen until
-the new server passes its smoke checks.
+Server 1.26.0 introduced migration 13, required even when OAuth is disabled.
+Init scripts run only on fresh data directories. For existing data, preserve the
+previous server image and operator configuration, take and verify a backup, and
+perform the following during a deployment window. Keep admission changes frozen
+until the new server passes its smoke checks.
 
-Current 1.27.0 upgrades also require
+Current 1.28.0 also requires
 [migration 14](native-access-tokens.md#existing-database-upgrade), even with
-native tokens disabled. The sequence below includes it before the final grants
-assertion; previously admitted OAuth subjects remain unchanged.
+native tokens disabled, plus migration 15 and embedding-generation activation.
+Use the complete deployment upgrade procedure, incorporating the
+authentication-specific steps below at the corresponding points:
+
+- [Local Compose upgrade](../deploy/compose-local/README.md#upgrading-an-existing-database)
+- [Pattern B upgrade](../deploy/compose-tailnet/README.md#upgrading-an-existing-deployment)
+- [Split Qubes upgrade](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
+
+Each procedure keeps corpus writers/search consumers stopped through schema
+migration and offline superuser embedding backfill/activation. Previously
+admitted OAuth subjects remain unchanged.
 
 1. Put a distinct `OPENBRAIN_TOKEN_ADMIN_PASSWORD` in the deployment's
    owner-only `.env`. It is used only by the tools profile. The role is
@@ -89,31 +98,16 @@ assertion; previously admitted OAuth subjects remain unchanged.
    one transaction. Password values are passed through environment variables,
    never command arguments. It does not install or reload `pg_hba.conf`.
 
-2. Apply migrations 13 and 14 and the current grants assertion together as a
-   PostgreSQL superuser (older databases must first apply the preceding
-   migrations):
+2. At the deployment procedure's schema-migration stage, apply all pending
+   migrations through 15 as a PostgreSQL superuser, then run the current grants
+   assertion. Migration 15 manages its own transaction; use the procedure's
+   separate invocation rather than wrapping the entire sequence in
+   `--single-transaction`. Keep MCP stopped after the assertion.
+
+3. At the admission-inventory stage, use the tools built from the reviewed
+   source to import the legacy lists **before starting the new server**:
 
    ```bash
-   docker compose --env-file .env exec -T postgres psql -X -v ON_ERROR_STOP=1 \
-     --single-transaction -U postgres -d openbrain \
-     -f /docker-entrypoint-initdb.d/13-oauth-subjects.sql \
-     -f /docker-entrypoint-initdb.d/14-native-token-principals.sql \
-     -f /docker-entrypoint-initdb.d/99-grants-assertion.sql
-   ```
-
-   Ensure the running database container has the new read-only migration mount
-   before using these paths. Alternatively stream all three checked-out files
-   through `psql --single-transaction`. On Qubes, use the existing
-   [native psql upgrade route](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
-   over ConnectTCP, with `-f` paths to the checkout's
-   `db/13-oauth-subjects.sql`, `db/14-native-token-principals.sql` and
-   `db/03-grants-assertion.sql`.
-
-3. Build the tools with the reviewed source and import the legacy lists **before
-   starting the new server**:
-
-   ```bash
-   docker compose --env-file .env build mcp subject-admin token-admin
    docker compose --env-file .env --profile tools run --rm subject-admin import-env --json
    docker compose --env-file .env --profile tools run --rm subject-admin list --json
    ```
@@ -128,14 +122,15 @@ assertion; previously admitted OAuth subjects remain unchanged.
    inventory with the intended subjects; it is not proof of a complete
    migration.
 
-4. Verify the inventory, remove both legacy lists from `.env`, then recreate
-   only the MCP service and smoke each existing client. Check the auth audit for
-   the expected admitted subjects and `subject_not_allowed` failures. An
-   `admission_unavailable` denial means the lookup failed (for example, table,
-   grants, or connectivity), rather than a bad token; check the DB path. Audit
-   delivery is best-effort and can also fail during a database-wide outage. An
-   empty or entirely revoked table rejects every Bearer and produces a loud boot
-   warning. `/health` remains available.
+4. Verify the inventory and remove both legacy lists from `.env`. Continue the
+   deployment procedure through its offline superuser embedding backfill and
+   activation before starting MCP, then smoke-test each existing client. Check
+   the auth audit for the expected admitted subjects and `subject_not_allowed`
+   failures. An `admission_unavailable` denial means the lookup failed (for
+   example, table, grants, or connectivity), rather than a bad token; check the
+   DB path. Audit delivery is best-effort and can also fail during a
+   database-wide outage. An empty or entirely revoked table rejects every Bearer
+   and produces a loud boot warning. `/health` remains available.
 
 The bridge is deliberately an explicit administrator step, rather than runtime
 boot-time seeding: a read-only verifier must not hold enrollment credentials or
@@ -169,6 +164,10 @@ defaults to `ENABLE_NATIVE_TOKENS=false`; private tailnet use is a separate
 The public Funnel branch remains OAuth-only.
 
 ### Rollback and restore
+
+If the upgrade also changed the embedding generation, follow the
+[coordinated corpus/runtime/app rollback](embedding-limits.md#reviewed-offline-migration-and-cutover).
+The authentication-specific steps below do not replace that recovery procedure.
 
 A failed migration transaction leaves the existing schema intact. Migration 13
 is additive and may remain present during an application rollback. If migration

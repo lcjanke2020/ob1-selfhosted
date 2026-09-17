@@ -827,11 +827,14 @@ pg_isready -h <this-qube-ip> -p 5432  # "accepting connections" — via qrexec t
 The `tools` profile provides one-shot `subject-admin` and `token-admin` clients
 through this qube's existing ConnectTCP database forwarder. They carry only the
 `OPENBRAIN_TOKEN_ADMIN_PASSWORD` credential, which is never injected into MCP.
-Provision the role and DB-qube HBA records, apply migrations 13 and 14 plus the
-final assertion atomically, import the old subject lists, and remove those lists
-from `.env` before the MCP roll. Follow
-[the full migration and rollback procedure](../../../docs/oauth-subjects.md). No
-ingress-qube or dom0 policy change is needed for subject administration. Native
-tokens default off; private tailnet HTTP use requires a separate opt-in after
+Use the [complete upgrade procedure](#upgrading-an-existing-deployment) to
+provision the role and DB-qube HBA records, apply migrations through 15 and the
+final assertion, verify subject admission, and complete offline superuser
+embedding backfill/activation before MCP starts. At its admission stage, import
+the old subject lists and remove them from `.env` after verification. See
+[OAuth subject admission](../../../docs/oauth-subjects.md) for the
+authentication-specific setup and rollback details. No ingress-qube or dom0
+policy change is needed for subject administration. Native tokens default off;
+private tailnet HTTP use requires a separate opt-in after
 [migration 14 and the ingress confinement checks](../../../docs/native-access-tokens.md#split-qubes-deployment).
 Public Funnel requests remain OAuth-only.

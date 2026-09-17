@@ -104,17 +104,16 @@ Fresh compose installs run
 and sessions schemas. Existing deployments require both pgvector 0.8.0 or newer
 (for filtered iterative scans) and this migration. Verify
 `SELECT extversion FROM pg_extension WHERE extname = 'vector';`, upgrade the
-extension if needed, and apply the migration as the database owner before
-deploying the hybrid-query server. A deployment whose database is not in the
-compose project has nothing to `exec` into; see
-[Upgrading an existing deployment](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
-for the equivalent over a network connection.
-
-```bash
-docker compose exec -T postgres \
-  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
-  < ../../db/05-hybrid-search.sql
-```
+extension if needed, and follow the complete current upgrade procedure for
+[local Compose](../deploy/compose-local/README.md#upgrading-an-existing-database),
+[Pattern B](../deploy/compose-tailnet/README.md#upgrading-an-existing-deployment),
+or
+[split Qubes](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment).
+Those procedures include all pending migrations through 15 and the final grants
+assertion, then the offline superuser embedding backfill and activation before
+MCP starts. Keep all corpus writers/search consumers stopped through activation.
+The Qubes procedure uses the existing network connection rather than a local
+Postgres container.
 
 The migration is idempotent and adds:
 

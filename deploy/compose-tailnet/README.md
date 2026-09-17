@@ -596,7 +596,8 @@ Never run them to provision the corpus: sink roles are created exclusively by
 The full `up -d` matters on the upgrade path: it creates services newly defined
 since the last deploy (e.g. `log-ingester`) as well as recreating changed ones.
 
-For an MCP code-only rollout with no schema or edge change, run:
+For an MCP code-only rollout with no schema, embedding-contract or edge change,
+and an already activated current embedding generation, run:
 
 ```bash
 docker compose --env-file .env build mcp && \
@@ -617,13 +618,15 @@ docker compose --env-file .env exec -T postgres \
 ```
 
 A non-zero exit means a completed-catalog invariant failed. Prefer a targeted
-fix (e.g. `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). To re-sync
-wholesale on 1.25.0+, provision `openbrain_auth_rollup` first with the helper
-used in the upgrade block above, then re-apply `01-schema.sql` →
-`02-observability.sql`, apply pending numbered migrations `04` through `14`, and
-run `03-grants-assertion.sql` **last**, with 14 and the assertion in one
-transaction as above. Never run `01` alone, since its REVOKE-all block strips
-observability grants until `02` restores them.
+fix (e.g. `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). For a
+wholesale re-sync, use the complete
+[upgrade procedure](#upgrading-an-existing-deployment) and its maintenance
+window, role provisioning, migrations through 15, final assertion, and offline
+embedding backfill/activation before MCP restarts. If repairing base-schema
+drift requires reapplying `01-schema.sql`, insert it immediately before that
+procedure's `02-observability.sql` step. Never run `01` alone, since its
+REVOKE-all block strips observability grants until `02` restores them. Migration
+15 manages its own transaction; the assertion runs after it commits.
 
 To retire the unused historical thought-search RPC without a full schema replay,
 run
@@ -642,10 +645,12 @@ the next request; individual JWTs have no per-token introspection/revocation.
 
 ## Database-backed OAuth admission
 
-Before starting the current server, apply migration 13 and import or explicitly
-enroll existing OAuth subjects with the tools-profile `subject-admin` CLI.
-Follow [OAuth subject admission](../../docs/oauth-subjects.md) for the complete
-transactional upgrade, dedicated administrator setup, verification and rollback.
+Use the [complete upgrade procedure](#upgrading-an-existing-deployment),
+including migrations through 15 and embedding activation before MCP starts. At
+its admission stage, import or explicitly enroll existing OAuth subjects with
+the tools-profile `subject-admin` CLI. Follow
+[OAuth subject admission](../../docs/oauth-subjects.md) for the dedicated
+administrator setup, identity verification and authentication rollback details.
 Legacy `OAUTH_ALLOWED_SUBJECTS` / `OAUTH_SERVICE_ACCOUNT_SUBJECTS` values are
 transition inputs only; they no longer authorize or classify requests. After
 import, remove them from the deployment environment. Enrollment and revocation
