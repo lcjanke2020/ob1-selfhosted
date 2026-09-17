@@ -88,7 +88,9 @@ export async function backfillEmbeddingIndex(
         await putEmbeddingIndex(client, kind, id, index);
         await client.queryArray("COMMIT");
       } catch (error) {
-        await client.queryArray("ROLLBACK");
+        try {
+          await client.queryArray("ROLLBACK");
+        } catch { /* preserve the original index/write failure */ }
         throw error;
       }
     }
@@ -123,7 +125,9 @@ export async function backfillEmbeddingIndex(
       await client.queryArray("COMMIT");
       console.log(JSON.stringify({ activated: contract }));
     } catch (error) {
-      await client.queryArray("ROLLBACK");
+      try {
+        await client.queryArray("ROLLBACK");
+      } catch { /* preserve the original activation failure */ }
       throw error;
     }
   }
