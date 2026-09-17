@@ -410,9 +410,26 @@ try {
         scope,
         auth,
       }, { ...deps, contract: () => Promise.resolve("b".repeat(64)) }),
-    Error,
+    services.UpstreamError,
     "backfill is incomplete",
   );
+  // A matching generation alone is insufficient: the SQL guard must detect
+  // a missing session index even when the request searches only thoughts.
+  await admin.queryArray(
+    "DELETE FROM sessions.embedding_index WHERE session_id=$1",
+    [sharedSession.id],
+  );
+  await assertRejects(
+    () =>
+      services.searchThoughtsByQuery(app, {
+        query: "semantic-tail",
+        scope,
+        auth,
+      }, deps),
+    services.UpstreamError,
+    "backfill is incomplete",
+  );
+  await backfillEmbeddingIndex(admin, true, backfillDeps);
   // Preserve the existing operator-aware lexical union on the NEW vector
   // contract. Orthogonal query vectors keep this a lexical correctness test.
   const lexicalTexts = [

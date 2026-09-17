@@ -176,7 +176,10 @@ DECLARE
   );
 BEGIN
   IF NOT memory_scope.embedding_ready(index_contract) THEN
-    RAISE EXCEPTION 'embedding index not ready for runtime/model contract';
+    -- Let the application preserve its upstream diagnostic without another
+    -- full-corpus scan or a match against the human-readable error text.
+    RAISE EXCEPTION USING ERRCODE = 'OB001',
+      MESSAGE = 'embedding index not ready for runtime/model contract';
   END IF;
   IF query_embedding IS NULL OR public.vector_dims(query_embedding) <> 768 THEN
     RAISE EXCEPTION 'query_embedding must have 768 dimensions';

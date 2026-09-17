@@ -2,21 +2,28 @@ import type { PoolClient } from "postgres";
 import type { EmbeddingIndex } from "./embedding_index.ts";
 import { UpstreamError } from "./errors.ts";
 
-export async function requireEmbeddingReady(
+export const EMBEDDING_INDEX_UNAVAILABLE_MESSAGE =
+  "embedding index unavailable: runtime/model contract differs or full-corpus backfill is incomplete; search not executed";
+
+export async function setEmbeddingStatementTimeout(
   client: PoolClient,
-  contract: string,
 ): Promise<void> {
   await client.queryArray(
     "SELECT set_config('statement_timeout', '5000', true)",
   );
+}
+
+export async function requireEmbeddingReady(
+  client: PoolClient,
+  contract: string,
+): Promise<void> {
+  await setEmbeddingStatementTimeout(client);
   const result = await client.queryObject<{ ready: boolean }>(
     "SELECT memory_scope.embedding_ready($1) AS ready",
     [contract],
   );
   if (result.rows[0]?.ready !== true) {
-    throw new UpstreamError(
-      "embedding index unavailable: runtime/model contract differs or full-corpus backfill is incomplete; search not executed",
-    );
+    throw new UpstreamError(EMBEDDING_INDEX_UNAVAILABLE_MESSAGE);
   }
 }
 

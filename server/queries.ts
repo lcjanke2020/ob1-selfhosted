@@ -10,10 +10,11 @@ import {
   type EmbeddingIndex,
 } from "./embedding_index.ts";
 import {
+  EMBEDDING_INDEX_UNAVAILABLE_MESSAGE,
   putEmbeddingIndex,
-  requireEmbeddingReady,
+  setEmbeddingStatementTimeout,
 } from "./embedding_queries.ts";
-import { ConflictError } from "./errors.ts";
+import { ConflictError, UpstreamError } from "./errors.ts";
 import type { MetadataDegradationEvent } from "./metadata.ts";
 import { withScopeClient } from "./scoped_db.ts";
 import {
@@ -171,9 +172,12 @@ export async function searchThoughts(
   ];
   return await withScopeClient(pool, scope, async (client) => {
     if (opts.contract) {
-      await requireEmbeddingReady(client, opts.contract);
-      const result = await client.queryObject<HybridCandidate>(
-        `SELECT thoughts.id, thoughts.content, thoughts.metadata,
+      // The SQL function enforces full-corpus readiness in this same snapshot
+      // and statement budget. Do not hash the whole corpus a second time here.
+      await setEmbeddingStatementTimeout(client);
+      try {
+        const result = await client.queryObject<HybridCandidate>(
+          `SELECT thoughts.id, thoughts.content, thoughts.metadata,
                 thoughts.workspace_id, thoughts.project_id, thoughts.visibility,
                 thoughts.created_at, candidates.similarity,
                 candidates.vector_rank, candidates.lexical_rank, candidates.lexical_source_priority
@@ -181,9 +185,20 @@ export async function searchThoughts(
            $1::vector, $2::double precision, $3::text, $4::text, $5::boolean,
            $6::jsonb, $7::jsonb, $8::int, $9::text
          ) candidates JOIN thoughts ON thoughts.id = candidates.candidate_id`,
-        [...params, opts.contract],
-      );
-      return fuseHybridCandidates(result.rows, limit);
+          [...params, opts.contract],
+        );
+        return fuseHybridCandidates(result.rows, limit);
+      } catch (error) {
+        // Migration 15 gives the readiness guard a dedicated SQLSTATE so its
+        // existing upstream response survives without matching error prose.
+        if (
+          (error as { fields?: { code?: unknown } } | null)?.fields?.code ===
+            "OB001"
+        ) {
+          throw new UpstreamError(EMBEDDING_INDEX_UNAVAILABLE_MESSAGE);
+        }
+        throw error;
+      }
     }
     // hnsw.ef_search defaults to 40, which would silently cap an unfiltered
     // vector leg below the documented minimum of 50 candidates. Scope the
