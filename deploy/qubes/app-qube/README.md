@@ -1,5 +1,10 @@
 # app qube — mcp + Ollama
 
+For server 1.28, apply the
+[embedding index migration and offline
+backfill](../../../docs/embedding-limits.md) after validating the runtime. The
+new startup gate rejects an incomplete or incompatible index.
+
 The **app** qube of the [three-qube split](../three-qube-design.md): it runs the
 application half (the MCP server + Ollama embeddings) and nothing else. The
 public edge (Funnel + Caddy + log-ingester) lives on the
@@ -15,7 +20,19 @@ app-qube-specific overlay.
 
 ```sh
 cp .env.example .env && $EDITOR .env     # fill required values + choose the fallback policy
-docker compose up -d
+docker compose --env-file .env up -d ollama
+docker compose --env-file .env exec ollama ollama pull nomic-embed-text
+docker compose --env-file .env build mcp
+```
+
+Finish the database/forwarder setup below, including migrations through 15 and
+the final grants assertion. Validate the configured embedding backend and run
+the
+[superuser backfill plan and activation](../../../docs/embedding-limits.md#compose-backfill-runner),
+even for a fresh empty corpus. After it succeeds and prints `activated`:
+
+```sh
+docker compose --env-file .env up -d --no-deps mcp
 ```
 
 [`docker-compose.yml`](docker-compose.yml) is self-contained — `mcp` + `ollama`
@@ -292,6 +309,7 @@ order
 | 1.25.0              | `db/12-auth-audit-grants.sql`                                              | first provision `openbrain_auth_rollup` and install/reload its HBA lines; rerun `03-grants-assertion.sql` after                                                        |
 | 1.26.0              | `db/13-oauth-subjects.sql`                                                 | required with OAuth on or off; provision credential administrator and HBA first, then migrate/assert and import/verify OAuth subjects before the MCP roll              |
 | 1.27.0              | `db/14-native-token-principals.sql`                                        | required with tokens on or off; explicit token principal, fail-closed legacy identity, final grants assertion; deploy ingress confinement before enabling the app flag |
+| 1.28.0              | `db/15-embedding-index.sql`                                                | PostgreSQL superuser; validated corrected runtime, full offline backfill and activation before MCP starts, including fresh empty databases                             |
 
 Server 1.26.0 additionally requires `db/13-oauth-subjects.sql` **even when OAuth
 is disabled**.
@@ -352,10 +370,10 @@ version. Apply migrations before the roll, not with it.
 6. Build the replacement with
    `docker compose --env-file .env build mcp subject-admin token-admin` while
    the current MCP is still serving. Then stop `mcp` and apply earlier pending
-   migrations in ascending order, through 13. Finish with migration 14 and
-   `db/03-grants-assertion.sql` in one transaction, **even with native tokens
-   disabled**. From the checkout root, load this deployment's owner-only `.env`
-   and explicitly select the database-superuser connection over ConnectTCP:
+   migrations in ascending order, through 13. Finish with migrations 14, 15 and
+   `db/03-grants-assertion.sql` last, **even with native tokens disabled**. From
+   the checkout root, load this deployment's owner-only `.env` and explicitly
+   select the database-superuser connection over ConnectTCP:
 
    ```bash
    (
@@ -363,11 +381,16 @@ version. Apply migrations before the roll, not with it.
      . ./.env || exit
      : "${DB_HOST:?set DB_HOST in .env}"
      : "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
-     env -i PATH="$PATH" PGPASSWORD="$POSTGRES_PASSWORD" \
-       psql -w -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
-         -d "${POSTGRES_DB:-openbrain}" -X --single-transaction -v ON_ERROR_STOP=1 \
-         -f ../../../db/14-native-token-principals.sql \
-         -f ../../../db/03-grants-assertion.sql
+     set -e
+     corpus_psql() {
+       env -i PATH="$PATH" PGPASSWORD="$POSTGRES_PASSWORD" \
+         psql -w -h "$DB_HOST" -p "${DB_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
+           -d "${POSTGRES_DB:-openbrain}" -X -v ON_ERROR_STOP=1 "$@"
+     }
+     corpus_psql --single-transaction -f ../../../db/14-native-token-principals.sql
+     # Migration 15 manages its own transaction; assert after it commits.
+     corpus_psql -f ../../../db/15-embedding-index.sql
+     corpus_psql -f ../../../db/03-grants-assertion.sql
    )
    ```
 
@@ -393,11 +416,20 @@ version. Apply migrations before the roll, not with it.
    after that comparison. On later upgrades after env removal, omit `import-env`
    and use `list --json` to verify current admission. Leave MCP stopped if a
    command or verification fails.
-8. After verification, run `docker compose --env-file .env up -d --no-deps mcp`.
+8. Keep MCP and all other corpus writers/search consumers stopped. Start the
+   validated corrected embedding backend with
+   `docker compose --env-file .env up -d --no-deps ollama` (or coordinate the
+   external backend), then complete the
+   [superuser backfill plan and activation](../../../docs/embedding-limits.md#compose-backfill-runner).
+   The existing database forwarder and database qube must remain running.
+   Require successful exit and the `activated` record. This is mandatory even
+   for a fresh empty corpus; an app-only rollback is insufficient after
+   new-version writes.
+9. After activation, run `docker compose --env-file .env up -d --no-deps mcp`.
    Confirm the boot log names the schemas it found and the auth door you expect,
    then `/health`.
-9. Verify from the outside — a real request through the public door, not only a
-   local health check.
+10. Verify from the outside — a real request through the public door, not only a
+    local health check.
 
 ## Daily auth-event rollup and retention (host-side)
 
@@ -772,6 +804,12 @@ explicitly reviewed recovery decision.
 
 ## Verify
 
+First provisioning must finish database migrations through 15 and the
+[superuser embedding activation](../../../docs/embedding-limits.md#compose-backfill-runner)
+before starting MCP. Start only Ollama and build MCP for that operation; keep
+the database qube and existing forwarder running. The commands below are the
+post-activation checks, not a replacement for that initialization.
+
 ```sh
 docker compose config --services      # exactly: mcp, ollama
 docker compose up -d
@@ -789,11 +827,14 @@ pg_isready -h <this-qube-ip> -p 5432  # "accepting connections" — via qrexec t
 The `tools` profile provides one-shot `subject-admin` and `token-admin` clients
 through this qube's existing ConnectTCP database forwarder. They carry only the
 `OPENBRAIN_TOKEN_ADMIN_PASSWORD` credential, which is never injected into MCP.
-Provision the role and DB-qube HBA records, apply migrations 13 and 14 plus the
-final assertion atomically, import the old subject lists, and remove those lists
-from `.env` before the MCP roll. Follow
-[the full migration and rollback procedure](../../../docs/oauth-subjects.md). No
-ingress-qube or dom0 policy change is needed for subject administration. Native
-tokens default off; private tailnet HTTP use requires a separate opt-in after
+Use the [complete upgrade procedure](#upgrading-an-existing-deployment) to
+provision the role and DB-qube HBA records, apply migrations through 15 and the
+final assertion, verify subject admission, and complete offline superuser
+embedding backfill/activation before MCP starts. At its admission stage, import
+the old subject lists and remove them from `.env` after verification. See
+[OAuth subject admission](../../../docs/oauth-subjects.md) for the
+authentication-specific setup and rollback details. No ingress-qube or dom0
+policy change is needed for subject administration. Native tokens default off;
+private tailnet HTTP use requires a separate opt-in after
 [migration 14 and the ingress confinement checks](../../../docs/native-access-tokens.md#split-qubes-deployment).
 Public Funnel requests remain OAuth-only.

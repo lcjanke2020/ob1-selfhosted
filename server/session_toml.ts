@@ -606,13 +606,6 @@ export function parseSessionToml(tomlText: string): ParsedSessionDoc {
   return { session, artifacts, rawToml: tomlText };
 }
 
-// Max characters the embedder actually consumes -- mirrors the slice in
-// embeddings.ts `embed()`. Local constant (not imported) so this module stays
-// dependency-free and hermetically testable. Truncating here keeps content_hash
-// aligned with what is embedded: an edit past this boundary cannot change the
-// vector, so it must not force a re-embed either.
-const EMBED_INPUT_MAX_CHARS = 8000;
-
 // The text fed to the embedder, and the exact string computeContentHash hashes.
 // Only these four fields drive re-embedding, so edits to lists
 // (next_actions/blockers/tags) do not trigger one. Fields are joined with a NUL
@@ -620,8 +613,7 @@ const EMBED_INPUT_MAX_CHARS = 8000;
 export function embedSource(s: ParsedSession): string {
   return [s.title, s.goal, s.summary, s.resume_context]
     .map((x) => x ?? "")
-    .join("\u0000")
-    .slice(0, EMBED_INPUT_MAX_CHARS);
+    .join("\u0000");
 }
 
 export async function computeContentHash(s: ParsedSession): Promise<string> {

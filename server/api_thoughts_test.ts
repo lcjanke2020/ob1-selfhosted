@@ -6,6 +6,7 @@
 // carry a valid x-brain-key; the failure shapes live in api_auth_test.ts.
 
 import { assert, assertEquals } from "@std/assert";
+import { EmbeddingContextError } from "./embedding_index.ts";
 import {
   asPool,
   FakePool,
@@ -285,8 +286,34 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
       assertEquals(res.status, 502);
       const body = await res.json();
       assertEquals(body.error.code, "upstream_error");
-      assertEquals(body.error.message, message);
+      assertEquals(
+        body.error.message,
+        `embedding document: ${message}; fields=content; utf8_bytes=1; utf16_units=1; write=not_started`,
+      );
     });
+
+    await t.step(
+      "query context overflow reports a validation error without payload text",
+      async () => {
+        const deps = makeDeps({
+          embed: () => Promise.reject(new EmbeddingContextError()),
+        });
+        const api = makeApi(() => undefined, deps);
+        const res = await api.request(
+          "/thoughts/search",
+          authed({
+            method: "POST",
+            body: JSON.stringify({ query: "private query text" }),
+          }),
+        );
+        assertEquals(res.status, 400);
+        const body = await res.json();
+        assertEquals(body.error.code, "validation_error");
+        assert(body.error.message.includes("fields=query"));
+        assert(body.error.message.includes("search=not_started"));
+        assert(!body.error.message.includes("private query text"));
+      },
+    );
 
     await t.step("POST /thoughts: body over 1 MiB → 413", async () => {
       const api = makeApi(() => undefined);
@@ -394,6 +421,7 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
             },
           ]),
           50,
+          "a".repeat(64),
         ]);
       },
     );

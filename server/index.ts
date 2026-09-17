@@ -60,6 +60,7 @@ import {
 } from "./config.ts";
 import { createApiRouter } from "./api.ts";
 import { pool } from "./db.ts";
+import { verifyEmbeddingStartup } from "./embedding_startup.ts";
 import {
   type AppVariables,
   createRequireAuth,
@@ -81,6 +82,7 @@ import { mcpRequestBodyLimit } from "./request_body_limit.ts";
 // at the boundaries (requireAuth sets, /mcp + / handlers get). Without
 // this the handler-side `c.get("door")` would be `unknown` and the
 // defensive 500-guard's type-narrow would not compile.
+await verifyEmbeddingStartup(pool);
 const app = new Hono<{ Variables: AppVariables }>();
 const requireRequestAuth = createRequireAuth(
   (token) => authenticateAccessToken(pool, token),

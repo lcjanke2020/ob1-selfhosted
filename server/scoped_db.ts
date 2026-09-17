@@ -10,11 +10,14 @@ export async function withScopeClient<T>(
   pool: Pool,
   scope: ResolvedReadScope,
   operation: (client: PoolClient) => Promise<T>,
+  repeatableRead = false,
 ): Promise<T> {
   const client = await getClient(pool);
   let transactionOpen = false;
   try {
-    await client.queryArray("BEGIN");
+    await client.queryArray(
+      repeatableRead ? "BEGIN ISOLATION LEVEL REPEATABLE READ" : "BEGIN",
+    );
     transactionOpen = true;
     await client.queryArray(
       `SELECT

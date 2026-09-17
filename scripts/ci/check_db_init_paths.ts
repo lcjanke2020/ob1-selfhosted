@@ -40,6 +40,7 @@ const representativeChanges = [
   "server/oauth_subjects_db_smoke.ts",
   "server/native_token_scope_db_smoke.ts",
   "server/native_token_upgrade_db_smoke.ts",
+  "server/embedding_empty_search_db_smoke.ts",
   "server/scope.ts",
   "deploy/qubes/ingress-qube/docker-compose.yml",
   "deploy/qubes/ingress-qube/openbrain-log-sink-dump_test.sh",

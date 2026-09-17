@@ -372,7 +372,9 @@ function implicitQueryArrayResult(sql: string): QueryResult | undefined {
   const compact = statement.replace(/\s+/g, " ");
   if (compact === "SELECT 1") return { rows: [[1]] };
   if (
-    compact === "BEGIN" || compact === "COMMIT" ||
+    compact === "BEGIN" ||
+    compact === "BEGIN ISOLATION LEVEL REPEATABLE READ" ||
+    compact === "COMMIT" ||
     compact === "ROLLBACK" ||
     compact === "SAVEPOINT thought_mutation" ||
     compact === "ROLLBACK TO SAVEPOINT thought_mutation" ||
@@ -380,7 +382,9 @@ function implicitQueryArrayResult(sql: string): QueryResult | undefined {
     compact.startsWith("SELECT set_config(") ||
     compact === "SET LOCAL hnsw.iterative_scan = strict_order" ||
     compact.startsWith("DELETE FROM sessions.artifact WHERE session_pk") ||
-    compact.startsWith("INSERT INTO sessions.artifact (")
+    compact.startsWith("INSERT INTO sessions.artifact (") ||
+    compact.startsWith("INSERT INTO sessions.embedding_index (") ||
+    compact.startsWith("INSERT INTO public.thought_embedding_index (")
   ) {
     return { rows: [] };
   }
@@ -448,6 +452,12 @@ export class FakeClient {
           project_exists: true,
         }],
       } as { rows: T[] });
+    }
+    if (!r && sql.includes("SELECT content AS content FROM thoughts")) {
+      return Promise.resolve({ rows: [] });
+    }
+    if (!r && sql.includes("memory_scope.embedding_ready(")) {
+      return Promise.resolve({ rows: [{ ready: true }] } as { rows: T[] });
     }
     if (!r) {
       return Promise.reject(
@@ -517,6 +527,7 @@ export function makeDeps(overrides: Partial<ServiceDeps> = {}): RecordingDeps {
   return {
     embedCalls,
     extractCalls,
+    contract: overrides.contract ?? (() => Promise.resolve("a".repeat(64))),
     embed: overrides.embed ?? ((text) => {
       embedCalls.push(text);
       return Promise.resolve([...FAKE_VECTOR]);

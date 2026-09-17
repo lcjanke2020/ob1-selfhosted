@@ -114,10 +114,29 @@ docker compose --env-file .env \
                --project-directory . \
                -f ../compose-local/docker-compose.yml \
                -f docker-compose.pattern-b.yml \
-               --profile pattern-b up -d
+               --profile pattern-b up -d --wait postgres ollama
 ```
 
 …or let those two `.env` settings select the files and profile:
+
+```bash
+docker compose --env-file .env up -d --wait postgres ollama
+```
+
+These commands initialize only the database and embedding backend. Before
+starting MCP, pull the configured model (the default is `nomic-embed-text`) and
+build the new image:
+
+```bash
+docker compose --env-file .env exec ollama ollama pull nomic-embed-text
+docker compose --env-file .env build mcp
+```
+
+Validate the runtime/model and complete the
+[superuser backfill plan and activation](../../docs/embedding-limits.md#compose-backfill-runner),
+including `--apply` on a fresh empty database. An external backend needs the
+equivalent model preparation there. Only after the command succeeds and prints
+`activated`, start the remaining services:
 
 ```bash
 docker compose --env-file .env up -d
@@ -459,9 +478,16 @@ docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postg
 docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/11-session-update-grants.sql
 docker compose --env-file .env exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/12-auth-audit-grants.sql
 docker compose --env-file .env exec -T postgres psql -X --single-transaction -v ON_ERROR_STOP=1 -U postgres -d openbrain < ../../db/13-oauth-subjects.sql
-cat ../../db/14-native-token-principals.sql ../../db/03-grants-assertion.sql |
-  docker compose --env-file .env exec -T postgres \
-    psql -X --single-transaction -v ON_ERROR_STOP=1 -U postgres -d openbrain
+docker compose --env-file .env exec -T postgres \
+  psql -X --single-transaction -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/14-native-token-principals.sql
+# Migration 15 manages its own transaction. Assert only after it commits.
+docker compose --env-file .env exec -T postgres \
+  psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/15-embedding-index.sql
+docker compose --env-file .env exec -T postgres \
+  psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/03-grants-assertion.sql
 # First upgrade to database admission: import while MCP is still stopped.
 docker compose --env-file .env --profile tools run --rm subject-admin import-env --json
 docker compose --env-file .env --profile tools run --rm subject-admin list --json
@@ -469,16 +495,27 @@ docker compose --env-file .env --profile tools run --rm subject-admin list --jso
 # Remove both legacy subject variables from .env after successful verification.
 read -r -p 'Inventory verified and legacy env lists removed? Type verified: ' admission_review
 test "$admission_review" = verified
-docker compose --env-file .env up -d
+# Keep MCP stopped while replacing the embedding backend.
+docker compose --env-file .env up -d --no-deps ollama
 )
 ```
 
+For **1.28.0**, keep all corpus writers/search consumers stopped and complete
+the
+[superuser backfill plan and activation](../../docs/embedding-limits.md#compose-backfill-runner)
+with the validated runtime. For an external Ollama, replace the last command
+with its coordinated runtime switch. Require successful activation before:
+
+```bash
+docker compose --env-file .env up -d
+```
+
 Upgrading to **1.27.0**: migration 14 is required even though Pattern B keeps
-native tokens disabled. Apply it and the final grants assertion in the same
-transaction, as above. Replaying 08 without finishing with 14 restores the
-retired principal-less registration function and fails the assertion. After 14,
-the 1.26.0 server and token-creation CLI no longer match the catalog; restarting
-the old image requires the
+native tokens disabled. Apply it in a transaction, then migration 15 and the
+final grants assertion, as above. Keep MCP stopped if any step fails. Replaying
+08 without finishing with 14 restores the retired principal-less registration
+function and fails the assertion. After 14, the 1.26.0 server and token-creation
+CLI no longer match the catalog; restarting the old image requires the
 [native-token schema rollback](../../docs/native-access-tokens.md#rollback), not
 just restoring its image tag.
 
@@ -559,7 +596,8 @@ Never run them to provision the corpus: sink roles are created exclusively by
 The full `up -d` matters on the upgrade path: it creates services newly defined
 since the last deploy (e.g. `log-ingester`) as well as recreating changed ones.
 
-For an MCP code-only rollout with no schema or edge change, run:
+For an MCP code-only rollout with no schema, embedding-contract or edge change,
+and an already activated current embedding generation, run:
 
 ```bash
 docker compose --env-file .env build mcp && \
@@ -580,13 +618,15 @@ docker compose --env-file .env exec -T postgres \
 ```
 
 A non-zero exit means a completed-catalog invariant failed. Prefer a targeted
-fix (e.g. `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). To re-sync
-wholesale on 1.25.0+, provision `openbrain_auth_rollup` first with the helper
-used in the upgrade block above, then re-apply `01-schema.sql` →
-`02-observability.sql`, apply pending numbered migrations `04` through `14`, and
-run `03-grants-assertion.sql` **last**, with 14 and the assertion in one
-transaction as above. Never run `01` alone, since its REVOKE-all block strips
-observability grants until `02` restores them.
+fix (e.g. `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). For a
+wholesale re-sync, use the complete
+[upgrade procedure](#upgrading-an-existing-deployment) and its maintenance
+window, role provisioning, migrations through 15, final assertion, and offline
+embedding backfill/activation before MCP restarts. If repairing base-schema
+drift requires reapplying `01-schema.sql`, insert it immediately before that
+procedure's `02-observability.sql` step. Never run `01` alone, since its
+REVOKE-all block strips observability grants until `02` restores them. Migration
+15 manages its own transaction; the assertion runs after it commits.
 
 To retire the unused historical thought-search RPC without a full schema replay,
 run
@@ -605,10 +645,12 @@ the next request; individual JWTs have no per-token introspection/revocation.
 
 ## Database-backed OAuth admission
 
-Before starting the current server, apply migration 13 and import or explicitly
-enroll existing OAuth subjects with the tools-profile `subject-admin` CLI.
-Follow [OAuth subject admission](../../docs/oauth-subjects.md) for the complete
-transactional upgrade, dedicated administrator setup, verification and rollback.
+Use the [complete upgrade procedure](#upgrading-an-existing-deployment),
+including migrations through 15 and embedding activation before MCP starts. At
+its admission stage, import or explicitly enroll existing OAuth subjects with
+the tools-profile `subject-admin` CLI. Follow
+[OAuth subject admission](../../docs/oauth-subjects.md) for the dedicated
+administrator setup, identity verification and authentication rollback details.
 Legacy `OAUTH_ALLOWED_SUBJECTS` / `OAUTH_SERVICE_ACCOUNT_SUBJECTS` values are
 transition inputs only; they no longer authorize or classify requests. After
 import, remove them from the deployment environment. Enrollment and revocation

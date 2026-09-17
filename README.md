@@ -1,5 +1,8 @@
 # Open Brain — Self-Hosted
 
+Embedding changes in server 1.28 require a validated runtime and a reviewed
+[full-corpus index migration](docs/embedding-limits.md) before startup.
+
 [![CI](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/ci.yml)
 [![Leak gate](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/leak-gate.yml/badge.svg?branch=main)](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/leak-gate.yml)
 [![Allowlist guard](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/allowlist-guard.yml/badge.svg?branch=main)](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/allowlist-guard.yml)
@@ -440,7 +443,7 @@ behavior, and agent-caller guidance are in
 
 ## Quickstart
 
-The five-minute version (full guide in
+The abbreviated setup (full guide in
 [`deploy/compose-local/`](deploy/compose-local/README.md)):
 
 ```bash
@@ -450,7 +453,17 @@ cp .env.example .env       # fill DB secrets; METADATA_FALLBACK_POLICY ships as 
 docker compose up -d ollama   # reserves an NVIDIA GPU — on a CPU-only box, comment out the
                               # `deploy:` block under `ollama:` (see deploy/compose-local/README.md)
 docker compose exec ollama ollama pull nomic-embed-text
-docker compose up -d
+docker compose --env-file .env up -d --wait postgres
+docker compose --env-file .env build mcp
+```
+
+Before starting MCP, run the
+[superuser backfill plan and activation](docs/embedding-limits.md#compose-backfill-runner).
+This is required even for an empty database. Once it prints `activated`, start
+the server and issue a client token:
+
+```bash
+docker compose --env-file .env up -d --no-deps mcp
 docker compose --profile tools run --rm token-admin create "laptop client" --principal native:laptop
 curl http://127.0.0.1:8787/health
 ```

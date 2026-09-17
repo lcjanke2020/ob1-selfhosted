@@ -19,7 +19,7 @@
 --   1. Fresh init: the Compose/CI paths mount this source file as
 --      99-grants-assertion.sql, after every schema migration. Native
 --      provisioning applies 01-, 02-, 04-, 05-, 06-, 07-, 08-, 09-, 10-,
---      11-, and 12-, then invokes
+--      11-, 12-, 13-, 14-, and 15-, then invokes
 --      this stable source path last. In both cases the assertion sees the
 --      completed catalog, so an init file that widens a protected role fails
 --      loudly.
@@ -1539,3 +1539,66 @@ BEGIN
   END LOOP;
 END;
 $$ LANGUAGE plpgsql;
+
+-- Passage vectors inherit the canonical parent's RLS audience, including
+-- moves. The generation marker is operator-owned; app credentials cannot
+-- declare a partially rebuilt corpus ready.
+DO $$
+DECLARE rel regclass; helper regprocedure; expected record;
+BEGIN
+  -- regclass renders the parent exactly as pg_get_expr does for the caller's
+  -- search_path; only whitespace is normalized in the stored expressions.
+  FOR expected IN SELECT * FROM (VALUES
+    ('public.thought_embedding_index', 'thought_embedding_audience',
+      format('(EXISTS ( SELECT 1 FROM %s t WHERE (t.id = thought_embedding_index.thought_id)))',
+        'public.thoughts'::regclass)),
+    ('sessions.embedding_index', 'session_embedding_audience',
+      format('(EXISTS ( SELECT 1 FROM %s s WHERE (s.id = embedding_index.session_id)))',
+        'sessions.session'::regclass))
+  ) AS policies(table_name, policy_name, parent_check) LOOP
+    rel := to_regclass(expected.table_name);
+    IF rel IS NULL OR NOT EXISTS (
+      SELECT 1 FROM pg_class WHERE oid=rel AND relrowsecurity AND relforcerowsecurity
+    ) OR NOT has_table_privilege('openbrain_app',rel,'SELECT')
+      OR NOT has_table_privilege('openbrain_app',rel,'INSERT')
+      OR NOT has_table_privilege('openbrain_app',rel,'UPDATE')
+      OR has_table_privilege('openbrain_app',rel,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      OR NOT has_table_privilege('openbrain_readonly',rel,'SELECT')
+      OR has_table_privilege('openbrain_readonly',rel,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      OR (SELECT count(*) FROM pg_policy WHERE polrelid=rel) <> 1 THEN
+      RAISE EXCEPTION 'grants assertion failed: embedding index must be parent-gated FORCE RLS with app SELECT/INSERT/UPDATE and readonly SELECT';
+    END IF;
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_policy
+      WHERE polrelid = rel AND polname = expected.policy_name
+        AND polcmd = '*' AND polpermissive
+        AND polroles = ARRAY['openbrain_app'::regrole::oid]
+        AND regexp_replace(pg_get_expr(polqual, polrelid), '\s+', ' ', 'g') = expected.parent_check
+        AND regexp_replace(pg_get_expr(polwithcheck, polrelid), '\s+', ' ', 'g') = expected.parent_check
+    ) THEN
+      RAISE EXCEPTION 'grants assertion failed: embedding index policy must enforce its parent audience on % (name, app role, permissive ALL, USING and WITH CHECK)', expected.table_name;
+    END IF;
+  END LOOP;
+  rel := to_regclass('memory_scope.embedding_generation');
+  IF rel IS NULL OR NOT has_table_privilege('openbrain_app',rel,'SELECT')
+    OR has_table_privilege('openbrain_app',rel,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') THEN
+    RAISE EXCEPTION 'grants assertion failed: embedding generation is read-only to the app';
+  END IF;
+  FOREACH helper IN ARRAY ARRAY[
+    to_regprocedure('memory_scope.embedding_ready(text)'),
+    to_regprocedure('memory_scope.invalidate_embedding_index()'),
+    to_regprocedure('memory_scope.search_thought_candidates(vector,double precision,text,text,boolean,jsonb,jsonb,integer,text)')
+  ] LOOP
+    IF helper IS NULL OR NOT EXISTS (
+      SELECT 1 FROM pg_proc p JOIN pg_class t ON t.oid='public.thoughts'::regclass
+      WHERE p.oid=helper AND p.prosecdef AND p.proowner=t.relowner
+        AND p.proconfig=ARRAY['search_path=pg_catalog']
+    ) OR EXISTS (
+      SELECT 1 FROM pg_proc p, LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+      WHERE p.oid=helper AND a.grantee=0
+    ) THEN
+      RAISE EXCEPTION 'grants assertion failed: embedding helper must be owner-owned, fixed-search-path SECURITY DEFINER without PUBLIC access';
+    END IF;
+  END LOOP;
+END;
+$$;

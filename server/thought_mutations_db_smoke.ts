@@ -865,9 +865,16 @@ try {
   {
     // Recording fakes for the service's embed/classify seam (real vector width
     // so the write path can persist what the fake returns).
+    await withAdmin((c) =>
+      c.queryArray(
+        "UPDATE memory_scope.embedding_generation SET contract = $1",
+        ["a".repeat(64)],
+      )
+    );
     const embedCalls: string[] = [];
     const extractCalls: string[] = [];
     const deps = {
+      contract: () => Promise.resolve("a".repeat(64)),
       embed: (text: string) => {
         embedCalls.push(text);
         return Promise.resolve([...ONE_VECTOR]);

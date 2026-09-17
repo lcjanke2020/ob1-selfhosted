@@ -106,7 +106,7 @@ Deno.test("MCP read tools enforce one serialized result budget", async () => {
         };
       }
       if (
-        sql.includes("1 - (embedding") &&
+        sql.includes("unnest(i.vectors)") &&
         sql.includes("FROM sessions.session")
       ) {
         return {

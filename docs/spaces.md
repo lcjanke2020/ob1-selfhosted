@@ -279,47 +279,24 @@ assertion is the completed-catalog check for these invariants.
 
 Fresh installs apply `06-spaces.sql` after sessions and hybrid search. For an
 existing deployment, PostgreSQL 15 or newer is required because audience-aware
-uniqueness uses `NULLS NOT DISTINCT`. Stop or quiesce the MCP service and take a
-verified backup, then run as a PostgreSQL superuser (normally `postgres`). The
-superuser is required because the migration sets `BYPASSRLS` on the backup role
-and creates or replaces a `LEAKPROOF` function.
+uniqueness uses `NULLS NOT DISTINCT`. Take a verified backup and run migrations
+as a PostgreSQL superuser (normally `postgres`). The superuser is required
+because migration 06 sets `BYPASSRLS` on the backup role and creates or replaces
+a `LEAKPROOF` function.
 
-A deployment whose database is not in the compose project has nothing to `exec`
-into; see
-[Upgrading an existing deployment](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
-for the equivalent over a network connection.
+Use the complete current upgrade procedure for your deployment:
 
-```bash
-docker compose exec -T postgres \
-  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
-  < ../../db/06-spaces.sql
-docker compose exec -T postgres \
-  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
-  < ../../db/07-metadata-degradation.sql
-# After setting OPENBRAIN_TOKEN_ADMIN_PASSWORD in .env:
-bash ../../scripts/upgrade-enable-token-admin-role.sh
-docker compose exec -T postgres \
-  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
-  < ../../db/08-access-tokens.sql
-docker compose exec -T postgres \
-  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
-  < ../../db/10-thought-mutations.sql
-docker compose exec -T postgres \
-  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
-  < ../../db/11-session-update-grants.sql
-# After setting OPENBRAIN_AUTH_ROLLUP_PASSWORD in .env:
-bash ../../scripts/upgrade-enable-auth-rollup-role.sh .
-docker compose exec -T postgres \
-  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
-  < ../../db/12-auth-audit-grants.sql
-docker compose exec -T postgres \
-  psql -v ON_ERROR_STOP=1 -U postgres -d openbrain \
-  < ../../db/03-grants-assertion.sql
-```
+- [Local Compose upgrade](../deploy/compose-local/README.md#upgrading-an-existing-database)
+- [Pattern B upgrade](../deploy/compose-tailnet/README.md#upgrading-an-existing-deployment)
+- [Split Qubes upgrade](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
 
-Migrations 07, 08, 10, 11, and 12 are the next required server schemas and are
-included here so the completed-catalog grant assertion remains last. 07 and 08
-neither extend nor weaken the space boundary; see
+Each procedure applies all pending migrations through 15 before the final grants
+assertion. Server 1.28.0 also requires the offline superuser embedding backfill
+and activation; keep all corpus writers/search consumers stopped until
+activation succeeds. The split Qubes procedure uses the existing ConnectTCP
+route instead of attempting to exec into a local Postgres container.
+
+Migrations 07 and 08 neither extend nor weaken the space boundary; see
 [Metadata degradation monitoring](metadata-degradation-monitoring.md) and
 [Native access tokens](native-access-tokens.md). 10 adds the head-gated revision
 history and the audience-move helper described in
@@ -332,7 +309,7 @@ report/retention role, removes direct grant-option and persistent-object
 creation drift (including dependent delegated grants), and likewise rewrites no
 rows.
 
-The migration backfills existing thoughts and sessions into the `default`
+Migration 06 backfills existing thoughts and sessions into the `default`
 workspace at workspace visibility. It takes table locks while adding and
 backfilling audience columns and rebuilding the fingerprint unique index, so use
 a full maintenance window and budget index headroom. It is idempotent, but not
@@ -343,10 +320,10 @@ index headroom on every run. Rollback of a completed migration is
 restore-from-backup rather than dropping the new columns: once audience-aware
 rows exist, removing the boundary would be a security-sensitive data merge.
 
-After the migration, deploy the updated server and test both default and
-sensitive capture/recall before reopening the service. The boot probe fails
-closed if required registry rows, columns, indexes, application policies,
-forced-RLS flags, or the scoped search function are absent.
+After the complete upgrade and activation, test both default and sensitive
+capture/recall before reopening the service. The boot probe fails closed if
+required registry rows, columns, indexes, application policies, forced-RLS
+flags, or the scoped search function are absent.
 
 ## Inspiration and lineage
 

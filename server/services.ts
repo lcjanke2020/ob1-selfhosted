@@ -13,6 +13,17 @@ import type { ZodType } from "zod";
 import type { AuthContext } from "./auth_context.ts";
 import type { ThoughtMatch, ThoughtRecord } from "./db.ts";
 import { embed as defaultEmbed } from "./embeddings.ts";
+import { embeddingContract } from "./embedding_runtime.ts";
+import {
+  buildEmbeddingIndex,
+  EmbeddingContextError,
+  type EmbeddingCoverage,
+  embeddingCoverage,
+  EmbeddingDocumentError,
+  type EmbeddingIndex,
+  type EmbedOne,
+  MAX_EMBEDDING_DURATION_MS,
+} from "./embedding_index.ts";
 export {
   ConflictError,
   NotFoundError,
@@ -39,6 +50,7 @@ import {
   probeThoughtUnchanged,
   searchThoughts,
   type Stats,
+  thoughtEmbeddingSource,
   type ThoughtMutationActor,
   updateThoughtContent,
   type UpdateThoughtOutcome,
@@ -161,27 +173,104 @@ function classifiedMetadata(
 }
 
 export type ServiceDeps = {
-  embed: (text: string) => Promise<number[]>;
+  embed: EmbedOne;
+  contract: (options?: { deadline: number }) => Promise<string>;
   extractMetadata: (text: string) => Promise<MetadataExtractionResult>;
 };
 
 export const defaultDeps: ServiceDeps = {
   embed: defaultEmbed,
+  contract: embeddingContract,
   extractMetadata: defaultExtractMetadata,
 };
 
-// embed() is the one upstream (Ollama) dependency on the hot path — wrap its
-// failures so REST can 502 while DB errors stay 500. extractMetadata never
-// throws (metadata.ts degrades to the uncategorized stub).
-async function embedOrUpstreamError(
-  embedFn: ServiceDeps["embed"],
+let embeddingJobs = 0;
+// Identity checks (including unchanged session refreshes) share the same
+// concurrency lease and end-to-end deadline as vector generation.
+async function embeddingJob<T>(
   text: string,
-): Promise<number[]> {
-  try {
-    return await embedFn(text);
-  } catch (e) {
-    throw new UpstreamError((e as Error).message);
+  fields: string[],
+  query: boolean,
+  work: (deadline: number) => Promise<T>,
+): Promise<T> {
+  const units = `utf8_bytes=${
+    new TextEncoder().encode(text).length
+  }; utf16_units=${text.length}`;
+  const context = `fields=${fields.join(",")}; ${units}; ${
+    query ? "search" : "write"
+  }=not_started`;
+  const stage = query ? "query" : "document";
+  if (!text.isWellFormed()) {
+    throw new ValidationError(
+      `embedding ${stage}: invalid Unicode; ${context}`,
+    );
   }
+  if (embeddingJobs >= 2) {
+    throw new UpstreamError(
+      `embedding ${stage}: busy; retry later; ${context}`,
+    );
+  }
+  embeddingJobs++;
+  const deadline = performance.now() + MAX_EMBEDDING_DURATION_MS;
+  try {
+    const result = await work(deadline);
+    if (performance.now() >= deadline) {
+      throw new Error("end-to-end deadline exceeded");
+    }
+    return result;
+  } catch (error) {
+    if (query && error instanceof EmbeddingContextError) {
+      throw new ValidationError(
+        `embedding query: exceeds model context; shorten query; ${context}`,
+      );
+    }
+    throw new UpstreamError(
+      error instanceof EmbeddingDocumentError
+        ? error.message
+        : `embedding ${stage}: ${(error as Error).message}; ${context}`,
+    );
+  } finally {
+    embeddingJobs--;
+  }
+}
+
+async function prepareEmbeddingIndex(
+  deps: ServiceDeps,
+  text: string,
+  fields: string[],
+  query: boolean,
+  deadline: number,
+  knownContract?: string,
+): Promise<EmbeddingIndex> {
+  const contract = knownContract ?? await deps.contract({ deadline });
+  const index = query
+    ? {
+      contract,
+      sourceHash: "",
+      sourceBytes: new TextEncoder().encode(text).length,
+      sourceUnits: text.length,
+      fields,
+      vectors: [await deps.embed(text, { deadline })],
+    }
+    : await buildEmbeddingIndex(text, fields, deps.embed, contract, deadline);
+  if (await deps.contract({ deadline }) !== contract) {
+    throw new Error("runtime/model changed during embedding");
+  }
+  return index;
+}
+
+function indexedEmbedding(
+  deps: ServiceDeps,
+  text: string,
+  fields: string[],
+  query = false,
+): Promise<EmbeddingIndex> {
+  return embeddingJob(
+    text,
+    fields,
+    query,
+    (deadline) => prepareEmbeddingIndex(deps, text, fields, query, deadline),
+  );
 }
 
 export async function captureThoughtWithMetadata(
@@ -214,8 +303,9 @@ export async function captureThoughtWithMetadata(
   // Unknown/misspelled registry targets and missing personal principals fail
   // before content reaches either the embedder or metadata extractor.
   const scope = await resolveWriteScope(pool, scopeInput, input.auth);
-  const [embedding, extraction] = await Promise.all([
-    embedOrUpstreamError(deps.embed, content),
+  const indexedContent = await thoughtEmbeddingSource(pool, content, scope);
+  const [index, extraction] = await Promise.all([
+    indexedEmbedding(deps, indexedContent, ["content"]),
     deps.extractMetadata(content),
   ]);
   const classified = classifiedMetadata(extraction);
@@ -244,7 +334,8 @@ export async function captureThoughtWithMetadata(
   };
   const persisted = await captureThought(pool, {
     content,
-    embedding,
+    embedding: index.vectors[0],
+    index,
     metadata,
     degradationEvents: extraction.degradation_events,
     scope,
@@ -252,7 +343,7 @@ export async function captureThoughtWithMetadata(
   // The upsert may preserve top-level keys omitted by this capture (notably
   // provenance on a duplicate). Return PostgreSQL's final merged row so REST
   // and MCP never report metadata that disagrees with durable state.
-  return persisted;
+  return { ...persisted, embedding_coverage: embeddingCoverage(index) };
 }
 
 export async function searchThoughtsByQuery(
@@ -290,10 +381,11 @@ export async function searchThoughtsByQuery(
     opts.scope,
   );
   const scope = await resolveReadScope(pool, scopeInput, opts.auth);
-  const embedding = await embedOrUpstreamError(deps.embed, query);
+  const index = await indexedEmbedding(deps, query, ["query"], true);
   return await searchThoughts(pool, {
     query,
-    embedding,
+    embedding: index.vectors[0],
+    contract: index.contract,
     limit,
     threshold,
     filter,
@@ -392,14 +484,15 @@ export async function updateThoughtInScope(
   });
   if (probe.state === "invisible") return null;
   if (probe.state === "unchanged") return probe.outcome;
-  const [embedding, extraction] = await Promise.all([
-    embedOrUpstreamError(deps.embed, content),
+  const [index, extraction] = await Promise.all([
+    indexedEmbedding(deps, content, ["content"]),
     deps.extractMetadata(content),
   ]);
-  return await updateThoughtContent(pool, {
+  const updated = await updateThoughtContent(pool, {
     id: thoughtId,
     content,
-    embedding,
+    embedding: index.vectors[0],
+    index,
     freshMetadata: {
       ...classifiedMetadata(extraction),
       metadata_extraction: extraction.classifier,
@@ -408,6 +501,9 @@ export async function updateThoughtInScope(
     actor: mutationActor(input.auth),
     scope,
   });
+  return updated?.outcome === "updated"
+    ? { ...updated, embedding_coverage: embeddingCoverage(index) }
+    : updated;
 }
 
 // Move a thought to another audience in place (same id, content, embedding,
@@ -500,9 +596,10 @@ export async function searchSessionsByQuery(
     validateServiceInput(sessionSearchShape.scope, opts.scope),
     opts.auth,
   );
-  const embedding = await embedOrUpstreamError(deps.embed, query);
+  const index = await indexedEmbedding(deps, query, ["query"], true);
   return await searchSessions(pool, {
-    embedding,
+    embedding: index.vectors[0],
+    contract: index.contract,
     limit,
     threshold,
     status: opts.status,
@@ -515,7 +612,12 @@ export async function captureSessionFromToml(
   pool: Pool,
   input: { tomlText: string; auth: AuthContext },
   deps: ServiceDeps = defaultDeps,
-): Promise<UpsertOutcome & { reembedded: boolean }> {
+): Promise<
+  UpsertOutcome & {
+    reembedded: boolean;
+    embedding_coverage?: EmbeddingCoverage;
+  }
+> {
   const tomlText = validateServiceInput(
     sessionCaptureShape.toml_text,
     input.tomlText,
@@ -541,23 +643,45 @@ export async function captureSessionFromToml(
   // unknown id errors HERE — before paying for an embedding. A fresh
   // capture (no id) has no existing hash, so it always (re)embeds.
   let existingHash: string | null = null;
+  let existingContract: string | null = null;
   if (session.id != null) {
     const cur = await getSessionContentHash(pool, session.id, scope);
     if (cur === null) {
       throw new NotFoundError(`No session found for id ${session.id}.`);
     }
     existingHash = cur.hash;
+    existingContract = cur.contract;
   }
-  // equal hash => content unchanged, skip embed; otherwise (re)embed.
-  const reembedded = existingHash !== contentHash;
-  const embedding = reembedded
-    ? await embedOrUpstreamError(deps.embed, embedSource(session))
-    : null;
+  const source = embedSource(session);
+  const fields = ["title", "goal", "summary", "resume_context"];
+  const { contract, index } = await embeddingJob(
+    source,
+    fields,
+    false,
+    async (deadline) => {
+      const contract = await deps.contract({ deadline });
+      if (
+        existingHash === contentHash && existingContract === contract
+      ) return { contract, index: null };
+      const index = await prepareEmbeddingIndex(
+        deps,
+        source,
+        fields,
+        false,
+        deadline,
+        contract,
+      );
+      return { contract, index };
+    },
+  );
+  const reembedded = index !== null;
   const res = await upsertSession(pool, {
     session,
     artifacts,
     contentHash,
-    embedding,
+    embedding: index?.vectors[0] ?? null,
+    index,
+    contract,
     provenance: {
       // Store the server-verified credential label faithfully, mirroring how
       // capture_thought stamps thoughts.metadata.door. OAuth user surfaces
@@ -576,7 +700,11 @@ export async function captureSessionFromToml(
     rawToml,
     scope,
   });
-  return { ...res, reembedded };
+  return {
+    ...res,
+    reembedded,
+    ...(index ? { embedding_coverage: embeddingCoverage(index) } : {}),
+  };
 }
 
 export async function getSessionInScope(

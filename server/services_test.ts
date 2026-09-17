@@ -15,6 +15,7 @@ import {
   withEnv,
 } from "./api_test_support.ts";
 import { MAX_CONTENT_BYTES, MAX_SEARCH_QUERY_BYTES } from "./schemas.ts";
+import { EmbeddingContextError } from "./embedding_index.ts";
 import { computeContentHash, parseSessionToml } from "./session_toml.ts";
 
 const TEST_ENV = {
@@ -331,10 +332,8 @@ await withEnv([], TEST_ENV, async () => {
       "thought capture: audit insert failure rolls back the thought upsert",
       async () => {
         let rolledBack = false;
-        let committed = false;
         const pool = new FakePool((sql, params) => {
           if (sql.trim() === "ROLLBACK") rolledBack = true;
-          if (sql.trim() === "COMMIT") committed = true;
           if (sql.includes("INSERT INTO metadata_degradation_events")) {
             throw new Error("simulated audit insert failure");
           }
@@ -374,7 +373,12 @@ await withEnv([], TEST_ENV, async () => {
           "simulated audit insert failure",
         );
         assertEquals(rolledBack, true);
-        assertEquals(committed, false);
+        assertEquals(
+          pool.clients.at(-1)?.queryArrayCalls.some((call) =>
+            call.sql === "COMMIT"
+          ),
+          false,
+        );
       },
     );
 
@@ -473,6 +477,35 @@ await withEnv([], TEST_ENV, async () => {
       },
     );
 
+    Deno.test(
+      "thought capture: document failure reports context once and never mutates storage",
+      async () => {
+        const mutations: string[] = [];
+        const pool = new FakePool((sql) => {
+          if (/\b(INSERT|UPDATE|DELETE)\b/.test(sql)) mutations.push(sql);
+          return undefined;
+        });
+        const deps = makeDeps();
+        deps.embed = () => {
+          throw new EmbeddingContextError("context overflow");
+        };
+        const error = await assertRejects(
+          () =>
+            captureThoughtWithMetadata(
+              asPool(pool),
+              { content: "e\u0301", auth: AUTH, via: "rest" },
+              deps,
+            ),
+          UpstreamError,
+        );
+        assertEquals(
+          error.message,
+          "embedding document: one grapheme exceeds model context; fields=content; utf8_bytes=3; utf16_units=2; write=not_started",
+        );
+        assertEquals(mutations, []);
+      },
+    );
+
     // ─── searchThoughtsByQuery / searchSessionsByQuery ────────────────
     Deno.test(
       "thought search: embeds the query and passes bounds through",
@@ -516,6 +549,7 @@ await withEnv([], TEST_ENV, async () => {
           null,
           "[]",
           50,
+          "a".repeat(64),
         ]);
         assertEquals(rows[0].rrf_score, 1 / 61);
       },
@@ -557,17 +591,19 @@ await withEnv([], TEST_ENV, async () => {
 
         assertEquals(deps.embedCalls, ["release checklist"]);
         assertEquals(
-          statements.includes("BEGIN"),
+          statements.includes("BEGIN ISOLATION LEVEL REPEATABLE READ"),
           true,
         );
         assertEquals(
           statements.includes(
-            "SELECT set_config('hnsw.ef_search', $1::text, true)",
+            "SELECT set_config('statement_timeout', '5000', true)",
           ),
           true,
         );
         assertEquals(
-          statements.includes("SET LOCAL hnsw.iterative_scan = strict_order"),
+          statements.includes(
+            "SELECT memory_scope.embedding_ready($1) AS ready",
+          ),
           true,
         );
         assertEquals(statements[statements.length - 1], "COMMIT");
@@ -594,6 +630,7 @@ await withEnv([], TEST_ENV, async () => {
             },
           ]),
           50,
+          "a".repeat(64),
         ]);
         assertEquals(
           capturedSql.includes("memory_scope.search_thought_candidates("),
@@ -605,7 +642,7 @@ await withEnv([], TEST_ENV, async () => {
     );
 
     Deno.test(
-      "thought search: filtered query failures roll back the local HNSW setting",
+      "thought search: filtered query failures roll back the local statement timeout",
       async () => {
         const statements: string[] = [];
         const pool = new FakePool((sql) => {
@@ -627,18 +664,21 @@ await withEnv([], TEST_ENV, async () => {
           Error,
           "unscripted queryObject",
         );
-        assertEquals(statements.includes("BEGIN"), true);
+        assertEquals(
+          statements.includes("BEGIN ISOLATION LEVEL REPEATABLE READ"),
+          true,
+        );
         assertEquals(
           statements.includes(
-            "SELECT set_config('hnsw.ef_search', $1::text, true)",
+            "SELECT set_config('statement_timeout', '5000', true)",
           ),
           true,
         );
         assertEquals(
           statements.includes(
-            "SET LOCAL hnsw.iterative_scan = strict_order",
+            "SELECT memory_scope.embedding_ready($1) AS ready",
           ),
-          true,
+          false,
         );
         assertEquals(statements.includes("ROLLBACK"), true);
         assertEquals(statements.includes("COMMIT"), false);
@@ -782,7 +822,7 @@ await withEnv([], TEST_ENV, async () => {
       const statements: string[] = [];
       const pool = new FakePool((sql, params) => {
         statements.push(sql.trim());
-        if (sql.includes("hnsw.ef_search")) {
+        if (sql.includes("statement_timeout")) {
           hnswDepth = params;
         }
         if (sql.includes("FROM sessions.session")) {
@@ -807,22 +847,23 @@ await withEnv([], TEST_ENV, async () => {
         "active",
         "ci",
         5,
+        "a".repeat(64),
       ]);
       assertEquals(
         capturedSql.includes("1 - (embedding <=> $1::vector) >="),
         false,
       );
-      assertEquals(hnswDepth, ["50"]);
+      assertEquals(hnswDepth, []);
 
-      const begin = statements.indexOf("BEGIN");
+      const begin = statements.indexOf("BEGIN ISOLATION LEVEL REPEATABLE READ");
       const audience = statements.findIndex((sql) =>
         sql.includes("openbrain.workspace_id")
       );
       const efSearch = statements.findIndex((sql) =>
-        sql.includes("hnsw.ef_search")
+        sql.includes("statement_timeout")
       );
       const iterative = statements.indexOf(
-        "SET LOCAL hnsw.iterative_scan = strict_order",
+        "SELECT memory_scope.embedding_ready($1) AS ready",
       );
       const query = statements.findIndex((sql) =>
         sql.includes("FROM sessions.session")
@@ -865,6 +906,7 @@ await withEnv([], TEST_ENV, async () => {
         assertEquals(captured, [
           `[${FAKE_VECTOR.join(",")}]`,
           5,
+          "a".repeat(64),
         ]);
         assertEquals(rows.map((row) => row.id), [1, 2]);
         assertEquals(
@@ -910,7 +952,7 @@ await withEnv([], TEST_ENV, async () => {
     );
 
     Deno.test(
-      "session search: ANN underfill retries through the exact materialized path",
+      "session search: passages are ranked through the exact materialized path",
       async () => {
         const statements: string[] = [];
         const pool = new FakePool((sql) => {
@@ -946,14 +988,14 @@ await withEnv([], TEST_ENV, async () => {
         );
         const commit = statements.lastIndexOf("COMMIT");
         assertEquals(
-          0 <= approximate && approximate < fallback && fallback < commit,
+          approximate === -1 && fallback >= 0 && fallback < commit,
           true,
         );
       },
     );
 
     Deno.test(
-      "session search: query failure rolls back transaction-local HNSW controls",
+      "session search: query failure rolls back transaction-local statement timeout",
       async () => {
         const statements: string[] = [];
         const pool = new FakePool((sql) => {
@@ -971,13 +1013,18 @@ await withEnv([], TEST_ENV, async () => {
           Error,
           "unscripted queryObject",
         );
-        assertEquals(statements.includes("BEGIN"), true);
         assertEquals(
-          statements.some((sql) => sql.includes("hnsw.ef_search")),
+          statements.includes("BEGIN ISOLATION LEVEL REPEATABLE READ"),
           true,
         );
         assertEquals(
-          statements.includes("SET LOCAL hnsw.iterative_scan = strict_order"),
+          statements.some((sql) => sql.includes("statement_timeout")),
+          true,
+        );
+        assertEquals(
+          statements.includes(
+            "SELECT memory_scope.embedding_ready($1) AS ready",
+          ),
           true,
         );
         assertEquals(statements.includes("ROLLBACK"), true);
@@ -1012,6 +1059,14 @@ await withEnv([], TEST_ENV, async () => {
           project_id: null,
           visibility: "workspace",
           reembedded: true,
+          embedding_coverage: {
+            complete: true,
+            fields: ["title", "goal", "summary", "resume_context"],
+            utf8_bytes: 8,
+            utf16_units: 8,
+            chunks: 1,
+            contract: "a".repeat(64),
+          },
         });
         assertEquals(deps.embedCalls.length, 1);
         // Provenance is server-stamped from the transport auth ($25/$26).
@@ -1082,7 +1137,9 @@ await withEnv([], TEST_ENV, async () => {
       "session capture (unknown id): NotFoundError BEFORE any embed is paid for",
       async () => {
         const pool = new FakePool((sql) => {
-          if (sql.includes("SELECT content_hash")) return { rows: [] };
+          if (
+            sql.includes("AS content_hash")
+          ) return { rows: [] };
           return undefined;
         });
         const deps = makeDeps();
@@ -1107,8 +1164,15 @@ await withEnv([], TEST_ENV, async () => {
         let storedContentHash: string | null = null;
         // SQL placeholders are 1-based: $17 = status; $28 = content_hash.
         const pool = new FakePool((sql, params) => {
-          if (sql.includes("SELECT content_hash")) {
-            return { rows: [{ content_hash: storedContentHash }] };
+          if (
+            sql.includes("AS content_hash")
+          ) {
+            return {
+              rows: [{
+                content_hash: storedContentHash,
+                contract: "a".repeat(64),
+              }],
+            };
           }
           if (sql.includes("INSERT INTO sessions.session")) {
             assertEquals(params[16], "active");
@@ -1181,8 +1245,10 @@ await withEnv([], TEST_ENV, async () => {
         const hash = await computeContentHash(session);
         let updateParams: unknown[] = [];
         const pool = new FakePool((sql, params) => {
-          if (sql.includes("SELECT content_hash")) {
-            return { rows: [{ content_hash: hash }] };
+          if (
+            sql.includes("AS content_hash")
+          ) {
+            return { rows: [{ content_hash: hash, contract: "a".repeat(64) }] };
           }
           if (sql.includes("UPDATE sessions.session SET")) {
             updateParams = params;
@@ -1214,7 +1280,9 @@ await withEnv([], TEST_ENV, async () => {
       "session capture (changed hash): re-embeds and reembedded true",
       async () => {
         const pool = new FakePool((sql) => {
-          if (sql.includes("SELECT content_hash")) {
+          if (
+            sql.includes("AS content_hash")
+          ) {
             return { rows: [{ content_hash: "something-else" }] };
           }
           if (sql.includes("UPDATE sessions.session SET")) {

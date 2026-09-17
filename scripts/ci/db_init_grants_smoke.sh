@@ -38,6 +38,52 @@ expect_rejected() {
 # after 02-observability.sql.
 run_assertion >/dev/null
 
+# Deparser qualification changes when sessions is visible. The assertion must
+# accept the same reviewed policies in either search path, without writing.
+{
+  printf '%s\n' 'BEGIN READ ONLY; SET LOCAL search_path = sessions, public, pg_catalog;'
+  cat db/03-grants-assertion.sql
+  printf '%s\n' 'ROLLBACK;'
+} | super_psql -v ON_ERROR_STOP=1 >/dev/null
+
+# A sole policy can still expose every vector or admit writes for hidden
+# parents. Check each predicate independently, plus the policy's identity and
+# audience; migration 15 restores the reviewed policy after each mutation.
+for relation in public.thought_embedding_index sessions.embedding_index; do
+  if [[ "$relation" == public.thought_embedding_index ]]; then
+    policy=thought_embedding_audience
+  else
+    policy=session_embedding_audience
+  fi
+  predicate=$(super_psql -tAc \
+    "SELECT pg_get_expr(polqual, polrelid) FROM pg_policy
+     WHERE polrelid = '$relation'::regclass AND polname = '$policy'")
+  for drift in using check role name command restrictive; do
+    case "$drift" in
+      using) mutation="ALTER POLICY $policy ON $relation USING (true)" ;;
+      check) mutation="ALTER POLICY $policy ON $relation WITH CHECK (true)" ;;
+      role) mutation="ALTER POLICY $policy ON $relation TO PUBLIC" ;;
+      name) mutation="ALTER POLICY $policy ON $relation RENAME TO drifted_embedding_policy" ;;
+      command) mutation="DROP POLICY $policy ON $relation;
+        CREATE POLICY $policy ON $relation FOR SELECT TO openbrain_app USING ($predicate)" ;;
+      restrictive) mutation="DROP POLICY $policy ON $relation;
+        CREATE POLICY $policy ON $relation AS RESTRICTIVE TO openbrain_app
+          USING ($predicate) WITH CHECK ($predicate)" ;;
+    esac
+    super_psql -v ON_ERROR_STOP=1 -c "$mutation" >/dev/null
+    expect_rejected "$relation policy $drift drift" \
+      "embedding index policy must enforce its parent audience" "$relation"
+    if [[ "$drift" == name ]]; then
+      # Migration 15 only replaces its known policy name; do not leave the
+      # intentionally renamed test policy behind as an extra permissive arm.
+      super_psql -v ON_ERROR_STOP=1 -c \
+        "DROP POLICY drifted_embedding_policy ON $relation" >/dev/null
+    fi
+    apply_sql db/15-embedding-index.sql >/dev/null
+    run_assertion >/dev/null
+  done
+done
+
 # Table SELECT alone is insufficient for a backup: schema USAGE is also
 # required. Prove the actual dump fails on drift and recovers after migration.
 dump_oauth_as_backup() {
@@ -717,5 +763,14 @@ docker exec "$DB_INIT_CONTAINER" sed -i '$d' "$hba_file"
 docker exec "$DB_INIT_CONTAINER" rm -f "$hba_role_file"
 super_psql -tAc "SELECT pg_reload_conf()" | grep -q t
 
+super_psql -v ON_ERROR_STOP=1 -c "GRANT UPDATE ON memory_scope.embedding_generation TO openbrain_app"
+expect_rejected "embedding generation write" "embedding generation is read-only"
+apply_sql db/15-embedding-index.sql >/dev/null
+super_psql -v ON_ERROR_STOP=1 -c "ALTER TABLE sessions.embedding_index DISABLE ROW LEVEL SECURITY"
+expect_rejected "embedding audience bypass" "embedding index must be parent-gated"
+apply_sql db/15-embedding-index.sql >/dev/null
+super_psql -v ON_ERROR_STOP=1 -c "GRANT DELETE ON public.thought_embedding_index TO openbrain_app"
+expect_rejected "embedding index DELETE" "embedding index must be parent-gated"
+apply_sql db/15-embedding-index.sql >/dev/null
 run_assertion >/dev/null
 echo "protected-role assertions accepted the clean catalog and rejected auth-audit mutation/delegation/object-creation/default-ACL drift, readonly SET ROLE mutation, session UPDATE widening, role attributes/membership, current and default PUBLIC access, PUBLIC SECURITY DEFINER execution, retired topology, and HBA drift"

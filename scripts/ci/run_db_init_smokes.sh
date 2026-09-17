@@ -153,6 +153,7 @@ start_database() {
     -v "$GITHUB_WORKSPACE/db/12-auth-audit-grants.sql:/docker-entrypoint-initdb.d/12-auth-audit-grants.sql:ro" \
     -v "$GITHUB_WORKSPACE/db/13-oauth-subjects.sql:/docker-entrypoint-initdb.d/13-oauth-subjects.sql:ro" \
     -v "$GITHUB_WORKSPACE/db/14-native-token-principals.sql:/docker-entrypoint-initdb.d/14-native-token-principals.sql:ro" \
+    -v "$GITHUB_WORKSPACE/db/15-embedding-index.sql:/docker-entrypoint-initdb.d/15-embedding-index.sql:ro" \
     -v "$GITHUB_WORKSPACE/db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro" \
     "$image" >/dev/null; then
     # Docker may create the named container before failing to bind its port.

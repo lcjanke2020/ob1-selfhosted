@@ -66,7 +66,7 @@ docker compose exec ollama ollama pull nomic-embed-text
 (Using an Ollama that already runs elsewhere? Skip this, remove the `ollama`
 service, and point `OLLAMA_URL` in `.env` at it.)
 
-### 3. Start everything
+### 3. Initialize the database and activate embeddings
 
 > **SELinux hosts (Fedora, RHEL, Qubes).** Before the first start, relabel the
 > DB init-script directory so the postgres container can read it:
@@ -81,7 +81,17 @@ service, and point `OLLAMA_URL` in `.env` at it.)
 > in the filesystem — one-time fix per checkout.
 
 ```bash
-docker compose up -d
+docker compose --env-file .env up -d --wait postgres
+docker compose --env-file .env build mcp
+```
+
+Before starting MCP, complete the
+[superuser backfill plan and activation](../../docs/embedding-limits.md#compose-backfill-runner).
+This is required even for an empty database: migration 15 leaves the generation
+inactive. After the command succeeds and prints `activated`, start the server:
+
+```bash
+docker compose --env-file .env up -d --no-deps mcp
 docker compose logs -f mcp
 ```
 
@@ -266,9 +276,16 @@ docker compose --env-file .env exec -T postgres \
 docker compose --env-file .env exec -T postgres \
   psql -X --single-transaction -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/13-oauth-subjects.sql
-cat ../../db/14-native-token-principals.sql ../../db/03-grants-assertion.sql |
-  docker compose --env-file .env exec -T postgres \
-    psql -X --single-transaction -v ON_ERROR_STOP=1 -U postgres -d openbrain
+docker compose --env-file .env exec -T postgres \
+  psql -X --single-transaction -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/14-native-token-principals.sql
+# Migration 15 manages its own transaction. Assert only after it commits.
+docker compose --env-file .env exec -T postgres \
+  psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/15-embedding-index.sql
+docker compose --env-file .env exec -T postgres \
+  psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/03-grants-assertion.sql
 # The Compose-backed summary reads its credential inside this service. Recreate
 # Postgres once so the newly-added environment value reaches the container;
 # the named data volume is preserved.
@@ -281,8 +298,21 @@ if [ "$oauth_enabled" = yes ]; then
   read -r -p 'Inventory verified and legacy env lists removed? Type verified: ' admission_review
   test "$admission_review" = verified
 fi
-docker compose --env-file .env up -d --no-deps mcp
+# MCP is still stopped. Switch only the embedding backend during maintenance.
+docker compose --env-file .env up -d --no-deps ollama
 )
+```
+
+For **1.28.0**, keep all corpus writers/search consumers stopped and complete
+the
+[superuser backfill plan and activation](../../docs/embedding-limits.md#compose-backfill-runner)
+against the validated runtime. With an external Ollama, switch/validate that
+backend instead of the last Compose command. Do not resume the old app against
+the corrected runtime. Only after successful activation:
+
+```bash
+docker compose --env-file .env up -d --no-deps mcp
+docker compose --env-file .env logs mcp
 ```
 
 Upgrading to **1.25.0+** adds a dedicated `openbrain_auth_rollup` login for the
@@ -402,10 +432,12 @@ represented in the token inventory and cannot be revoked there.
 
 ## Database-backed OAuth admission
 
-Before starting the current server, apply migration 13 and import or explicitly
-enroll existing OAuth subjects with the tools-profile `subject-admin` CLI.
-Follow [OAuth subject admission](../../docs/oauth-subjects.md) for the complete
-transactional upgrade, dedicated administrator setup, verification and rollback.
+Use the [complete upgrade procedure](#upgrading-an-existing-database), including
+migrations through 15 and embedding activation before MCP starts. At its
+admission stage, import or explicitly enroll existing OAuth subjects with the
+tools-profile `subject-admin` CLI. Follow
+[OAuth subject admission](../../docs/oauth-subjects.md) for the dedicated
+administrator setup, identity verification and authentication rollback details.
 Legacy `OAUTH_ALLOWED_SUBJECTS` / `OAUTH_SERVICE_ACCOUNT_SUBJECTS` values are
 transition inputs only; they no longer authorize or classify requests. After
 import, remove them from the deployment environment. Enrollment and revocation

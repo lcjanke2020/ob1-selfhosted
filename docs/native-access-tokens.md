@@ -22,12 +22,25 @@ MCP_ACCESS_KEY=
 MCP_ACCESS_KEY_PRINCIPAL=
 ```
 
-Start the stack and create a token using its restricted administration
-container:
+Complete the remaining config and CPU/GPU prerequisites in the
+[local setup guide](../deploy/compose-local/README.md#setup), then prepare the
+embedding runtime and database:
 
 ```bash
 cd deploy/compose-local
-docker compose --env-file .env up -d
+docker compose --env-file .env up -d ollama
+docker compose --env-file .env exec ollama ollama pull nomic-embed-text
+docker compose --env-file .env up -d --wait postgres
+docker compose --env-file .env build mcp
+```
+
+Before starting MCP, run the
+[superuser backfill plan and activation](embedding-limits.md#compose-backfill-runner).
+This is required even for an empty database. Once it prints `activated`, start
+MCP and create a token using its restricted administration container:
+
+```bash
+docker compose --env-file .env up -d --no-deps mcp
 docker compose --env-file .env --profile tools run --rm token-admin \
   create "laptop client" --principal native:laptop
 ```
@@ -147,39 +160,38 @@ by token rotation.
 
 ## Existing database upgrade
 
-Server **1.27.0 requires migration 14 even with native tokens disabled**.
-Starting it against an older schema or unreadable verification columns fails
-with migration guidance. For a 1.26.0 database, preserve the old image and
-environment, take a verified backup, and build the replacement before stopping
-MCP. Then apply the migration and final grants assertion in one transaction:
+Server **1.27.0 introduced migration 14, required even with native tokens
+disabled**. Current **1.28.0** also requires migration 15 and an activated
+embedding generation. Preserve the old app/runtime images and environment, take
+a verified backup, and use the complete procedure for your deployment:
 
-```bash
-cd deploy/compose-local
-docker compose --env-file .env build mcp token-admin
-docker compose --env-file .env stop mcp
-cat ../../db/14-native-token-principals.sql ../../db/03-grants-assertion.sql |
-  docker compose --env-file .env exec -T postgres \
-    psql -X --single-transaction -v ON_ERROR_STOP=1 -U postgres -d openbrain
-docker compose --env-file .env --profile tools run --rm token-admin list --json
-# Resolve any legacy personal ownership and remove a native-only shared principal.
-docker compose --env-file .env up -d --no-deps mcp
-```
+- [Local Compose upgrade](../deploy/compose-local/README.md#upgrading-an-existing-database)
+- [Pattern B upgrade](../deploy/compose-tailnet/README.md#upgrading-an-existing-deployment)
+- [Split Qubes upgrade](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
+
+These procedures apply all pending migrations through 15 before the final grants
+assertion, then perform the offline PostgreSQL-superuser embedding backfill and
+activation before starting MCP. Keep all corpus writers and search consumers
+stopped through activation. At the credential-inventory stage, use the new tools
+image to run `token-admin list --json` as shown above, preserve access to legacy
+personal rows, and remove a native-only shared principal or configure the local
+recovery key before MCP restarts. Pattern B continues to disable native-token
+HTTP authentication.
 
 Migration 14 changes the token registration function's signature. The 1.26.0
 server cannot boot against that catalog, and its token-creation CLI no longer
 works. Returning to the old image requires the [schema rollback](#rollback)
 before restarting it; changing the image tag alone is insufficient.
 
-Older installations must apply the intervening migrations in the
-[local upgrade sequence](../deploy/compose-local/README.md#upgrading-an-existing-database),
-including 08 and 13 **before** 14. Reapplying 14 preserves principals and
-revocation state and reconciles verification/admin column grants. Reapplying 08
-alone restores its retired registration overload; always finish with 14 and the
-current grants assertion.
+The deployment upgrade sequence includes 08 and 13 **before** 14. Reapplying 14
+preserves principals and revocation state and reconciles verification/admin
+column grants. Reapplying 08 alone restores its retired registration overload;
+always finish the complete sequence through 15 and the current grants assertion.
 
-Before committing a production migration, rehearse that exact sequence with
-`BEGIN`/`ROLLBACK` and verify the old catalog afterward. Do not run a second
-runtime against the real database for tests.
+Rehearse the complete upgrade on a disposable restored database before the
+production window. Migration 15 manages its own transaction, so an outer
+`BEGIN`/`ROLLBACK` is not a rollback rehearsal for the full sequence. Do not run
+a second runtime against the real database for tests.
 
 ## Split Qubes deployment
 
@@ -201,9 +213,14 @@ only after all of these deployment steps have passed:
    `X-Brain-Key` and `X-OpenBrain-Tailnet`; the tailnet proxy replaces the
    marker with `1`. Verify the branch matrix below before enabling the runtime
    flag.
-3. Stop MCP, apply migration 14 plus the full grant assertion atomically through
-   the existing app→DB route, inspect the administrator's token inventory, and
-   start the new runtime with `ENABLE_NATIVE_TOKENS=true`.
+3. Follow the complete
+   [split Qubes upgrade](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
+   through the existing app→DB route: stop all corpus writers/search consumers,
+   apply pending migrations through 15 and the final grants assertion, inspect
+   the administrator's token inventory, and complete the offline superuser
+   embedding backfill and activation. Start the new MCP with
+   `ENABLE_NATIVE_TOKENS=true` only after successful activation and resolution
+   of legacy identity access.
 4. Create one token per intended role with a distinct principal. Store its
    secret directly on that role's trusted account and smoke-test its client.
    Keep existing OAuth clients until each replacement works.
@@ -235,6 +252,10 @@ runs the actual Caddyfile in an isolated container and separately exercises real
 auth→audit and auth→RLS paths against disposable PostgreSQL.
 
 ## Rollback
+
+For an upgrade that also changed the embedding generation, follow the
+[coordinated corpus/runtime/app rollback](embedding-limits.md#reviewed-offline-migration-and-cutover).
+The token-schema rollback below alone does not undo that cutover.
 
 Turn native tokens off, stop MCP, and pause token administration first. Confirm
 that the saved environment has a working OAuth fallback; a local deployment may

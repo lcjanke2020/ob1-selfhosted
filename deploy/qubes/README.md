@@ -254,8 +254,9 @@ Each role gets its own directory with a self-contained `docker-compose.yml`, a
 per-qube `.env.example` (the credential split — each qube holds only the secrets
 it needs), and a README: [`db-qube/`](db-qube/), [`app-qube/`](app-qube/),
 [`ingress-qube/`](ingress-qube/). No `COMPOSE_FILE` override stack, no
-`--profile` flags — `cp .env.example .env && docker compose up -d` in the right
-directory. (The override files
+`--profile` flags are needed for the normal services. Follow each role's README
+for its startup order; MCP requires an activated embedding generation before it
+can start, including on a fresh empty database. (The override files
 [`docker-compose.external-db.yml`](docker-compose.external-db.yml) +
 [`docker-compose.cpu-ollama.yml`](docker-compose.cpu-ollama.yml) remain only for
 the simpler on-ramp of a _single_ app qube running the whole base stack against
@@ -289,13 +290,18 @@ control-plane, so its `.env` holds the admin + app + auth-rollup + readonly
 passwords (never the ingester credential); it also runs the encrypted corpus
 backup and pulls the Funnel aggregate over a separate fixed qrexec service
 before encrypting it ([`app-qube/backup/`](app-qube/backup/)). Full recipe in
-[`app-qube/README.md`](app-qube/README.md):
+the [app-qube startup procedure](app-qube/README.md#run):
 
 ```sh
 cd app-qube
 cp .env.example .env && $EDITOR .env     # required values + METADATA_FALLBACK_POLICY
-docker compose up -d                     # services: mcp, ollama
 ```
+
+Then complete the app-qube procedure: start Ollama, pull the embedding model,
+build MCP, and run the offline superuser embedding backfill and activation
+against the fully migrated DB qube before starting MCP. For an existing
+deployment, use the
+[complete upgrade procedure](app-qube/README.md#upgrading-an-existing-deployment).
 
 ### ingress qube — Funnel + Caddy + log-ingester + log sink
 
@@ -342,10 +348,13 @@ app qube — see the
 
 ## Optional native tokens on the tailnet branch
 
-Server 1.27.0 adds stable native-token principals. Apply migration 14 after the
-prior schema migrations, keep the app listener loopback-only, and deploy the
-shared Caddyfile's public credential strip before enabling
-`ENABLE_NATIVE_TOKENS=true` on the app. Its Compose pins the trusted marker
-requirement. Public Funnel remains OAuth-only; the existing restricted
-`token-admin` tools container uses the app→DB ConnectTCP path. See the
+Server 1.27.0 introduced stable native-token principals in migration 14. Follow
+the
+[complete upgrade procedure](app-qube/README.md#upgrading-an-existing-deployment),
+including migration 15 and embedding activation for 1.28.0. Keep the app
+listener loopback-only, and deploy the shared Caddyfile's public credential
+strip before enabling `ENABLE_NATIVE_TOKENS=true` on the app. Its Compose pins
+the trusted marker requirement. Public Funnel remains OAuth-only; the existing
+restricted `token-admin` tools container uses the app→DB ConnectTCP path. See
+the
 [rollout, branch matrix and rollback](../../docs/native-access-tokens.md#split-qubes-deployment).

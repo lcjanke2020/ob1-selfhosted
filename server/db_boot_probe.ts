@@ -150,8 +150,12 @@ export async function probeDbAtBoot(
                  AND indexdef LIKE '%NULLS NOT DISTINCT%'
              ),
            to_regprocedure(
-             'memory_scope.search_thought_candidates(vector,double precision,text,text,boolean,jsonb,jsonb,integer)'
-           ) IS NOT NULL,
+             'memory_scope.search_thought_candidates(vector,double precision,text,text,boolean,jsonb,jsonb,integer,text)'
+           ) IS NOT NULL
+             AND to_regclass('public.thought_embedding_index') IS NOT NULL
+             AND to_regclass('sessions.embedding_index') IS NOT NULL
+             AND to_regclass('memory_scope.embedding_generation') IS NOT NULL
+             AND to_regprocedure('memory_scope.embedding_ready(text)') IS NOT NULL,
            EXISTS (
              SELECT 1
              FROM pg_class thoughts
@@ -608,7 +612,7 @@ export async function probeDbAtBoot(
         hasThoughtScope,
         hasSessionScope,
         hasAudienceIndexes,
-        hasScopedSearch,
+        hasPassageSearchSchema,
         hasRlsEnforcement,
         hasMetadataDegradationSchema,
         hasNativeAccessTokenSchema,
@@ -645,7 +649,7 @@ export async function probeDbAtBoot(
       }
       if (
         !hasWorkspaceRegistry || !hasThoughtScope || !hasSessionScope ||
-        !hasAudienceIndexes || !hasScopedSearch || !hasRlsEnforcement
+        !hasAudienceIndexes || !hasRlsEnforcement
       ) {
         const missing = [
           ...(!hasWorkspaceRegistry
@@ -654,15 +658,20 @@ export async function probeDbAtBoot(
           ...(!hasThoughtScope ? ["thought audience columns"] : []),
           ...(!hasSessionScope ? ["session audience columns"] : []),
           ...(!hasAudienceIndexes ? ["audience-aware indexes"] : []),
-          ...(!hasScopedSearch
-            ? ["memory_scope.search_thought_candidates"]
-            : []),
           ...(!hasRlsEnforcement ? ["forced audience RLS policies"] : []),
         ].join(", ");
         throw new RequiredSchemaError(
           `[db] Postgres at ${target} is missing fail-closed spaces schema ` +
             `(${missing}). Apply db/06-spaces.sql as a PostgreSQL superuser ` +
             `(for example, postgres) before starting this server version.`,
+        );
+      }
+      if (!hasPassageSearchSchema) {
+        throw new RequiredSchemaError(
+          `[db] Postgres at ${target} is missing passage-embedding schema. ` +
+            `Apply db/15-embedding-index.sql, then db/03-grants-assertion.sql ` +
+            `as a PostgreSQL superuser. Complete the offline backfill and ` +
+            `activation in docs/embedding-limits.md before starting MCP.`,
         );
       }
       if (!hasMetadataDegradationSchema) {

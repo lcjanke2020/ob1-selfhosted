@@ -4,11 +4,14 @@ import {
   assert,
   assertAlmostEquals,
   assertEquals,
+  assertRejects,
+  assertStrictEquals,
   assertStringIncludes,
 } from "@std/assert";
 import { asPool, FAKE_VECTOR, FakePool, withEnv } from "./api_test_support.ts";
 import type { HybridCandidate } from "./queries.ts";
 import type { ResolvedReadScope } from "./scope_contract.ts";
+import { UpstreamError } from "./errors.ts";
 
 const {
   DEFAULT_RRF_K,
@@ -172,6 +175,115 @@ Deno.test("searchThoughts: emits bounded vector and lexical candidate legs", asy
   assertEquals(rows.map((row) => row.id), ["consensus", "lexical"]);
   assertEquals(rows[1].similarity, 0.12);
   assert(rows[1].rrf_score > 0, "lexical-only hit must survive fusion");
+});
+
+Deno.test("passage search: SQL readiness failure preserves the upstream diagnostic", async () => {
+  const statements: string[] = [];
+  const pool = new FakePool((sql) => {
+    statements.push(sql.trim());
+    if (sql.includes("search_thought_candidates")) {
+      throw Object.assign(new Error("database readiness guard"), {
+        fields: { code: "OB001" },
+      });
+    }
+    return undefined;
+  });
+  const error = await assertRejects(
+    () =>
+      searchThoughts(asPool(pool), {
+        query: "release checklist",
+        embedding: FAKE_VECTOR,
+        contract: "a".repeat(64),
+        scope: DEFAULT_SCOPE,
+      }),
+    UpstreamError,
+  );
+  assertEquals(
+    error.message,
+    "embedding index unavailable: runtime/model contract differs or full-corpus backfill is incomplete; search not executed",
+  );
+  assertEquals(statements.includes("ROLLBACK"), true);
+  assertEquals(statements.includes("COMMIT"), false);
+});
+
+Deno.test("passage search: unrelated database failures retain their identity", async () => {
+  const original = Object.assign(new Error("database query failed"), {
+    fields: { code: "XX000" },
+  });
+  const pool = new FakePool((sql) => {
+    if (sql.includes("search_thought_candidates")) throw original;
+    return undefined;
+  });
+  const error = await assertRejects(() =>
+    searchThoughts(asPool(pool), {
+      query: "release checklist",
+      embedding: FAKE_VECTOR,
+      contract: "a".repeat(64),
+      scope: DEFAULT_SCOPE,
+    })
+  );
+  assertStrictEquals(error, original);
+});
+
+Deno.test("passage search: empty results require readiness in the same snapshot", async (t) => {
+  for (const ready of [false, true]) {
+    await t.step(`empty results with ready=${ready}`, async () => {
+      const statements: string[] = [];
+      const pool = new FakePool((sql) => {
+        statements.push(sql.trim());
+        if (sql.includes("search_thought_candidates")) return { rows: [] };
+        if (sql.includes("embedding_ready(")) return { rows: [{ ready }] };
+        return undefined;
+      });
+      const search = () =>
+        searchThoughts(asPool(pool), {
+          query: "release checklist",
+          embedding: FAKE_VECTOR,
+          contract: "a".repeat(64),
+          scope: DEFAULT_SCOPE,
+        });
+      if (ready) {
+        assertEquals(await search(), []);
+      } else {
+        await assertRejects(search, UpstreamError, "backfill is incomplete");
+      }
+      assertEquals(pool.connectCalls, 1);
+      assert(statements.includes("BEGIN ISOLATION LEVEL REPEATABLE READ"));
+      const candidates = statements.findIndex((sql) =>
+        sql.includes("search_thought_candidates")
+      );
+      const readiness = statements.findIndex((sql) =>
+        sql.includes("embedding_ready(")
+      );
+      assert(
+        readiness > candidates,
+        "validate the empty result before returning",
+      );
+      assertEquals(statements.at(-1), ready ? "COMMIT" : "ROLLBACK");
+    });
+  }
+
+  await t.step(
+    "nonempty results do not repeat the SQL readiness scan",
+    async () => {
+      const pool = new FakePool((sql) => {
+        if (sql.includes("embedding_ready(")) {
+          throw new Error("unexpected duplicate corpus scan");
+        }
+        if (sql.includes("search_thought_candidates")) {
+          return { rows: [candidate("hit", 1, null)] };
+        }
+        return undefined;
+      });
+      const rows = await searchThoughts(asPool(pool), {
+        query: "release checklist",
+        embedding: FAKE_VECTOR,
+        contract: "a".repeat(64),
+        scope: DEFAULT_SCOPE,
+      });
+      assertEquals(rows.map((row) => row.id), ["hit"]);
+    },
+  );
 });
 
 Deno.test("searchThoughts: one bound provenance predicate is applied to both legs", async () => {
