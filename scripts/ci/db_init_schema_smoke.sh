@@ -53,6 +53,10 @@ super_psql -v ON_ERROR_STOP=1 -tAc \
 fi
 
 if [[ "$phase" == "all" || "$phase" == "data" ]]; then
+smoke_step "Smoke test — empty thought search still enforces embedding readiness"
+# Run before the data fixtures: a physically empty thoughts table can let the
+# PostgreSQL planner skip the candidate function and its readiness guard.
+run_deno_db_smoke server/embedding_empty_search_db_smoke.ts
 smoke_step "Smoke test — metadata audit is append-only and coherent"
 # Recreate the first preview's committed schema/data, apply current
 # migration 07 over it, and prove that columns, constraints, queued

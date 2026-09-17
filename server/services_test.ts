@@ -604,7 +604,7 @@ await withEnv([], TEST_ENV, async () => {
           statements.includes(
             "SELECT memory_scope.embedding_ready($1) AS ready",
           ),
-          false,
+          true,
         );
         assertEquals(statements[statements.length - 1], "COMMIT");
         assertEquals(capturedParams, [

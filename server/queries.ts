@@ -12,6 +12,7 @@ import {
 import {
   EMBEDDING_INDEX_UNAVAILABLE_MESSAGE,
   putEmbeddingIndex,
+  requireEmbeddingReady,
   setEmbeddingStatementTimeout,
 } from "./embedding_queries.ts";
 import { ConflictError, UpstreamError } from "./errors.ts";
@@ -172,8 +173,8 @@ export async function searchThoughts(
   ];
   return await withScopeClient(pool, scope, async (client) => {
     if (opts.contract) {
-      // The SQL function enforces full-corpus readiness in this same snapshot
-      // and statement budget. Do not hash the whole corpus a second time here.
+      // The SQL function enforces full-corpus readiness for returned rows in
+      // this same snapshot and statement budget.
       await setEmbeddingStatementTimeout(client);
       try {
         const result = await client.queryObject<HybridCandidate>(
@@ -187,6 +188,11 @@ export async function searchThoughts(
          ) candidates JOIN thoughts ON thoughts.id = candidates.candidate_id`,
           [...params, opts.contract],
         );
+        // An empty join input can let the planner skip the function entirely.
+        // Validate empty answers explicitly; nonempty results need no rescan.
+        if (result.rows.length === 0) {
+          await requireEmbeddingReady(client, opts.contract);
+        }
         return fuseHybridCandidates(result.rows, limit);
       } catch (error) {
         // Migration 15 gives the readiness guard a dedicated SQLSTATE so its
