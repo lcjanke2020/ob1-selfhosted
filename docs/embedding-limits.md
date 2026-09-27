@@ -133,8 +133,9 @@ proven break from a version change:
   Until that is noticed, new vectors mix with old ones and ranking degrades;
   nothing fails. Every accepted change is logged as
   `[embedding] runtime version changed A -> B; runtime canaries passed`. Compare
-  stored single-passage vectors with the current runtime (the relabel below does
-  exactly this), and recover with a [rebuild](#recovering-from-runtime-drift).
+  a sample of stored records with the current runtime, rebuilding each and
+  comparing every passage as the relabel below does, and recover with a
+  [rebuild](#recovering-from-runtime-drift).
 
 A distinct-input canary rejects the uppercase collision reproduced in the
 [September investigation](investigations/2026-09-16-embedding-context-overflow.md).
@@ -373,7 +374,8 @@ BEGIN
   GET DIAGNOSTICS moved = ROW_COUNT;
   IF moved <> 1
     OR NOT memory_scope.embedding_ready(current_setting('relabel.legacy')) THEN
-    RAISE EXCEPTION 'reverse relabel incomplete; nothing committed';
+    RAISE EXCEPTION 'reverse relabel refused: generation is not % or the corpus is incomplete under %; nothing committed',
+      current_setting('relabel.current'), current_setting('relabel.legacy');
   END IF;
 END
 $$;
@@ -384,7 +386,7 @@ The check runs inside the transaction. If the generation did not move or the
 corpus is not complete under the restored label, the block raises. psql then
 exits nonzero and nothing is committed; without `ON_ERROR_STOP`, the `COMMIT` of
 the aborted transaction still rolls back. The DB-init smoke executes this block
-verbatim.
+from this file, minus its psql meta-commands and with the variables substituted.
 
 After 1.29 writes, the coordinated backup restore described above remains the
 rollback.

@@ -218,7 +218,7 @@ services:
   ollama:
     # Validated with the existing Nomic model; see docs/embedding-limits.md.
     # Runtime upgrades keep the index (server 1.29+); each new version must
-    # pass the distinct-input canary. Watch for drift after a bump.
+    # pass the runtime canaries. Watch for drift after a bump.
     # Pin the multi-platform image index; amd64 was tested on CPU.
     # Image-only pin: bumping it also requires updating KNOWN_NON_DENO_IMAGES
     # in server/scripts/check_allow_env.ts (the allow-env drift gate).

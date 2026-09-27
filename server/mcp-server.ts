@@ -294,7 +294,7 @@ export function createMcpServer(
     // 1.27.0: stable native-token principals and proxy-confined tailnet auth.
     // 1.28.0: full-source strict passage embeddings; offline index cutover required.
     // 1.29.0: the embedding contract no longer names the Ollama runtime
-    // version; a runtime change re-runs the distinct-input canary instead of
+    // version; a runtime change re-runs the runtime canaries instead of
     // failing closed. Existing 1.28 generations need the one-time offline
     // relabel (embedding_backfill.ts --relabel auto; full backfill if its
     // checks fail) before this server starts.

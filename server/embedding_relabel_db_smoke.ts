@@ -277,7 +277,11 @@ async function runRelabel(activated: string, shortId: string) {
     "DELETE FROM public.thought_embedding_index WHERE thought_id = $1",
     [shortId],
   );
-  await assertRejects(() => documentedReverse(legacy, current));
+  await assertRejects(
+    () => documentedReverse(legacy, current),
+    Error,
+    "reverse relabel refused: generation is not",
+  );
   assertEquals(
     await generation(),
     current,
