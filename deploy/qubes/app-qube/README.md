@@ -4,9 +4,10 @@ For server 1.28, apply the
 [embedding index migration and offline
 backfill](../../../docs/embedding-limits.md) after validating the runtime. The
 new startup gate rejects an incomplete or incompatible index. From 1.28 to 1.29,
-run the one-time
-[relabel](../../../docs/embedding-limits.md#upgrading-a-128-generation-to-129-relabel)
-instead of re-embedding.
+the one-time
+[`--relabel auto`](../../../docs/embedding-limits.md#upgrading-a-128-generation-to-129-relabel)
+replaces the re-embed when its identity, coverage and vector-sample checks pass;
+otherwise run the full backfill.
 
 The **app** qube of the [three-qube split](../three-qube-design.md): it runs the
 application half (the MCP server + Ollama embeddings) and nothing else. The
@@ -299,21 +300,21 @@ before the relations it asserts on exist. The db qube records the same canonical
 order
 ([First boot / provisioning](../db-qube/README.md#first-boot--provisioning)).
 
-| Server              | Migration                                                                  | Additional requirement                                                                                                                                                 |
-| ------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1.7.0               | `db/05-hybrid-search.sql`                                                  | pgvector 0.8.0+ (filtered iterative scans)                                                                                                                             |
-| 1.9.0               | `db/06-spaces.sql`                                                         | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner                                                                                                            |
-| 1.16.0              | `db/07-metadata-degradation.sql`                                           | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env`                                                                                                          |
-| 1.19.0              | `db/08-access-tokens.sql`                                                  | —                                                                                                                                                                      |
-| 1.20.0 (historical) | `db/02-observability.sql` (re-apply; converges `mcp_auth_events` in place) | historical env admission; current upgrades must import it into migration 13 before rolling MCP                                                                         |
-| Arc B               | `db/02-observability.sql`, then `db/09-retire-corpus-funnel.sql`           | sink cutover complete; both legacy tables archived, verified, and empty; retired HBA rules removed                                                                     |
-| 1.22.0              | `db/10-thought-mutations.sql`                                              | superuser (table-owner SECURITY DEFINER helper; narrows the app's thoughts UPDATE to content columns); rerun `03-grants-assertion.sql` after                           |
-| 1.24.0              | `db/11-session-update-grants.sql`                                          | database owner; narrows session UPDATE to content columns and removes artifact UPDATE; rerun `03-grants-assertion.sql` after                                           |
-| 1.25.0              | `db/12-auth-audit-grants.sql`                                              | first provision `openbrain_auth_rollup` and install/reload its HBA lines; rerun `03-grants-assertion.sql` after                                                        |
-| 1.26.0              | `db/13-oauth-subjects.sql`                                                 | required with OAuth on or off; provision credential administrator and HBA first, then migrate/assert and import/verify OAuth subjects before the MCP roll              |
-| 1.27.0              | `db/14-native-token-principals.sql`                                        | required with tokens on or off; explicit token principal, fail-closed legacy identity, final grants assertion; deploy ingress confinement before enabling the app flag |
-| 1.28.0              | `db/15-embedding-index.sql`                                                | PostgreSQL superuser; validated corrected runtime, full offline backfill and activation before MCP starts, including fresh empty databases                             |
-| 1.29.0              | —                                                                          | from 1.28: PostgreSQL superuser; offline `embedding_backfill.ts --relabel` before MCP starts (no re-embed); later Ollama version changes need no index work            |
+| Server              | Migration                                                                  | Additional requirement                                                                                                                                                                |
+| ------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.7.0               | `db/05-hybrid-search.sql`                                                  | pgvector 0.8.0+ (filtered iterative scans)                                                                                                                                            |
+| 1.9.0               | `db/06-spaces.sql`                                                         | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner                                                                                                                           |
+| 1.16.0              | `db/07-metadata-degradation.sql`                                           | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env`                                                                                                                         |
+| 1.19.0              | `db/08-access-tokens.sql`                                                  | —                                                                                                                                                                                     |
+| 1.20.0 (historical) | `db/02-observability.sql` (re-apply; converges `mcp_auth_events` in place) | historical env admission; current upgrades must import it into migration 13 before rolling MCP                                                                                        |
+| Arc B               | `db/02-observability.sql`, then `db/09-retire-corpus-funnel.sql`           | sink cutover complete; both legacy tables archived, verified, and empty; retired HBA rules removed                                                                                    |
+| 1.22.0              | `db/10-thought-mutations.sql`                                              | superuser (table-owner SECURITY DEFINER helper; narrows the app's thoughts UPDATE to content columns); rerun `03-grants-assertion.sql` after                                          |
+| 1.24.0              | `db/11-session-update-grants.sql`                                          | database owner; narrows session UPDATE to content columns and removes artifact UPDATE; rerun `03-grants-assertion.sql` after                                                          |
+| 1.25.0              | `db/12-auth-audit-grants.sql`                                              | first provision `openbrain_auth_rollup` and install/reload its HBA lines; rerun `03-grants-assertion.sql` after                                                                       |
+| 1.26.0              | `db/13-oauth-subjects.sql`                                                 | required with OAuth on or off; provision credential administrator and HBA first, then migrate/assert and import/verify OAuth subjects before the MCP roll                             |
+| 1.27.0              | `db/14-native-token-principals.sql`                                        | required with tokens on or off; explicit token principal, fail-closed legacy identity, final grants assertion; deploy ingress confinement before enabling the app flag                |
+| 1.28.0              | `db/15-embedding-index.sql`                                                | PostgreSQL superuser; validated corrected runtime, full offline backfill and activation before MCP starts, including fresh empty databases                                            |
+| 1.29.0              | —                                                                          | from 1.28: PostgreSQL superuser; offline `embedding_backfill.ts --relabel auto` before MCP starts (full backfill if its checks fail); later Ollama version changes need no index work |
 
 Server 1.26.0 additionally requires `db/13-oauth-subjects.sql` **even when OAuth
 is disabled**.

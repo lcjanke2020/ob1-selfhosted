@@ -296,7 +296,8 @@ export function createMcpServer(
     // 1.29.0: the embedding contract no longer names the Ollama runtime
     // version; a runtime change re-runs the distinct-input canary instead of
     // failing closed. Existing 1.28 generations need the one-time offline
-    // relabel (embedding_backfill.ts --relabel) before this server starts.
+    // relabel (embedding_backfill.ts --relabel auto; full backfill if its
+    // checks fail) before this server starts.
     version: "1.29.0",
   });
 

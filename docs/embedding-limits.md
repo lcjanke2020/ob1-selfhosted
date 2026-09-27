@@ -285,7 +285,7 @@ computes. An unchanged corpus does not need re-embedding; it needs a one-time,
 offline **relabel**. Take the usual backup and keep the old image, stop MCP and
 all other corpus writers/search consumers, leave the database and embedding
 backend running, and build the 1.29 `mcp` image. Then use the same runner shape
-as above with `--relabel`:
+as above with `--relabel auto`:
 
 ```bash
 (
