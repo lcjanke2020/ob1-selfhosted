@@ -233,6 +233,8 @@ Deno.test(
       active: string | null,
       thoughts: Stored[] = [single],
       failAt?: string,
+      // Sessions exist but all exceed the sampler's passage cap.
+      sessionsPresent = false,
     ) => {
       let generation = active;
       const hashes = await Promise.all(
@@ -258,7 +260,7 @@ Deno.test(
           return { rows: [{ present: thoughts.length > 0 }] };
         }
         if (compact.startsWith("SELECT EXISTS (SELECT 1 FROM sessions.")) {
-          return { rows: [{ present: false }] };
+          return { rows: [{ present: sessionsPresent }] };
         }
         if (compact.includes("FROM public.thought_embedding_index i JOIN")) {
           // Mirror the sampler's SQL passage cap.
@@ -389,6 +391,21 @@ Deno.test(
           "no stored thought vectors",
         );
         assertEquals(embedCalls, 0);
+        assertEquals(writes(client), []);
+      },
+    );
+
+    await t.step(
+      "each nonempty kind needs its own comparison",
+      async () => {
+        // Comparable thoughts cannot vouch for sessions: their text reaches
+        // the runtime NUL-joined through a different tokenizer path.
+        const client = await fixture(legacy, [single], undefined, true);
+        await assertRejects(
+          () => run(client, "0.34.1", true),
+          Error,
+          "no stored session vectors",
+        );
         assertEquals(writes(client), []);
       },
     );
