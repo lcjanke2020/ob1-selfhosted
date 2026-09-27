@@ -61,14 +61,25 @@ STORE=$(cd "$STORE" && pwd)
 PREFIX="ollama-ew-$$"
 containers=()
 
+# Keeps the container's log with the results, then removes it.
+remove() {
+  docker logs "$1" >"$OUT/$1.log" 2>&1 || true
+  docker rm -f "$1" >/dev/null 2>&1 || true
+}
+
 # shellcheck disable=SC2329 # invoked by the EXIT trap
 cleanup() {
   local name
   for name in "${containers[@]}"; do
-    docker logs "$name" >"$OUT/$name.log" 2>&1 || true
-    docker rm -f "$name" >/dev/null 2>&1 || true
+    docker container inspect "$name" >/dev/null 2>&1 || continue
+    # A serving container's scratch store may hold files it created as root;
+    # open them so the invoking user can delete the copy. The persistent
+    # store behind the fetch container is left as is.
+    [[ $name == "$PREFIX-fetch" ]] ||
+      docker exec "$name" chmod -R a+rwX /root/.ollama/models >/dev/null 2>&1 || true
+    remove "$name"
   done
-  rm -rf "$WORK"
+  rm -rf "$WORK" || echo "warning: could not remove scratch $WORK" >&2
 }
 trap cleanup EXIT
 
@@ -125,7 +136,10 @@ if [[ ! -d $STORE/manifests ]]; then
   }
 fi
 digest=$(served_digest "$PORT_BASE" || true)
-docker rm -f "$PREFIX-fetch" >/dev/null
+# Ollama writes some store files mode 0600. With rootful Docker they belong to
+# root, and the copies below run as the invoking user.
+docker exec "$PREFIX-fetch" chmod -R a+rX /root/.ollama/models
+remove "$PREFIX-fetch"
 if [[ $digest != "$MODEL_DIGEST" ]]; then
   echo "model store serves $MODEL digest '${digest:-none}', not the pin $MODEL_DIGEST" >&2
   exit 1

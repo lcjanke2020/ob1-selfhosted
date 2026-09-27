@@ -221,14 +221,6 @@ jobs:
           if-no-files-found: warn
           overwrite: true
 
-      # Containers write the store as root; the cache is archived as the
-      # runner user.
-      - name: Make the model store readable for the cache
-        if: always() && steps.store.outputs.cache-hit != 'true' && steps.ab.outputs.store_verified == 'true'
-        env:
-          STORE: ${{ runner.temp }}/nomic-model-store
-        run: sudo chmod -R a+rX "$STORE"
-
       - name: Save the verified model store
         if: always() && steps.store.outputs.cache-hit != 'true' && steps.ab.outputs.store_verified == 'true'
         uses: actions/cache/save@v4
