@@ -1,8 +1,9 @@
 // Runs only in the disposable corpus CI fixture, after the embedding index
-// smoke has activated a generation. Captures its own record through the real
-// service, rewrites the corpus labels to a server 1.28 (runtime-inclusive)
-// generation, then proves the real relabel tool converts it without
-// re-embedding and that the documented reverse SQL restores the fixture.
+// smoke has activated a generation. Captures its own single- and two-passage
+// records through the real service, rewrites the corpus labels to a server
+// 1.28 (runtime-inclusive) generation, then proves the real relabel tool
+// converts it without re-embedding. The reverse relabel is executed verbatim
+// from docs/embedding-limits.md, including its not-ready refusal.
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { Pool, type PoolClient } from "postgres";
 const hostname = Deno.env.get("DB_SMOKE_HOST") ?? "127.0.0.1";
@@ -17,6 +18,7 @@ const { captureThoughtWithMetadata } = await import("./services.ts");
 const { contractFor, legacyContractFor } = await import(
   "./embedding_runtime.ts"
 );
+const { buildEmbeddingIndex } = await import("./embedding_index.ts");
 const adminPool = new Pool({
   hostname,
   port,
@@ -49,7 +51,7 @@ const ready = async (client: PoolClient, contract: string) =>
     "SELECT memory_scope.embedding_ready($1) AS ready",
     [contract],
   )).rows[0]?.ready;
-// The documented superuser rollback, parameterized instead of psql variables.
+// Fixture setup and cleanup relabel (the documented reverse runs below).
 const relabelSql = async (from: string, to: string) => {
   await admin.queryArray("BEGIN");
   try {
@@ -78,8 +80,29 @@ const relabelSql = async (from: string, to: string) => {
     throw error;
   }
 };
-// Fresh embeddings reproduce each stored single passage exactly, as an
-// unchanged model/runtime would; `drift` models a runtime that moved vectors.
+// The reverse relabel exactly as documented, minus psql meta-commands, with
+// its psql variables substituted. Parameterless text runs as one simple query.
+const docs = await Deno.readTextFile(
+  new URL("../docs/embedding-limits.md", import.meta.url),
+);
+const reverseBlock = docs
+  .slice(docs.indexOf("## Upgrading a 1.28 generation to 1.29"))
+  .match(/```sql\n([\s\S]*?)```/)?.[1];
+assert(reverseBlock, "documented reverse relabel block");
+const documentedReverse = async (legacyLabel: string, currentLabel: string) => {
+  const sql = reverseBlock.split("\n").filter((line) => !line.startsWith("\\"))
+    .join("\n").replaceAll(":'legacy'", `'${legacyLabel}'`)
+    .replaceAll(":'current'", `'${currentLabel}'`);
+  assert(!sql.includes(":'"), "every documented psql variable is substituted");
+  try {
+    await admin.queryArray(sql);
+  } catch (error) {
+    await admin.queryArray("ROLLBACK");
+    throw error;
+  }
+};
+// Fresh embeddings reproduce every stored passage exactly, as an unchanged
+// model/runtime would; `drift` models a runtime that moved vectors.
 const stored = new Map<string, string>();
 const deps = (drift = false) => ({
   contract: () => contractFor(identity),
@@ -115,23 +138,32 @@ try {
     "INSERT INTO memory_scope.workspace(id,default_visibility,personal_only) VALUES ($1,'workspace',false) ON CONFLICT DO NOTHING",
     [workspace],
   );
-  await captureThoughtWithMetadata(appPool, {
-    content: "relabel smoke single passage",
-    scope: { workspace_id: workspace, visibility: "workspace" },
-    auth: { door: "funnel", sub: "relabel-smoke", tokenLabel: null },
-    via: "rest",
-  }, {
-    contract: () => Promise.resolve(original),
-    embed: () =>
-      Promise.resolve(Array.from({ length: 768 }, (_, i) => i === 3 ? 1 : 0)),
-    extractMetadata: () =>
-      Promise.resolve({
-        metadata: {},
-        classifier: { schema_version: 1 as const, endpoint: "stub" as const },
-        degradation_events: [],
-      }),
-  });
-  await runRelabel(original);
+  const capture = (content: string) =>
+    captureThoughtWithMetadata(appPool, {
+      content,
+      scope: { workspace_id: workspace, visibility: "workspace" },
+      auth: { door: "funnel", sub: "relabel-smoke", tokenLabel: null },
+      via: "rest",
+    }, {
+      contract: () => Promise.resolve(original),
+      embed: () =>
+        Promise.resolve(
+          Array.from({ length: 768 }, (_, i) => i === 3 ? 1 : 0),
+        ),
+      extractMetadata: () =>
+        Promise.resolve({
+          metadata: {},
+          classifier: {
+            schema_version: 1 as const,
+            endpoint: "stub" as const,
+          },
+          degradation_events: [],
+        }),
+    });
+  const short = await capture("relabel smoke single passage");
+  // Over the 4096-unit initial target, so the index holds two passages.
+  await capture("relabel smoke two passages ".repeat(200));
+  await runRelabel(original, String(short.id));
 } finally {
   await admin.queryArray("DELETE FROM thoughts WHERE workspace_id=$1", [
     workspace,
@@ -148,26 +180,51 @@ try {
 }
 console.log("embedding relabel smoke passed");
 
-async function runRelabel(activated: string) {
-  for (
-    const row of (await admin.queryObject<{ content: string; vector: string }>(
-      `SELECT t.content, i.vectors[1]::text AS vector
-       FROM public.thought_embedding_index i JOIN public.thoughts t ON t.id = i.thought_id
-       WHERE cardinality(i.vectors) = 1`,
-    )).rows
-  ) stored.set(row.content, row.vector);
-  for (
-    const row of (await admin.queryObject<Record<string, string | null>>(
-      `SELECT s.title, s.goal, s.summary, s.resume_context, i.vectors[1]::text AS vector
-       FROM sessions.embedding_index i JOIN sessions.session s ON s.id = i.session_id
-       WHERE cardinality(i.vectors) = 1`,
-    )).rows
-  ) {
-    const source = [row.title, row.goal, row.summary, row.resume_context]
-      .map((field) => field ?? "").join("\u0000");
-    stored.set(source, row.vector!);
+async function runRelabel(activated: string, shortId: string) {
+  // Map every stored passage's exact text to its vector by rebuilding each
+  // record's passages with a recording embedder.
+  for (const kind of ["thought", "session"] as const) {
+    const rows = (await admin.queryObject<Record<string, unknown>>(
+      kind === "thought"
+        ? `SELECT t.content, (SELECT jsonb_agg(v::text ORDER BY n)
+             FROM unnest(i.vectors) WITH ORDINALITY AS u(v, n)) AS vectors
+           FROM public.thought_embedding_index i
+           JOIN public.thoughts t ON t.id = i.thought_id`
+        : `SELECT s.title, s.goal, s.summary, s.resume_context,
+             (SELECT jsonb_agg(v::text ORDER BY n)
+              FROM unnest(i.vectors) WITH ORDINALITY AS u(v, n)) AS vectors
+           FROM sessions.embedding_index i
+           JOIN sessions.session s ON s.id = i.session_id`,
+    )).rows;
+    for (const row of rows) {
+      const source = kind === "thought"
+        ? String(row.content)
+        : [row.title, row.goal, row.summary, row.resume_context]
+          .map((field) => field ?? "").join("\u0000");
+      const passages: string[] = [];
+      await buildEmbeddingIndex(
+        source,
+        ["fixture"],
+        (text) => {
+          passages.push(text);
+          return Promise.resolve([1]);
+        },
+        "fixture",
+        performance.now() + 15_000,
+      );
+      const vectors = row.vectors as string[];
+      assertEquals(passages.length, vectors.length);
+      passages.forEach((text, i) => stored.set(text, vectors[i]));
+    }
   }
-  assert(stored.size > 0, "the fixture must have single-passage records");
+  const multi = await admin.queryObject<{ n: number }>(
+    `SELECT count(*)::int AS n FROM public.thought_embedding_index
+     WHERE cardinality(vectors) > 1`,
+  );
+  assert(
+    multi.rows[0].n > 0,
+    "the fixture must include a multi-passage thought",
+  );
 
   // A server 1.28 generation built by runtime 0.34.1 with the pinned manifest.
   await relabelSql(activated, legacy);
@@ -185,7 +242,9 @@ async function runRelabel(activated: string) {
   assertEquals(plan.previous_runtime, "0.34.1");
   assertEquals(plan.from, legacy);
   assertEquals(plan.to, current);
-  assert((plan.sampled as number) > 0);
+  assert((plan.sampled as { thought: number }).thought > 0);
+  assert((plan.passages_compared as number) > 0);
+  assertEquals(plan.uncovered, []);
   assertEquals(plan.min_cosine, 1);
   assertEquals(await generation(), legacy, "the plan writes nothing");
 
@@ -194,12 +253,13 @@ async function runRelabel(activated: string) {
   );
   assertEquals(applied.at(-1), { relabeled: current });
   assertEquals(await generation(), current);
-  const leftovers = await admin.queryObject<{ n: number }>(
-    `SELECT (SELECT count(*) FROM public.thought_embedding_index WHERE contract <> $1)::int +
-            (SELECT count(*) FROM sessions.embedding_index WHERE contract <> $1)::int AS n`,
-    [current],
-  );
-  assertEquals(leftovers.rows[0].n, 0);
+  const labels = async (contract: string) =>
+    (await admin.queryObject<{ n: number }>(
+      `SELECT (SELECT count(*) FROM public.thought_embedding_index WHERE contract <> $1)::int +
+              (SELECT count(*) FROM sessions.embedding_index WHERE contract <> $1)::int AS n`,
+      [contract],
+    )).rows[0].n;
+  assertEquals(await labels(current), 0);
   const app = await appPool.connect();
   try {
     assertEquals(await ready(app, current), true);
@@ -212,7 +272,23 @@ async function runRelabel(activated: string) {
   );
   assertEquals(again.relabel, "already_current");
 
-  // Documented reverse relabel back to the 1.28 label.
-  await relabelSql(current, legacy);
+  // The documented reverse must refuse an incomplete corpus: nothing commits.
+  await admin.queryArray(
+    "DELETE FROM public.thought_embedding_index WHERE thought_id = $1",
+    [shortId],
+  );
+  await assertRejects(() => documentedReverse(legacy, current));
+  assertEquals(
+    await generation(),
+    current,
+    "a refused reverse commits nothing",
+  );
+  assertEquals(await labels(current), 0);
+  await admin.queryArray("DELETE FROM thoughts WHERE id = $1", [shortId]);
+
+  // On a complete corpus it restores the 1.28 label.
+  await documentedReverse(legacy, current);
   assertEquals(await generation(), legacy);
+  assertEquals(await labels(legacy), 0);
+  assertEquals(await ready(admin, legacy), true);
 }

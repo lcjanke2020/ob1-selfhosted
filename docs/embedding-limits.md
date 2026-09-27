@@ -344,18 +344,38 @@ any 1.29 write, with the embedding backend still reporting the plan's
 values as the corpus superuser:
 
 ```sql
+\set ON_ERROR_STOP on
 \set legacy '<plan from>'
 \set current '<plan to>'
 BEGIN;
+SELECT set_config('relabel.legacy', :'legacy', true),
+  set_config('relabel.current', :'current', true);
 LOCK TABLE public.thoughts, sessions.session, public.thought_embedding_index,
   sessions.embedding_index IN SHARE MODE;
 UPDATE public.thought_embedding_index SET contract = :'legacy' WHERE contract = :'current';
 UPDATE sessions.embedding_index SET contract = :'legacy' WHERE contract = :'current';
-UPDATE memory_scope.embedding_generation SET contract = :'legacy'
-  WHERE singleton AND contract = :'current';
-SELECT memory_scope.embedding_ready(:'legacy') AS ready; -- must be true
+DO $$
+DECLARE
+  moved integer;
+BEGIN
+  UPDATE memory_scope.embedding_generation
+    SET contract = current_setting('relabel.legacy')
+    WHERE singleton AND contract = current_setting('relabel.current');
+  GET DIAGNOSTICS moved = ROW_COUNT;
+  IF moved <> 1
+    OR NOT memory_scope.embedding_ready(current_setting('relabel.legacy')) THEN
+    RAISE EXCEPTION 'reverse relabel incomplete; nothing committed';
+  END IF;
+END
+$$;
 COMMIT;
 ```
+
+The check runs inside the transaction. If the generation did not move or the
+corpus is not complete under the restored label, the block raises. psql then
+exits nonzero and nothing is committed; without `ON_ERROR_STOP`, the `COMMIT` of
+the aborted transaction still rolls back. The DB-init smoke executes this block
+verbatim.
 
 After 1.29 writes, the coordinated backup restore described above remains the
 rollback.

@@ -106,7 +106,7 @@ smoke_step "Smoke test — chunked embedding index and atomic writes"
 run_deno_db_smoke server/embedding_index_db_smoke.ts
 smoke_step "Smoke test — 1.28 generation relabels without re-embedding"
 # Uses the corpus the index smoke left behind and restores its label.
-run_deno_db_smoke server/embedding_relabel_db_smoke.ts
+run_deno_db_smoke --allow-read=docs/embedding-limits.md server/embedding_relabel_db_smoke.ts
 smoke_step "Smoke test — openbrain_readonly can run a full pg_dump"
 # The exact operation the off-box backup performs. Exits non-zero
 # with "permission denied for sequence/relation" if the read-only
