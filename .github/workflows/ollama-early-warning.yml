@@ -1,0 +1,370 @@
+# Early warning for Ollama releases that would change the pinned Nomic
+# embeddings, before any deployment upgrades. Daily, a cheap gate compares the
+# latest stable ollama/ollama release with the image pinned in the Compose files.
+# A new release, image digest, model pin or harness revision runs
+# scripts/ci/ollama_early_warning.sh: an A/B test of the candidate against the
+# pinned image on one runner, with a pinned-vs-pinned control. See
+# docs/embedding-limits.md and scripts/ci/README.md.
+#
+# Verdicts: compatible (safe to bump the pin), drift (the vectors moved), broken
+# (a check the server relies on fails), error (the harness could not judge; the
+# run fails and the next scheduled run retries).
+#
+# Notifications come only from scheduled and manual runs on main. Drift and
+# broken open one issue per candidate version, and GitHub's issue notification
+# email is the email channel. A newly opened issue also sends a Pushover alert,
+# and compatible sends a low-priority notice, when the PUSHOVER_APP_TOKEN and
+# PUSHOVER_USER_KEY secrets are set. The verdict artifact, named by the
+# evaluation key and kept for 90 days, is the dedupe record.
+#
+# Pull requests that change the harness run the same A/B without notifications,
+# plus a negative control: Ollama 0.24.0, whose known tokenizer defect must be
+# reported as broken.
+#
+# GitHub disables scheduled workflows in public repositories after 60 days
+# without repository activity; re-enable this one from the Actions tab.
+
+name: Ollama early warning
+
+on:
+  schedule:
+    - cron: "23 13 * * *"
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: "Ollama version to test, such as 0.34.4 or 0.40.0-rc0 (default: latest stable release)"
+        required: false
+        default: ""
+      force:
+        description: "Evaluate again even if this evaluation already has a verdict"
+        type: boolean
+        default: false
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - ".github/workflows/ollama-early-warning.yml"
+      - "scripts/ci/ollama_early_warning*"
+      - "scripts/embedding-fingerprint.ts"
+      - "scripts/nomic_pin.ts"
+      - "scripts/probe-embedding-runtime.ts"
+      - "server/bounded_fetch.ts"
+      - "server/config.ts"
+      - "server/deno.json"
+      - "server/deno.lock"
+      - "server/embedding*.ts"
+      - "server/embeddings.ts"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ollama-early-warning-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate:
+    name: New Ollama release?
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Reads the verdict artifacts of earlier runs (the dedupe record).
+      actions: read
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+      candidate_image: ${{ steps.gate.outputs.candidate_image }}
+      candidate_version: ${{ steps.gate.outputs.candidate_version }}
+      pinned_version: ${{ steps.gate.outputs.pinned_version }}
+      model_digest: ${{ steps.gate.outputs.model_digest }}
+      key: ${{ steps.gate.outputs.key }}
+    steps:
+      - name: Checkout PR head safely
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout trusted event ref
+        if: github.event_name != 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.4
+
+      # Inputs reach the script only through the environment; the script
+      # validates the version before using it.
+      - name: Compare the latest release with the pin
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE: ${{ inputs.candidate }}
+          EW_FORCE: ${{ github.event_name == 'pull_request' || inputs.force == true }}
+          EW_REPO: ${{ github.repository }}
+          EW_BRANCH: main
+        run: |
+          scripts/ci/ollama_early_warning_gate.sh ${CANDIDATE:+"$CANDIDATE"} | tee -a "$GITHUB_OUTPUT"
+          grep -E '^(run|reason)=' "$GITHUB_OUTPUT" | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
+
+  harness-tests:
+    name: Verdict unit tests
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout PR head safely
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.4
+
+      - name: Run verdict tests
+        run: >-
+          deno test --config server/deno.json --frozen --allow-env --allow-read
+          scripts/ci/ollama_early_warning_verdict_test.ts
+
+  ab:
+    name: A/B test
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      verdict: ${{ steps.ab.outputs.verdict }}
+    steps:
+      - name: Checkout PR head safely
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout trusted event ref
+        if: github.event_name != 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.4
+
+      # Each ollama/ollama image is about 3.7 GB compressed (CUDA libraries
+      # included) and the job holds two.
+      - name: Free runner disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Restore the verified model store
+        id: store
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/nomic-model-store
+          key: ollama-ew-nomic-${{ needs.gate.outputs.model_digest }}
+
+      - name: Run the A/B test
+        id: ab
+        env:
+          IMAGE: ${{ needs.gate.outputs.candidate_image }}
+          KEY: ${{ needs.gate.outputs.key }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EW_MODEL_STORE: ${{ runner.temp }}/nomic-model-store
+          EW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          out="$RUNNER_TEMP/ew"
+          status=0
+          scripts/ci/ollama_early_warning.sh "$IMAGE" "$out" || status=$?
+          if [ -f "$out/summary.md" ]; then cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          verdict=$(jq -r '.verdict // "error"' "$out/verdict.json" 2>/dev/null || echo error)
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          # meta.json is written only after the model store matched the pin.
+          if [ -f "$out/meta.json" ]; then echo "store_verified=true" >> "$GITHUB_OUTPUT"; fi
+          # Only a verdict about the candidate from a trusted run is a dedupe
+          # record; pull request and error results are not.
+          if [ -n "$PR_NUMBER" ]; then
+            name="pr$PR_NUMBER-$KEY"
+          elif [ "$verdict" = error ]; then
+            name="error-$GITHUB_RUN_ID-$KEY"
+          else
+            name="$KEY"
+          fi
+          echo "artifact=$name" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Upload the result
+        if: always() && steps.ab.outputs.artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ab.outputs.artifact }}
+          path: ${{ runner.temp }}/ew/
+          retention-days: 90
+          if-no-files-found: warn
+          overwrite: true
+
+      # Containers write the store as root; the cache is archived as the
+      # runner user.
+      - name: Make the model store readable for the cache
+        if: always() && steps.store.outputs.cache-hit != 'true' && steps.ab.outputs.store_verified == 'true'
+        env:
+          STORE: ${{ runner.temp }}/nomic-model-store
+        run: sudo chmod -R a+rX "$STORE"
+
+      - name: Save the verified model store
+        if: always() && steps.store.outputs.cache-hit != 'true' && steps.ab.outputs.store_verified == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/nomic-model-store
+          key: ollama-ew-nomic-${{ needs.gate.outputs.model_digest }}
+
+  # Proves on every harness change that the pipeline can still say broken:
+  # Ollama 0.24.0 collides distinct uppercase inputs (see
+  # docs/investigations/2026-09-16-embedding-context-overflow.md).
+  negative-control:
+    name: Negative control (0.24.0 must be broken)
+    needs: gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout PR head safely
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.4
+
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Restore the verified model store
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/nomic-model-store
+          key: ollama-ew-nomic-${{ needs.gate.outputs.model_digest }}
+
+      - name: Run the A/B test against 0.24.0
+        env:
+          IMAGE: ollama/ollama:0.24.0@sha256:a6149234667efc71d37766d61c1a16f24c33e4cd7a0bf4125c44a7e47e2419c4
+          EW_MODEL_STORE: ${{ runner.temp }}/nomic-model-store
+        run: |
+          out="$RUNNER_TEMP/ew"
+          scripts/ci/ollama_early_warning.sh "$IMAGE" "$out" || true
+          if [ -f "$out/summary.md" ]; then cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          verdict=$(jq -r '.verdict // "error"' "$out/verdict.json" 2>/dev/null || echo error)
+          if [ "$verdict" != broken ]; then
+            echo "::error::negative control expected broken, got $verdict"
+            exit 1
+          fi
+
+      - name: Upload the result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr${{ github.event.pull_request.number }}-negative-control
+          path: ${{ runner.temp }}/ew/
+          retention-days: 14
+          if-no-files-found: warn
+          overwrite: true
+
+  notify:
+    name: Notify (${{ needs.ab.outputs.verdict }})
+    needs: [gate, ab]
+    if: >-
+      github.event_name != 'pull_request' && github.ref == 'refs/heads/main' &&
+      contains(fromJSON('["compatible","drift","broken"]'), needs.ab.outputs.verdict)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Download the verdict
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.gate.outputs.key }}
+          path: verdict
+
+      - name: Open one issue per candidate version (drift, broken)
+        id: issue
+        if: needs.ab.outputs.verdict != 'compatible'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERDICT: ${{ needs.ab.outputs.verdict }}
+          CANDIDATE: ${{ needs.gate.outputs.candidate_version }}
+          PINNED: ${{ needs.gate.outputs.pinned_version }}
+        run: |
+          label=ollama-early-warning
+          gh label create "$label" -R "$REPO" --force --color D93F0B \
+            --description "Ollama release changes the pinned embeddings"
+          prefix="Ollama $CANDIDATE:"
+          url=$(gh issue list -R "$REPO" --state all --label "$label" --limit 500 \
+            --json title,url |
+            jq -r --arg p "$prefix" 'map(select(.title | startswith($p)))[0].url // empty')
+          if [ -n "$url" ]; then
+            echo "Already reported: $url"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+          else
+            url=$(gh issue create -R "$REPO" --label "$label" \
+              --title "$prefix nomic-embed-text embeddings $VERDICT vs pinned $PINNED" \
+              --body-file verdict/issue.md)
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Pushover
+        if: needs.ab.outputs.verdict == 'compatible' || steps.issue.outputs.created == 'true'
+        env:
+          PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+          VERDICT: ${{ needs.ab.outputs.verdict }}
+          CANDIDATE: ${{ needs.gate.outputs.candidate_version }}
+          PINNED: ${{ needs.gate.outputs.pinned_version }}
+          ISSUE_URL: ${{ steps.issue.outputs.url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$PUSHOVER_APP_TOKEN" ] || [ -z "$PUSHOVER_USER_KEY" ]; then
+            echo "::warning::PUSHOVER_APP_TOKEN or PUSHOVER_USER_KEY is not set; no Pushover notice sent"
+            exit 0
+          fi
+          min=$(jq -r '.candidate.min_cosine // "n/a"' verdict/verdict.json)
+          if [ "$VERDICT" = compatible ]; then
+            priority=-1
+            message="Vectors match (min cosine $min). Safe to bump the pinned image."
+          else
+            priority=0
+            message="$(jq -r '.reasons[0] // ""' verdict/verdict.json | cut -c1-600)"
+          fi
+          curl -fsS https://api.pushover.net/1/messages.json \
+            --form-string "token=$PUSHOVER_APP_TOKEN" \
+            --form-string "user=$PUSHOVER_USER_KEY" \
+            --form-string "title=Ollama $CANDIDATE: embeddings $VERDICT vs pinned $PINNED" \
+            --form-string "message=$message" \
+            --form-string "priority=$priority" \
+            --form-string "url=${ISSUE_URL:-$RUN_URL}" \
+            --form-string "url_title=Details" >/dev/null

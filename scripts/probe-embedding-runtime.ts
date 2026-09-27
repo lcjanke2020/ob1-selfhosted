@@ -6,13 +6,14 @@
 // OLLAMA_URL=http://127.0.0.1:11434 deno run --config server/deno.json --frozen \
 //   --allow-env --allow-net=127.0.0.1:11434 scripts/probe-embedding-runtime.ts
 // These bounded synthetic checks are smoke evidence, not a corpus quality eval.
+import { NOMIC_MANIFEST_DIGEST, NOMIC_MODEL } from "./nomic_pin.ts";
 
 Deno.env.set("DB_PASSWORD", "synthetic-probe");
 Deno.env.set("MCP_ACCESS_KEY", "synthetic-probe-key-".repeat(4));
 Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 const base = Deno.env.get("OLLAMA_URL")?.replace(/\/$/, "");
 if (!base) throw new Error("Set OLLAMA_URL to the isolated candidate endpoint");
-Deno.env.set("EMBED_MODEL", "nomic-embed-text:latest");
+Deno.env.set("EMBED_MODEL", NOMIC_MODEL);
 const { buildEmbeddingIndex, EmbeddingContextError } = await import(
   "../server/embedding_index.ts"
 );
@@ -30,11 +31,8 @@ async function readMetadata(route: string) {
 }
 const version = await readMetadata("version");
 const tags = await readMetadata("tags");
-const model = tags.models.find((m: { name: string }) =>
-  m.name === "nomic-embed-text:latest"
-);
-const expected =
-  "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f";
+const model = tags.models.find((m: { name: string }) => m.name === NOMIC_MODEL);
+const expected = NOMIC_MANIFEST_DIGEST;
 console.log(
   JSON.stringify({
     stage: "identity",

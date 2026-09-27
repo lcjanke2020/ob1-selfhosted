@@ -135,7 +135,9 @@ proven break from a version change:
   `[embedding] runtime version changed A -> B; runtime canaries passed`. Compare
   a sample of stored records with the current runtime, rebuilding each and
   comparing every passage as the relabel below does, and recover with a
-  [rebuild](#recovering-from-runtime-drift).
+  [rebuild](#recovering-from-runtime-drift). The
+  [early warning](#early-warning-for-new-ollama-releases) tests each release
+  before a deployment adopts it.
 
 A distinct-input canary rejects the uppercase collision reproduced in the
 [September investigation](investigations/2026-09-16-embedding-context-overflow.md).
@@ -184,6 +186,70 @@ PR is not a prerequisite for our strict chunking path. Before cutover, repeat
 the checks on the target CPU and evaluate representative approved records.
 Vectors written by a canary-failing runtime such as 0.24.0 are not compatible
 with a corrected one: replacing it needs the full rebuild below, not a relabel.
+
+## Early warning for new Ollama releases
+
+The
+[Ollama early-warning workflow](../.github/workflows/ollama-early-warning.yml)
+tests each new stable `ollama/ollama` release before any deployment upgrades to
+it. A daily gate compares the latest release with the pinned image. It skips the
+run when that release is already pinned or already has a verdict for the same
+candidate image digest, pin, model digest and harness revision. Otherwise the
+[runner](../scripts/ci/README.md#ollama-early-warning-runner) starts three
+containers on one GitHub-hosted runner, each from a copy of one model store
+verified against the pinned manifest digest:
+
+- **pinned**: runs the [runtime probe](../scripts/probe-embedding-runtime.ts). A
+  failure here means the runner cannot judge the candidate.
+- **control**: the pinned image again, in a fresh process. Its vectors must
+  match the pinned ones. This sets the noise floor and catches harness faults.
+- **candidate**: runs the same probe.
+
+A fingerprint of fixed synthetic canaries then goes through the server's own
+embedder and chunker on each endpoint:
+[`scripts/embedding-fingerprint.ts`](../scripts/embedding-fingerprint.ts) covers
+casing, accents, code, identifiers, several scripts, emoji, NUL-joined session
+text, and multi-passage documents up to the context boundary. The verdict
+compares every passage of the candidate with the pinned one:
+
+| Verdict      | Meaning                                                                                                                                                                         |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `compatible` | The probe passes, chunk counts are equal and every passage reaches cosine 0.999 (the relabel guard's bar). The summary says whether the vectors are bitwise identical.          |
+| `drift`      | The probe passes, but some passage falls below 0.999 or a chunk count differs. Deployments on that version mix incompatible vectors silently.                                   |
+| `broken`     | The probe or an embedding fails, or the candidate reports a different digest for the same model files, which changes the contract. A 1.29+ server on that version fails closed. |
+| `error`      | The harness could not judge. The run fails, and the next scheduled run retries.                                                                                                 |
+
+The job summary and a JSON artifact kept for 90 days record every verdict. That
+artifact is also the deduplication record. Scheduled and manual runs on `main`
+then notify:
+
+- **Drift or broken** opens one issue per candidate version, labelled
+  `ollama-early-warning`. Watching the repository delivers it as a GitHub
+  notification, including email to the watching account's notification address.
+- **A newly opened issue** also sends a Pushover alert.
+- **Compatible** sends a low-priority "safe to bump" notice.
+
+Pushover needs the repository secrets `PUSHOVER_APP_TOKEN` and
+`PUSHOVER_USER_KEY`; without them the workflow logs a warning and sends nothing.
+A dedicated Pushover application keeps this token separate from the server's
+metadata alerts. Manual runs take any version, including a release candidate,
+and can force a re-evaluation. Pull requests that change the harness run the
+same A/B without notifications, plus a negative control: 0.24.0 must be reported
+`broken`.
+
+To bump the pin, confirm that the workflow reported the target version
+`compatible`, then update both Compose files and `KNOWN_NON_DENO_IMAGES` in
+`server/scripts/check_allow_env.ts`. The verdict is a proxy with limits:
+
+- It measures CPU inference of the Linux amd64 image. Pinned and candidate share
+  one runner, so CPU backend selection cancels out, but other platforms can
+  differ numerically: macOS with Metal, GPUs, or the native installers.
+- It catches tokenizer, context-accounting and logic regressions shared across
+  platforms, not every platform's numerics.
+- Deployments that are already running keep needing their own drift check.
+
+GitHub disables scheduled workflows in a public repository after 60 days without
+repository activity; re-enable the workflow from the Actions tab.
 
 ## Reviewed offline migration and cutover
 
