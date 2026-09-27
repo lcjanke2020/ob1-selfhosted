@@ -13,6 +13,7 @@ import {
 } from "./embedding_runtime.ts";
 import {
   buildEmbeddingIndex,
+  cosine,
   type EmbedOne,
   MAX_EMBEDDING_DURATION_MS,
   sourceHash,
@@ -180,9 +181,11 @@ export async function backfillEmbeddingIndex(
 
 // One-time conversion of a server 1.28 generation, whose contract also hashed
 // the runtime version, to the runtime-free contract without re-embedding. The
-// legacy hash proves which runtime and model built the activated generation; a
-// sample of stored single-passage vectors must then match the current runtime.
+// legacy hash proves which runtime and model built the activated generation;
+// every passage of a sample of stored records must then match the current
+// runtime, and each nonempty record kind must contribute a comparison.
 export const RELABEL_SAMPLE_PER_KIND = 8;
+export const RELABEL_MAX_SAMPLE_PASSAGES = 8;
 export const RELABEL_MIN_COSINE = 0.999;
 
 // `auto` accepts any plausible release string. The candidate is only a hash
@@ -227,43 +230,42 @@ async function findLegacyRuntime(
   return batch.length ? await match() : undefined;
 }
 
-function cosine(a: number[], b: number[]): number {
-  if (a.length !== b.length) return NaN;
-  let dot = 0;
-  let aa = 0;
-  let bb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    aa += a[i] * a[i];
-    bb += b[i] * b[i];
-  }
-  return dot / Math.sqrt(aa * bb);
-}
-
 async function sampleStoredVectors(
   client: PoolClient,
   embedOne: EmbedOne,
   previous: string,
   contract: string,
 ) {
-  let sampled = 0;
+  const sampled: Record<Kind, number> = { thought: 0, session: 0 };
+  const uncovered: Kind[] = [];
+  let passages = 0;
   let chunkMismatches = 0;
   let below = 0;
   let minCosine: number | null = null;
   for (const kind of KINDS) {
     const { table, index, key, projection, fields } = TABLES[kind];
-    // A single-passage record reproduces its exact embedded text; stale
-    // rows are skipped here and rejected by the readiness gate.
+    const present = await client.queryObject<{ present: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM ${index} WHERE contract = $1) AS present`,
+      [previous],
+    );
+    // Rebuilding a record reproduces its exact passage texts, so every stored
+    // passage is compared in order. The passage cap bounds work per record;
+    // stale rows are skipped here and rejected by the readiness gate.
     const result = await client.queryObject<Record<string, unknown>>(
-      `SELECT ${projection}, i.source_hash, i.vectors[1]::text AS vector
+      `SELECT ${projection}, i.source_hash,
+         (SELECT jsonb_agg(v::text ORDER BY n)
+          FROM unnest(i.vectors) WITH ORDINALITY AS u(v, n)) AS vectors
        FROM ${index} i JOIN ${table} t ON t.id = i.${key}
-       WHERE i.contract = $1 AND cardinality(i.vectors) = 1
+       WHERE i.contract = $1 AND cardinality(i.vectors) <= $3
        ORDER BY random() LIMIT $2`,
-      [previous, RELABEL_SAMPLE_PER_KIND],
+      [previous, RELABEL_SAMPLE_PER_KIND, RELABEL_MAX_SAMPLE_PASSAGES],
     );
     for (const row of result.rows) {
       const source = embeddingSource(kind, row);
       if (await sourceHash(source) !== row.source_hash) continue;
+      const stored = (row.vectors as string[]).map((vector) =>
+        JSON.parse(vector) as number[]
+      );
       const fresh = await buildEmbeddingIndex(
         source,
         [...fields],
@@ -271,22 +273,23 @@ async function sampleStoredVectors(
         contract,
         performance.now() + MAX_EMBEDDING_DURATION_MS,
       );
-      sampled++;
-      if (fresh.vectors.length !== 1) {
+      sampled[kind]++;
+      if (fresh.vectors.length !== stored.length) {
         chunkMismatches++;
         continue;
       }
-      const similarity = cosine(
-        fresh.vectors[0],
-        JSON.parse(String(row.vector)),
-      );
-      if (!(similarity >= RELABEL_MIN_COSINE)) below++;
-      if (!Number.isNaN(similarity)) {
-        minCosine = Math.min(minCosine ?? 1, similarity);
+      for (let i = 0; i < stored.length; i++) {
+        const similarity = cosine(fresh.vectors[i], stored[i]);
+        passages++;
+        if (!(similarity >= RELABEL_MIN_COSINE)) below++;
+        if (!Number.isNaN(similarity)) {
+          minCosine = Math.min(minCosine ?? 1, similarity);
+        }
       }
     }
+    if (present.rows[0]?.present && sampled[kind] === 0) uncovered.push(kind);
   }
-  return { sampled, chunkMismatches, below, minCosine };
+  return { sampled, uncovered, passages, chunkMismatches, below, minCosine };
 }
 
 export async function relabelEmbeddingGeneration(
@@ -348,10 +351,21 @@ export async function relabelEmbeddingGeneration(
     from: active,
     to: contract,
     sampled: sample.sampled,
+    passages_compared: sample.passages,
     min_cosine: sample.minCosine,
     below_threshold: sample.below,
     chunk_mismatches: sample.chunkMismatches,
+    uncovered: sample.uncovered,
   }));
+  // An empty corpus has nothing to compare. A nonempty kind must contribute at
+  // least one successful comparison, so the guard can never pass vacuously.
+  if (sample.uncovered.length) {
+    throw new Error(
+      `relabel: no stored ${
+        sample.uncovered.join(" or ")
+      } vectors of at most ${RELABEL_MAX_SAMPLE_PASSAGES} passages could be compared with the current runtime; run the backfill (--apply) instead`,
+    );
+  }
   if (sample.below || sample.chunkMismatches) {
     throw new Error(
       "relabel: sampled stored vectors differ from the current runtime; run the backfill (--apply) instead",

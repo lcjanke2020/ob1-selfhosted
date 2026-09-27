@@ -315,22 +315,28 @@ The tool proceeds only when all of these hold:
    A manifest or strategy change matches nothing.
 2. **The corpus is complete.** Every record must be indexed under that
    generation.
-3. **A sample still matches.** Up to eight thought and eight session vectors
-   with a single passage are re-embedded with the current runtime. Every sample
-   must keep one passage and reach cosine 0.999. This is a relabel guard, not a
-   quality threshold.
+3. **A sample still matches.** Up to eight thoughts and eight sessions with at
+   most eight passages each are rebuilt with the current runtime. Every sampled
+   record must keep its passage count, and every passage must reach cosine 0.999
+   against its stored vector. Each nonempty record kind must contribute at least
+   one comparison: session text reaches the runtime NUL-joined, so a thought
+   sample cannot vouch for sessions. Only an empty corpus relabels with nothing
+   to compare. This is a relabel guard, not a quality threshold.
 
 The plan prints `previous_runtime`, `current_runtime`, `from`, `to`, `sampled`
-and `min_cosine`, and writes nothing. `--apply` locks both parent tables and
-both index tables, rechecks the generation and coverage, then rewrites every
-index label and the generation in one transaction. It ends with a `relabeled`
-record. Rerunning it reports `already_current`. Then start the 1.29 server.
+per kind, `passages_compared`, `min_cosine` and any `uncovered` kind, and writes
+nothing. `--apply` locks both parent tables and both index tables, rechecks the
+generation and coverage, then rewrites every index label and the generation in
+one transaction. It ends with a `relabeled` record. Rerunning it reports
+`already_current`. Then start the 1.29 server.
 
 If any condition fails, nothing changes. Run the full
 [backfill](#compose-backfill-runner) (`--apply` without `--relabel`) instead. It
 re-embeds every record under the new contract and activates it. This is the path
 for an installation whose runtime has already been upgraded beneath 1.28 when
-the sample shows that its vectors moved.
+the sample shows that its vectors moved. When only completeness fails because a
+few records changed, running the **1.28** image's backfill first re-embeds just
+those records with the same runtime; the relabel can then proceed.
 
 A 1.28 app refuses to start against a relabeled generation. To roll back before
 any 1.29 write, with the embedding backend still reporting the plan's

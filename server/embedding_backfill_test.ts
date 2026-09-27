@@ -207,9 +207,8 @@ Deno.test(
 Deno.test(
   "relabel converts a proven 1.28 generation without re-embedding",
   withEnv([], BACKFILL_ENV, async (t) => {
-    const { relabelEmbeddingGeneration } = await import(
-      "./embedding_backfill.ts"
-    );
+    const { RELABEL_MAX_SAMPLE_PASSAGES, relabelEmbeddingGeneration } =
+      await import("./embedding_backfill.ts");
     const { contractFor, legacyContractFor } = await import(
       "./embedding_runtime.ts"
     );
@@ -217,18 +216,28 @@ Deno.test(
     const identity = { runtime: "0.35.0", ...NOMIC };
     const current = await contractFor(identity);
     const legacy = await legacyContractFor(NOMIC, "0.34.1");
-    const hash = await sourceHash("stored thought");
+    let embedCalls = 0;
     const deps = (runtimeIdentity = identity) => ({
       contract: () => contractFor(runtimeIdentity),
       identity: () => Promise.resolve(runtimeIdentity),
-      embed: () => Promise.resolve([1, 0]),
+      embed: () => {
+        embedCalls++;
+        return Promise.resolve([1, 0]);
+      },
     });
-    const fixture = (
+    type Stored = { content: string; vectors: number[][] };
+    const single: Stored = { content: "stored thought", vectors: [[2, 0]] };
+    // Over the 4096-unit initial target: the rebuild yields two passages.
+    const long = "x".repeat(5000);
+    const fixture = async (
       active: string | null,
-      stored: number[] = [2, 0],
+      thoughts: Stored[] = [single],
       failAt?: string,
     ) => {
       let generation = active;
+      const hashes = await Promise.all(
+        thoughts.map((row) => sourceHash(row.content)),
+      );
       return new FakeClient((sql, params) => {
         const compact = sql.replace(/\s+/g, " ").trim();
         if (failAt && compact.startsWith(failAt)) {
@@ -245,13 +254,24 @@ Deno.test(
         if (compact.includes("embedding_ready(")) {
           return { rows: [{ ready: params[0] === generation }] };
         }
+        if (compact.startsWith("SELECT EXISTS (SELECT 1 FROM public.")) {
+          return { rows: [{ present: thoughts.length > 0 }] };
+        }
+        if (compact.startsWith("SELECT EXISTS (SELECT 1 FROM sessions.")) {
+          return { rows: [{ present: false }] };
+        }
         if (compact.includes("FROM public.thought_embedding_index i JOIN")) {
+          // Mirror the sampler's SQL passage cap.
           return {
-            rows: [{
-              content: "stored thought",
-              source_hash: hash,
-              vector: JSON.stringify(stored),
-            }],
+            rows: thoughts.flatMap((row, i) =>
+              row.vectors.length <= (params[2] as number)
+                ? [{
+                  content: row.content,
+                  source_hash: hashes[i],
+                  vectors: row.vectors.map((v) => JSON.stringify(v)),
+                }]
+                : []
+            ),
           };
         }
         if (compact.includes("FROM sessions.embedding_index i JOIN")) {
@@ -282,18 +302,22 @@ Deno.test(
         apply,
         deps(runtimeIdentity),
       );
+    const relabeled = (client: FakeClient) =>
+      writes(client).some(({ sql }) =>
+        sql.startsWith("UPDATE memory_scope.embedding_generation")
+      );
 
     await t.step(
       "plan proves the previous runtime and writes nothing",
       async () => {
-        const client = fixture(legacy);
+        const client = await fixture(legacy);
         await run(client, "0.34.1", false);
         assertEquals(writes(client), []);
       },
     );
 
     await t.step("apply relabels in one locked transaction", async () => {
-      const client = fixture(legacy);
+      const client = await fixture(legacy);
       await run(client, "auto", true);
       assertEquals(writes(client).map(({ sql }) => sql), [
         "BEGIN",
@@ -307,13 +331,79 @@ Deno.test(
         assertEquals(call.params, [current, legacy]);
       }
       // Idempotent: a second run finds the generation already current.
-      const again = fixture(current);
+      const again = await fixture(current);
       await run(again, "auto", true);
       assertEquals(writes(again), []);
     });
 
+    await t.step("multi-passage records compare every passage", async () => {
+      const client = await fixture(legacy, [{
+        content: long,
+        vectors: [[2, 0], [3, 0]],
+      }]);
+      embedCalls = 0;
+      await run(client, "0.34.1", true);
+      assertEquals(embedCalls, 2);
+      assert(relabeled(client));
+
+      const drifted = await fixture(legacy, [{
+        content: long,
+        vectors: [[2, 0], [0, 1]],
+      }]);
+      await assertRejects(
+        () => run(drifted, "0.34.1", true),
+        Error,
+        "differ from the current runtime",
+      );
+      assertEquals(writes(drifted), []);
+
+      const split = await fixture(legacy, [{
+        content: long,
+        vectors: [[2, 0]],
+      }]);
+      await assertRejects(
+        () => run(split, "0.34.1", true),
+        Error,
+        "differ from the current runtime",
+      );
+      assertEquals(writes(split), []);
+    });
+
+    await t.step(
+      "a nonempty kind without a comparable record is refused",
+      async () => {
+        // Every stored record exceeds the sampler's passage cap, so no
+        // comparison is possible; relabeling must not pass vacuously.
+        const tooLong = Array.from(
+          { length: RELABEL_MAX_SAMPLE_PASSAGES + 1 },
+          () => [2, 0],
+        );
+        const client = await fixture(legacy, [{
+          content: long,
+          vectors: tooLong,
+        }]);
+        embedCalls = 0;
+        await assertRejects(
+          () => run(client, "0.34.1", true),
+          Error,
+          "no stored thought vectors",
+        );
+        assertEquals(embedCalls, 0);
+        assertEquals(writes(client), []);
+      },
+    );
+
+    await t.step(
+      "an empty corpus relabels with nothing to compare",
+      async () => {
+        const client = await fixture(legacy, []);
+        await run(client, "0.34.1", true);
+        assert(relabeled(client));
+      },
+    );
+
     await t.step("an unproven previous runtime is refused", async () => {
-      const client = fixture(legacy);
+      const client = await fixture(legacy);
       await assertRejects(
         () => run(client, "0.33.0", true),
         Error,
@@ -323,7 +413,7 @@ Deno.test(
     });
 
     await t.step("a different model manifest matches no runtime", async () => {
-      const client = fixture(legacy);
+      const client = await fixture(legacy);
       await assertRejects(
         () =>
           run(client, "auto", true, { ...identity, digest: "1".repeat(64) }),
@@ -334,7 +424,10 @@ Deno.test(
     });
 
     await t.step("drifted stored vectors are refused", async () => {
-      const client = fixture(legacy, [0, 1]);
+      const client = await fixture(legacy, [{
+        content: "stored thought",
+        vectors: [[0, 1]],
+      }]);
       await assertRejects(
         () => run(client, "0.34.1", true),
         Error,
@@ -344,7 +437,7 @@ Deno.test(
     });
 
     await t.step("an inactive generation needs the backfill", async () => {
-      const client = fixture(null);
+      const client = await fixture(null);
       await assertRejects(
         () => run(client, "auto", true),
         Error,
@@ -353,7 +446,11 @@ Deno.test(
     });
 
     await t.step("a failed label update rolls back", async () => {
-      const client = fixture(legacy, [2, 0], "UPDATE sessions.embedding_index");
+      const client = await fixture(
+        legacy,
+        [single],
+        "UPDATE sessions.embedding_index",
+      );
       await assertRejects(
         () => run(client, "0.34.1", true),
         Error,
