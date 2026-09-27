@@ -3,7 +3,7 @@ import type { EmbeddingIndex } from "./embedding_index.ts";
 import { UpstreamError } from "./errors.ts";
 
 export const EMBEDDING_INDEX_UNAVAILABLE_MESSAGE =
-  "embedding index unavailable: runtime/model contract differs or full-corpus backfill is incomplete; search not executed";
+  "embedding index unavailable: model contract differs or full-corpus backfill is incomplete; search not executed";
 
 export async function setEmbeddingStatementTimeout(
   client: PoolClient,

@@ -2,10 +2,13 @@
 
 The passage index inherits each canonical record's audience through forced RLS.
 Index replacement shares the canonical write transaction; source drift or an
-incomplete/incompatible generation makes search fail closed. Runtime identity
-checks assume an immutable, trusted embedding backend; the targeted tokenizer
-canary detects the measured collision and is not a general model certification.
-See [embedding limits](embedding-limits.md).
+incomplete/incompatible generation makes search fail closed. The contract names
+the model manifest, not the runtime version, so a trusted embedding backend may
+be upgraded in place; each newly observed runtime version must pass the targeted
+tokenizer canary, which detects the measured collision and is not a general
+model certification. Vector drift that the canary cannot see degrades ranking
+rather than failing closed until an operator rebuilds. See
+[embedding limits](embedding-limits.md).
 
 The security documentation in this repo is deliberately distributed: each doc
 owns the layer it describes. This page assembles the whole model in one place —

@@ -200,7 +200,7 @@ Deno.test("passage search: SQL readiness failure preserves the upstream diagnost
   );
   assertEquals(
     error.message,
-    "embedding index unavailable: runtime/model contract differs or full-corpus backfill is incomplete; search not executed",
+    "embedding index unavailable: model contract differs or full-corpus backfill is incomplete; search not executed",
   );
   assertEquals(statements.includes("ROLLBACK"), true);
   assertEquals(statements.includes("COMMIT"), false);

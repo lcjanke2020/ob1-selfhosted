@@ -3,7 +3,10 @@
 For server 1.28, apply the
 [embedding index migration and offline
 backfill](../../../docs/embedding-limits.md) after validating the runtime. The
-new startup gate rejects an incomplete or incompatible index.
+new startup gate rejects an incomplete or incompatible index. From 1.28 to 1.29,
+run the one-time
+[relabel](../../../docs/embedding-limits.md#upgrading-a-128-generation-to-129-relabel)
+instead of re-embedding.
 
 The **app** qube of the [three-qube split](../three-qube-design.md): it runs the
 application half (the MCP server + Ollama embeddings) and nothing else. The
@@ -310,6 +313,7 @@ order
 | 1.26.0              | `db/13-oauth-subjects.sql`                                                 | required with OAuth on or off; provision credential administrator and HBA first, then migrate/assert and import/verify OAuth subjects before the MCP roll              |
 | 1.27.0              | `db/14-native-token-principals.sql`                                        | required with tokens on or off; explicit token principal, fail-closed legacy identity, final grants assertion; deploy ingress confinement before enabling the app flag |
 | 1.28.0              | `db/15-embedding-index.sql`                                                | PostgreSQL superuser; validated corrected runtime, full offline backfill and activation before MCP starts, including fresh empty databases                             |
+| 1.29.0              | —                                                                          | from 1.28: PostgreSQL superuser; offline `embedding_backfill.ts --relabel` before MCP starts (no re-embed); later Ollama version changes need no index work            |
 
 Server 1.26.0 additionally requires `db/13-oauth-subjects.sql` **even when OAuth
 is disabled**.

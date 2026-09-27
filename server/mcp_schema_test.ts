@@ -68,7 +68,7 @@ Deno.test("MCP publishes server and session-lifecycle metadata", async () => {
   await withMcpFixture(() => undefined, async ({ client }) => {
     assertEquals(client.getServerVersion(), {
       name: "open-brain-homelab",
-      version: "1.28.0",
+      version: "1.29.0",
     });
     const listed = await client.listTools();
     const sessionLookup = listed.tools.find((tool) =>

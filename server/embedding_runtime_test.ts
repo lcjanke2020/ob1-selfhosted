@@ -18,11 +18,13 @@ Deno.test(
     const { embeddingContract } = await import("./embedding_runtime.ts");
     const original = globalThis.fetch;
     let mode = "ok";
+    let version = "fixture-1";
     let digest = "1".repeat(64);
+    let canaryRuns = 0;
     let captured: Record<string, unknown> = {};
     globalThis.fetch = ((url, init) => {
       if (String(url).endsWith("/version")) {
-        return Promise.resolve(Response.json({ version: "fixture-1" }));
+        return Promise.resolve(Response.json({ version }));
       }
       if (String(url).endsWith("/tags")) {
         return Promise.resolve(
@@ -32,6 +34,7 @@ Deno.test(
         );
       }
       captured = JSON.parse(init?.body as string);
+      if (captured.input === "QUARTZ ZEPHYR WALRUS") canaryRuns++;
       if (mode === "overflow") {
         return Promise.resolve(
           Response.json({
@@ -110,6 +113,27 @@ Deno.test(
       mode = "ok";
       const first = await embeddingContract();
       assertEquals(first.length, 64);
+      const validated = canaryRuns;
+      assertEquals(await embeddingContract(), first);
+      assertEquals(canaryRuns, validated, "a validated runtime is not rerun");
+
+      // An unmanaged runtime upgrade keeps the contract (and the corpus)
+      // usable; only the canary reruns for the newly observed version.
+      version = "fixture-2";
+      assertEquals(await embeddingContract(), first);
+      assertEquals(canaryRuns, validated + 1);
+
+      // A later swap to a proven-defective build fails closed, including at a
+      // job's end-of-work identity check, without forgetting the good build.
+      version = "fixture-3";
+      mode = "collision";
+      await assertRejects(() => embeddingContract(), Error, "canary collision");
+      version = "fixture-2";
+      mode = "ok";
+      const beforeReturn = canaryRuns;
+      assertEquals(await embeddingContract(), first);
+      assertEquals(canaryRuns, beforeReturn);
+
       digest = "2".repeat(64);
       assert(
         (await embeddingContract()) !== first,

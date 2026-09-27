@@ -1,7 +1,10 @@
 # Open Brain — Self-Hosted
 
 Embedding changes in server 1.28 require a validated runtime and a reviewed
-[full-corpus index migration](docs/embedding-limits.md) before startup.
+[full-corpus index migration](docs/embedding-limits.md) before startup. Server
+1.29 no longer treats an Ollama version change as an incompatible index; a 1.28
+corpus needs only a one-time offline
+[relabel](docs/embedding-limits.md#upgrading-a-128-generation-to-129-relabel).
 
 [![CI](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/ci.yml)
 [![Leak gate](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/leak-gate.yml/badge.svg?branch=main)](https://github.com/lcjanke2020/ob1-selfhosted/actions/workflows/leak-gate.yml)
