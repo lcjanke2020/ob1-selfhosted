@@ -435,11 +435,35 @@ Deno.test(
                   },
                 ),
               Error,
-              "runtime changed during relabel (0.35.0 -> 0.36.0)",
+              "embedding identity changed during relabel (version 0.35.0 -> 0.36.0)",
             );
             assertEquals(writes(client), []);
           });
         }
+        await t.step("a digest-only move names the digest", async () => {
+          const client = await fixture(legacy);
+          let reads = 0;
+          const error = await assertRejects(
+            () =>
+              relabelEmbeddingGeneration(
+                client as unknown as PoolClient,
+                "0.34.1",
+                true,
+                {
+                  ...deps(),
+                  identity: () =>
+                    Promise.resolve({
+                      ...identity,
+                      digest: ++reads > 1 ? "1".repeat(64) : identity.digest,
+                    }),
+                },
+              ),
+            Error,
+            "embedding identity changed during relabel (model digest 0a109f422b47 -> 111111111111)",
+          );
+          assert(!error.message.includes("version"));
+          assertEquals(writes(client), []);
+        });
       },
     );
 

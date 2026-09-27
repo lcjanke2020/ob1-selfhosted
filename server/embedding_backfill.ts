@@ -313,9 +313,19 @@ export async function relabelEmbeddingGeneration(
   const identity = await readIdentity();
   const requireSameRuntime = async () => {
     const now = await readIdentity();
-    if (now.runtime !== identity.runtime || now.digest !== identity.digest) {
+    const moved = [
+      now.runtime !== identity.runtime &&
+      `version ${identity.runtime} -> ${now.runtime}`,
+      now.digest !== identity.digest &&
+      `model digest ${identity.digest.slice(0, 12)} -> ${
+        now.digest.slice(0, 12)
+      }`,
+    ].filter(Boolean);
+    if (moved.length) {
       throw new Error(
-        `relabel: runtime changed during relabel (${identity.runtime} -> ${now.runtime}); nothing relabeled; rerun`,
+        `relabel: embedding identity changed during relabel (${
+          moved.join(", ")
+        }); nothing relabeled; rerun`,
       );
     }
   };
