@@ -161,9 +161,10 @@ by token rotation.
 ## Existing database upgrade
 
 Server **1.27.0 introduced migration 14, required even with native tokens
-disabled**. Current **1.28.0** also requires migration 15 and an activated
-embedding generation. Preserve the old app/runtime images and environment, take
-a verified backup, and use the complete procedure for your deployment:
+disabled**. Since **1.28.0**, upgrades also require migration 15 and an
+activated embedding generation. Preserve the old app/runtime images and
+environment, take a verified backup, and use the complete procedure for your
+deployment:
 
 - [Local Compose upgrade](../deploy/compose-local/README.md#upgrading-an-existing-database)
 - [Pattern B upgrade](../deploy/compose-tailnet/README.md#upgrading-an-existing-deployment)

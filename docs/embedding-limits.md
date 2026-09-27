@@ -103,18 +103,46 @@ copied workspace/owner fields can drift from the canonical row.
 ## Runtime identity and the known tokenizer defect
 
 The embedding contract hashes strategy version, model name, model manifest
-digest, dimensions and reported Ollama runtime version. Both document and query
-paths verify that identity before/after work. Sessions reuse an index only when
-its full-source hash and contract both match. Rebuild the whole corpus for a
-model/runtime/prefix/strategy change; a mutable model tag is insufficient.
+digest and dimensions. Both document and query paths verify that identity
+before/after work. Sessions reuse an index only when its full-source hash and
+contract both match. Rebuild the whole corpus for a model/prefix/strategy
+change; a mutable model tag is insufficient.
+
+Since server 1.29 the contract **does not include the Ollama runtime version**.
+Releases rarely change a pinned model's vectors, and some installations cannot
+pin the runtime: a native desktop install may be upgraded by device management
+at any moment, even between the start and end of one request. Treating every
+release as incompatible made such an installation reject every capture and
+search until an operator re-embedded the corpus. The server now distinguishes a
+proven break from a version change:
+
+- **Proven corruption fails closed.** The server remembers the runtime version
+  whose canaries last passed. Any identity check that observes a different
+  version reruns them before that runtime's vectors are used: at startup, before
+  and after every document or query embedding, and for every backfill record.
+  The version is read again afterwards, and a runtime swapped in mid-check is
+  not cached as validated. Every model gets the distinct-input collision canary.
+  For `nomic-embed-text`, an uncased WordPiece model, a correct runtime also
+  lowercases and strips accents, so an upper/lowercase pair and an
+  accented/plain pair must each reach cosine 0.999 (the validated 0.34.1
+  measures exactly 1). A failure rejects the request with `write=not_started` or
+  `search=not_started`. The canaries rerun only when the reported version
+  changes, so a custom runtime build must report a distinct version string.
+- **Subtler drift is monitored, not gated.** A release could move vectors
+  without tripping the canary, for example through a different numeric backend.
+  Until that is noticed, new vectors mix with old ones and ranking degrades;
+  nothing fails. Every accepted change is logged as
+  `[embedding] runtime version changed A -> B; runtime canaries passed`. Compare
+  a sample of stored records with the current runtime, rebuilding each and
+  comparing every passage as the relabel below does, and recover with a
+  [rebuild](#recovering-from-runtime-drift).
 
 A distinct-input canary rejects the uppercase collision reproduced in the
 [September investigation](investigations/2026-09-16-embedding-context-overflow.md).
 This detects that particular corruption; it does not certify arbitrary tokenizer
-behavior. Custom runtime builds must expose a distinct version, and the backend
-must remain immutable during service operation. Before any rollout, separately
-validate the selected runtime/model with casing, unknown-token, multilingual,
-boundary and representative retrieval probes. Nomic's
+behavior. Before deliberately adopting a runtime, still separately validate the
+selected runtime/model with casing, unknown-token, multilingual, boundary and
+representative retrieval probes. Nomic's
 [model card](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5#usage)
 recommends task prefixes; introducing them is a separate, versioned contract
 change requiring retrieval evaluation and another rebuild.
@@ -153,9 +181,9 @@ See the
 [uppercase issue](https://github.com/ollama/ollama/issues/13942#issuecomment-4617769764)
 already reported corrected behavior in 0.30.0/0.30.3. The still-open truncation
 PR is not a prerequisite for our strict chunking path. Before cutover, repeat
-the checks on the target CPU and evaluate representative approved records. Do
-not upgrade the runtime beneath an app serving the old vectors: schedule
-runtime, full-corpus rebuild, and app activation as one maintenance operation.
+the checks on the target CPU and evaluate representative approved records.
+Vectors written by a canary-failing runtime such as 0.24.0 are not compatible
+with a corrected one: replacing it needs the full rebuild below, not a relabel.
 
 ## Reviewed offline migration and cutover
 
@@ -254,3 +282,130 @@ same immutable runtime/model. Matching records are reused. Then return to the
 deployment guide's MCP start and smoke checks. Do not start an old app with the
 corrected runtime against its old vectors, or present this offline tool as an
 online background migration.
+
+## Upgrading a 1.28 generation to 1.29 (relabel)
+
+Server 1.28 also hashed the runtime version into the contract, so every stored
+index row and the activated generation carry a label that 1.29 no longer
+computes. An unchanged corpus does not need re-embedding; it needs a one-time,
+offline **relabel**. Take the usual backup and keep the old image, stop MCP and
+all other corpus writers/search consumers, leave the database and embedding
+backend running, and build the 1.29 `mcp` image. Then use the same runner shape
+as above with `--relabel auto`:
+
+```bash
+(
+set -euo pipefail
+read -r -s -p 'Corpus PostgreSQL superuser password: ' DB_PASSWORD
+printf '\n'
+export DB_PASSWORD
+docker compose --env-file .env run --rm --no-deps -T \
+  -e DB_USER=postgres -e DB_PASSWORD mcp \
+  deno run --cached-only --frozen --allow-env --allow-net embedding_backfill.ts --relabel auto
+
+# Review the proven previous runtime and the sampled cosine first.
+read -r -p 'Apply the reviewed relabel? Type relabel: ' relabel_review
+test "$relabel_review" = relabel
+docker compose --env-file .env run --rm --no-deps -T \
+  -e DB_USER=postgres -e DB_PASSWORD mcp \
+  deno run --cached-only --frozen --allow-env --allow-net embedding_backfill.ts --relabel auto --apply
+)
+```
+
+The tool proceeds only when all of these hold:
+
+1. **The previous generation is proven.** The activated contract must equal the
+   1.28 hash of the current model name, manifest digest, dimensions and strategy
+   with some runtime version. Pass that version (for example `--relabel 0.34.1`)
+   or `auto`, which searches plausible release strings offline in a few seconds.
+   A manifest or strategy change matches nothing.
+2. **The corpus is complete.** Every record must be indexed under that
+   generation.
+3. **A sample still matches.** Up to eight thoughts and eight sessions with at
+   most eight passages each are rebuilt with the current runtime. Every sampled
+   record must keep its passage count, and every passage must reach cosine 0.999
+   against its stored vector. Each nonempty record kind must contribute at least
+   one comparison: session text reaches the runtime NUL-joined, so a thought
+   sample cannot vouch for sessions. Only an empty corpus relabels with nothing
+   to compare. This is a relabel guard, not a quality threshold.
+4. **The runtime holds still.** The serving runtime's version and digest are
+   read before its canaries, after them, after the sample and immediately before
+   the transaction. If they move, the sample measured a runtime other than the
+   one being accepted, so the tool refuses and asks for a rerun.
+
+The plan prints `previous_runtime`, `current_runtime`, `from`, `to`, `sampled`
+per kind, `passages_compared`, `min_cosine` and any `uncovered` kind, and writes
+nothing. `--apply` locks both parent tables and both index tables, rechecks the
+generation and coverage, then rewrites every index label and the generation in
+one transaction. It ends with a `relabeled` record. Rerunning it reports
+`already_current`. Then start the 1.29 server.
+
+If any condition fails, nothing changes. Run the full
+[backfill](#compose-backfill-runner) (`--apply` without `--relabel`) instead. It
+re-embeds every record under the new contract and activates it. This is the path
+for an installation whose runtime has already been upgraded beneath 1.28 when
+the sample shows that its vectors moved. When only completeness fails because a
+few records changed, running the **1.28** image's backfill first re-embeds just
+those records with the same runtime; the relabel can then proceed.
+
+A 1.28 app refuses to start against a relabeled generation. To roll back before
+any 1.29 write, with the embedding backend still reporting the plan's
+`previous_runtime`, keep writers stopped and reverse the plan's `from`/`to`
+values as the corpus superuser:
+
+```sql
+\set ON_ERROR_STOP on
+\set legacy '<plan from>'
+\set current '<plan to>'
+BEGIN;
+SELECT set_config('relabel.legacy', :'legacy', true),
+  set_config('relabel.current', :'current', true);
+LOCK TABLE public.thoughts, sessions.session, public.thought_embedding_index,
+  sessions.embedding_index IN SHARE MODE;
+UPDATE public.thought_embedding_index SET contract = :'legacy' WHERE contract = :'current';
+UPDATE sessions.embedding_index SET contract = :'legacy' WHERE contract = :'current';
+DO $$
+DECLARE
+  moved integer;
+BEGIN
+  UPDATE memory_scope.embedding_generation
+    SET contract = current_setting('relabel.legacy')
+    WHERE singleton AND contract = current_setting('relabel.current');
+  GET DIAGNOSTICS moved = ROW_COUNT;
+  IF moved <> 1
+    OR NOT memory_scope.embedding_ready(current_setting('relabel.legacy')) THEN
+    RAISE EXCEPTION 'reverse relabel refused: generation is not % or the corpus is incomplete under %; nothing committed',
+      current_setting('relabel.current'), current_setting('relabel.legacy');
+  END IF;
+END
+$$;
+COMMIT;
+```
+
+The check runs inside the transaction. If the generation did not move or the
+corpus is not complete under the restored label, the block raises. psql then
+exits nonzero and nothing is committed; without `ON_ERROR_STOP`, the `COMMIT` of
+the aborted transaction still rolls back. The DB-init smoke executes this block
+from this file, minus its psql meta-commands and with the variables substituted.
+
+After 1.29 writes, the coordinated backup restore described above remains the
+rollback.
+
+## Recovering from runtime drift
+
+Monitoring may show that a runtime change moved vectors, or you may want to
+converge after an unmanaged upgrade. In either case, re-embed every record with
+the current runtime:
+
+```bash
+deno run --cached-only --frozen --allow-env --allow-net embedding_backfill.ts --rebuild
+deno run --cached-only --frozen --allow-env --allow-net embedding_backfill.ts --rebuild --apply
+```
+
+Run both through the Compose runner above, with the same superuser identity and
+review step. The plan counts every record, not only mismatched ones. Records
+keep the same contract, so the generation stays active throughout. Still keep
+writers stopped: the tool stops at a concurrently edited record, and a rerun of
+`--rebuild` starts again from the beginning. When the new release itself is the
+problem, rolling the runtime back to the one that built the corpus is the
+alternative.

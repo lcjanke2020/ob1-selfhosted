@@ -21,7 +21,7 @@ export async function verifyEmbeddingStartup(pool: Pool): Promise<void> {
       } catch { /* preserve the original startup/transaction failure */ }
     }
     throw new Error(
-      "embedding startup gate: apply db/15-embedding-index.sql, validate the runtime, and complete the offline backfill/cutover; " +
+      "embedding startup gate: apply db/15-embedding-index.sql, validate the runtime, and complete the offline backfill/cutover (upgrading a 1.28 generation: embedding_backfill.ts --relabel auto avoids the re-embed when its identity, coverage and vector-sample checks pass); " +
         (error instanceof Error ? error.message : String(error)),
       { cause: error },
     );

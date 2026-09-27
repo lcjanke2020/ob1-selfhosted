@@ -315,6 +315,15 @@ docker compose --env-file .env up -d --no-deps mcp
 docker compose --env-file .env logs mcp
 ```
 
+For **1.29.0** from 1.28, there is no new migration. Keep MCP stopped and run
+the one-time
+[`--relabel auto`](../../docs/embedding-limits.md#upgrading-a-128-generation-to-129-relabel)
+with the new image instead of the backfill. If its identity, coverage or
+vector-sample check fails, it changes nothing; run the backfill instead. Then
+start MCP as above. An older release upgrading straight to 1.29 uses the
+backfill, which activates the 1.29 contract directly. From 1.29 on, an Ollama
+upgrade with the same model manifest needs no index work.
+
 Upgrading to **1.25.0+** adds a dedicated `openbrain_auth_rollup` login for the
 auth-event report and retention pass. Set its new password, run the role helper
 while the current server is still live, then apply `12-auth-audit-grants.sql`.

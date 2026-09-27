@@ -254,7 +254,7 @@ async function prepareEmbeddingIndex(
     }
     : await buildEmbeddingIndex(text, fields, deps.embed, contract, deadline);
   if (await deps.contract({ deadline }) !== contract) {
-    throw new Error("runtime/model changed during embedding");
+    throw new Error("model identity changed during embedding");
   }
   return index;
 }

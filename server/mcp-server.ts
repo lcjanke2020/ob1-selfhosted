@@ -293,7 +293,12 @@ export function createMcpServer(
     // with subject-admin before the server roll. Legacy env lists cannot admit.
     // 1.27.0: stable native-token principals and proxy-confined tailnet auth.
     // 1.28.0: full-source strict passage embeddings; offline index cutover required.
-    version: "1.28.0",
+    // 1.29.0: the embedding contract no longer names the Ollama runtime
+    // version; a runtime change re-runs the runtime canaries instead of
+    // failing closed. Existing 1.28 generations need the one-time offline
+    // relabel (embedding_backfill.ts --relabel auto; full backfill if its
+    // checks fail) before this server starts.
+    version: "1.29.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -671,7 +676,7 @@ export function createMcpServer(
     {
       title: "Capture Session",
       description:
-        "Ingest or refresh an agent work session from its TOML front matter. Upserts the session and its artifacts, indexes the complete title/goal/summary/resume_context in strict-fit passages, re-embeds when that source or the runtime/model contract changes, and stamps provenance/server-owned personal identity. Returns {id, session_id, status, created, reembedded, workspace_id, project_id, visibility, embedding_coverage?} — `id` is the canonical key; write it and the stored scope back into fresh TOML to refresh the same session. String fields are not coerced, list fields contain only strings, and artifacts must use a [[artifacts]] array-of-tables with kind and title required and detail optional. See the 'Session TOML schema' resource for the full front-matter contract, including the personal-only sensitive workspace.",
+        "Ingest or refresh an agent work session from its TOML front matter. Upserts the session and its artifacts, indexes the complete title/goal/summary/resume_context in strict-fit passages, re-embeds when that source or the model contract changes, and stamps provenance/server-owned personal identity. Returns {id, session_id, status, created, reembedded, workspace_id, project_id, visibility, embedding_coverage?} — `id` is the canonical key; write it and the stored scope back into fresh TOML to refresh the same session. String fields are not coerced, list fields contain only strings, and artifacts must use a [[artifacts]] array-of-tables with kind and title required and detail optional. See the 'Session TOML schema' resource for the full front-matter contract, including the personal-only sensitive workspace.",
       annotations: {
         readOnlyHint: false,
         openWorldHint: false,

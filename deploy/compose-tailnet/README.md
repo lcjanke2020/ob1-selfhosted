@@ -510,6 +510,15 @@ with its coordinated runtime switch. Require successful activation before:
 docker compose --env-file .env up -d
 ```
 
+For **1.29.0** from 1.28, there is no new migration. Keep MCP stopped and run
+the one-time
+[`--relabel auto`](../../docs/embedding-limits.md#upgrading-a-128-generation-to-129-relabel)
+with the new image instead of the backfill. If its identity, coverage or
+vector-sample check fails, it changes nothing; run the backfill instead. Then
+start MCP as above. An older release upgrading straight to 1.29 uses the
+backfill, which activates the 1.29 contract directly. From 1.29 on, an Ollama
+upgrade with the same model manifest needs no index work.
+
 Upgrading to **1.27.0**: migration 14 is required even though Pattern B keeps
 native tokens disabled. Apply it in a transaction, then migration 15 and the
 final grants assertion, as above. Keep MCP stopped if any step fails. Replaying

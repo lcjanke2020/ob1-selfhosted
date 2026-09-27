@@ -41,6 +41,20 @@ export function embeddingCoverage(index: EmbeddingIndex) {
 
 export type EmbeddingCoverage = ReturnType<typeof embeddingCoverage>;
 
+// NaN for mismatched lengths, so any `>= threshold` comparison fails.
+export function cosine(a: number[], b: number[]): number {
+  if (a.length !== b.length) return NaN;
+  let dot = 0;
+  let aa = 0;
+  let bb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    aa += a[i] * a[i];
+    bb += b[i] * b[i];
+  }
+  return dot / Math.sqrt(aa * bb);
+}
+
 export async function sourceHash(source: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",

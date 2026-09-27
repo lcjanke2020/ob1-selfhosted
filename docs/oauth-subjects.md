@@ -59,7 +59,7 @@ previous server image and operator configuration, take and verify a backup, and
 perform the following during a deployment window. Keep admission changes frozen
 until the new server passes its smoke checks.
 
-Current 1.28.0 also requires
+Since 1.28.0, upgrades also require
 [migration 14](native-access-tokens.md#existing-database-upgrade), even with
 native tokens disabled, plus migration 15 and embedding-generation activation.
 Use the complete deployment upgrade procedure, incorporating the
