@@ -25,9 +25,11 @@ Deno.test(
           models: [{ name: "nomic-embed-text:latest", digest: "1".repeat(64) }],
         }));
       }
-      const input = JSON.parse(init?.body as string).input;
+      // An uncased runtime: lowercases and strips accents before embedding.
+      const input = String(JSON.parse(init?.body as string).input)
+        .toLowerCase().normalize("NFD").replace(/\p{M}/gu, "");
       return Promise.resolve(Response.json({
-        embeddings: input === "QUARTZ ZEPHYR WALRUS" ? [[1, 0]] : [[0, 1]],
+        embeddings: input === "quartz zephyr walrus" ? [[1, 0]] : [[0, 1]],
       }));
     }) as typeof fetch;
     try {

@@ -22,6 +22,14 @@ Deno.test(
     let digest = "1".repeat(64);
     let canaryRuns = 0;
     let captured: Record<string, unknown> = {};
+    // A correct uncased runtime lowercases and strips accents; the defect
+    // modes skip one of those steps.
+    const tokens = (input: string) => {
+      const lowered = mode === "cased" ? input : input.toLowerCase();
+      return mode === "accented"
+        ? lowered
+        : lowered.normalize("NFD").replace(/\p{M}/gu, "");
+    };
     globalThis.fetch = ((url, init) => {
       if (String(url).endsWith("/version")) {
         return Promise.resolve(Response.json({ version }));
@@ -64,11 +72,16 @@ Deno.test(
           )
         );
       }
+      const key = tokens(String(captured.input));
       return Promise.resolve(Response.json({
         embeddings: mode === "collision"
           ? [[1, 0]]
-          : captured.input === "QUARTZ ZEPHYR WALRUS"
+          : key === "quartz zephyr walrus"
           ? [[0, 1]]
+          : key === "QUARTZ ZEPHYR WALRUS"
+          ? [[0.8, 0.6]]
+          : key.includes("café")
+          ? [[0.6, 0.8]]
           : [[1, 0]],
       }));
     }) as typeof fetch;
@@ -134,11 +147,78 @@ Deno.test(
       assertEquals(await embeddingContract(), first);
       assertEquals(canaryRuns, beforeReturn);
 
+      // The uncased model's casing and accent invariants are proven defects
+      // too, checked for every newly observed version.
+      version = "fixture-cased";
+      mode = "cased";
+      await assertRejects(() => embeddingContract(), Error, "casing canary");
+      version = "fixture-accented";
+      mode = "accented";
+      await assertRejects(() => embeddingContract(), Error, "accent canary");
+      version = "fixture-2";
+      mode = "ok";
+      assertEquals(await embeddingContract(), first);
+
       digest = "2".repeat(64);
       assert(
         (await embeddingContract()) !== first,
         "model identity changes the contract even with unchanged source",
       );
+    } finally {
+      globalThis.fetch = original;
+    }
+  }),
+);
+
+Deno.test(
+  "a runtime swap during the canary never validates an untested version",
+  withEnv([], {
+    DB_PASSWORD: "test-password",
+    MCP_ACCESS_KEY: "k".repeat(64),
+    METADATA_FALLBACK_POLICY: "off",
+    EMBED_DIM: "2",
+    FETCH_TIMEOUT_MS: "100",
+  }, async () => {
+    const { embeddingContract } = await import("./embedding_runtime.ts");
+    const original = globalThis.fetch;
+    // The runtime actually serving requests; a broken build collides.
+    let serving = { version: "good-x", broken: false };
+    let swapOnEmbed: typeof serving | undefined;
+    globalThis.fetch = ((url, init) => {
+      if (String(url).endsWith("/version")) {
+        return Promise.resolve(Response.json({ version: serving.version }));
+      }
+      if (String(url).endsWith("/tags")) {
+        return Promise.resolve(
+          Response.json({
+            models: [{
+              name: "nomic-embed-text:latest",
+              digest: "3".repeat(64),
+            }],
+          }),
+        );
+      }
+      if (swapOnEmbed) {
+        serving = swapOnEmbed;
+        swapOnEmbed = undefined;
+      }
+      const key = String(JSON.parse(init?.body as string).input)
+        .toLowerCase().normalize("NFD").replace(/\p{M}/gu, "");
+      return Promise.resolve(Response.json({
+        embeddings: [
+          serving.broken || key !== "quartz zephyr walrus" ? [1, 0] : [0, 1],
+        ],
+      }));
+    }) as typeof fetch;
+    try {
+      await embeddingContract();
+      // The identity read sees broken-y, but good-z serves the canary pair.
+      serving = { version: "broken-y", broken: true };
+      swapOnEmbed = { version: "good-z", broken: false };
+      await embeddingContract();
+      // broken-y was never tested, so its return must rerun the canary.
+      serving = { version: "broken-y", broken: true };
+      await assertRejects(() => embeddingContract(), Error, "canary collision");
     } finally {
       globalThis.fetch = original;
     }

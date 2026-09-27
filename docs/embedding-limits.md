@@ -117,19 +117,24 @@ search until an operator re-embedded the corpus. The server now distinguishes a
 proven break from a version change:
 
 - **Proven corruption fails closed.** The server remembers the runtime version
-  whose distinct-input canary last passed. Any identity check that observes a
-  different version reruns the canary before that runtime's vectors are used: at
-  startup, before and after every document or query embedding, and for every
-  backfill record. A collision rejects the request with `write=not_started` or
-  `search=not_started`. The canary reruns only when the reported version
+  whose canaries last passed. Any identity check that observes a different
+  version reruns them before that runtime's vectors are used: at startup, before
+  and after every document or query embedding, and for every backfill record.
+  The version is read again afterwards, and a runtime swapped in mid-check is
+  not cached as validated. Every model gets the distinct-input collision canary.
+  For `nomic-embed-text`, an uncased WordPiece model, a correct runtime also
+  lowercases and strips accents, so an upper/lowercase pair and an
+  accented/plain pair must each reach cosine 0.999 (the validated 0.34.1
+  measures exactly 1). A failure rejects the request with `write=not_started` or
+  `search=not_started`. The canaries rerun only when the reported version
   changes, so a custom runtime build must report a distinct version string.
 - **Subtler drift is monitored, not gated.** A release could move vectors
   without tripping the canary, for example through a different numeric backend.
   Until that is noticed, new vectors mix with old ones and ranking degrades;
   nothing fails. Every accepted change is logged as
-  `[embedding] runtime version changed A -> B`. Compare stored single-passage
-  vectors with the current runtime (the relabel below does exactly this), and
-  recover with a [rebuild](#recovering-from-runtime-drift).
+  `[embedding] runtime version changed A -> B; runtime canaries passed`. Compare
+  stored single-passage vectors with the current runtime (the relabel below does
+  exactly this), and recover with a [rebuild](#recovering-from-runtime-drift).
 
 A distinct-input canary rejects the uppercase collision reproduced in the
 [September investigation](investigations/2026-09-16-embedding-context-overflow.md).

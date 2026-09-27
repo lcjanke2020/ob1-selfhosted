@@ -8,12 +8,18 @@ import { boundedFetch } from "./bounded_fetch.ts";
 import { embed } from "./embeddings.ts";
 import { embeddingResponseJson } from "./embedding_response.ts";
 import {
+  cosine,
   EMBEDDING_INDEX_VERSION,
   MAX_EMBEDDING_DURATION_MS,
   sourceHash,
 } from "./embedding_index.ts";
 
 export const RUNTIME_VERSION_PATTERN = /^[a-zA-Z0-9.+_-]{1,80}$/;
+// Nomic's uncased WordPiece lowercases and strips accents, so a correct
+// runtime embeds these pairs identically (0.34.1 measures exactly 1). Other
+// configurable models may be cased and get only the model-agnostic check.
+const UNCASED_MODEL = /^nomic-embed-text(:|$)/;
+const UNCASED_MIN_COSINE = 0.999;
 
 export type EmbeddingIdentity = Readonly<{
   runtime: string;
@@ -101,16 +107,19 @@ export async function embeddingContract(
   options?: { deadline: number },
 ): Promise<string> {
   options ??= { deadline: performance.now() + MAX_EMBEDDING_DURATION_MS };
-  const identity = await readEmbeddingIdentity(options);
-  const contract = await contractFor(identity);
-  if (
-    validated?.runtime !== identity.runtime || validated.contract !== contract
-  ) {
+  for (let attempt = 1;; attempt++) {
+    const identity = await readEmbeddingIdentity(options);
+    const contract = await contractFor(identity);
+    if (
+      validated?.runtime === identity.runtime && validated.contract === contract
+    ) return contract;
     // Every newly observed runtime must pass before its vectors are used,
     // including one swapped in between a job's start and end identity checks.
     // The measured tokenizer regression makes unrelated uppercase words
-    // identical. This is a targeted corruption canary, not a quality eval or
-    // a claim that arbitrary future tokenizer bugs can be detected here.
+    // identical; for the uncased model, a runtime that stops lowercasing or
+    // stripping accents is equally a proven tokenizer defect. These are
+    // targeted canaries, not a quality eval or a claim that arbitrary future
+    // tokenizer bugs can be detected here.
     const a = await embed("QUARTZ ZEPHYR WALRUS", options);
     const b = await embed("BANANA ENGINE COSMOS", options);
     if (a.every((value, i) => value === b[i])) {
@@ -118,16 +127,43 @@ export async function embeddingContract(
         "embedding runtime: distinct-input canary collision; validate a corrected runtime before indexing",
       );
     }
+    if (UNCASED_MODEL.test(identity.model)) {
+      const lower = await embed("quartz zephyr walrus", options);
+      if (!(cosine(a, lower) >= UNCASED_MIN_COSINE)) {
+        throw new Error(
+          "embedding runtime: casing canary differs for the uncased model; validate a corrected runtime before indexing",
+        );
+      }
+      const accented = await embed("The café serves coffee.", options);
+      const plain = await embed("The cafe serves coffee.", options);
+      if (!(cosine(accented, plain) >= UNCASED_MIN_COSINE)) {
+        throw new Error(
+          "embedding runtime: accent canary differs for the uncased model; validate a corrected runtime before indexing",
+        );
+      }
+    }
+    // The canaries validate a version only if that version served them all; a
+    // swap between the identity reads must not cache a runtime that was never
+    // tested. (A swap and swap-back cannot be excluded.)
+    const after = await readEmbeddingIdentity(options);
+    if (
+      after.runtime !== identity.runtime || after.digest !== identity.digest
+    ) {
+      if (attempt < 2) continue;
+      throw new Error(
+        "embedding runtime: identity changed during the runtime canaries; retry",
+      );
+    }
     if (validated && validated.runtime !== identity.runtime) {
       console.warn(
-        `[embedding] runtime version changed ${validated.runtime} -> ${identity.runtime}; distinct-input canary passed`,
+        `[embedding] runtime version changed ${validated.runtime} -> ${identity.runtime}; runtime canaries passed`,
       );
     } else if (!validated) {
       console.log(
-        `[embedding] runtime ${identity.runtime} passed the distinct-input canary`,
+        `[embedding] runtime ${identity.runtime} passed the runtime canaries`,
       );
     }
     validated = { runtime: identity.runtime, contract };
+    return contract;
   }
-  return contract;
 }
