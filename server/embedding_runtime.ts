@@ -27,7 +27,7 @@ export type EmbeddingIdentity = Readonly<{
   digest: string;
 }>;
 
-// The runtime version and contract whose distinct-input canary last passed.
+// The runtime version and contract whose runtime canaries last passed.
 let validated: { runtime: string; contract: string } | undefined;
 
 export async function readEmbeddingIdentity(
