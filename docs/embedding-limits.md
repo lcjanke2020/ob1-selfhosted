@@ -327,6 +327,10 @@ The tool proceeds only when all of these hold:
    one comparison: session text reaches the runtime NUL-joined, so a thought
    sample cannot vouch for sessions. Only an empty corpus relabels with nothing
    to compare. This is a relabel guard, not a quality threshold.
+4. **The runtime holds still.** The serving runtime's version and digest are
+   read before its canaries, after them, after the sample and immediately before
+   the transaction. If they move, the sample measured a runtime other than the
+   one being accepted, so the tool refuses and asks for a rerun.
 
 The plan prints `previous_runtime`, `current_runtime`, `from`, `to`, `sampled`
 per kind, `passages_compared`, `min_cosine` and any `uncovered` kind, and writes

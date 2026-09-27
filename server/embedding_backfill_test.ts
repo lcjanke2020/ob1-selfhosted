@@ -394,6 +394,39 @@ Deno.test(
     );
 
     await t.step(
+      "a runtime change at any phase refuses the relabel",
+      async (t) => {
+        // Identity reads: before the canaries, after them, after the sample,
+        // and before BEGIN. A move at any point must leave nothing written.
+        for (const moveAfter of [1, 2, 3]) {
+          await t.step(`moves after identity read ${moveAfter}`, async () => {
+            const client = await fixture(legacy);
+            let reads = 0;
+            await assertRejects(
+              () =>
+                relabelEmbeddingGeneration(
+                  client as unknown as PoolClient,
+                  "0.34.1",
+                  true,
+                  {
+                    ...deps(),
+                    identity: () =>
+                      Promise.resolve({
+                        ...identity,
+                        runtime: ++reads > moveAfter ? "0.36.0" : "0.35.0",
+                      }),
+                  },
+                ),
+              Error,
+              "runtime changed during relabel (0.35.0 -> 0.36.0)",
+            );
+            assertEquals(writes(client), []);
+          });
+        }
+      },
+    );
+
+    await t.step(
       "an empty corpus relabels with nothing to compare",
       async () => {
         const client = await fixture(legacy, []);

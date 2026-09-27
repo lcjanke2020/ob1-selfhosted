@@ -304,11 +304,25 @@ export async function relabelEmbeddingGeneration(
 ): Promise<void> {
   await requireSuperuser(client, "relabel");
   const mode = apply ? "apply" : "plan";
-  // The contract call also runs the current runtime's distinct-input canary.
+  const readIdentity = () =>
+    deps.identity({ deadline: performance.now() + MAX_EMBEDDING_DURATION_MS });
+  // The sample measures one runtime. Every phase re-reads the serving runtime
+  // and refuses if it moved, rather than labeling the corpus compatible with a
+  // runtime that was never compared. (A swap after the last check is an
+  // ordinary post-relabel upgrade, which 1.29 accepts by design.)
+  const identity = await readIdentity();
+  const requireSameRuntime = async () => {
+    const now = await readIdentity();
+    if (now.runtime !== identity.runtime || now.digest !== identity.digest) {
+      throw new Error(
+        `relabel: runtime changed during relabel (${identity.runtime} -> ${now.runtime}); nothing relabeled; rerun`,
+      );
+    }
+  };
+  // The contract call runs the serving runtime's canaries, which must have
+  // validated the runtime identified above.
   const contract = await deps.contract();
-  const identity = await deps.identity({
-    deadline: performance.now() + MAX_EMBEDDING_DURATION_MS,
-  });
+  await requireSameRuntime();
   if (await contractFor(identity) !== contract) {
     throw new Error("model identity changed during relabel; nothing relabeled");
   }
@@ -344,6 +358,7 @@ export async function relabelEmbeddingGeneration(
     active,
     contract,
   );
+  await requireSameRuntime();
   console.log(JSON.stringify({
     mode,
     previous_runtime: runtime,
@@ -375,6 +390,7 @@ export async function relabelEmbeddingGeneration(
   if (await deps.contract() !== contract) {
     throw new Error("model identity changed; nothing relabeled");
   }
+  await requireSameRuntime();
   await client.queryArray("BEGIN");
   try {
     // SHARE blocks every other writer to the parents and their indexes; this
