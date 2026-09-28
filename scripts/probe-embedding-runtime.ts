@@ -6,13 +6,14 @@
 // OLLAMA_URL=http://127.0.0.1:11434 deno run --config server/deno.json --frozen \
 //   --allow-env --allow-net=127.0.0.1:11434 scripts/probe-embedding-runtime.ts
 // These bounded synthetic checks are smoke evidence, not a corpus quality eval.
+import { NOMIC_MANIFEST_DIGEST, NOMIC_MODEL } from "./nomic_pin.ts";
 
 Deno.env.set("DB_PASSWORD", "synthetic-probe");
 Deno.env.set("MCP_ACCESS_KEY", "synthetic-probe-key-".repeat(4));
 Deno.env.set("METADATA_FALLBACK_POLICY", "off");
 const base = Deno.env.get("OLLAMA_URL")?.replace(/\/$/, "");
 if (!base) throw new Error("Set OLLAMA_URL to the isolated candidate endpoint");
-Deno.env.set("EMBED_MODEL", "nomic-embed-text:latest");
+Deno.env.set("EMBED_MODEL", NOMIC_MODEL);
 const { buildEmbeddingIndex, EmbeddingContextError } = await import(
   "../server/embedding_index.ts"
 );
@@ -30,21 +31,20 @@ async function readMetadata(route: string) {
 }
 const version = await readMetadata("version");
 const tags = await readMetadata("tags");
-const model = tags.models.find((m: { name: string }) =>
-  m.name === "nomic-embed-text:latest"
-);
-const expected =
-  "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f";
+const model = tags.models.find((m: { name: string }) => m.name === NOMIC_MODEL);
+const expected = NOMIC_MANIFEST_DIGEST;
+// The server accepts an optional sha256: prefix (readEmbeddingIdentity).
+const digest = String(model.digest).replace(/^sha256:/, "");
 console.log(
   JSON.stringify({
     stage: "identity",
     runtime: version.version,
     model: model.name,
-    digest: model.digest,
-    same_model: model.digest === expected,
+    digest,
+    same_model: digest === expected,
   }),
 );
-if (model.digest !== expected) {
+if (digest !== expected) {
   throw new Error("Model digest differs from deployed artifact");
 }
 const start = performance.now();
@@ -217,20 +217,28 @@ for (
     throw new Error("Late-passage retrieval smoke failed");
   }
 }
-const resident = await readMetadata("ps");
-console.log(JSON.stringify({
-  stage: "resident",
-  models: resident.models.map((
-    m: {
-      name: string;
-      digest: string;
-      context_length: number;
-      size_vram: number;
-    },
-  ) => ({
-    name: m.name,
-    digest: m.digest,
-    context_length: m.context_length,
-    size_vram: m.size_vram,
-  })),
-}));
+// Diagnostic only: the server never reads /api/ps, so a failure or a changed
+// response shape here is recorded without failing the probe.
+try {
+  const resident = await readMetadata("ps");
+  console.log(JSON.stringify({
+    stage: "resident",
+    models: resident.models.map((
+      m: {
+        name: string;
+        digest: string;
+        context_length: number;
+        size_vram: number;
+      },
+    ) => ({
+      name: m.name,
+      digest: m.digest,
+      context_length: m.context_length,
+      size_vram: m.size_vram,
+    })),
+  }));
+} catch (e) {
+  console.log(
+    JSON.stringify({ stage: "resident", error: (e as Error).message }),
+  );
+}

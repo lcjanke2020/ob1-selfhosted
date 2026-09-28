@@ -77,3 +77,43 @@ scripts/ci/run_log_sink_smokes.sh contract rollup wrapper
 The lifecycle family owns separate adoption and failed-init volumes. Invoking a
 checked-in `log_sink_*_smoke.sh` file directly bootstraps the corresponding
 runner family.
+
+## Ollama early-warning runner
+
+`.github/workflows/ollama-early-warning.yml` tests the latest stable Ollama
+release daily against the image pinned in the Compose files, with the pinned
+Nomic model. The workflow's scheduling, deduplication and notifications are
+described in
+[embedding limits](../../docs/embedding-limits.md#early-warning-for-new-ollama-releases).
+The measurement itself runs outside Actions.
+
+### Prerequisites
+
+Run from a checkout with Bash 4+, Docker, Deno 2.9.x, `jq` and `curl`, on Linux.
+Each `ollama/ollama` image is about 3.7 GB compressed. The runner binds three
+loopback ports starting at 55450; override the first with `EW_PORT_BASE`. Deno
+runs with a minimal environment, so deployment settings in the caller's shell
+cannot change the measurement.
+
+### Commands
+
+| Step        | Local command                                                                                                                   | Result                                                                                                             |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Gate        | `scripts/ci/ollama_early_warning_gate.sh [VERSION]`                                                                             | Candidate image digest and evaluation key, or why no run is needed (needs `gh`, `docker buildx`)                   |
+| A/B         | `scripts/ci/ollama_early_warning.sh ollama/ollama:VER@sha256:… DIR`                                                             | `DIR/verdict.json`, `summary.md`, `issue.md`, probe logs, fingerprints and container logs                          |
+| Verdict     | `deno run --config server/deno.json --frozen --allow-read=DIR --allow-write=DIR scripts/ci/ollama_early_warning_verdict.ts DIR` | Recomputes the verdict from an existing result directory                                                           |
+| Tests       | `deno test --config server/deno.json --frozen --allow-env --allow-read scripts/ci/ollama_early_warning_verdict_test.ts`         | Verdict rules on synthetic fingerprints                                                                            |
+| Gate tests  | `scripts/ci/ollama_early_warning_gate_test.sh`                                                                                  | Evaluation key, registry failures, pin digest, marker provenance and path coverage, with stubbed `gh` and `docker` |
+| Issue tests | `scripts/ci/ollama_early_warning_issue_test.sh`                                                                                 | Per-version issue reconciliation and same-evaluation retries, with a recording `gh` stub                           |
+
+Set `EW_MODEL_STORE` to a persistent directory to keep the verified model
+between runs; by default it is downloaded into scratch space and removed. The
+store is fetched with the pinned runtime and checked against the manifest digest
+in `scripts/nomic_pin.ts`, then copied for each container. Passing the pinned
+image as the candidate measures pinned against pinned, a quick end-to-end check
+that should report `compatible` with bitwise-identical vectors.
+
+The A/B exits 0 with a verdict about the candidate (`compatible`, `drift` or
+`broken`) and 1 when the harness could not judge (`error`): the pinned runtime
+failed its own probe, an endpoint served the wrong model, the pinned-vs-pinned
+control moved, or a failure looked transient.
