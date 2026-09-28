@@ -33,16 +33,18 @@ const version = await readMetadata("version");
 const tags = await readMetadata("tags");
 const model = tags.models.find((m: { name: string }) => m.name === NOMIC_MODEL);
 const expected = NOMIC_MANIFEST_DIGEST;
+// The server accepts an optional sha256: prefix (readEmbeddingIdentity).
+const digest = String(model.digest).replace(/^sha256:/, "");
 console.log(
   JSON.stringify({
     stage: "identity",
     runtime: version.version,
     model: model.name,
-    digest: model.digest,
-    same_model: model.digest === expected,
+    digest,
+    same_model: digest === expected,
   }),
 );
-if (model.digest !== expected) {
+if (digest !== expected) {
   throw new Error("Model digest differs from deployed artifact");
 }
 const start = performance.now();
