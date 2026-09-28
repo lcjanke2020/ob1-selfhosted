@@ -217,20 +217,28 @@ for (
     throw new Error("Late-passage retrieval smoke failed");
   }
 }
-const resident = await readMetadata("ps");
-console.log(JSON.stringify({
-  stage: "resident",
-  models: resident.models.map((
-    m: {
-      name: string;
-      digest: string;
-      context_length: number;
-      size_vram: number;
-    },
-  ) => ({
-    name: m.name,
-    digest: m.digest,
-    context_length: m.context_length,
-    size_vram: m.size_vram,
-  })),
-}));
+// Diagnostic only: the server never reads /api/ps, so a failure or a changed
+// response shape here is recorded without failing the probe.
+try {
+  const resident = await readMetadata("ps");
+  console.log(JSON.stringify({
+    stage: "resident",
+    models: resident.models.map((
+      m: {
+        name: string;
+        digest: string;
+        context_length: number;
+        size_vram: number;
+      },
+    ) => ({
+      name: m.name,
+      digest: m.digest,
+      context_length: m.context_length,
+      size_vram: m.size_vram,
+    })),
+  }));
+} catch (e) {
+  console.log(
+    JSON.stringify({ stage: "resident", error: (e as Error).message }),
+  );
+}
