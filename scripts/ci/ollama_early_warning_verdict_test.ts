@@ -366,3 +366,87 @@ Deno.test("broken guidance says fails closed only for checks the server enforces
   };
   assertEquals(decide(inputs({ candidate: ok(embedFailure) })).enforced, true);
 });
+
+Deno.test("a request failure seen by both probe and fingerprint is server-enforced", () => {
+  // A reviewer's regression case: a runtime that fails every embed request.
+  const candidate = fingerprint("0.34.4");
+  candidate.items[0] = {
+    id: "upper",
+    kind: "short",
+    error: "Ollama embed failed: HTTP 500",
+  };
+  const report = decide(inputs({
+    candidate: ok(candidate),
+    candidateProbe: fail("identity", "Ollama embed failed: HTTP 500", "0.34.4"),
+  }));
+  assertEquals(report.verdict, "broken");
+  assertEquals(report.enforced, true);
+  assertMatch(renderIssue(report), /fails closed/);
+});
+
+Deno.test("probe failures from code the server shares are server-enforced", () => {
+  for (
+    const error of [
+      "Ollama embed failed: HTTP 500",
+      "embedding identity: HTTP 500",
+      "metadata version: HTTP 500",
+      "Embedding dim mismatch: model returned 1",
+      "Contract drift",
+      "Model digest differs from deployed artifact",
+      "embedding document: exceeds 128 chunks; write=not_started",
+    ]
+  ) {
+    const report = decide(inputs({
+      candidateProbe: fail("identity", error, "0.34.4"),
+    }));
+    assertEquals([error, report.verdict], [error, "broken"]);
+    assertEquals([error, report.enforced], [error, true]);
+    assert(!renderIssue(report).includes("keeps accepting"), error);
+  }
+  // An unrecognized failure type is not assumed to be probe-only either.
+  const typeError: ProbeRun = {
+    exit: 1,
+    lines: [{ stage: "identity", runtime: "0.34.4" }],
+    stderr:
+      "error: Uncaught (in promise) TypeError: Cannot read properties of undefined (reading 'name')\n",
+  };
+  assertEquals(decide(inputs({ candidateProbe: typeError })).enforced, true);
+});
+
+Deno.test("only the probe's own assertions are probe-only", () => {
+  for (
+    const [stage, error] of [
+      ["accent", "Casing regression"],
+      ["strict_boundary", "Expected strict context overflow"],
+      ["accent", "embedding input exceeds model context"],
+      ["retrieval", "Late-passage retrieval smoke failed"],
+    ]
+  ) {
+    const report = decide(inputs({
+      candidateProbe: fail(stage, error, "0.34.4"),
+    }));
+    assertEquals([error, report.verdict], [error, "broken"]);
+    assertEquals([error, report.enforced], [error, false]);
+    assertMatch(renderIssue(report), /keeps accepting captures and searches/);
+  }
+  // A failing request in the fingerprint still makes it server-enforced.
+  const candidate = fingerprint("0.34.4");
+  candidate.items[1] = {
+    id: "lower",
+    kind: "short",
+    error: "Ollama embed failed: HTTP 500",
+  };
+  const report = decide(inputs({
+    candidate: ok(candidate),
+    candidateProbe: fail(
+      "retrieval",
+      "Late-passage retrieval smoke failed",
+      "0.34.4",
+    ),
+  }));
+  assertEquals(report.enforced, true);
+  assertMatch(
+    report.reasons.join("\n"),
+    /candidate short lower: Ollama embed failed/,
+  );
+});

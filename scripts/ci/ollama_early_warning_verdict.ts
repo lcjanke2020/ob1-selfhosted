@@ -95,9 +95,16 @@ function probeRuntime(run: ProbeRun): string | undefined {
   return typeof runtime === "string" ? runtime : undefined;
 }
 
-// Failure messages of checks the server itself performs before using vectors:
-// its runtime canaries and its model identity.
-const SERVER_ENFORCED = /^Error: (embedding runtime:|Model digest differs)/;
+// The probe's own assertions, which have no counterpart in the server: a
+// runtime that fails only these still serves captures and searches. Every other
+// probe failure comes from code the server shares (identity reads, embedding
+// requests, runtime canaries, the contract) and rejects requests there too.
+// The context error is the 2046-token fit, which the server's chunker would
+// absorb by splitting.
+const PROBE_ONLY = new RegExp(
+  "^Error: (Casing regression|Expected strict context overflow|" +
+    "embedding input exceeds model context|Late-passage retrieval smoke failed)$",
+);
 
 export function summarizeProbe(run: ProbeRun): ProbeSummary {
   if (run.exit === 0) return { pass: true };
@@ -298,8 +305,16 @@ export function decide(inputs: Inputs): Report {
         probe.failed_stage ?? "before any stage"
       }): ${probe.error}`,
     );
-    report.enforced = SERVER_ENFORCED.test(probe.error ?? "");
-    return done(transient(probe.error ?? "") ? "error" : "broken");
+    // Failed fingerprint requests go through the server's own embedder, so
+    // they decide the guidance even when the probe stopped at its own check.
+    const requestErrors = candidate.ok
+      ? itemErrors(candidate.fingerprint).filter((e) => !transient(e))
+      : [];
+    reasons.push(...requestErrors.map((e) => `candidate ${e}`));
+    report.enforced = !PROBE_ONLY.test(probe.error ?? "") ||
+      requestErrors.length > 0;
+    const judged = !transient(probe.error ?? "") || requestErrors.length > 0;
+    return done(judged ? "broken" : "error");
   }
   // Failing identity reads and embedding requests fail the server's own
   // captures and searches as well.
@@ -436,7 +451,7 @@ function guidance(report: Report): string | undefined {
     `This release fails a probe check that the server does not enforce (${
       report.probe.candidate.failed_stage ?? "probe"
     }). Do not bump the pinned image to it.`,
-    "A server 1.29+ deployment that upgrades to it keeps accepting captures and searches. Depending on the check, passages no longer split at the context boundary the chunker relies on, or late passages stop ranking, so treat those deployments as drifted: check them and rebuild or roll the runtime back.",
+    "A server 1.29+ deployment that upgrades to it keeps accepting captures and searches. Depending on the check, distinct casings collide, passages no longer split at the context boundary the chunker relies on, or late passages stop ranking, so treat those deployments as drifted: check them and rebuild or roll the runtime back.",
     HOLD,
   ].join("\n");
 }
