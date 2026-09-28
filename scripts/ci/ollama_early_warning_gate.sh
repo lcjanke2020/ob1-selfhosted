@@ -101,11 +101,14 @@ if [[ $force != true && -n ${EW_REPO:-} ]]; then
       .workflow_run.id')
   for run in $runs; do
     [[ $run =~ ^[0-9]+$ ]] || continue
-    if gh api "repos/$EW_REPO/actions/runs/$run" |
-      jq -e --arg branch "${EW_BRANCH:-main}" --arg path "$WORKFLOW" '
-        (.event == "schedule" or .event == "workflow_dispatch") and
-        .head_branch == $branch and (.path | split("@")[0]) == $path and
-        .head_repository.id == .repository.id' >/dev/null; then
+    # Fetched and parsed outside any condition, so an API or parse failure
+    # fails the gate rather than reading as an untrusted marker.
+    details=$(gh api "repos/$EW_REPO/actions/runs/$run")
+    trusted=$(jq -r --arg branch "${EW_BRANCH:-main}" --arg path "$WORKFLOW" '
+      (.event == "schedule" or .event == "workflow_dispatch") and
+      .head_branch == $branch and (.path | split("@")[0]) == $path and
+      .head_repository.id == .repository.id' <<<"$details")
+    if [[ $trusted == true ]]; then
       skip "$key was already evaluated and delivered (run $run)"
     fi
   done

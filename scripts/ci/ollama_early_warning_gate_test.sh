@@ -26,6 +26,7 @@ case "$args" in
     if [[ -n ${STUB_RELEASES_FAIL:-} ]]; then echo "HTTP 503" >&2; exit 1; fi
     printf '{"tag_name":"%s"}\n' "${STUB_LATEST:-v0.34.4}" ;;
   "api -X GET repos/"*"/actions/artifacts "*)
+    if [[ -n ${STUB_ARTIFACTS_FAIL:-} ]]; then echo "HTTP 502" >&2; exit 1; fi
     printf '%s\n' "${STUB_ARTIFACTS:-"{\"artifacts\":[]}"}" ;;
   "api repos/"*"/actions/runs/"*) cat "$STUB_RUNS/${args##*/}.json" ;;
   *) echo "unexpected: gh $*" >&2; exit 1 ;;
@@ -156,6 +157,23 @@ check "another workflow's artifact does not" \
 check "an expired marker does not" with_marker true 17 1 schedule main "$w" true
 forced() { STUB_ARTIFACTS=$(marker 18 1 schedule main "$w") EW_REPO=o/r EW_FORCE=true run_is true 0.34.4; }
 check "force ignores a trusted marker" forced
+
+# A lookup that cannot establish provenance fails the gate instead of
+# re-running the A/B and re-notifying.
+run_lookup_fails() {
+  STUB_ARTIFACTS=$(marker 19 1 schedule main "$w")
+  rm "$STUB_RUNS/19.json"
+  STUB_ARTIFACTS=$STUB_ARTIFACTS EW_REPO=o/r fails 0.34.4
+}
+malformed_run() {
+  STUB_ARTIFACTS=$(marker 20 1 schedule main "$w")
+  echo 'not json' >"$STUB_RUNS/20.json"
+  STUB_ARTIFACTS=$STUB_ARTIFACTS EW_REPO=o/r fails 0.34.4
+}
+artifact_lookup_fails() { STUB_ARTIFACTS_FAIL=1 EW_REPO=o/r fails 0.34.4; }
+check "a failed run lookup fails the gate" run_lookup_fails
+check "a malformed run response fails the gate" malformed_run
+check "a failed artifact lookup fails the gate" artifact_lookup_fails
 
 if ((failures)); then
   echo "$failures gate test(s) failed" >&2
