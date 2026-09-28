@@ -32,7 +32,7 @@ name: Ollama early warning
 
 on:
   schedule:
-    - cron: "23 13 * * *"
+    - cron: "41 13 * * *"
   workflow_dispatch:
     inputs:
       candidate:
