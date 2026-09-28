@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Tests for scripts/ci/ollama_early_warning_issue.sh against a stateful gh
-# stub that keeps issues, titles, states and comments across runs and can fail
-# one kind of call: one issue per candidate version, reconciled per verdict; a
-# retried delivery of the same evaluation that changes nothing; and an
-# interrupted update that the retry completes. Needs bash 4+ and jq.
+# stub that keeps issues, titles, states, comments and their authors across
+# runs and can fail one kind of call: one issue per candidate version,
+# reconciled per verdict; a retried delivery of the same evaluation that
+# changes nothing; an interrupted update that the retry completes; and an
+# evaluation marker forged by another account that is ignored. Needs bash 4+
+# and jq.
 # usage: scripts/ci/ollama_early_warning_issue_test.sh
 set -euo pipefail
 
@@ -14,11 +16,30 @@ mkdir -p "$work/bin" "$work/verdict"
 echo "## Ollama 0.35.0 vs pinned 0.34.1: **drift**" >"$work/verdict/issue.md"
 export GH_LOG=$work/gh.log STATE=$work/issues.json
 
-# gh stub: issues live in $STATE; STUB_FAIL="issue reopen" (for example) makes
-# that call fail without changing anything, as an API outage would.
+# gh stub: issues live in $STATE, and everything it creates is authored by
+# github-actions[bot] (the workflow's identity). STUB_FAIL="issue reopen" (for
+# example; "api" for the REST reads) makes that call fail without changing
+# anything, as an API outage would; STUB_MALFORMED=1 garbles the REST reads.
 cat >"$work/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+bot=github-actions[bot]
+if [[ $1 == api ]]; then
+  path=${*: -1}
+  echo "api $path" >>"$GH_LOG"
+  if [[ ${STUB_FAIL:-} == api ]]; then echo "HTTP 503: injected" >&2; exit 1; fi
+  if [[ -n ${STUB_MALFORMED:-} ]]; then echo "not json"; exit 0; fi
+  n=$(sed -E 's#.*/issues/([0-9]+).*#\1#' <<<"$path")
+  user='{login: ., type: (if endswith("[bot]") then "Bot" else "User" end)}'
+  case $path in
+    */comments)
+      jq --argjson n "$n" ".[] | select(.number == \$n) |
+        [.comments[] | {body, user: (.author | $user)}]" "$STATE" ;;
+    *) jq --argjson n "$n" ".[] | select(.number == \$n) |
+        {number, body, user: (.author | $user)}" "$STATE" ;;
+  esac
+  exit 0
+fi
 cmd="$1 $2"
 shift 2
 number= title=
@@ -34,18 +55,18 @@ case $cmd in
   "issue list") jq '[.[] | {number, state, title, url}]' "$STATE" ;;
   "issue view")
     jq --argjson n "$number" \
-      '.[] | select(.number == $n) | {body, comments: [.comments[] | {body: .}]}' "$STATE" ;;
+      '.[] | select(.number == $n) | {body, comments: [.comments[] | {body}]}' "$STATE" ;;
   "issue create")
     body=$(cat)
     number=$(jq '([.[].number] | max // 0) + 1' "$STATE")
-    update --argjson n "$number" --arg t "$title" --arg b "$body" \
-      '. + [{number: $n, state: "OPEN", title: $t, body: $b, comments: [],
-             url: "https://github.com/o/r/issues/\($n)"}]'
+    update --argjson n "$number" --arg t "$title" --arg b "$body" --arg a "$bot" \
+      '. + [{number: $n, state: "OPEN", title: $t, body: $b, author: $a,
+             comments: [], url: "https://github.com/o/r/issues/\($n)"}]'
     echo "https://github.com/o/r/issues/$number" ;;
   "issue comment")
     body=$(cat)
-    update --argjson n "$number" --arg b "$body" \
-      'map(if .number == $n then .comments += [$b] else . end)' ;;
+    update --argjson n "$number" --arg b "$body" --arg a "$bot" \
+      'map(if .number == $n then .comments += [{body: $b, author: $a}] else . end)' ;;
   "issue edit")
     update --argjson n "$number" --arg t "$title" \
       'map(if .number == $n then .title = $t else . end)' ;;
@@ -62,11 +83,15 @@ key=ollama-ew-0.35.0-aaaaaaaaaaaa-pin-0.34.1-bbbbbbbbbbbb-model-cccccccccccc-har
 marker="<!-- ollama-ew-key: $key -->"
 drift_title="Ollama 0.35.0: nomic-embed-text embeddings drift vs pinned 0.34.1"
 
-# seed NUMBER STATE [TITLE [COMMENT]]: a single existing issue.
+# seed NUMBER STATE [TITLE [COMMENT [COMMENT_AUTHOR [BODY [BODY_AUTHOR]]]]]:
+# a single existing issue; authors default to the workflow's bot.
 seed() {
-  jq -n --argjson n "$1" --arg s "$2" --arg t "${3:-$drift_title}" --arg c "${4:-}" \
-    '[{number: $n, state: $s, title: $t, body: "first report", url: "https://github.com/o/r/issues/\($n)",
-       comments: (if $c == "" then [] else [$c] end)}]' >"$STATE"
+  jq -n --argjson n "$1" --arg s "$2" --arg t "${3:-$drift_title}" \
+    --arg c "${4:-}" --arg ca "${5:-github-actions[bot]}" \
+    --arg b "${6:-first report}" --arg ba "${7:-github-actions[bot]}" \
+    '[{number: $n, state: $s, title: $t, body: $b, author: $ba,
+       url: "https://github.com/o/r/issues/\($n)",
+       comments: (if $c == "" then [] else [{body: $c, author: $ca}] end)}]' >"$STATE"
 }
 none() { echo '[]' >"$STATE"; }
 # run VERDICT: one delivery attempt; returns the script's status.
@@ -78,7 +103,7 @@ run() {
 }
 # state: "<number> <state> <marked texts> <title verdict word>" per issue.
 state() {
-  jq -r --arg m "$marker" '.[] | "\(.number) \(.state) \([.body, .comments[]] |
+  jq -r --arg m "$marker" '.[] | "\(.number) \(.state) \([.body, .comments[].body] |
     map(select(contains($m))) | length) \(.title | split(" ")[4])"' "$STATE" |
     paste -sd';' -
 }
@@ -151,15 +176,30 @@ check "a neighbouring version's issue is not matched" "$(state)" \
 # was already reported: the delivery fails (and is retried) without writing.
 seed 7 OPEN "$drift_title" "earlier report $marker"
 failed=0
-STUB_FAIL="issue view" run drift || failed=$?
+STUB_FAIL=api run drift || failed=$?
 check "a failed issue lookup fails without writing" \
   "$([[ $failed != 0 ]] && echo failed) $(writes) $(state)" "failed  7 OPEN 1 drift"
 seed 7 OPEN
-jq '.[0].comments = null' "$STATE" >"$STATE.tmp" && mv "$STATE.tmp" "$STATE"
 failed=0
-run broken || failed=$?
+STUB_MALFORMED=1 run broken || failed=$?
 check "an unreadable issue lookup fails without writing" \
   "$([[ $failed != 0 ]] && echo failed) $(writes)" "failed "
+
+# Anyone can comment on a public issue and the key is not secret: only markers
+# written by the workflow's identity count.
+seed 7 CLOSED "$drift_title" "forged $marker" mallory
+run broken
+check "an outsider's marker comment does not suppress the update" \
+  "$(state) / $(writes)" \
+  "7 OPEN 2 broken / issue edit 7;issue reopen 7;issue comment 7"
+seed 7 OPEN "$drift_title" "" "" "forged $marker" mallory
+run drift
+check "a marker in an outsider-authored issue body does not count" \
+  "$(writes)" "issue edit 7;issue comment 7"
+seed 7 OPEN "$drift_title" "" "" "forged $marker" mallory
+run compatible
+check "a forged marker does not suppress the compatible comment" \
+  "$(writes)" "issue comment 7;issue close 7"
 
 rejects() {
   if (cd "$work" && PATH="$work/bin:$PATH" REPO=o/r VERDICT=$1 CANDIDATE=$2 \

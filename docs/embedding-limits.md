@@ -238,11 +238,14 @@ Scheduled and manual runs on `main` then notify:
 - **A failed run** (an `error` verdict, a gate failure or a failed delivery)
   sends a low-priority Pushover notice linking the run.
 
-The deduplication record is a small delivery marker that the notify job uploads
-only after all of these succeeded. A failed delivery therefore leaves no marker,
-and the next scheduled run measures and delivers again. The gate counts a marker
-only from a scheduled or manual run of this workflow on `main` in this
-repository, never from a pull request.
+Each issue body and comment also carries the evaluation key, and only text
+written by the workflow's own identity counts, so a comment from another account
+cannot mark an evaluation as already reported. The deduplication record is a
+small delivery marker that the notify job uploads only after all of these
+succeeded. A failed delivery therefore leaves no marker, and the next scheduled
+run measures and delivers again. The gate counts a marker only from a scheduled
+or manual run of this workflow on `main` in this repository, never from a pull
+request.
 
 Pushover needs the repository secrets `PUSHOVER_APP_TOKEN` and
 `PUSHOVER_USER_KEY`; without them the workflow logs a warning and sends nothing,
