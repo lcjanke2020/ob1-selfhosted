@@ -191,13 +191,18 @@ with a corrected one: replacing it needs the full rebuild below, not a relabel.
 
 The
 [Ollama early-warning workflow](../.github/workflows/ollama-early-warning.yml)
-tests each new stable `ollama/ollama` release before any deployment upgrades to
-it. A daily gate compares the latest release with the pinned image. It skips the
-run when that release is already pinned or already has a verdict for the same
-candidate image digest, pin, model digest and harness revision. Otherwise the
-[runner](../scripts/ci/README.md#ollama-early-warning-runner) starts three
-containers on one GitHub-hosted runner, each from a copy of one model store
-verified against the pinned manifest digest:
+tests the latest stable `ollama/ollama` release once a day, before deployments
+upgrade to it. Intermediate releases published between two runs are not tested
+separately; a manual run takes any version. The daily gate compares the latest
+release with the pinned image. It skips the run when that release is already
+pinned (the same version and image digest), or when an evaluation with the same
+candidate image digest, pin, model digest and harness revision was already
+delivered. The harness revision hashes every file the measurement executes or
+configures, including the server's embedder, chunker, runtime canaries and Deno
+lockfile. A registry or GitHub failure fails the gate rather than skipping.
+Otherwise the [runner](../scripts/ci/README.md#ollama-early-warning-runner)
+starts three containers on one GitHub-hosted runner, each from a copy of one
+model store verified against the pinned manifest digest:
 
 - **pinned**: runs the [runtime probe](../scripts/probe-embedding-runtime.ts). A
   failure here means the runner cannot judge the candidate.
@@ -212,30 +217,41 @@ casing, accents, code, identifiers, several scripts, emoji, NUL-joined session
 text, and multi-passage documents up to the context boundary. The verdict
 compares every passage of the candidate with the pinned one:
 
-| Verdict      | Meaning                                                                                                                                                                         |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `compatible` | The probe passes, chunk counts are equal and every passage reaches cosine 0.999 (the relabel guard's bar). The summary says whether the vectors are bitwise identical.          |
-| `drift`      | The probe passes, but some passage falls below 0.999 or a chunk count differs. Deployments on that version mix incompatible vectors silently.                                   |
-| `broken`     | The probe or an embedding fails, or the candidate reports a different digest for the same model files, which changes the contract. A 1.29+ server on that version fails closed. |
-| `error`      | The harness could not judge. The run fails, and the next scheduled run retries.                                                                                                 |
+| Verdict      | Meaning                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `compatible` | The probe passes, chunk counts are equal and every passage reaches cosine 0.999 (the relabel guard's bar). The summary says whether the vectors are bitwise identical.                                                                                                                                                                                                               |
+| `drift`      | The probe passes, but some passage falls below 0.999 or a chunk count differs. Deployments on that version mix incompatible vectors silently.                                                                                                                                                                                                                                        |
+| `broken`     | The probe or an embedding fails, or the candidate reports a different digest for the same model files. When the server performs the failed check itself (runtime canaries, contract, embedding requests), a 1.29+ server on that version fails closed. When only the probe checks it (context boundary, chunk fit, late-passage retrieval), the server keeps writing, as with drift. |
+| `error`      | The harness could not judge. The run fails, and the next scheduled run retries.                                                                                                                                                                                                                                                                                                      |
 
-The job summary and a JSON artifact kept for 90 days record every verdict. That
-artifact is also the deduplication record. Scheduled and manual runs on `main`
-then notify:
+The job summary and a JSON artifact kept for 90 days record every verdict.
+Scheduled and manual runs on `main` then notify:
 
-- **Drift or broken** opens one issue per candidate version, labelled
-  `ollama-early-warning`. Watching the repository delivers it as a GitHub
-  notification, including email to the watching account's notification address.
-- **A newly opened issue** also sends a Pushover alert.
-- **Compatible** sends a low-priority "safe to bump" notice.
+- **Drift or broken** keeps one issue per candidate version, labelled
+  `ollama-early-warning`. The first evaluation opens it; a later evaluation of
+  the same version comments on it, updates its title and reopens it if needed.
+  Watching the repository delivers it as a GitHub notification, including email
+  to the watching account's notification address.
+- **Every delivered evaluation** sends a Pushover alert; **compatible** sends a
+  low-priority "safe to bump" notice instead, and closes an open issue for that
+  version with a comment.
+- **A failed run** (an `error` verdict, a gate failure or a failed delivery)
+  sends a low-priority Pushover notice linking the run.
+
+The deduplication record is a small delivery marker that the notify job uploads
+only after all of these succeeded. A failed delivery therefore leaves no marker,
+and the next scheduled run measures and delivers again. The gate counts a marker
+only from a scheduled or manual run of this workflow on `main` in this
+repository, never from a pull request.
 
 Pushover needs the repository secrets `PUSHOVER_APP_TOKEN` and
 `PUSHOVER_USER_KEY`; without them the workflow logs a warning and sends nothing.
 A dedicated Pushover application keeps this token separate from the server's
 metadata alerts. Manual runs take any version, including a release candidate,
 and can force a re-evaluation. Pull requests that change the harness run the
-same A/B without notifications, plus a negative control: 0.24.0 must be reported
-`broken`.
+gate and verdict tests and the same A/B without notifications, plus a negative
+control: 0.24.0 must be reported `broken`, with its vectors measurably moved
+against a clean control.
 
 To bump the pin, confirm that the workflow reported the target version
 `compatible`, then update both Compose files and `KNOWN_NON_DENO_IMAGES` in

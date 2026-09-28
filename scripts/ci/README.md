@@ -96,12 +96,13 @@ cannot change the measurement.
 
 ### Commands
 
-| Step    | Local command                                                                                                                   | Result                                                                                    |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Gate    | `scripts/ci/ollama_early_warning_gate.sh [VERSION]`                                                                             | Candidate image digest and evaluation key, or why no run is needed (needs `gh`)           |
-| A/B     | `scripts/ci/ollama_early_warning.sh ollama/ollama:VER@sha256:… DIR`                                                             | `DIR/verdict.json`, `summary.md`, `issue.md`, probe logs, fingerprints and container logs |
-| Verdict | `deno run --config server/deno.json --frozen --allow-read=DIR --allow-write=DIR scripts/ci/ollama_early_warning_verdict.ts DIR` | Recomputes the verdict from an existing result directory                                  |
-| Tests   | `deno test --config server/deno.json --frozen --allow-env --allow-read scripts/ci/ollama_early_warning_verdict_test.ts`         | Verdict rules on synthetic fingerprints                                                   |
+| Step       | Local command                                                                                                                   | Result                                                                                                             |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Gate       | `scripts/ci/ollama_early_warning_gate.sh [VERSION]`                                                                             | Candidate image digest and evaluation key, or why no run is needed (needs `gh`, `docker buildx`)                   |
+| A/B        | `scripts/ci/ollama_early_warning.sh ollama/ollama:VER@sha256:… DIR`                                                             | `DIR/verdict.json`, `summary.md`, `issue.md`, probe logs, fingerprints and container logs                          |
+| Verdict    | `deno run --config server/deno.json --frozen --allow-read=DIR --allow-write=DIR scripts/ci/ollama_early_warning_verdict.ts DIR` | Recomputes the verdict from an existing result directory                                                           |
+| Tests      | `deno test --config server/deno.json --frozen --allow-env --allow-read scripts/ci/ollama_early_warning_verdict_test.ts`         | Verdict rules on synthetic fingerprints                                                                            |
+| Gate tests | `scripts/ci/ollama_early_warning_gate_test.sh`                                                                                  | Evaluation key, registry failures, pin digest, marker provenance and path coverage, with stubbed `gh` and `docker` |
 
 Set `EW_MODEL_STORE` to a persistent directory to keep the verified model
 between runs; by default it is downloaded into scratch space and removed. The
