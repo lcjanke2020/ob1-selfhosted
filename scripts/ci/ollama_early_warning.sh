@@ -72,10 +72,10 @@ cleanup() {
   local name
   for name in "${containers[@]}"; do
     docker container inspect "$name" >/dev/null 2>&1 || continue
-    # A serving container's scratch store may hold files it created as root;
-    # open them so the invoking user can delete the copy. The persistent
-    # store behind the fetch container is left as is.
-    [[ $name == "$PREFIX-fetch" ]] ||
+    # Scratch stores may hold files a container created as root; open them so
+    # the invoking user can delete them. A caller's persistent store (behind
+    # the fetch container) is left as is.
+    [[ $name == "$PREFIX-fetch" && -n ${EW_MODEL_STORE:-} ]] ||
       docker exec "$name" chmod -R a+rwX /root/.ollama/models >/dev/null 2>&1 || true
     remove "$name"
   done
@@ -128,17 +128,22 @@ docker pull -q "$CANDIDATE_IMAGE" >/dev/null
 # by the caller), then copied per container so no runtime can modify the files
 # another one serves.
 start fetch "$PINNED_IMAGE" "$PORT_BASE" "$STORE"
-if [[ ! -d $STORE/manifests ]]; then
+digest=$(served_digest "$PORT_BASE" || true)
+# A store may exist without the pinned manifest (another model, or a moved tag).
+if [[ $digest != "$MODEL_DIGEST" ]]; then
   echo "fetching $MODEL into $STORE"
   docker exec "$PREFIX-fetch" ollama pull "$MODEL" >"$OUT/model-pull.log" 2>&1 || {
     tail -n 5 "$OUT/model-pull.log" >&2
     exit 1
   }
+  digest=$(served_digest "$PORT_BASE" || true)
 fi
-digest=$(served_digest "$PORT_BASE" || true)
 # Ollama writes some store files mode 0600. With rootful Docker they belong to
-# root, and the copies below run as the invoking user.
-docker exec "$PREFIX-fetch" chmod -R a+rX /root/.ollama/models
+# root, and the copies below run as the invoking user. A persistent store only
+# needs to be readable; the default scratch store must also be deletable.
+mode=a+rX
+[[ -n ${EW_MODEL_STORE:-} ]] || mode=a+rwX
+docker exec "$PREFIX-fetch" chmod -R "$mode" /root/.ollama/models
 remove "$PREFIX-fetch"
 if [[ $digest != "$MODEL_DIGEST" ]]; then
   echo "model store serves $MODEL digest '${digest:-none}', not the pin $MODEL_DIGEST" >&2
