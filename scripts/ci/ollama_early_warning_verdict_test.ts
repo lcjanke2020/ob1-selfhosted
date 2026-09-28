@@ -50,10 +50,14 @@ function fingerprint(
 }
 
 const ok = (fp: Fingerprint): FingerprintRun => ({ ok: true, fingerprint: fp });
-const pass: ProbeRun = { exit: 0, lines: [{ stage: "resident" }], stderr: "" };
-const fail = (stage: string, error: string): ProbeRun => ({
+const pass = (runtime: string): ProbeRun => ({
+  exit: 0,
+  lines: [{ stage: "identity", runtime }, { stage: "resident" }],
+  stderr: "",
+});
+const fail = (stage: string, error: string, runtime?: string): ProbeRun => ({
   exit: 1,
-  lines: [{ stage: "identity" }, { stage }],
+  lines: [{ stage: "identity", runtime }, { stage }],
   stderr:
     `error: Uncaught (in promise) Error: ${error}\n    at file:///probe.ts:1:1\n`,
 });
@@ -65,16 +69,19 @@ function inputs(overrides: {
   pinnedProbe?: ProbeRun;
   candidateProbe?: ProbeRun;
 } = {}): Inputs {
+  const candidate = overrides.candidate ?? ok(fingerprint("0.34.4"));
+  // By default each probe read the runtime its fingerprint reports.
+  const seen = candidate.ok ? candidate.fingerprint.runtime : "0.34.4";
   return {
     meta,
     probes: {
-      pinned: overrides.pinnedProbe ?? pass,
-      candidate: overrides.candidateProbe ?? pass,
+      pinned: overrides.pinnedProbe ?? pass("0.34.1"),
+      candidate: overrides.candidateProbe ?? pass(seen),
     },
     fingerprints: {
       baseline: overrides.baseline ?? ok(fingerprint("0.34.1")),
       control: overrides.control ?? ok(fingerprint("0.34.1")),
-      candidate: overrides.candidate ?? ok(fingerprint("0.34.4")),
+      candidate,
     },
   };
 }
@@ -294,4 +301,68 @@ Deno.test("a broken report still shows how far the candidate vectors moved", () 
   assertEquals(report.verdict, "broken");
   assert((report.candidate?.min_cosine ?? 1) < DRIFT_MIN_COSINE);
   assertMatch(renderSummary(report), /Lowest candidate passages/);
+});
+
+Deno.test("fingerprinting the wrong endpoint is a harness error, not a verdict", () => {
+  // The mutant a reviewer ran: the candidate fingerprint came from the pinned
+  // endpoint while the probe measured the real candidate.
+  const report = decide(inputs({
+    candidate: ok(fingerprint("0.34.1")),
+    candidateProbe: fail(
+      "runtime_canary",
+      "embedding runtime: distinct-input canary collision",
+      "0.24.0",
+    ),
+  }));
+  assertEquals(report.verdict, "error");
+  assertMatch(
+    report.reasons.join("\n"),
+    /candidate probe read runtime 0\.24\.0/,
+  );
+  const passing = decide(inputs({
+    candidate: ok(fingerprint("0.34.1")),
+    candidateProbe: pass("0.34.4"),
+  }));
+  assertEquals(passing.verdict, "error");
+});
+
+Deno.test("a pinned probe and fingerprint from different endpoints are a harness error", () => {
+  const report = decide(inputs({ pinnedProbe: pass("0.34.4") }));
+  assertEquals(report.verdict, "error");
+  assertMatch(report.reasons.join("\n"), /pinned probe read runtime 0\.34\.4/);
+});
+
+Deno.test("broken guidance says fails closed only for checks the server enforces", () => {
+  const canary = decide(inputs({
+    candidateProbe: fail(
+      "identity",
+      "embedding runtime: distinct-input canary collision",
+      "0.34.4",
+    ),
+  }));
+  assertEquals(canary.verdict, "broken");
+  assertEquals(canary.enforced, true);
+  assertMatch(renderIssue(canary), /fails closed/);
+
+  const boundary = decide(inputs({
+    candidateProbe: fail(
+      "strict_boundary",
+      "Expected strict context overflow",
+      "0.34.4",
+    ),
+  }));
+  assertEquals(boundary.verdict, "broken");
+  assertEquals(boundary.enforced, false);
+  const issue = renderIssue(boundary);
+  assert(!issue.includes("fails closed"), issue);
+  assertMatch(issue, /does not enforce \(after strict_boundary\)/);
+  assertMatch(issue, /keeps accepting captures and searches/);
+
+  const embedFailure = fingerprint("0.34.4");
+  embedFailure.items[0] = {
+    id: "upper",
+    kind: "short",
+    error: "Ollama embed failed: HTTP 500",
+  };
+  assertEquals(decide(inputs({ candidate: ok(embedFailure) })).enforced, true);
 });

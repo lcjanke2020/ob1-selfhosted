@@ -70,6 +70,9 @@ export type Report = {
   probe: { pinned: ProbeSummary; candidate: ProbeSummary };
   control?: Comparison;
   candidate?: Comparison;
+  // For broken: whether a deployed 1.29+ server itself rejects this runtime
+  // (its canaries, contract or failing requests), or only the probe noticed.
+  enforced?: boolean;
 };
 
 // Failures that say nothing about the candidate's vectors: a stalled shared
@@ -85,6 +88,16 @@ export function denoError(stderr: string): string | undefined {
     l.startsWith("error:")
   )?.replace(/^error:\s*(Uncaught\s*(\(in promise\)\s*)?)?/, "");
 }
+
+// The runtime version the probe's identity stage read from its endpoint.
+function probeRuntime(run: ProbeRun): string | undefined {
+  const runtime = run.lines.find((l) => l.stage === "identity")?.runtime;
+  return typeof runtime === "string" ? runtime : undefined;
+}
+
+// Failure messages of checks the server itself performs before using vectors:
+// its runtime canaries and its model identity.
+const SERVER_ENFORCED = /^Error: (embedding runtime:|Model digest differs)/;
 
 export function summarizeProbe(run: ProbeRun): ProbeSummary {
   if (run.exit === 0) return { pass: true };
@@ -215,6 +228,13 @@ export function decide(inputs: Inputs): Report {
     reasons.push(
       `the pinned runtime failed the probe on this runner: ${report.probe.pinned.error}`,
     );
+  } else if (probeRuntime(probes.pinned) !== baseline.fingerprint.runtime) {
+    // The probe and the fingerprint must have measured the same endpoint.
+    reasons.push(
+      `the pinned probe read runtime ${
+        probeRuntime(probes.pinned)
+      } but the pinned fingerprint ${baseline.fingerprint.runtime}`,
+    );
   }
   if (reasons.length) return done("error");
   report.control = compare(baseline.fingerprint, control.fingerprint);
@@ -237,6 +257,18 @@ export function decide(inputs: Inputs): Report {
       );
       return done("error");
     }
+    // A harness that fingerprints the wrong endpoint would compare the pin
+    // with itself and call every release compatible. The probe's identity
+    // stage must have seen the same runtime as the candidate fingerprint.
+    const seen = probeRuntime(probes.candidate);
+    if (
+      (report.probe.candidate.pass || seen !== undefined) && seen !== fp.runtime
+    ) {
+      reasons.push(
+        `the candidate probe read runtime ${seen} but the candidate fingerprint ${fp.runtime}`,
+      );
+      return done("error");
+    }
     if (fp.runtime !== meta.candidate.version) {
       notes.push(
         `candidate image reports runtime ${fp.runtime}, not ${meta.candidate.version}`,
@@ -255,6 +287,7 @@ export function decide(inputs: Inputs): Report {
       reasons.push(
         `candidate reports model digest ${fp.digest} for the same model files; the server's embedding contract would change and every capture and search would fail closed until a full rebuild`,
       );
+      report.enforced = true;
       return done("broken");
     }
   }
@@ -265,15 +298,20 @@ export function decide(inputs: Inputs): Report {
         probe.failed_stage ?? "before any stage"
       }): ${probe.error}`,
     );
+    report.enforced = SERVER_ENFORCED.test(probe.error ?? "");
     return done(transient(probe.error ?? "") ? "error" : "broken");
   }
+  // Failing identity reads and embedding requests fail the server's own
+  // captures and searches as well.
   if (!candidate.ok) {
     reasons.push(`candidate fingerprint failed: ${candidate.error}`);
+    report.enforced = true;
     return done(transient(candidate.error) ? "error" : "broken");
   }
   const errors = itemErrors(candidate.fingerprint);
   if (errors.length) {
     reasons.push(...errors.map((e) => `candidate ${e}`));
+    report.enforced = true;
     return done(errors.every(transient) ? "error" : "broken");
   }
 
@@ -374,26 +412,38 @@ export function renderSummary(report: Report): string {
   return lines.join("\n") + "\n";
 }
 
-const GUIDANCE: Partial<Record<Verdict, string>> = {
-  drift: [
-    "### What this means",
-    "",
-    "This release changes the vectors of the pinned model. Do not bump the pinned image to it yet.",
-    "A deployment that already runs it (for example a native install upgraded by device management) keeps accepting writes, but new vectors no longer line up with stored ones and ranking degrades without any error.",
-    "Check such deployments, then recover with `embedding_backfill.ts --rebuild` or roll the runtime back (docs/embedding-limits.md, *Recovering from runtime drift*).",
-  ].join("\n"),
-  broken: [
-    "### What this means",
-    "",
-    "This release fails a check the server relies on. Do not bump the pinned image to it.",
-    "A server 1.29+ deployment that upgrades to it fails closed: its runtime canaries or embedding contract reject captures and searches (`write=not_started`) until the runtime is rolled back or fixed, and a tokenizer or context change can make stored and new vectors disagree.",
-    "Hold or roll back any deployment that upgrades Ollama automatically.",
-  ].join("\n"),
-};
+const HEADING = "### What this means\n\n";
+const HOLD =
+  "Hold or roll back any deployment that upgrades Ollama automatically.";
+
+function guidance(report: Report): string | undefined {
+  if (report.verdict === "drift") {
+    return HEADING + [
+      "This release changes the vectors of the pinned model. Do not bump the pinned image to it yet.",
+      "A deployment that already runs it (for example a native install upgraded by device management) keeps accepting writes, but new vectors no longer line up with stored ones and ranking degrades without any error.",
+      "Check such deployments, then recover with `embedding_backfill.ts --rebuild` or roll the runtime back (docs/embedding-limits.md, *Recovering from runtime drift*).",
+    ].join("\n");
+  }
+  if (report.verdict !== "broken") return undefined;
+  if (report.enforced) {
+    return HEADING + [
+      "This release fails a check the server itself performs. Do not bump the pinned image to it.",
+      "A server 1.29+ deployment that upgrades to it fails closed: its runtime canaries, embedding contract or failing embedding requests reject captures and searches (`write=not_started`) until the runtime is rolled back or fixed.",
+      HOLD,
+    ].join("\n");
+  }
+  return HEADING + [
+    `This release fails a probe check that the server does not enforce (${
+      report.probe.candidate.failed_stage ?? "probe"
+    }). Do not bump the pinned image to it.`,
+    "A server 1.29+ deployment that upgrades to it keeps accepting captures and searches. Depending on the check, passages no longer split at the context boundary the chunker relies on, or late passages stop ranking, so treat those deployments as drifted: check them and rebuild or roll the runtime back.",
+    HOLD,
+  ].join("\n");
+}
 
 export function renderIssue(report: Report): string {
-  const guidance = GUIDANCE[report.verdict];
-  return renderSummary(report) + (guidance ? `\n${guidance}\n` : "");
+  const text = guidance(report);
+  return renderSummary(report) + (text ? `\n${text}\n` : "");
 }
 
 async function readProbe(dir: string, name: string): Promise<ProbeRun> {
