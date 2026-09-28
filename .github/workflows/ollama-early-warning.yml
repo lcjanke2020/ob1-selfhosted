@@ -1,25 +1,29 @@
 # Early warning for Ollama releases that would change the pinned Nomic
 # embeddings, before any deployment upgrades. Daily, a cheap gate compares the
 # latest stable ollama/ollama release with the image pinned in the Compose files.
-# A new release, image digest, model pin or harness revision runs
-# scripts/ci/ollama_early_warning.sh: an A/B test of the candidate against the
-# pinned image on one runner, with a pinned-vs-pinned control. See
-# docs/embedding-limits.md and scripts/ci/README.md.
+# A new release, image digest, model pin or harness revision (every file the
+# measurement executes or configures) runs scripts/ci/ollama_early_warning.sh:
+# an A/B test of the candidate against the pinned image on one runner, with a
+# pinned-vs-pinned control. See docs/embedding-limits.md and scripts/ci/README.md.
 #
 # Verdicts: compatible (safe to bump the pin), drift (the vectors moved), broken
-# (a check the server relies on fails), error (the harness could not judge; the
-# run fails and the next scheduled run retries).
+# (a check fails; the report says whether the server itself would fail closed),
+# error (the harness could not judge; the run fails and the next scheduled run
+# retries).
 #
 # Notifications come only from scheduled and manual runs on main. Drift and
-# broken open one issue per candidate version, and GitHub's issue notification
-# email is the email channel. A newly opened issue also sends a Pushover alert,
-# and compatible sends a low-priority notice, when the PUSHOVER_APP_TOKEN and
-# PUSHOVER_USER_KEY secrets are set. The verdict artifact, named by the
-# evaluation key and kept for 90 days, is the dedupe record.
+# broken keep one issue per candidate version, and GitHub's issue notification
+# email is the email channel: the first evaluation opens it, a later one comments
+# (reopening it if needed), and a later compatible result closes it. Every
+# delivered evaluation also sends Pushover when the PUSHOVER_APP_TOKEN and
+# PUSHOVER_USER_KEY secrets are set (low priority for compatible), and a failed
+# run sends a low-priority failure notice. The dedupe record is a delivery marker
+# uploaded only after every notification succeeded, so a failed delivery is
+# measured and delivered again on the next run.
 #
-# Pull requests that change the harness run the same A/B without notifications,
-# plus a negative control: Ollama 0.24.0, whose known tokenizer defect must be
-# reported as broken.
+# Pull requests that change the harness run the gate and verdict tests and the
+# same A/B without notifications, plus a negative control: Ollama 0.24.0, whose
+# known tokenizer defect must be reported as broken with moved vectors.
 #
 # GitHub disables scheduled workflows in public repositories after 60 days
 # without repository activity; re-enable this one from the Actions tab.
@@ -53,10 +57,16 @@ on:
       - "server/deno.json"
       - "server/deno.lock"
       - "server/embedding*.ts"
-      - "server/embeddings.ts"
+      - "server/runtime_config.ts"
+      - "server/scope_contract.ts"
 
 permissions:
   contents: read
+
+# An explicit bash shell runs with -o pipefail; the implicit default does not.
+defaults:
+  run:
+    shell: bash
 
 concurrency:
   group: ollama-early-warning-${{ github.event.pull_request.number || github.ref }}
@@ -69,7 +79,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      # Reads the verdict artifacts of earlier runs (the dedupe record).
+      # Reads the delivery markers of earlier runs (the dedupe record).
       actions: read
     outputs:
       run: ${{ steps.gate.outputs.run }}
@@ -112,10 +122,12 @@ jobs:
           EW_BRANCH: main
         run: |
           scripts/ci/ollama_early_warning_gate.sh ${CANDIDATE:+"$CANDIDATE"} | tee -a "$GITHUB_OUTPUT"
+          # A gate that printed no decision checked nothing.
+          grep -q '^run=' "$GITHUB_OUTPUT"
           grep -E '^(run|reason)=' "$GITHUB_OUTPUT" | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
 
   harness-tests:
-    name: Verdict unit tests
+    name: Harness tests
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -136,6 +148,9 @@ jobs:
         run: >-
           deno test --config server/deno.json --frozen --allow-env --allow-read
           scripts/ci/ollama_early_warning_verdict_test.ts
+
+      - name: Run gate tests
+        run: scripts/ci/ollama_early_warning_gate_test.sh
 
   ab:
     name: A/B test
@@ -199,14 +214,13 @@ jobs:
           echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
           # meta.json is written only after the model store matched the pin.
           if [ -f "$out/meta.json" ]; then echo "store_verified=true" >> "$GITHUB_OUTPUT"; fi
-          # Only a verdict about the candidate from a trusted run is a dedupe
-          # record; pull request and error results are not.
+          # Evidence only: the dedupe record is the notify job's delivery marker.
           if [ -n "$PR_NUMBER" ]; then
-            name="pr$PR_NUMBER-$KEY"
+            name="pr$PR_NUMBER-verdict-$KEY"
           elif [ "$verdict" = error ]; then
             name="error-$GITHUB_RUN_ID-$KEY"
           else
-            name="$KEY"
+            name="verdict-$KEY"
           fi
           echo "artifact=$name" >> "$GITHUB_OUTPUT"
           exit "$status"
@@ -228,8 +242,9 @@ jobs:
           path: ${{ runner.temp }}/nomic-model-store
           key: ollama-ew-nomic-${{ needs.gate.outputs.model_digest }}
 
-  # Proves on every harness change that the pipeline can still say broken:
-  # Ollama 0.24.0 collides distinct uppercase inputs (see
+  # Proves on every harness change that the pipeline can still say broken and
+  # still measures the candidate's own vectors: Ollama 0.24.0 collides distinct
+  # uppercase inputs (see
   # docs/investigations/2026-09-16-embedding-context-overflow.md).
   negative-control:
     name: Negative control (0.24.0 must be broken)
@@ -267,9 +282,14 @@ jobs:
           out="$RUNNER_TEMP/ew"
           scripts/ci/ollama_early_warning.sh "$IMAGE" "$out" || true
           if [ -f "$out/summary.md" ]; then cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY"; fi
-          verdict=$(jq -r '.verdict // "error"' "$out/verdict.json" 2>/dev/null || echo error)
-          if [ "$verdict" != broken ]; then
-            echo "::error::negative control expected broken, got $verdict"
+          # The probe alone reports broken, so also require that the candidate's
+          # fingerprint moved against a clean control over the full canary set.
+          if ! jq -e '.verdict == "broken"
+              and (.candidate.min_cosine | type) == "number"
+              and .candidate.min_cosine < .threshold
+              and .control.min_cosine >= .threshold and .candidate.items > 0
+              and .candidate.items == .control.items' "$out/verdict.json"; then
+            echo "::error::negative control expected broken with moved vectors and a clean control"
             exit 1
           fi
 
@@ -284,7 +304,7 @@ jobs:
           overwrite: true
 
   notify:
-    name: Notify (${{ needs.ab.outputs.verdict }})
+    name: Notify
     needs: [gate, ab]
     if: >-
       github.event_name != 'pull_request' && github.ref == 'refs/heads/main' &&
@@ -298,12 +318,12 @@ jobs:
       - name: Download the verdict
         uses: actions/download-artifact@v4
         with:
-          name: ${{ needs.gate.outputs.key }}
+          name: verdict-${{ needs.gate.outputs.key }}
           path: verdict
 
-      - name: Open one issue per candidate version (drift, broken)
+      # One issue per candidate version, reconciled on every evaluation.
+      - name: Reconcile the issue for this version
         id: issue
-        if: needs.ab.outputs.verdict != 'compatible'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -312,25 +332,35 @@ jobs:
           PINNED: ${{ needs.gate.outputs.pinned_version }}
         run: |
           label=ollama-early-warning
+          prefix="Ollama $CANDIDATE:"
+          title="$prefix nomic-embed-text embeddings $VERDICT vs pinned $PINNED"
           gh label create "$label" -R "$REPO" --force --color D93F0B \
             --description "Ollama release changes the pinned embeddings"
-          prefix="Ollama $CANDIDATE:"
-          url=$(gh issue list -R "$REPO" --state all --label "$label" --limit 500 \
-            --json title,url |
-            jq -r --arg p "$prefix" 'map(select(.title | startswith($p)))[0].url // empty')
-          if [ -n "$url" ]; then
-            echo "Already reported: $url"
-            echo "created=false" >> "$GITHUB_OUTPUT"
-          else
-            url=$(gh issue create -R "$REPO" --label "$label" \
-              --title "$prefix nomic-embed-text embeddings $VERDICT vs pinned $PINNED" \
+          issue=$(gh issue list -R "$REPO" --state all --label "$label" --limit 500 \
+            --json number,state,title,url |
+            jq -c --arg p "$prefix" 'map(select(.title | startswith($p))) | first // {}')
+          number=$(jq -r '.number // empty' <<<"$issue")
+          state=$(jq -r '.state // empty' <<<"$issue")
+          url=$(jq -r '.url // empty' <<<"$issue")
+          { echo "**Re-evaluated** (a new image digest, pin, model or harness revision):"
+            echo
+            cat verdict/issue.md; } > comment.md
+          if [ "$VERDICT" = compatible ]; then
+            if [ "$state" = OPEN ]; then
+              gh issue comment "$number" -R "$REPO" --body-file comment.md
+              gh issue close "$number" -R "$REPO" --reason completed
+            fi
+          elif [ -z "$number" ]; then
+            url=$(gh issue create -R "$REPO" --label "$label" --title "$title" \
               --body-file verdict/issue.md)
-            echo "created=true" >> "$GITHUB_OUTPUT"
+          else
+            gh issue comment "$number" -R "$REPO" --body-file comment.md
+            gh issue edit "$number" -R "$REPO" --title "$title"
+            if [ "$state" = CLOSED ]; then gh issue reopen "$number" -R "$REPO"; fi
           fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
       - name: Pushover
-        if: needs.ab.outputs.verdict == 'compatible' || steps.issue.outputs.created == 'true'
         env:
           PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
           PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
@@ -360,3 +390,50 @@ jobs:
             --form-string "priority=$priority" \
             --form-string "url=${ISSUE_URL:-$RUN_URL}" \
             --form-string "url_title=Details" >/dev/null
+
+      # Written only when every step above succeeded; the gate dedupes on it.
+      - name: Record the delivery
+        env:
+          VERDICT: ${{ needs.ab.outputs.verdict }}
+          ISSUE_URL: ${{ steps.issue.outputs.url }}
+        run: >-
+          jq -n --arg verdict "$VERDICT" --arg issue "$ISSUE_URL"
+          '{verdict: $verdict, issue: $issue}' > delivered.json
+
+      - name: Upload the delivery marker
+        uses: actions/upload-artifact@v4
+        with:
+          name: delivered-${{ needs.gate.outputs.key }}
+          path: delivered.json
+          retention-days: 90
+          overwrite: true
+
+  # A scheduled check that cannot run or report must not stay silent: error
+  # verdicts, gate failures and failed deliveries all end here.
+  alert:
+    name: Alert on failure
+    needs: [gate, ab, notify]
+    if: >-
+      failure() && github.event_name != 'pull_request' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Pushover
+        env:
+          PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$PUSHOVER_APP_TOKEN" ] || [ -z "$PUSHOVER_USER_KEY" ]; then
+            echo "::warning::PUSHOVER_APP_TOKEN or PUSHOVER_USER_KEY is not set; no Pushover notice sent"
+            exit 0
+          fi
+          curl -fsS https://api.pushover.net/1/messages.json \
+            --form-string "token=$PUSHOVER_APP_TOKEN" \
+            --form-string "user=$PUSHOVER_USER_KEY" \
+            --form-string "title=Ollama early warning failed" \
+            --form-string "message=The run could not check or report the latest Ollama release. The next scheduled run retries." \
+            --form-string "priority=-1" \
+            --form-string "url=$RUN_URL" \
+            --form-string "url_title=Run" >/dev/null
