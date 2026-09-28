@@ -147,6 +147,20 @@ run drift
 check "a neighbouring version's issue is not matched" "$(state)" \
   "8 OPEN 0 drift;9 OPEN 1 drift"
 
+# A failed or unreadable issue lookup cannot tell whether this evaluation
+# was already reported: the delivery fails (and is retried) without writing.
+seed 7 OPEN "$drift_title" "earlier report $marker"
+failed=0
+STUB_FAIL="issue view" run drift || failed=$?
+check "a failed issue lookup fails without writing" \
+  "$([[ $failed != 0 ]] && echo failed) $(writes) $(state)" "failed  7 OPEN 1 drift"
+seed 7 OPEN
+jq '.[0].comments = null' "$STATE" >"$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+failed=0
+run broken || failed=$?
+check "an unreadable issue lookup fails without writing" \
+  "$([[ $failed != 0 ]] && echo failed) $(writes)" "failed "
+
 rejects() {
   if (cd "$work" && PATH="$work/bin:$PATH" REPO=o/r VERDICT=$1 CANDIDATE=$2 \
     PINNED=0.34.1 KEY=$key "$SRC/scripts/ci/ollama_early_warning_issue.sh" \

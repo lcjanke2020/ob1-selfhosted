@@ -51,22 +51,29 @@ comment() {
     body
   } | gh issue comment "$number" -R "$REPO" --body-file - >/dev/null
 }
-# Whether this exact evaluation already reached the issue.
-reported() {
-  gh issue view "$number" -R "$REPO" --json body,comments |
-    jq -e --arg m "$marker" '[.body, .comments[].body] | any(contains($m))' \
-      >/dev/null
-}
+# Whether this exact evaluation already reached the issue. Read outside any
+# condition: a failed or unreadable lookup must fail the delivery (the next
+# run retries it), not pass for "not yet reported" and post a duplicate.
+reported=false
+if [[ -n $number ]]; then
+  view=$(gh issue view "$number" -R "$REPO" --json body,comments)
+  reported=$(jq -r --arg m "$marker" \
+    '[.body, .comments[].body] | any(contains($m))' <<<"$view")
+  if [[ $reported != true && $reported != false ]]; then
+    echo "unexpected issue lookup result" >&2
+    exit 1
+  fi
+fi
 
 if [[ $VERDICT == compatible ]]; then
   if [[ $state == OPEN ]]; then
-    reported || comment
+    [[ $reported == true ]] || comment
     gh issue close "$number" -R "$REPO" --reason completed >/dev/null
   fi
 elif [[ -z $number ]]; then
   url=$(body | gh issue create -R "$REPO" --label "$label" --title "$title" \
     --body-file -)
-elif ! reported; then
+elif [[ $reported != true ]]; then
   # Idempotent state changes first: the marked comment is written last, so
   # its presence means the whole update finished. An interrupted update
   # leaves no marker, and the retry completes it.
