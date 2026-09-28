@@ -152,6 +152,9 @@ jobs:
       - name: Run gate tests
         run: scripts/ci/ollama_early_warning_gate_test.sh
 
+      - name: Run issue tests
+        run: scripts/ci/ollama_early_warning_issue_test.sh
+
   ab:
     name: A/B test
     needs: gate
@@ -315,13 +318,21 @@ jobs:
       contents: read
       issues: write
     steps:
+      - name: Checkout trusted event ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Download the verdict
         uses: actions/download-artifact@v4
         with:
           name: verdict-${{ needs.gate.outputs.key }}
           path: verdict
 
-      # One issue per candidate version, reconciled on every evaluation.
+      # One issue per candidate version, reconciled on every delivered
+      # evaluation; a retried delivery of the same evaluation adds nothing.
       - name: Reconcile the issue for this version
         id: issue
         env:
@@ -330,35 +341,8 @@ jobs:
           VERDICT: ${{ needs.ab.outputs.verdict }}
           CANDIDATE: ${{ needs.gate.outputs.candidate_version }}
           PINNED: ${{ needs.gate.outputs.pinned_version }}
-        run: |
-          label=ollama-early-warning
-          prefix="Ollama $CANDIDATE:"
-          title="$prefix nomic-embed-text embeddings $VERDICT vs pinned $PINNED"
-          gh label create "$label" -R "$REPO" --force --color D93F0B \
-            --description "Ollama release changes the pinned embeddings"
-          issue=$(gh issue list -R "$REPO" --state all --label "$label" --limit 500 \
-            --json number,state,title,url |
-            jq -c --arg p "$prefix" 'map(select(.title | startswith($p))) | first // {}')
-          number=$(jq -r '.number // empty' <<<"$issue")
-          state=$(jq -r '.state // empty' <<<"$issue")
-          url=$(jq -r '.url // empty' <<<"$issue")
-          { echo "**Re-evaluated** (a new image digest, pin, model or harness revision):"
-            echo
-            cat verdict/issue.md; } > comment.md
-          if [ "$VERDICT" = compatible ]; then
-            if [ "$state" = OPEN ]; then
-              gh issue comment "$number" -R "$REPO" --body-file comment.md
-              gh issue close "$number" -R "$REPO" --reason completed
-            fi
-          elif [ -z "$number" ]; then
-            url=$(gh issue create -R "$REPO" --label "$label" --title "$title" \
-              --body-file verdict/issue.md)
-          else
-            gh issue comment "$number" -R "$REPO" --body-file comment.md
-            gh issue edit "$number" -R "$REPO" --title "$title"
-            if [ "$state" = CLOSED ]; then gh issue reopen "$number" -R "$REPO"; fi
-          fi
-          echo "url=$url" >> "$GITHUB_OUTPUT"
+          KEY: ${{ needs.gate.outputs.key }}
+        run: scripts/ci/ollama_early_warning_issue.sh verdict | tee -a "$GITHUB_OUTPUT"
 
       - name: Pushover
         env:
