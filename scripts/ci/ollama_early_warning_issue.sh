@@ -9,10 +9,11 @@
 # broken), CANDIDATE and PINNED (versions), KEY (the evaluation key); gh must be
 # authenticated with issues:write. Prints url=<issue URL or empty>.
 #
-# drift/broken: the first evaluation opens the issue; a later one comments,
-# updates the title and reopens it. compatible: comments on an open issue and
-# closes it. Every body and comment carries the evaluation key, so retrying the
-# delivery of the same evaluation (after a failed Pushover) adds nothing.
+# drift/broken: the first evaluation opens the issue; a later one updates the
+# title, reopens it and comments. compatible: comments on an open issue and
+# closes it. Every body and comment carries the evaluation key and is written
+# after the state changes, so a retried delivery of a finished update adds
+# nothing, and a retry after an interrupted one completes it.
 set -euo pipefail
 
 dir=${1:?usage: ollama_early_warning_issue.sh VERDICT_DIR}
@@ -66,10 +67,13 @@ elif [[ -z $number ]]; then
   url=$(body | gh issue create -R "$REPO" --label "$label" --title "$title" \
     --body-file -)
 elif ! reported; then
-  comment
+  # Idempotent state changes first: the marked comment is written last, so
+  # its presence means the whole update finished. An interrupted update
+  # leaves no marker, and the retry completes it.
   gh issue edit "$number" -R "$REPO" --title "$title" >/dev/null
   if [[ $state == CLOSED ]]; then
     gh issue reopen "$number" -R "$REPO" >/dev/null
   fi
+  comment
 fi
 echo "url=$url"
