@@ -450,3 +450,33 @@ Deno.test("only the probe's own assertions are probe-only", () => {
     /candidate short lower: Ollama embed failed/,
   );
 });
+
+Deno.test("a transient probe failure does not mask a conclusive fingerprint failure", () => {
+  const report = decide(inputs({
+    candidate: { ok: false, error: "embedding identity: HTTP 500" },
+    candidateProbe: fail(
+      "prose",
+      "Ollama embed timed out after 15000ms",
+      "0.34.4",
+    ),
+  }));
+  assertEquals(report.verdict, "broken");
+  assertEquals(report.enforced, true);
+  assertMatch(
+    report.reasons.join("\n"),
+    /candidate fingerprint failed: embedding identity: HTTP 500/,
+  );
+  // Both transient: the next run decides.
+  const both = decide(inputs({
+    candidate: {
+      ok: false,
+      error: "endpoint identity changed while fingerprinting; retry",
+    },
+    candidateProbe: fail(
+      "prose",
+      "Ollama embed timed out after 15000ms",
+      "0.34.4",
+    ),
+  }));
+  assertEquals(both.verdict, "error");
+});

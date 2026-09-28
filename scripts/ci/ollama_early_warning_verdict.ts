@@ -305,15 +305,20 @@ export function decide(inputs: Inputs): Report {
         probe.failed_stage ?? "before any stage"
       }): ${probe.error}`,
     );
-    // Failed fingerprint requests go through the server's own embedder, so
-    // they decide the guidance even when the probe stopped at its own check.
-    const requestErrors = candidate.ok
-      ? itemErrors(candidate.fingerprint).filter((e) => !transient(e))
-      : [];
-    reasons.push(...requestErrors.map((e) => `candidate ${e}`));
+    // The fingerprint goes through the server's own identity and embedding
+    // code, so a non-transient failure there is conclusive and server-enforced
+    // even when the probe stopped at its own check or timed out.
+    const fingerprintErrors = (candidate.ok
+      ? itemErrors(candidate.fingerprint).map((e) =>
+        `candidate ${e}`
+      )
+      : [`candidate fingerprint failed: ${candidate.error}`])
+      .filter((e) => !transient(e));
+    reasons.push(...fingerprintErrors);
     report.enforced = !PROBE_ONLY.test(probe.error ?? "") ||
-      requestErrors.length > 0;
-    const judged = !transient(probe.error ?? "") || requestErrors.length > 0;
+      fingerprintErrors.length > 0;
+    const judged = !transient(probe.error ?? "") ||
+      fingerprintErrors.length > 0;
     return done(judged ? "broken" : "error");
   }
   // Failing identity reads and embedding requests fail the server's own
