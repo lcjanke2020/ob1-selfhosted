@@ -210,7 +210,7 @@ Deno.test("reviewed non-Deno images pass only on their unmodified defaults", () 
   for (
     const image of [
       "pgvector/pgvector:0.8.6-pg16",
-      "ollama/ollama:0.34.1@sha256:0c0a83210471fb50226bcdc2d6611d20ab13ae87e024cc304c94a6a5765c5e65",
+      "ollama/ollama:0.35.0@sha256:2a6e883b917fc543389599dae79918f5cac9e1438890506982f44aa4f5625d01",
     ]
   ) {
     assertEquals(

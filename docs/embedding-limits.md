@@ -124,10 +124,11 @@ proven break from a version change:
   not cached as validated. Every model gets the distinct-input collision canary.
   For `nomic-embed-text`, an uncased WordPiece model, a correct runtime also
   lowercases and strips accents, so an upper/lowercase pair and an
-  accented/plain pair must each reach cosine 0.999 (the validated 0.34.1
-  measures exactly 1). A failure rejects the request with `write=not_started` or
-  `search=not_started`. The canaries rerun only when the reported version
-  changes, so a custom runtime build must report a distinct version string.
+  accented/plain pair must each reach cosine 0.999 (the validated 0.34.1 and
+  0.35.0 measure exactly 1). A failure rejects the request with
+  `write=not_started` or `search=not_started`. The canaries rerun only when the
+  reported version changes, so a custom runtime build must report a distinct
+  version string.
 - **Subtler drift is monitored, not gated.** A release could move vectors
   without tripping the canary, for example through a different numeric backend.
   Until that is noticed, new vectors mix with old ones and ranking degrades;
@@ -157,16 +158,38 @@ not validate search quality or make that defective runtime deployable. The
 original historically rejected session payload was not recovered; synthetic
 fixtures do not claim byte-for-byte incident replay.
 
-### Tested replacement: Ollama 0.34.1
+### Current baseline: Ollama 0.35.0
+
+Ollama **0.35.0** is the verified baseline. Both Compose stacks pin the
+multi-platform image index
+`sha256:2a6e883b917fc543389599dae79918f5cac9e1438890506982f44aa4f5625d01`, and
+the [early-warning workflow](#early-warning-for-new-ollama-releases) judges
+every later release against this pin.
+
+The workflow's A/B test against 0.34.1
+([run 36759535165](https://github.com/lcjanke2020/ob1-selfhosted/actions/runs/36759535165))
+reported `compatible` with the same Nomic model manifest (`0a109f422b47…`). All
+48 passages of the 35 fingerprint items were **bitwise identical** to the 0.34.1
+vectors, with equal chunk counts. The runtime probe passed with the same results
+as 0.34.1: casing and accent pairs at cosine 1, unrelated uppercase phrases at
+about 0.252, 2046 repetitions fitting the 2048-token context while 2047 were
+rejected, and all three retrieval checks ranking the intended document first. As
+with 0.34.1, only CPU inference of the Linux amd64 image was measured.
+
+Because the vectors are identical, upgrading a 1.29+ deployment from 0.34.1
+needs no relabel or re-embed. Pull the new image and restart only Ollama; the
+server reruns its runtime canaries when it sees the new version. Rolling back is
+the same operation with the previous pin.
+
+### Previous baseline: Ollama 0.34.1
 
 Ollama **0.34.1** passed an isolated CPU test on Linux amd64 with the **same
-Nomic model manifest** as the deployment. Both Compose stacks now pin the
-multi-platform image index
+Nomic model manifest** as the deployment, and was the Compose pin until 0.35.0.
+Its multi-platform image index is
 `sha256:0c0a83210471fb50226bcdc2d6611d20ab13ae87e024cc304c94a6a5765c5e65`. The
 tested amd64 manifest is
 `sha256:8eb6c4d16138c8320f2598f03e01b3549f6ed2e41fe6ac16329a5a921b314914`; arm64
-was not tested. This is a tested replacement candidate, not a statement that
-production has been upgraded.
+was not tested.
 
 The actual app runtime gate passed. Upper/lowercase versions of the same phrase
 had cosine 1; unrelated uppercase phrases were distinct (cosine about 0.252).
@@ -258,9 +281,14 @@ harness run the gate and verdict tests and the same A/B without notifications,
 plus a negative control: 0.24.0 must be reported `broken`, with its vectors
 measurably moved against a clean control.
 
-To bump the pin, confirm that the workflow reported the target version
-`compatible`, then update both Compose files and `KNOWN_NON_DENO_IMAGES` in
-`server/scripts/check_allow_env.ts`. The verdict is a proxy with limits:
+The pinned image is the baseline: every candidate is compared with it, never
+with an earlier pin. To bump the pin, confirm that the workflow reported the
+target version `compatible`, then update both Compose files and
+`KNOWN_NON_DENO_IMAGES` in `server/scripts/check_allow_env.ts` to that exact
+image index digest, and record the new baseline under
+[Runtime identity](#runtime-identity-and-the-known-tokenizer-defect). The next
+scheduled run then skips the new pin as already pinned, and later releases are
+judged against it. The verdict is a proxy with limits:
 
 - It measures CPU inference of the Linux amd64 image. Pinned and candidate share
   one runner, so CPU backend selection cancels out, but other platforms can
