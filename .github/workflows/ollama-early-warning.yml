@@ -21,6 +21,12 @@
 # uploaded only after every notification succeeded, so a failed delivery is
 # measured and delivered again on the next run.
 #
+# A second, independent lane watches the model itself: the model gate compares
+# the manifest the Ollama registry serves for the pinned Nomic tag with the
+# pinned manifest digest (scripts/ci/ollama_early_warning_model.sh). A moved tag
+# opens one issue per upstream manifest and sends Pushover, deduped by the same
+# kind of delivery marker; it pulls no model and runs no A/B.
+#
 # Pull requests that change the harness run the gate and verdict tests and the
 # same A/B without notifications, plus a negative control: Ollama 0.24.0, whose
 # known tokenizer defect must be reported as broken with moved vectors.
@@ -126,6 +132,56 @@ jobs:
           grep -q '^run=' "$GITHUB_OUTPUT"
           grep -E '^(run|reason)=' "$GITHUB_OUTPUT" | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
 
+  model-gate:
+    name: Upstream Nomic manifest moved?
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Reads the delivery markers of earlier runs (the dedupe record).
+      actions: read
+    outputs:
+      notify: ${{ steps.model.outputs.notify }}
+      model: ${{ steps.model.outputs.model }}
+      pinned_digest: ${{ steps.model.outputs.pinned_digest }}
+      upstream_digest: ${{ steps.model.outputs.upstream_digest }}
+      push_time: ${{ steps.model.outputs.push_time }}
+      key: ${{ steps.model.outputs.key }}
+    steps:
+      - name: Checkout PR head safely
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout trusted event ref
+        if: github.event_name != 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.4
+
+      - name: Compare the upstream manifest with the pin
+        id: model
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EW_FORCE: ${{ github.event_name == 'pull_request' || inputs.force == true }}
+          EW_REPO: ${{ github.repository }}
+          EW_BRANCH: main
+        run: |
+          scripts/ci/ollama_early_warning_model.sh check | tee -a "$GITHUB_OUTPUT"
+          # A gate that printed no decision checked nothing.
+          grep -q '^notify=' "$GITHUB_OUTPUT"
+          grep -E '^(notify|reason)=' "$GITHUB_OUTPUT" | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
+
   harness-tests:
     name: Harness tests
     if: github.event_name == 'pull_request'
@@ -154,6 +210,9 @@ jobs:
 
       - name: Run issue tests
         run: scripts/ci/ollama_early_warning_issue_test.sh
+
+      - name: Run model gate tests
+        run: scripts/ci/ollama_early_warning_model_test.sh
 
   ab:
     name: A/B test
@@ -392,11 +451,79 @@ jobs:
           retention-days: 90
           overwrite: true
 
+  model-notify:
+    name: Notify (model)
+    needs: model-gate
+    if: >-
+      github.event_name != 'pull_request' && github.ref == 'refs/heads/main' &&
+      needs.model-gate.outputs.notify == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout trusted event ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Open the issue for this manifest
+        id: issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MODEL: ${{ needs.model-gate.outputs.model }}
+          PINNED_DIGEST: ${{ needs.model-gate.outputs.pinned_digest }}
+          UPSTREAM_DIGEST: ${{ needs.model-gate.outputs.upstream_digest }}
+          PUSH_TIME: ${{ needs.model-gate.outputs.push_time }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: scripts/ci/ollama_early_warning_model.sh report | tee -a "$GITHUB_OUTPUT"
+
+      - name: Pushover
+        env:
+          PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+          MODEL: ${{ needs.model-gate.outputs.model }}
+          PINNED_DIGEST: ${{ needs.model-gate.outputs.pinned_digest }}
+          UPSTREAM_DIGEST: ${{ needs.model-gate.outputs.upstream_digest }}
+          ISSUE_URL: ${{ steps.issue.outputs.url }}
+        run: |
+          if [ -z "$PUSHOVER_APP_TOKEN" ] || [ -z "$PUSHOVER_USER_KEY" ]; then
+            echo "::warning::PUSHOVER_APP_TOKEN or PUSHOVER_USER_KEY is not set; no Pushover notice sent"
+            exit 0
+          fi
+          curl -fsS https://api.pushover.net/1/messages.json \
+            --form-string "token=$PUSHOVER_APP_TOKEN" \
+            --form-string "user=$PUSHOVER_USER_KEY" \
+            --form-string "title=$MODEL re-published upstream" \
+            --form-string "message=Registry manifest ${UPSTREAM_DIGEST:0:12} no longer matches the pin ${PINNED_DIGEST:0:12}. Do not pull the model on a deployment: it would fail closed until a full rebuild." \
+            --form-string "priority=0" \
+            --form-string "url=$ISSUE_URL" \
+            --form-string "url_title=Issue" >/dev/null
+
+      # Written only when every step above succeeded; the model gate dedupes on it.
+      - name: Record the delivery
+        env:
+          ISSUE_URL: ${{ steps.issue.outputs.url }}
+        run: >-
+          jq -n --arg issue "$ISSUE_URL" '{issue: $issue}' > delivered.json
+
+      - name: Upload the delivery marker
+        uses: actions/upload-artifact@v4
+        with:
+          name: delivered-${{ needs.model-gate.outputs.key }}
+          path: delivered.json
+          retention-days: 90
+          overwrite: true
+
   # A scheduled check that cannot run or report must not stay silent: error
   # verdicts, gate failures and failed deliveries all end here.
   alert:
     name: Alert on failure
-    needs: [gate, ab, notify]
+    needs: [gate, ab, notify, model-gate, model-notify]
     if: >-
       failure() && github.event_name != 'pull_request' &&
       github.ref == 'refs/heads/main'
@@ -417,7 +544,7 @@ jobs:
             --form-string "token=$PUSHOVER_APP_TOKEN" \
             --form-string "user=$PUSHOVER_USER_KEY" \
             --form-string "title=Ollama early warning failed" \
-            --form-string "message=The run could not check or report the latest Ollama release. The next scheduled run retries." \
+            --form-string "message=The run could not check or report the latest Ollama release or the upstream Nomic manifest. The next scheduled run retries." \
             --form-string "priority=-1" \
             --form-string "url=$RUN_URL" \
             --form-string "url_title=Run" >/dev/null

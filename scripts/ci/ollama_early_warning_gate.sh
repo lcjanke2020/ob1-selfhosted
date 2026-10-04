@@ -88,30 +88,12 @@ key="ollama-ew-$candidate-${index:7:12}-pin-$pinned_version-${pinned_digest:0:12
 key+="-model-${model_digest:0:12}-harness-$harness"
 emit key "$key"
 
-# The dedupe record is the delivery marker that the notify job uploads after
-# every notification succeeded, not the verdict: a failed delivery is retried.
-# Only a marker from a scheduled or manual run of this workflow, in this
-# repository and on the trusted branch, counts; a pull request (including one
-# from a fork branch named main) can upload an artifact under any name.
+# Dedupe on the delivery marker (see find_delivery).
 if [[ $force != true && -n ${EW_REPO:-} ]]; then
-  runs=$(gh api -X GET "repos/$EW_REPO/actions/artifacts" \
-    -f name="delivered-$key" -f per_page=100 |
-    jq -r '.artifacts[] | select((.expired | not) and
-      .workflow_run.head_repository_id == .workflow_run.repository_id) |
-      .workflow_run.id')
-  for run in $runs; do
-    [[ $run =~ ^[0-9]+$ ]] || continue
-    # Fetched and parsed outside any condition, so an API or parse failure
-    # fails the gate rather than reading as an untrusted marker.
-    details=$(gh api "repos/$EW_REPO/actions/runs/$run")
-    trusted=$(jq -r --arg branch "${EW_BRANCH:-main}" --arg path "$WORKFLOW" '
-      (.event == "schedule" or .event == "workflow_dispatch") and
-      .head_branch == $branch and (.path | split("@")[0]) == $path and
-      .head_repository.id == .repository.id' <<<"$details")
-    if [[ $trusted == true ]]; then
-      skip "$key was already evaluated and delivered (run $run)"
-    fi
-  done
+  find_delivery "$EW_REPO" "${EW_BRANCH:-main}" "$key"
+  if [[ -n $DELIVERED_RUN ]]; then
+    skip "$key was already evaluated and delivered (run $DELIVERED_RUN)"
+  fi
 fi
 emit run true
 emit reason "evaluate $candidate against pinned $pinned_version"

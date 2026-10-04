@@ -82,7 +82,8 @@ runner family.
 
 `.github/workflows/ollama-early-warning.yml` tests the latest stable Ollama
 release daily against the image pinned in the Compose files, with the pinned
-Nomic model. The workflow's scheduling, deduplication and notifications are
+Nomic model, and checks that the registry still serves the pinned Nomic
+manifest. The workflow's scheduling, deduplication and notifications are
 described in
 [embedding limits](../../docs/embedding-limits.md#early-warning-for-new-ollama-releases).
 The measurement itself runs outside Actions.
@@ -97,14 +98,16 @@ cannot change the measurement.
 
 ### Commands
 
-| Step        | Local command                                                                                                                   | Result                                                                                                             |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| Gate        | `scripts/ci/ollama_early_warning_gate.sh [VERSION]`                                                                             | Candidate image digest and evaluation key, or why no run is needed (needs `gh`, `docker buildx`)                   |
-| A/B         | `scripts/ci/ollama_early_warning.sh ollama/ollama:VER@sha256:… DIR`                                                             | `DIR/verdict.json`, `summary.md`, `issue.md`, probe logs, fingerprints and container logs                          |
-| Verdict     | `deno run --config server/deno.json --frozen --allow-read=DIR --allow-write=DIR scripts/ci/ollama_early_warning_verdict.ts DIR` | Recomputes the verdict from an existing result directory                                                           |
-| Tests       | `deno test --config server/deno.json --frozen --allow-env --allow-read scripts/ci/ollama_early_warning_verdict_test.ts`         | Verdict rules on synthetic fingerprints                                                                            |
-| Gate tests  | `scripts/ci/ollama_early_warning_gate_test.sh`                                                                                  | Evaluation key, registry failures, pin digest, marker provenance and path coverage, with stubbed `gh` and `docker` |
-| Issue tests | `scripts/ci/ollama_early_warning_issue_test.sh`                                                                                 | Per-version issue reconciliation and same-evaluation retries, with a recording `gh` stub                           |
+| Step        | Local command                                                                                                                   | Result                                                                                                               |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Gate        | `scripts/ci/ollama_early_warning_gate.sh [VERSION]`                                                                             | Candidate image digest and evaluation key, or why no run is needed (needs `gh`, `docker buildx`)                     |
+| A/B         | `scripts/ci/ollama_early_warning.sh ollama/ollama:VER@sha256:… DIR`                                                             | `DIR/verdict.json`, `summary.md`, `issue.md`, probe logs, fingerprints and container logs                            |
+| Verdict     | `deno run --config server/deno.json --frozen --allow-read=DIR --allow-write=DIR scripts/ci/ollama_early_warning_verdict.ts DIR` | Recomputes the verdict from an existing result directory                                                             |
+| Tests       | `deno test --config server/deno.json --frozen --allow-env --allow-read scripts/ci/ollama_early_warning_verdict_test.ts`         | Verdict rules on synthetic fingerprints                                                                              |
+| Gate tests  | `scripts/ci/ollama_early_warning_gate_test.sh`                                                                                  | Evaluation key, registry failures, pin digest, marker provenance and path coverage, with stubbed `gh` and `docker`   |
+| Issue tests | `scripts/ci/ollama_early_warning_issue_test.sh`                                                                                 | Per-version issue reconciliation and same-evaluation retries, with a recording `gh` stub                             |
+| Model gate  | `scripts/ci/ollama_early_warning_model.sh check`                                                                                | Upstream manifest digest of the pinned Nomic tag vs `scripts/nomic_pin.ts`, without pulling the model (needs `curl`) |
+| Model tests | `scripts/ci/ollama_early_warning_model_test.sh`                                                                                 | Moved/unchanged tag, registry failures, marker dedupe and per-manifest issue reuse, with stubbed `curl` and `gh`     |
 
 Set `EW_MODEL_STORE` to a persistent directory to keep the verified model
 between runs; by default it is downloaded into scratch space and removed. The
