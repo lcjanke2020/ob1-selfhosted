@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Shared by the Ollama early-warning gate, runner and tests. Source it; it
+# Shared by the Ollama early-warning gates, runner and tests. Source it; it
 # defines ROOT relative to this file, the version and image patterns, the
-# pinned-image lookup and the harness inputs. It is not a standalone script.
+# pinned-image lookup, the delivery-marker lookup and the harness inputs. It is
+# not a standalone script.
 # shellcheck disable=SC2034 # the patterns are used by the sourcing scripts
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -23,6 +24,62 @@ pinned_image() {
     return 1
   fi
   echo "$pins"
+}
+
+# Sets DELIVERED_RUN to the id of a trusted run that uploaded the delivery
+# marker delivered-KEY, or to nothing. The dedupe record is the marker that a
+# notify job uploads after every notification succeeded, not the verdict: a
+# failed delivery is retried. Only a marker from a scheduled or manual run of
+# this workflow, in this repository and on the trusted branch, counts; a pull
+# request (including one from a fork branch named main) can upload an artifact
+# under any name. Call it as a plain statement under `set -e` (not inside $()
+# or a condition), so an API or parse failure fails the caller rather than
+# reading as an untrusted marker.
+# usage: find_delivery REPO BRANCH KEY
+find_delivery() {
+  local repo=$1 branch=$2 key=$3 runs run details trusted
+  DELIVERED_RUN=
+  runs=$(gh api -X GET "repos/$repo/actions/artifacts" \
+    -f name="delivered-$key" -f per_page=100 |
+    jq -r '.artifacts[] | select((.expired | not) and
+      .workflow_run.head_repository_id == .workflow_run.repository_id) |
+      .workflow_run.id')
+  for run in $runs; do
+    [[ $run =~ ^[0-9]+$ ]] || continue
+    details=$(gh api "repos/$repo/actions/runs/$run")
+    trusted=$(jq -r --arg branch "$branch" --arg path "$WORKFLOW" '
+      (.event == "schedule" or .event == "workflow_dispatch") and
+      .head_branch == $branch and (.path | split("@")[0]) == $path and
+      .head_repository.id == .repository.id' <<<"$details")
+    if [[ $trusted == true ]]; then
+      DELIVERED_RUN=$run
+      return 0
+    fi
+  done
+}
+
+# Sets REPORTED to true when MARKER appears in the body or a comment of issue
+# NUMBER written by AUTHOR, otherwise false. Only text this script's identity
+# wrote counts (a "[bot]" login cannot belong to a user account): anyone can
+# comment on a public issue, and the keys are derived from public data. Call it
+# as a plain statement under `set -e`, as find_delivery: a failed or unreadable
+# lookup must fail the delivery (the next run retries it), not pass for "not
+# yet reported" and post a duplicate.
+# usage: issue_reported REPO NUMBER MARKER AUTHOR
+issue_reported() {
+  local repo=$1 number=$2 marker=$3 author=$4 issue_json comments_json
+  issue_json=$(gh api "repos/$repo/issues/$number")
+  comments_json=$(gh api --paginate "repos/$repo/issues/$number/comments" |
+    jq -s 'add // []')
+  REPORTED=$(jq -rn --arg m "$marker" --arg author "$author" \
+    --argjson issue "$issue_json" --argjson comments "$comments_json" '
+    [$issue, $comments[]] |
+    map(select(.user.login == $author) | .body // "") |
+    any(contains($m))')
+  if [[ $REPORTED != true && $REPORTED != false ]]; then
+    echo "unexpected issue lookup result" >&2
+    return 1
+  fi
 }
 
 # Prints, one repository path per line, every file whose content defines a

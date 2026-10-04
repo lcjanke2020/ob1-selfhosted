@@ -297,6 +297,41 @@ judged against it. The verdict is a proxy with limits:
   platforms, not every platform's numerics.
 - Deployments that are already running keep needing their own drift check.
 
+### Upstream model manifest
+
+The same workflow also watches the model. Every run, the model gate fetches the
+manifest that the Ollama registry serves for the pinned tag in
+[`scripts/nomic_pin.ts`](../scripts/nomic_pin.ts) and compares its sha256, the
+digest Ollama reports for a pulled model, with the pinned manifest digest. It
+rejects a response that is not a model manifest and downloads no model. A
+registry `ollama-content-digest` header that disagrees fails the run, and a
+moved tag is reported only when that header is present and matches: the pinned
+bytes prove themselves, but an alert telling operators to protect their model
+stores needs the registry's corroboration. A registry failure fails the run, as
+with the release gate.
+
+Re-publishing the tag is a break for deployments, whatever it does to the
+vectors. The embedding contract hashes the manifest digest, and a relabel cannot
+adopt a manifest change, so a 1.29+ deployment that pulls the model again (as
+the install guides say) rejects every capture and search until a full rebuild.
+The registry does not serve an earlier manifest by digest, so after a move the
+existing model stores are the only copies of the pinned model. The current pin
+was pushed on 2024-02-21.
+
+When the tag moved, scheduled and manual runs on `main` keep one issue per
+upstream manifest, labelled `ollama-early-warning`, send Pushover, then upload a
+delivery marker. The delivery key names the upstream manifest and the pin, and
+the issue carries it as the release lane's issues carry theirs: a key already on
+the issue writes nothing (an issue closed after that delivery stays closed),
+while the same upstream manifest seen against another pin retitles the issue,
+reopens it and comments. The model gate dedupes on the marker exactly as the
+release gate does, and the marker is kept for 90 days. While the tag stays
+moved, Pushover therefore repeats about every 90 days as a reminder, and a
+manual run with `force` sends it again at once; both point at the same issue.
+Close the issue after the pin is updated with a full rebuild or the registry
+serves the pinned manifest again. Measuring how far the new manifest moves the
+vectors is left to that deliberate migration.
+
 GitHub disables scheduled workflows in a public repository after 60 days without
 repository activity; re-enable the workflow from the Actions tab.
 

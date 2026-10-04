@@ -16,68 +16,9 @@ mkdir -p "$work/bin" "$work/verdict"
 echo "## Ollama 0.35.0 vs pinned 0.34.1: **drift**" >"$work/verdict/issue.md"
 export GH_LOG=$work/gh.log STATE=$work/issues.json
 
-# gh stub: issues live in $STATE, and everything it creates is authored by
-# github-actions[bot] (the workflow's identity). STUB_FAIL="issue reopen" (for
-# example; "api" for the REST reads) makes that call fail without changing
-# anything, as an API outage would; STUB_MALFORMED=1 garbles the REST reads.
-cat >"$work/bin/gh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-bot=github-actions[bot]
-if [[ $1 == api ]]; then
-  path=${*: -1}
-  echo "api $path" >>"$GH_LOG"
-  if [[ ${STUB_FAIL:-} == api ]]; then echo "HTTP 503: injected" >&2; exit 1; fi
-  if [[ -n ${STUB_MALFORMED:-} ]]; then echo "not json"; exit 0; fi
-  n=$(sed -E 's#.*/issues/([0-9]+).*#\1#' <<<"$path")
-  user='{login: ., type: (if endswith("[bot]") then "Bot" else "User" end)}'
-  case $path in
-    */comments)
-      jq --argjson n "$n" ".[] | select(.number == \$n) |
-        [.comments[] | {body, user: (.author | $user)}]" "$STATE" ;;
-    *) jq --argjson n "$n" ".[] | select(.number == \$n) |
-        {number, body, user: (.author | $user)}" "$STATE" ;;
-  esac
-  exit 0
-fi
-cmd="$1 $2"
-shift 2
-number= title=
-if [[ ${1:-} =~ ^[0-9]+$ ]]; then number=$1; shift; fi
-while (($#)); do
-  if [[ $1 == --title ]]; then title=$2; shift 2; else shift; fi
-done
-echo "$cmd $number" >>"$GH_LOG"
-if [[ $cmd == "${STUB_FAIL:-}" ]]; then echo "HTTP 503: injected" >&2; exit 1; fi
-update() { jq "$@" "$STATE" >"$STATE.tmp" && mv "$STATE.tmp" "$STATE"; }
-case $cmd in
-  "label create") ;;
-  "issue list") jq '[.[] | {number, state, title, url}]' "$STATE" ;;
-  "issue view")
-    jq --argjson n "$number" \
-      '.[] | select(.number == $n) | {body, comments: [.comments[] | {body}]}' "$STATE" ;;
-  "issue create")
-    body=$(cat)
-    number=$(jq '([.[].number] | max // 0) + 1' "$STATE")
-    update --argjson n "$number" --arg t "$title" --arg b "$body" --arg a "$bot" \
-      '. + [{number: $n, state: "OPEN", title: $t, body: $b, author: $a,
-             comments: [], url: "https://github.com/o/r/issues/\($n)"}]'
-    echo "https://github.com/o/r/issues/$number" ;;
-  "issue comment")
-    body=$(cat)
-    update --argjson n "$number" --arg b "$body" --arg a "$bot" \
-      'map(if .number == $n then .comments += [{body: $b, author: $a}] else . end)' ;;
-  "issue edit")
-    update --argjson n "$number" --arg t "$title" \
-      'map(if .number == $n then .title = $t else . end)' ;;
-  "issue close")
-    update --argjson n "$number" 'map(if .number == $n then .state = "CLOSED" else . end)' ;;
-  "issue reopen")
-    update --argjson n "$number" 'map(if .number == $n then .state = "OPEN" else . end)' ;;
-  *) echo "unexpected: gh $cmd" >&2; exit 1 ;;
-esac
-EOF
-chmod +x "$work/bin/gh"
+# The stateful gh stub (see its header): issues, titles, states, comments and
+# their authors persist in $STATE across runs.
+cp "$SRC/scripts/ci/ollama_early_warning_gh_stub.sh" "$work/bin/gh"
 
 key=ollama-ew-0.35.0-aaaaaaaaaaaa-pin-0.34.1-bbbbbbbbbbbb-model-cccccccccccc-harness-dddddddddddd
 marker="<!-- ollama-ew-key: $key -->"
