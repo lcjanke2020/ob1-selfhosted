@@ -36,6 +36,13 @@ DIGEST_RE='^[0-9a-f]{64}$'
 LABEL=ollama-early-warning
 
 emit() { printf '%s=%s\n' "$1" "$2"; }
+# Prints the last value of header NAME in a curl header dump: field names are
+# case-insensitive, and optional whitespace (spaces or tabs) around the value
+# is not part of it. usage: header_value FILE NAME
+header_value() {
+  tr -d '\r' <"$1" |
+    sed -n "s/^$2:[[:blank:]]*\(.*[^[:blank:]]\)[[:blank:]]*\$/\1/Ip" | tail -n 1
+}
 # The delivery key: one upstream manifest against one pin.
 key_for() { echo "nomic-ew-${1:0:12}-pin-${2:0:12}"; }
 
@@ -71,8 +78,7 @@ check() {
     echo "$url did not return an Ollama model manifest" >&2
     exit 1
   fi
-  header=$(tr -d '\r' <"$work/headers" |
-    sed -n 's/^[Oo]llama-[Cc]ontent-[Dd]igest: *//p' | tail -n 1)
+  header=$(header_value "$work/headers" ollama-content-digest)
   header=${header#sha256:}
   if [[ -n $header && $header != "$digest" ]]; then
     echo "registry reports digest $header but the manifest hashes to $digest" >&2
@@ -86,8 +92,7 @@ check() {
     echo "manifest hashes to $digest, not the pin, but the registry sent no valid digest header to corroborate it" >&2
     exit 1
   fi
-  push_time=$(tr -d '\r' <"$work/headers" |
-    sed -n 's/^[Oo]llama-[Pp]ush-[Tt]ime: *//p' | tail -n 1)
+  push_time=$(header_value "$work/headers" ollama-push-time)
 
   emit model "$model"
   emit pinned_digest "$pinned"

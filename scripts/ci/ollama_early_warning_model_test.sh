@@ -43,13 +43,19 @@ if [[ -n ${STUB_CURL_FAIL:-} ]]; then
   exit 22
 fi
 # STUB_HEADER_DIGEST overrides the digest header; "omit" leaves it out.
+# STUB_HEADER_SHOUT=1 sends upper-case field names with tab and trailing
+# whitespace, which HTTP allows.
 if [[ $head == true ]]; then
+  digest_name='ollama-content-digest: ' push_name='ollama-push-time: ' tail=''
+  if [[ -n ${STUB_HEADER_SHOUT:-} ]]; then
+    digest_name=$'OLLAMA-CONTENT-DIGEST:\t' push_name=$'OLLAMA-PUSH-TIME:\t' tail=$' \t'
+  fi
   {
     printf 'HTTP/2 200\r\n'
     [[ ${STUB_HEADER_DIGEST:-} == omit ]] ||
-      printf 'ollama-content-digest: %s\r\n' \
-        "${STUB_HEADER_DIGEST:-$(sha256sum "$STUB_MANIFEST" | cut -c1-64)}"
-    printf 'ollama-push-time: 1708536356\r\n\r\n'
+      printf '%s%s%s\r\n' "$digest_name" \
+        "${STUB_HEADER_DIGEST:-$(sha256sum "$STUB_MANIFEST" | cut -c1-64)}" "$tail"
+    printf '%s1708536356%s\r\n\r\n' "$push_name" "$tail"
   } >"$out"
 else
   cp "$STUB_MANIFEST" "$out"
@@ -113,6 +119,13 @@ moved_header() { STUB_HEADER_DIGEST=$1 fails; }
 check "a moved tag without a digest header fails the check" moved_header omit
 check "a moved tag with an empty digest header fails the check" moved_header sha256:
 check "a moved tag with a malformed digest header fails the check" moved_header "${moved:0:63}"
+shouted() {
+  local out
+  out=$(STUB_HEADER_SHOUT=1 model check) || return 1
+  [[ $(field notify <<<"$out") == true &&
+    $(field push_time <<<"$out") == 2024-02-21T17:25:56Z ]]
+}
+check "header names in any case with tab and trailing whitespace are read" shouted
 unchanged_no_header() { STUB_MANIFEST=$work/pinned.json STUB_HEADER_DIGEST=omit notify_is false; }
 check "the pinned bytes without a digest header do not notify" unchanged_no_header
 
