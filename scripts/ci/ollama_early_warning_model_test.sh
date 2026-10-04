@@ -42,9 +42,15 @@ if [[ -n ${STUB_CURL_FAIL:-} ]]; then
   echo "curl: (22) The requested URL returned error: 503" >&2
   exit 22
 fi
+# STUB_HEADER_DIGEST overrides the digest header; "omit" leaves it out.
 if [[ $head == true ]]; then
-  printf 'HTTP/2 200\r\nollama-content-digest: %s\r\nollama-push-time: 1708536356\r\n\r\n' \
-    "${STUB_HEADER_DIGEST:-$(sha256sum "$STUB_MANIFEST" | cut -c1-64)}" >"$out"
+  {
+    printf 'HTTP/2 200\r\n'
+    [[ ${STUB_HEADER_DIGEST:-} == omit ]] ||
+      printf 'ollama-content-digest: %s\r\n' \
+        "${STUB_HEADER_DIGEST:-$(sha256sum "$STUB_MANIFEST" | cut -c1-64)}"
+    printf 'ollama-push-time: 1708536356\r\n\r\n'
+  } >"$out"
 else
   cp "$STUB_MANIFEST" "$out"
 fi
@@ -57,9 +63,6 @@ case "$args" in
   "api -X GET repos/"*"/actions/artifacts "*)
     printf '%s\n' "${STUB_ARTIFACTS:-"{\"artifacts\":[]}"}" ;;
   "api repos/"*"/actions/runs/"*) cat "$STUB_RUNS/${args##*/}.json" ;;
-  "label create "*) ;;
-  "issue list "*) printf '%s\n' "${STUB_ISSUES:-[]}" ;;
-  "issue create "*) cat >/dev/null; echo "https://github.com/o/r/issues/99" ;;
   *) echo "unexpected: gh $*" >&2; exit 1 ;;
 esac
 EOF
@@ -104,6 +107,14 @@ html() { STUB_MANIFEST=$work/html.json fails; }
 check "a non-manifest response fails the check" html
 disagree() { STUB_HEADER_DIGEST=$pinned fails; }
 check "a header digest that disagrees fails the check" disagree
+# A moved tag is only reported with the registry's own corroboration; the
+# pinned bytes need none.
+moved_header() { STUB_HEADER_DIGEST=$1 fails; }
+check "a moved tag without a digest header fails the check" moved_header omit
+check "a moved tag with an empty digest header fails the check" moved_header sha256:
+check "a moved tag with a malformed digest header fails the check" moved_header "${moved:0:63}"
+unchanged_no_header() { STUB_MANIFEST=$work/pinned.json STUB_HEADER_DIGEST=omit notify_is false; }
+check "the pinned bytes without a digest header do not notify" unchanged_no_header
 
 # Delivery markers dedupe exactly as in the release gate.
 w=.github/workflows/ollama-early-warning.yml
@@ -130,31 +141,106 @@ lookup_fails() {
 }
 check "a failed run lookup fails the check" lookup_fails
 
-# Report: one issue per upstream manifest.
+# Report: one issue per upstream manifest, reconciled per delivery key against
+# the stateful gh stub, as the release lane reconciles per evaluation key.
+rbin=$work/rbin
+mkdir -p "$rbin"
+cp "$SRC/scripts/ci/ollama_early_warning_gh_stub.sh" "$rbin/gh"
+export GH_LOG=$work/report.log STATE=$work/issues.json
+key="nomic-ew-${moved:0:12}-pin-${pinned:0:12}"
+mark="<!-- ollama-ew-key: $key -->"
+prefix="Upstream nomic-embed-text:latest moved to manifest ${moved:0:12}"
+old_title="$prefix (pinned 000000000000)"
+
+# seed NUMBER STATE [TITLE [COMMENT [COMMENT_AUTHOR]]]: one existing issue.
+seed() {
+  jq -n --argjson n "$1" --arg s "$2" --arg t "${3:-$old_title}" \
+    --arg c "${4:-}" --arg ca "${5:-github-actions[bot]}" \
+    '[{number: $n, state: $s, title: $t, body: "earlier report",
+       author: "github-actions[bot]", url: "https://github.com/o/r/issues/\($n)",
+       comments: (if $c == "" then [] else [{body: $c, author: $ca}] end)}]' >"$STATE"
+}
+none() { echo "[]" >"$STATE"; }
+# report [UPSTREAM]: one delivery attempt; returns the script's status.
 report() {
-  REPO=o/r MODEL=nomic-embed-text:latest PINNED_DIGEST=$pinned \
-    UPSTREAM_DIGEST=$moved model report
+  : >"$GH_LOG"
+  (cd "$repo" && PATH="$rbin:$PATH" REPO=o/r MODEL=nomic-embed-text:latest \
+    PINNED_DIGEST=$pinned UPSTREAM_DIGEST=${1:-$moved} \
+    scripts/ci/ollama_early_warning_model.sh report >/dev/null 2>&1)
 }
-creates() {
-  : >"$STUB_LOG"
-  [[ $(report | field url) == https://github.com/o/r/issues/99 ]] &&
-    grep -q "^gh issue create .*--title Upstream nomic-embed-text:latest moved to manifest ${moved:0:12} (pinned ${pinned:0:12})" "$STUB_LOG"
+# state: "<number> <state> <marked texts> <pin in title>" per issue.
+state() {
+  jq -r --arg m "$mark" '.[] | "\(.number) \(.state) \([.body, .comments[].body] |
+    map(select(contains($m))) | length) \(.title | capture("pinned (?<p>[^)]*)").p)"' \
+    "$STATE" | paste -sd";" -
 }
-reuses() {
-  local existing="https://github.com/o/r/issues/7"
-  : >"$STUB_LOG"
-  [[ $(STUB_ISSUES="[{\"title\":\"Upstream nomic-embed-text:latest moved to manifest ${moved:0:12} (pinned 000000000000)\",\"url\":\"$existing\"}]" \
-    report | field url) == "$existing" ]] && ! grep -q "issue create" "$STUB_LOG"
+writes() {
+  { grep -E "^issue (create|comment|edit|close|reopen)" "$GH_LOG" || true; } |
+    sed "s/ $//" | paste -sd";" -
 }
-other_manifest() {
-  : >"$STUB_LOG"
-  STUB_ISSUES='[{"title":"Upstream nomic-embed-text:latest moved to manifest cccccccccccc (pinned x)","url":"u"}]' \
-    report >/dev/null && grep -q "issue create" "$STUB_LOG"
+expect() {
+  local name=$1 got=$2 want=$3
+  if [[ $got == "$want" ]]; then echo "ok - $name"; else
+    echo "FAIL - $name: got '$got', want '$want'" >&2
+    failures=$((failures + 1))
+  fi
 }
-invalid() { ! REPO=o/r MODEL='x;id' PINNED_DIGEST=$pinned UPSTREAM_DIGEST=$moved model report >/dev/null 2>&1; }
-check "the first report opens an issue" creates
-check "a retried report reuses the issue" reuses
-check "another upstream manifest gets its own issue" other_manifest
+p12=${pinned:0:12}
+
+none
+report
+expect "the first report opens an issue carrying the key" "$(state)" "1 OPEN 1 $p12"
+report
+expect "a retried report writes nothing" "$(writes)" ""
+
+seed 7 CLOSED
+report
+expect "a new key on a closed issue retitles, reopens and comments" \
+  "$(state) / $(writes)" "7 OPEN 1 $p12 / issue edit 7;issue reopen 7;issue comment 7"
+report
+expect "... and its retry writes nothing" "$(writes)" ""
+
+seed 7 OPEN
+report
+expect "a new key on an open issue retitles and comments" \
+  "$(state) / $(writes)" "7 OPEN 1 $p12 / issue edit 7;issue comment 7"
+
+seed 7 CLOSED "$old_title" "earlier report $mark"
+report
+expect "an issue closed after a completed delivery stays closed" \
+  "$(state) / $(writes)" "7 CLOSED 1 000000000000 / "
+
+for fail in "issue edit" "issue reopen" "issue comment"; do
+  seed 7 CLOSED
+  first=0
+  STUB_FAIL=$fail report || first=$?
+  report || true
+  expect "a failed ${fail#issue } is completed by the retry" \
+    "$([[ $first != 0 ]] && echo failed) $(state)" "failed 7 OPEN 1 $p12"
+done
+
+seed 8 OPEN "Upstream nomic-embed-text:latest moved to manifest cccccccccccc (pinned $p12)"
+report
+expect "another upstream manifest gets its own issue" "$(state)" \
+  "8 OPEN 0 $p12;9 OPEN 1 $p12"
+
+seed 7 OPEN "$old_title" "earlier report $mark"
+failed=0
+STUB_FAIL=api report || failed=$?
+expect "a failed issue lookup fails without writing" \
+  "$([[ $failed != 0 ]] && echo failed) $(writes)" "failed "
+
+seed 7 CLOSED "$old_title" "forged $mark" mallory
+report
+expect "an outsider's marker does not suppress the update" "$(writes)" \
+  "issue edit 7;issue reopen 7;issue comment 7"
+
+none
+failed=0
+report "$pinned" || failed=$?
+expect "a report for the pinned manifest itself fails without writing" \
+  "$([[ $failed != 0 ]] && echo failed) $(writes)" "failed "
+invalid() { ! REPO=o/r MODEL="x;id" PINNED_DIGEST=$pinned UPSTREAM_DIGEST=$moved model report >/dev/null 2>&1; }
 check "an invalid model fails the report" invalid
 
 if ((failures)); then

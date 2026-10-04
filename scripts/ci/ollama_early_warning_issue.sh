@@ -19,6 +19,8 @@
 # written by ISSUE_AUTHOR count: anyone can comment on a public issue, and the
 # key is derived from public data.
 set -euo pipefail
+# shellcheck source=scripts/ci/ollama_early_warning_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/ollama_early_warning_common.sh"
 
 dir=${1:?usage: ollama_early_warning_issue.sh VERDICT_DIR}
 : "${REPO:?}" "${VERDICT:?}" "${CANDIDATE:?}" "${PINNED:?}" "${KEY:?}"
@@ -56,25 +58,11 @@ comment() {
     body
   } | gh issue comment "$number" -R "$REPO" --body-file - >/dev/null
 }
-# Whether this exact evaluation already reached the issue, judged only from
-# text this script's identity wrote (a "[bot]" login cannot belong to a user
-# account). Read outside any condition: a failed or
-# unreadable lookup must fail the delivery (the next run retries it), not pass
-# for "not yet reported" and post a duplicate.
+# Whether this exact evaluation already reached the issue (see issue_reported).
 reported=false
 if [[ -n $number ]]; then
-  issue_json=$(gh api "repos/$REPO/issues/$number")
-  comments_json=$(gh api --paginate "repos/$REPO/issues/$number/comments" |
-    jq -s 'add // []')
-  reported=$(jq -rn --arg m "$marker" --arg author "$author" \
-    --argjson issue "$issue_json" --argjson comments "$comments_json" '
-    [$issue, $comments[]] |
-    map(select(.user.login == $author) | .body // "") |
-    any(contains($m))')
-  if [[ $reported != true && $reported != false ]]; then
-    echo "unexpected issue lookup result" >&2
-    exit 1
-  fi
+  issue_reported "$REPO" "$number" "$marker" "$author"
+  reported=$REPORTED
 fi
 
 if [[ $VERDICT == compatible ]]; then

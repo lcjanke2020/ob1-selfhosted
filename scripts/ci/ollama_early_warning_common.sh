@@ -58,6 +58,30 @@ find_delivery() {
   done
 }
 
+# Sets REPORTED to true when MARKER appears in the body or a comment of issue
+# NUMBER written by AUTHOR, otherwise false. Only text this script's identity
+# wrote counts (a "[bot]" login cannot belong to a user account): anyone can
+# comment on a public issue, and the keys are derived from public data. Call it
+# as a plain statement under `set -e`, as find_delivery: a failed or unreadable
+# lookup must fail the delivery (the next run retries it), not pass for "not
+# yet reported" and post a duplicate.
+# usage: issue_reported REPO NUMBER MARKER AUTHOR
+issue_reported() {
+  local repo=$1 number=$2 marker=$3 author=$4 issue_json comments_json
+  issue_json=$(gh api "repos/$repo/issues/$number")
+  comments_json=$(gh api --paginate "repos/$repo/issues/$number/comments" |
+    jq -s 'add // []')
+  REPORTED=$(jq -rn --arg m "$marker" --arg author "$author" \
+    --argjson issue "$issue_json" --argjson comments "$comments_json" '
+    [$issue, $comments[]] |
+    map(select(.user.login == $author) | .body // "") |
+    any(contains($m))')
+  if [[ $REPORTED != true && $REPORTED != false ]]; then
+    echo "unexpected issue lookup result" >&2
+    return 1
+  fi
+}
+
 # Prints, one repository path per line, every file whose content defines a
 # measurement: the entry scripts with every local module they import (dynamic
 # imports included, so the server's embedder, chunker, runtime canaries and

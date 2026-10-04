@@ -13,15 +13,18 @@
 #   Prints `key=value` lines for GITHUB_OUTPUT: model, pinned_digest,
 #   upstream_digest, push_time (when the registry reports one), then either
 #   notify=false with a reason, or key and notify=true. Any failure to establish
-#   the answer (registry, malformed manifest, digest disagreement, dependency
-#   lookup) exits nonzero, so a scheduled check can never pass without checking.
-#   Environment: EW_FORCE=true notifies even when this upstream manifest was
-#   already delivered; EW_REPO and EW_BRANCH as for the gate (see find_delivery).
+#   the answer (registry, malformed manifest, a missing or disagreeing digest
+#   header for a moved tag, dependency lookup) exits nonzero, so a scheduled
+#   check can never pass without checking. Environment: EW_FORCE=true notifies
+#   even when this delivery key was already delivered; EW_REPO and EW_BRANCH as
+#   for the gate (see find_delivery).
 # usage: scripts/ci/ollama_early_warning_model.sh report
-#   Opens the issue for this upstream manifest, or reuses the one an earlier,
-#   partly delivered run opened. Prints url=<issue URL>. Environment (required):
-#   REPO, MODEL, PINNED_DIGEST, UPSTREAM_DIGEST; optional: PUSH_TIME, RUN_URL.
-#   gh must be authenticated with issues:write.
+#   Keeps one issue per upstream manifest in step with the delivery key (the
+#   upstream manifest and the pin), stamped on the issue as the release lane
+#   stamps its evaluation key. Prints url=<issue URL>. Environment (required):
+#   REPO, MODEL, PINNED_DIGEST, UPSTREAM_DIGEST; optional: PUSH_TIME, RUN_URL,
+#   ISSUE_AUTHOR (default github-actions[bot]). gh must be authenticated with
+#   issues:write.
 # Requires curl, jq, sha256sum, deno and (for dedupe and report) gh.
 set -euo pipefail
 # shellcheck source=scripts/ci/ollama_early_warning_common.sh
@@ -33,6 +36,8 @@ DIGEST_RE='^[0-9a-f]{64}$'
 LABEL=ollama-early-warning
 
 emit() { printf '%s=%s\n' "$1" "$2"; }
+# The delivery key: one upstream manifest against one pin.
+key_for() { echo "nomic-ew-${1:0:12}-pin-${2:0:12}"; }
 
 check() {
   local pin model pinned name tag url work digest header push_time key
@@ -73,6 +78,14 @@ check() {
     echo "registry reports digest $header but the manifest hashes to $digest" >&2
     exit 1
   fi
+  # The pinned bytes prove themselves. A moved tag sends operators to protect
+  # their model stores, so it is reported only with the registry's own,
+  # matching digest; a registry that stops sending the header then fails the
+  # run instead of alerting on the body alone.
+  if [[ $digest != "$pinned" ]] && ! [[ $header =~ $DIGEST_RE ]]; then
+    echo "manifest hashes to $digest, not the pin, but the registry sent no valid digest header to corroborate it" >&2
+    exit 1
+  fi
   push_time=$(tr -d '\r' <"$work/headers" |
     sed -n 's/^[Oo]llama-[Pp]ush-[Tt]ime: *//p' | tail -n 1)
 
@@ -87,7 +100,7 @@ check() {
     emit reason "upstream $model still serves the pinned manifest ${pinned:0:12}"
     exit 0
   fi
-  key="nomic-ew-${digest:0:12}-pin-${pinned:0:12}"
+  key=$(key_for "$digest" "$pinned")
   emit key "$key"
   if [[ ${EW_FORCE:-false} != true && -n ${EW_REPO:-} ]]; then
     find_delivery "$EW_REPO" "${EW_BRANCH:-main}" "$key"
@@ -143,20 +156,48 @@ report() {
     echo "invalid MODEL, PINNED_DIGEST or UPSTREAM_DIGEST" >&2
     exit 1
   fi
-  local prefix title url
+  if [[ $UPSTREAM_DIGEST == "$PINNED_DIGEST" ]]; then
+    echo "upstream manifest equals the pin; nothing to report" >&2
+    exit 1
+  fi
+  local author prefix title marker issue number state url
+  author=${ISSUE_AUTHOR:-github-actions[bot]}
   prefix="Upstream $MODEL moved to manifest ${UPSTREAM_DIGEST:0:12}"
   title="$prefix (pinned ${PINNED_DIGEST:0:12})"
+  marker="<!-- ollama-ew-key: $(key_for "$UPSTREAM_DIGEST" "$PINNED_DIGEST") -->"
   gh label create "$LABEL" -R "$REPO" --force --color D93F0B \
     --description "Ollama release changes the pinned embeddings" >/dev/null
-  # One issue per upstream manifest, in any state: a retried delivery (or a
-  # forced run) reuses it instead of opening another. Only collaborators can
-  # label issues, so a matching labelled title is this workflow's own.
-  url=$(gh issue list -R "$REPO" --state all --label "$LABEL" --limit 500 \
-    --json title,url |
-    jq -r --arg p "$prefix" 'map(select(.title | startswith($p))) | first | .url // empty')
-  if [[ -z $url ]]; then
-    url=$(body | gh issue create -R "$REPO" --label "$LABEL" --title "$title" \
-      --body-file -)
+  # One issue per upstream manifest, in any state. Only collaborators can label
+  # issues, so a matching labelled title is this workflow's own.
+  issue=$(gh issue list -R "$REPO" --state all --label "$LABEL" --limit 500 \
+    --json number,state,title,url |
+    jq -c --arg p "$prefix" 'map(select(.title | startswith($p))) | first // {}')
+  number=$(jq -r '.number // empty' <<<"$issue")
+  state=$(jq -r '.state // empty' <<<"$issue")
+  url=$(jq -r '.url // empty' <<<"$issue")
+  if [[ -z $number ]]; then
+    url=$({ body; printf '\n%s\n' "$marker"; } |
+      gh issue create -R "$REPO" --label "$LABEL" --title "$title" --body-file -)
+    emit url "$url"
+    return
+  fi
+  # As in the release lane: a delivery key already on the issue (a retry, a
+  # forced run, a reminder after the marker artifact expired) writes nothing,
+  # and an issue closed after that delivery stays closed. A new key (the same
+  # upstream manifest against another pin) retitles, reopens and comments. The
+  # marked comment is written last, so a retry completes an interrupted update.
+  issue_reported "$REPO" "$number" "$marker" "$author"
+  if [[ $REPORTED != true ]]; then
+    gh issue edit "$number" -R "$REPO" --title "$title" >/dev/null
+    if [[ $state == CLOSED ]]; then
+      gh issue reopen "$number" -R "$REPO" >/dev/null
+    fi
+    {
+      echo "**Reported again** against a new pin:"
+      echo
+      body
+      printf '\n%s\n' "$marker"
+    } | gh issue comment "$number" -R "$REPO" --body-file - >/dev/null
   fi
   emit url "$url"
 }
