@@ -39,8 +39,10 @@ const SCRIPT = `
       }],
     }), { status: 200 });
   };
-  const { extractMetadata } = await import("./metadata.ts");
-  const result = await extractMetadata("content must not be echoed");
+  const metadata = await import("./metadata.ts");
+  const result = Deno.env.get("TEST_METADATA_ENTRYPOINT") === "primary"
+    ? await metadata.classifyWithPrimary("content must not be echoed")
+    : await metadata.extractMetadata("content must not be echoed");
   writeOutput(JSON.stringify({ result, urls, warnings, logs }));
 `;
 
@@ -58,6 +60,7 @@ const BASE_ENV: Record<string, string> = {
   TEST_METADATA_RESPONSE: "success",
   TEST_METADATA_TYPE: "observation",
   TEST_METADATA_TOPIC: "test",
+  TEST_METADATA_ENTRYPOINT: "extract",
 };
 
 interface MetadataRun {
@@ -195,4 +198,22 @@ Deno.test("disabled metadata extraction returns a durable stub outcome", async (
     endpoint: "stub",
   });
   assertEquals(output.result.degradation_events, []);
+});
+
+Deno.test("primary-only classification refuses a disabled primary without any request", async () => {
+  const output = await runConfigSubprocess(SCRIPT, BASE_ENV, {
+    CHAT_API_BASE: PRIMARY_BASE,
+    CHAT_MODEL: "local-model",
+    FALLBACK_CHAT_API_BASE: FALLBACK_BASE,
+    FALLBACK_CHAT_MODEL: "hosted-model",
+    FALLBACK_CHAT_API_KEY: "must-not-be-used",
+    METADATA_FALLBACK_POLICY: "allow",
+    TEST_METADATA_ENTRYPOINT: "primary",
+  });
+  assertEquals(output.code, 0, output.stderr);
+  const run = JSON.parse(output.stdout);
+  assertEquals(run.result, { ok: false, reason: "primary_disabled" });
+  assertEquals(run.urls, []);
+  assertEquals(run.warnings, []);
+  assertEquals(run.logs, []);
 });

@@ -36,7 +36,10 @@ import {
   UpstreamError,
   ValidationError,
 } from "./errors.ts";
-import { extractMetadata as defaultExtractMetadata } from "./metadata.ts";
+import {
+  extractMetadata as defaultExtractMetadata,
+  withoutReservedMetadataKeys,
+} from "./metadata.ts";
 import type { MetadataExtractionResult } from "./metadata.ts";
 import {
   type CaptureOutcome,
@@ -149,27 +152,15 @@ function mutationActor(auth: AuthContext): ThoughtMutationActor {
   };
 }
 
-// Treat these keys as reserved even though metadata.ts's strict runtime schema
-// already excludes them. This defense keeps injected test/custom extractors
-// from impersonating server stamps or caller claims — on capture and again on
-// update, where the fresh classifier output replaces the old.
-const RESERVED_METADATA_KEYS = [
-  "source",
-  "door",
-  "sub",
-  "token_label",
-  "provenance",
-  "metadata_extraction",
-] as const;
-
+// Treat RESERVED_METADATA_KEYS (metadata.ts) as reserved even though the
+// strict runtime schema already excludes them. This defense keeps injected
+// test/custom extractors from impersonating server stamps or caller claims —
+// on capture and again on update, where the fresh classifier output replaces
+// the old.
 function classifiedMetadata(
   extraction: MetadataExtractionResult,
 ): Record<string, unknown> {
-  const classified = { ...extraction.metadata };
-  for (const reserved of RESERVED_METADATA_KEYS) {
-    delete classified[reserved];
-  }
-  return classified;
+  return withoutReservedMetadataKeys(extraction.metadata);
 }
 
 export type ServiceDeps = {

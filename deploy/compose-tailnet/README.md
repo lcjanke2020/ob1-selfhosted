@@ -481,10 +481,14 @@ docker compose --env-file .env exec -T postgres psql -X --single-transaction -v 
 docker compose --env-file .env exec -T postgres \
   psql -X --single-transaction -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/14-native-token-principals.sql
-# Migration 15 manages its own transaction. Assert only after it commits.
+# Migrations 15 and 16 manage their own transactions. Assert only after they
+# commit.
 docker compose --env-file .env exec -T postgres \
   psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/15-embedding-index.sql
+docker compose --env-file .env exec -T postgres \
+  psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/16-thought-metadata-revisions.sql
 docker compose --env-file .env exec -T postgres \
   psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/03-grants-assertion.sql
@@ -519,12 +523,19 @@ start MCP as above. An older release upgrading straight to 1.29 uses the
 backfill, which activates the 1.29 contract directly. From 1.29 on, an Ollama
 upgrade with the same model manifest needs no index work.
 
+For **1.30.0**, the block above also applies migration 16, which only admits the
+`metadata` change kind in thought revision history; it rewrites no rows. There
+is no backfill or relabel; start MCP as above. The optional, maintenance-only
+[metadata reclassifier](../../docs/metadata-degradation-monitoring.md#reclassifying-legacy-and-stub-thoughts)
+requires it and can run while MCP serves.
+
 Upgrading to **1.27.0**: migration 14 is required even though Pattern B keeps
-native tokens disabled. Apply it in a transaction, then migration 15 and the
-final grants assertion, as above. Keep MCP stopped if any step fails. Replaying
-08 without finishing with 14 restores the retired principal-less registration
-function and fails the assertion. After 14, the 1.26.0 server and token-creation
-CLI no longer match the catalog; restarting the old image requires the
+native tokens disabled. Apply it in a transaction, then migrations 15 and 16 and
+the final grants assertion, as above. Keep MCP stopped if any step fails.
+Replaying 08 without finishing with 14 restores the retired principal-less
+registration function and fails the assertion. After 14, the 1.26.0 server and
+token-creation CLI no longer match the catalog; restarting the old image
+requires the
 [native-token schema rollback](../../docs/native-access-tokens.md#rollback), not
 just restoring its image tag.
 
@@ -630,12 +641,13 @@ A non-zero exit means a completed-catalog invariant failed. Prefer a targeted
 fix (e.g. `REVOKE DELETE ON public.thoughts FROM openbrain_app;`). For a
 wholesale re-sync, use the complete
 [upgrade procedure](#upgrading-an-existing-deployment) and its maintenance
-window, role provisioning, migrations through 15, final assertion, and offline
+window, role provisioning, migrations through 16, final assertion, and offline
 embedding backfill/activation before MCP restarts. If repairing base-schema
 drift requires reapplying `01-schema.sql`, insert it immediately before that
 procedure's `02-observability.sql` step. Never run `01` alone, since its
-REVOKE-all block strips observability grants until `02` restores them. Migration
-15 manages its own transaction; the assertion runs after it commits.
+REVOKE-all block strips observability grants until `02` restores them.
+Migrations 15 and 16 manage their own transactions; the assertion runs after
+they commit.
 
 To retire the unused historical thought-search RPC without a full schema replay,
 run
@@ -655,7 +667,7 @@ the next request; individual JWTs have no per-token introspection/revocation.
 ## Database-backed OAuth admission
 
 Use the [complete upgrade procedure](#upgrading-an-existing-deployment),
-including migrations through 15 and embedding activation before MCP starts. At
+including migrations through 16 and embedding activation before MCP starts. At
 its admission stage, import or explicitly enroll existing OAuth subjects with
 the tools-profile `subject-admin` CLI. Follow
 [OAuth subject admission](../../docs/oauth-subjects.md) for the dedicated

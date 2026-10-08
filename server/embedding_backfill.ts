@@ -20,6 +20,7 @@ import {
 } from "./embedding_index.ts";
 import { embed } from "./embeddings.ts";
 import { putEmbeddingIndex } from "./embedding_queries.ts";
+import { requireSuperuser } from "./maintenance.ts";
 
 type Kind = "thought" | "session";
 
@@ -47,17 +48,6 @@ function embeddingSource(kind: Kind, row: Record<string, unknown>): string {
   return TABLES[kind].fields.map((field) => row[field] ?? "").join(
     kind === "thought" ? "" : "\u0000",
   );
-}
-
-async function requireSuperuser(client: PoolClient, tool: string) {
-  const access = await client.queryObject<{ owner: boolean }>(
-    "SELECT rolsuper AS owner FROM pg_roles WHERE rolname = current_user",
-  );
-  if (!access.rows[0]?.owner) {
-    throw new Error(
-      `${tool} requires a PostgreSQL superuser (rolsuper) to include every audience; database ownership alone is insufficient`,
-    );
-  }
 }
 
 async function corpusReady(

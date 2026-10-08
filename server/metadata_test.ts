@@ -132,7 +132,11 @@ async function testMetadata(t: Deno.TestContext): Promise<void> {
   const run = withEnv([], TEST_ENV, async () => {
     // Import inside the try so the finally below always restores fetch + env,
     // even if module-load (config.ts validation) were to throw.
-    const { extractMetadata, sanitizeMetadataEndpointBase } = await import(
+    const {
+      classifyWithPrimary,
+      extractMetadata,
+      sanitizeMetadataEndpointBase,
+    } = await import(
       "./metadata.ts"
     );
 
@@ -539,6 +543,91 @@ async function testMetadata(t: Deno.TestContext): Promise<void> {
             endpoint_base_url: null,
           },
         ]);
+      },
+    );
+
+    // The maintenance helper behind metadata_reclassify.ts. The fallback is
+    // configured and policy-permitted in this suite, so any fallback request
+    // here would be a real privacy regression rather than an unreachable path.
+    await t.step(
+      "primary-only helper returns the primary stamp and never the fallback or stub",
+      async () => {
+        const origLog = console.log;
+        const logs: string[] = [];
+        console.log = (...args: unknown[]) => logs.push(args.join(" "));
+        try {
+          calls.length = 0;
+          warnings.length = 0;
+          const classified = validMetadata({
+            type: "task",
+            topics: ["review"],
+            action_items: ["Review the draft"],
+          });
+          responder = (c) =>
+            c.url.startsWith(PRIMARY_BASE)
+              ? chatOk(classified)
+              : chatOk(validMetadata({ topics: ["wrong-endpoint"] }));
+          assertEquals<unknown>(await classifyWithPrimary("Review the draft"), {
+            ok: true,
+            metadata: classified,
+            classifier: {
+              schema_version: 1,
+              endpoint: "primary",
+              model: "local-model",
+            },
+          });
+          assertEquals(calls.map((c) => c.url), [
+            `${PRIMARY_BASE}/chat/completions`,
+          ]);
+
+          const failures: [string, () => Response, string][] = [
+            ["non-2xx", () => chatErr(503), "non_2xx"],
+            [
+              "schema-invalid",
+              () => chatOk(validMetadata({ type: "diary" })),
+              "schema_rejection",
+            ],
+            [
+              "unparseable",
+              () =>
+                new Response(
+                  JSON.stringify({
+                    choices: [{ message: { content: "not json" } }],
+                  }),
+                  { status: 200 },
+                ),
+              "unparseable_output",
+            ],
+            [
+              "transport",
+              () => {
+                throw new TypeError("connection refused");
+              },
+              "transport_or_timeout",
+            ],
+          ];
+          for (const [label, primaryResponse, reason] of failures) {
+            calls.length = 0;
+            responder = (c) =>
+              c.url.startsWith(PRIMARY_BASE)
+                ? primaryResponse()
+                : chatOk(validMetadata({ topics: ["wrong-endpoint"] }));
+            assertEquals<unknown>(
+              await classifyWithPrimary("any text"),
+              { ok: false, reason },
+              label,
+            );
+            assertEquals(
+              calls.map((c) => c.url),
+              [`${PRIMARY_BASE}/chat/completions`],
+              `${label}: only the primary may be requested`,
+            );
+          }
+          assertEquals(warnings, [], "the helper logs nothing");
+          assertEquals(logs, [], "the helper logs nothing");
+        } finally {
+          console.log = origLog;
+        }
       },
     );
   });

@@ -19,7 +19,7 @@
 --   1. Fresh init: the Compose/CI paths mount this source file as
 --      99-grants-assertion.sql, after every schema migration. Native
 --      provisioning applies 01-, 02-, 04-, 05-, 06-, 07-, 08-, 09-, 10-,
---      11-, 12-, 13-, 14-, and 15-, then invokes
+--      11-, 12-, 13-, 14-, 15-, and 16-, then invokes
 --      this stable source path last. In both cases the assertion sees the
 --      completed catalog, so an init file that widens a protected role fails
 --      loudly.
@@ -60,7 +60,8 @@
 --       relations, sink-only roles, and matching/unprovable HBA user tokens
 --       are absent from the corpus.
 --   (h) thought revision history is append-only (SELECT/INSERT) to the app,
---       dumpable by the read-only role, under forced head-gated RLS, and the
+--       dumpable by the read-only role, under forced head-gated RLS, and
+--       admits exactly the content/scope/metadata change kinds; the
 --       audience-move helper is a table-owner-owned, fixed-search-path
 --       SECURITY DEFINER function executable only by the app.
 --   (i) auth-decision history is non-delegable SELECT/INSERT-only to the app,
@@ -1116,8 +1117,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Thought revision history (10-thought-mutations.sql) is the audit trail for
--- content updates and audience moves. The app appends and reads it but can
+-- Thought revision history (10-thought-mutations.sql, 16-thought-metadata-
+-- revisions.sql) is the audit trail for content updates, audience moves, and
+-- maintenance metadata reclassification. The app appends and reads it but can
 -- never rewrite or erase it; the read-only role dumps it (table + identity
 -- sequence); PUBLIC gets nothing; and forced RLS gates every row on its head
 -- thought being visible, so a moved thought's earlier text follows the head.
@@ -1183,6 +1185,23 @@ BEGIN
      ) THEN
     RAISE EXCEPTION
       'grants assertion failed: public.thought_revisions must be under forced RLS with the thought_revisions_app_head policy.';
+  END IF;
+
+  -- History records exactly the content/scope mutations and the maintenance
+  -- metadata reclassification (16-thought-metadata-revisions.sql). A missing,
+  -- unvalidated, or widened CHECK would let a writer label history with an
+  -- arbitrary kind; constraints only narrow, so pinning this one suffices.
+  IF NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conrelid = revisions
+         AND conname = 'thought_revisions_change_kind'
+         AND contype = 'c'
+         AND convalidated
+         AND pg_get_constraintdef(oid) =
+           'CHECK ((change_kind = ANY (ARRAY[''content''::text, ''scope''::text, ''metadata''::text])))'
+     ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: public.thought_revisions change_kind must admit exactly content, scope, and metadata; apply db/16-thought-metadata-revisions.sql.';
   END IF;
 END;
 $$ LANGUAGE plpgsql;

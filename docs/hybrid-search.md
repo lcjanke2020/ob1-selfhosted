@@ -109,7 +109,7 @@ extension if needed, and follow the complete current upgrade procedure for
 [Pattern B](../deploy/compose-tailnet/README.md#upgrading-an-existing-deployment),
 or
 [split Qubes](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment).
-Those procedures include all pending migrations through 15 and the final grants
+Those procedures include all pending migrations through 16 and the final grants
 assertion, then the offline superuser embedding backfill and activation before
 MCP starts. Keep all corpus writers/search consumers stopped through activation.
 The Qubes procedure uses the existing network connection rather than a local

@@ -1,4 +1,5 @@
--- CI/local integration smoke for db/10-thought-mutations.sql.
+-- CI/local integration smoke for db/10-thought-mutations.sql (and the
+-- change kind db/16-thought-metadata-revisions.sql adds).
 --
 -- Runs as the database owner, switches to the real application role for the
 -- assertions, and cleans up every fixture at the end. It proves the database
@@ -748,6 +749,42 @@ END;
 $$;
 
 RESET ROLE;
+
+-- ---------- Migration 16: the metadata change kind --------------------------
+
+-- Maintenance reclassification (server/metadata_reclassify.ts) records
+-- change_kind 'metadata' with the 'maintenance' door; any other unknown kind
+-- is still refused by the CHECK. Rolled back so the counts below are exact.
+BEGIN;
+DO $$
+BEGIN
+  INSERT INTO public.thought_revisions (
+    thought_id, revision, change_kind, prior_content, prior_metadata,
+    prior_workspace_id, prior_project_id, prior_visibility,
+    prior_owner_subject, changed_by_subject, changed_by_door,
+    changed_by_token_label
+  ) VALUES (
+    '00000000-0000-0000-0000-000000001001', 99, 'metadata',
+    'mutation smoke one', '{}', 'default', NULL, 'workspace', NULL,
+    NULL, 'maintenance', NULL
+  );
+  BEGIN
+    INSERT INTO public.thought_revisions (
+      thought_id, revision, change_kind, prior_content, prior_metadata,
+      prior_workspace_id, prior_project_id, prior_visibility,
+      prior_owner_subject, changed_by_subject, changed_by_door
+    ) VALUES (
+      '00000000-0000-0000-0000-000000001001', 100, 'reclassify',
+      'mutation smoke one', '{}', 'default', NULL, 'workspace', NULL,
+      NULL, 'maintenance'
+    );
+    RAISE EXCEPTION 'thought_revisions accepted an unknown change_kind';
+  EXCEPTION WHEN check_violation THEN
+    NULL;
+  END;
+END;
+$$;
+ROLLBACK;
 
 -- ---------- Owner-side invariants + cleanup ---------------------------------
 

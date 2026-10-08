@@ -29,7 +29,7 @@ docker compose --env-file .env exec ollama ollama pull nomic-embed-text
 docker compose --env-file .env build mcp
 ```
 
-Finish the database/forwarder setup below, including migrations through 15 and
+Finish the database/forwarder setup below, including migrations through 16 and
 the final grants assertion. Validate the configured embedding backend and run
 the
 [superuser backfill plan and activation](../../../docs/embedding-limits.md#compose-backfill-runner),
@@ -315,6 +315,7 @@ order
 | 1.27.0              | `db/14-native-token-principals.sql`                                        | required with tokens on or off; explicit token principal, fail-closed legacy identity, final grants assertion; deploy ingress confinement before enabling the app flag                |
 | 1.28.0              | `db/15-embedding-index.sql`                                                | PostgreSQL superuser; validated corrected runtime, full offline backfill and activation before MCP starts, including fresh empty databases                                            |
 | 1.29.0              | —                                                                          | from 1.28: PostgreSQL superuser; offline `embedding_backfill.ts --relabel auto` before MCP starts (full backfill if its checks fail); later Ollama version changes need no index work |
+| 1.30.0              | `db/16-thought-metadata-revisions.sql`                                     | PostgreSQL superuser; admits the `metadata` revision kind, rewrites no rows; required before the optional maintenance-only `metadata_reclassify.ts`                                   |
 
 Server 1.26.0 additionally requires `db/13-oauth-subjects.sql` **even when OAuth
 is disabled**.
@@ -375,10 +376,10 @@ version. Apply migrations before the roll, not with it.
 6. Build the replacement with
    `docker compose --env-file .env build mcp subject-admin token-admin` while
    the current MCP is still serving. Then stop `mcp` and apply earlier pending
-   migrations in ascending order, through 13. Finish with migrations 14, 15 and
-   `db/03-grants-assertion.sql` last, **even with native tokens disabled**. From
-   the checkout root, load this deployment's owner-only `.env` and explicitly
-   select the database-superuser connection over ConnectTCP:
+   migrations in ascending order, through 13. Finish with migrations 14, 15, 16
+   and `db/03-grants-assertion.sql` last, **even with native tokens disabled**.
+   From the checkout root, load this deployment's owner-only `.env` and
+   explicitly select the database-superuser connection over ConnectTCP:
 
    ```bash
    (
@@ -393,8 +394,10 @@ version. Apply migrations before the roll, not with it.
            -d "${POSTGRES_DB:-openbrain}" -X -v ON_ERROR_STOP=1 "$@"
      }
      corpus_psql --single-transaction -f ../../../db/14-native-token-principals.sql
-     # Migration 15 manages its own transaction; assert after it commits.
+     # Migrations 15 and 16 manage their own transactions; assert after they
+     # commit.
      corpus_psql -f ../../../db/15-embedding-index.sql
+     corpus_psql -f ../../../db/16-thought-metadata-revisions.sql
      corpus_psql -f ../../../db/03-grants-assertion.sql
    )
    ```
@@ -809,7 +812,7 @@ explicitly reviewed recovery decision.
 
 ## Verify
 
-First provisioning must finish database migrations through 15 and the
+First provisioning must finish database migrations through 16 and the
 [superuser embedding activation](../../../docs/embedding-limits.md#compose-backfill-runner)
 before starting MCP. Start only Ollama and build MCP for that operation; keep
 the database qube and existing forwarder running. The commands below are the
@@ -833,7 +836,7 @@ The `tools` profile provides one-shot `subject-admin` and `token-admin` clients
 through this qube's existing ConnectTCP database forwarder. They carry only the
 `OPENBRAIN_TOKEN_ADMIN_PASSWORD` credential, which is never injected into MCP.
 Use the [complete upgrade procedure](#upgrading-an-existing-deployment) to
-provision the role and DB-qube HBA records, apply migrations through 15 and the
+provision the role and DB-qube HBA records, apply migrations through 16 and the
 final assertion, verify subject admission, and complete offline superuser
 embedding backfill/activation before MCP starts. At its admission stage, import
 the old subject lists and remove them from `.env` after verification. See

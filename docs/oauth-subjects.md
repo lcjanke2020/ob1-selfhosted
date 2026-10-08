@@ -99,9 +99,9 @@ admitted OAuth subjects remain unchanged.
    never command arguments. It does not install or reload `pg_hba.conf`.
 
 2. At the deployment procedure's schema-migration stage, apply all pending
-   migrations through 15 as a PostgreSQL superuser, then run the current grants
-   assertion. Migration 15 manages its own transaction; use the procedure's
-   separate invocation rather than wrapping the entire sequence in
+   migrations through 16 as a PostgreSQL superuser, then run the current grants
+   assertion. Migrations 15 and 16 manage their own transactions; use the
+   procedure's separate invocations rather than wrapping the entire sequence in
    `--single-transaction`. Keep MCP stopped after the assertion.
 
 3. At the admission-inventory stage, use the tools built from the reviewed

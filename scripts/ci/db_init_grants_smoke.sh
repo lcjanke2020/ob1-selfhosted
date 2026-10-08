@@ -84,6 +84,29 @@ for relation in public.thought_embedding_index sessions.embedding_index; do
   done
 done
 
+# Revision history admits exactly the content/scope/metadata kinds. The
+# pre-16 shape, a widened or unvalidated CHECK, and a dropped CHECK each fail
+# the assertion; migration 16 converges every one of them.
+for drift in pre16 widened unvalidated dropped; do
+  case "$drift" in
+    pre16) kinds="'content', 'scope'"; validity= ;;
+    widened) kinds="'content', 'scope', 'metadata', 'other'"; validity= ;;
+    unvalidated) kinds="'content', 'scope', 'metadata'"; validity="NOT VALID" ;;
+    dropped) kinds= ;;
+  esac
+  mutation="ALTER TABLE public.thought_revisions
+    DROP CONSTRAINT thought_revisions_change_kind"
+  if [[ -n "$kinds" ]]; then
+    mutation+=", ADD CONSTRAINT thought_revisions_change_kind
+      CHECK (change_kind IN ($kinds)) $validity"
+  fi
+  super_psql -v ON_ERROR_STOP=1 -c "$mutation" >/dev/null
+  expect_rejected "thought revision change-kind $drift drift" \
+    "change_kind must admit exactly content, scope, and metadata"
+  apply_sql db/16-thought-metadata-revisions.sql >/dev/null
+  run_assertion >/dev/null
+done
+
 # Table SELECT alone is insufficient for a backup: schema USAGE is also
 # required. Prove the actual dump fails on drift and recovers after migration.
 dump_oauth_as_backup() {

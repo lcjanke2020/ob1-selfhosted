@@ -106,17 +106,23 @@ embedding work.
 **Revision history.** Every update and move first snapshots the prior state —
 content, metadata, workspace/project/visibility/owner, plus the subject, door,
 and token label the server verified for the request — into
-`public.thought_revisions` (`db/10-thought-mutations.sql`). The application role
-can append and read that history but never rewrite or erase it. Revision rows
-are readable exactly when their head thought is readable, so once a misfiled
-thought has been moved to a narrower audience its earlier text is no longer
-visible to the audience it left. `fetch` and search return heads only; the
-history is an audit trail, not a second recall surface. There is no soft-delete
-yet; that remains follow-up work. This attribution is server-verified but still
-application-trusted at the database boundary: a compromised `openbrain_app`
-credential can append fabricated history or actor fields even though it cannot
-alter genuine rows. The rationale for documenting that boundary instead of
-adding privileged mutation triggers/functions is in the
+`public.thought_revisions` (`db/10-thought-mutations.sql`), as `change_kind`
+`content` or `scope`. A third kind, `metadata`
+(`db/16-thought-metadata-revisions.sql`), is never written by the server itself,
+only by the maintenance-only superuser tool that
+[reclassifies legacy and stub thoughts](metadata-degradation-monitoring.md#reclassifying-legacy-and-stub-thoughts):
+it snapshots the same prior state with door `maintenance` and no subject or
+token label, because no authenticated request made the change. The application
+role can append and read that history but never rewrite or erase it. Revision
+rows are readable exactly when their head thought is readable, so once a
+misfiled thought has been moved to a narrower audience its earlier text is no
+longer visible to the audience it left. `fetch` and search return heads only;
+the history is an audit trail, not a second recall surface. There is no
+soft-delete yet; that remains follow-up work. This attribution is
+server-verified but still application-trusted at the database boundary: a
+compromised `openbrain_app` credential can append fabricated history or actor
+fields even though it cannot alter genuine rows. The rationale for documenting
+that boundary instead of adding privileged mutation triggers/functions is in the
 [security model](security-model.md#known-limitations).
 
 Under the hood, an update is an ordinary application-role `UPDATE` of the
@@ -290,7 +296,7 @@ Use the complete current upgrade procedure for your deployment:
 - [Pattern B upgrade](../deploy/compose-tailnet/README.md#upgrading-an-existing-deployment)
 - [Split Qubes upgrade](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
 
-Each procedure applies all pending migrations through 15 before the final grants
+Each procedure applies all pending migrations through 16 before the final grants
 assertion. Server 1.28.0 also requires the offline superuser embedding backfill
 and activation; keep all corpus writers/search consumers stopped until
 activation succeeds. The split Qubes procedure uses the existing ConnectTCP
@@ -307,7 +313,8 @@ and removes direct artifact UPDATE; it is ACL-only and rewrites no rows.
 Migration 12 separates request-path auth-event insertion from the dedicated
 report/retention role, removes direct grant-option and persistent-object
 creation drift (including dependent delegated grants), and likewise rewrites no
-rows.
+rows. Migration 16 only admits the `metadata` revision kind; it changes no
+audience boundary and rewrites no rows.
 
 Migration 06 backfills existing thoughts and sessions into the `default`
 workspace at workspace visibility. It takes table locks while adding and

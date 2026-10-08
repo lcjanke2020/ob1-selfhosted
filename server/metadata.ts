@@ -64,6 +64,32 @@ const THOUGHT_METADATA_RUNTIME_SCHEMA = z.object({
   dates_mentioned: z.array(z.string()),
 }).strict();
 
+export type ThoughtMetadata = z.infer<typeof THOUGHT_METADATA_RUNTIME_SCHEMA>;
+
+// Server-owned keys on a stored thought: transport identity, caller-asserted
+// provenance, and the classifier stamp. The strict runtime schema above
+// already excludes them; capture, update, and maintenance reclassification
+// strip them again so injected test/custom extractors cannot impersonate
+// server stamps or caller claims.
+export const RESERVED_METADATA_KEYS = [
+  "source",
+  "door",
+  "sub",
+  "token_label",
+  "provenance",
+  "metadata_extraction",
+] as const;
+
+export function withoutReservedMetadataKeys(
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const classified = { ...metadata };
+  for (const reserved of RESERVED_METADATA_KEYS) {
+    delete classified[reserved];
+  }
+  return classified;
+}
+
 // Strict JSON-schema for structured output. A schema-constrained model returns
 // a valid object far more reliably than prompt-only `json_object` mode, which
 // could emit a runaway or partial generation. Enforcement is serving-stack
@@ -112,7 +138,7 @@ export type ClassificationFailure =
 type ClassificationAttempt =
   | {
     ok: true;
-    metadata: z.infer<typeof THOUGHT_METADATA_RUNTIME_SCHEMA>;
+    metadata: ThoughtMetadata;
   }
   | ({ ok: false } & ClassificationFailure);
 
@@ -444,5 +470,41 @@ export async function extractMetadata(
     metadata: { ...METADATA_STUB },
     classifier: { schema_version: 1, endpoint: "stub" },
     degradation_events: degradationEvents,
+  };
+}
+
+export type PrimaryClassification =
+  | {
+    ok: true;
+    metadata: ThoughtMetadata;
+    classifier: { schema_version: 1; endpoint: "primary"; model: string };
+  }
+  | {
+    ok: false;
+    reason: ClassificationFailure["reason"] | "primary_disabled";
+  };
+
+// Classify with the configured PRIMARY endpoint only, for maintenance tools
+// that re-run classification over stored thoughts (metadata_reclassify.ts).
+// Unlike extractMetadata it never calls the fallback endpoint, never returns
+// the stub, records no degradation events, and logs nothing: a failure is
+// returned as its finite reason so the caller can leave the row untouched.
+// The capture path keeps using extractMetadata. Never throws.
+export async function classifyWithPrimary(
+  text: string,
+): Promise<PrimaryClassification> {
+  if (!ENABLE_PRIMARY_EXTRACTION) {
+    return { ok: false, reason: "primary_disabled" };
+  }
+  const attempt = await classifyOnce(text, {
+    base: CHAT_API_BASE,
+    key: CHAT_API_KEY,
+    model: CHAT_MODEL,
+  });
+  if (!attempt.ok) return { ok: false, reason: attempt.reason };
+  return {
+    ok: true,
+    metadata: attempt.metadata,
+    classifier: { schema_version: 1, endpoint: "primary", model: CHAT_MODEL },
   };
 }

@@ -344,13 +344,15 @@ between the check and the write, is reported as an outcome, never as an index
 error. Content updates use no privileged path at all. Both write the prior state
 to `public.thought_revisions`, which is append-only to the application role and
 readable only when the head thought is readable, so a thought moved to a
-narrower audience takes its history with it. Revision values and actor
-attribution are nevertheless supplied by the trusted application tier; the
-database prevents rewriting or erasing genuine rows but does not attest that
-every insert describes a real mutation. The grants assertion pins the
-column-scoped grant, the function's definer/owner/config shape and grantee set,
-and the history table's grants and forced policy; the boot probe requires the
-function and the table.
+narrower audience takes its history with it. The maintenance-only superuser
+reclassifier (`server/metadata_reclassify.ts`) records a third kind, `metadata`,
+labeled `changed_by_door = 'maintenance'`. Revision values and actor attribution
+are nevertheless supplied by the trusted application tier; the database prevents
+rewriting or erasing genuine rows but does not attest that every insert
+describes a real mutation. The grants assertion pins the column-scoped grant,
+the function's definer/owner/config shape and grantee set, and the history
+table's grants, forced policy, and exact change kinds; the boot probe requires
+the function and the table.
 
 `db/11-session-update-grants.sql` closes the corresponding session-side gap.
 Session recapture addresses a row through its current exact audience and can

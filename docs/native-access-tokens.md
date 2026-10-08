@@ -170,7 +170,7 @@ deployment:
 - [Pattern B upgrade](../deploy/compose-tailnet/README.md#upgrading-an-existing-deployment)
 - [Split Qubes upgrade](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
 
-These procedures apply all pending migrations through 15 before the final grants
+These procedures apply all pending migrations through 16 before the final grants
 assertion, then perform the offline PostgreSQL-superuser embedding backfill and
 activation before starting MCP. Keep all corpus writers and search consumers
 stopped through activation. At the credential-inventory stage, use the new tools
@@ -187,12 +187,12 @@ before restarting it; changing the image tag alone is insufficient.
 The deployment upgrade sequence includes 08 and 13 **before** 14. Reapplying 14
 preserves principals and revocation state and reconciles verification/admin
 column grants. Reapplying 08 alone restores its retired registration overload;
-always finish the complete sequence through 15 and the current grants assertion.
+always finish the complete sequence through 16 and the current grants assertion.
 
 Rehearse the complete upgrade on a disposable restored database before the
-production window. Migration 15 manages its own transaction, so an outer
-`BEGIN`/`ROLLBACK` is not a rollback rehearsal for the full sequence. Do not run
-a second runtime against the real database for tests.
+production window. Migrations 15 and 16 manage their own transactions, so an
+outer `BEGIN`/`ROLLBACK` is not a rollback rehearsal for the full sequence. Do
+not run a second runtime against the real database for tests.
 
 ## Split Qubes deployment
 
@@ -217,7 +217,7 @@ only after all of these deployment steps have passed:
 3. Follow the complete
    [split Qubes upgrade](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
    through the existing app→DB route: stop all corpus writers/search consumers,
-   apply pending migrations through 15 and the final grants assertion, inspect
+   apply pending migrations through 16 and the final grants assertion, inspect
    the administrator's token inventory, and complete the offline superuser
    embedding backfill and activation. Start the new MCP with
    `ENABLE_NATIVE_TOKENS=true` only after successful activation and resolution

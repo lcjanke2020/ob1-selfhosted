@@ -351,10 +351,9 @@ app qube — see the
 Server 1.27.0 introduced stable native-token principals in migration 14. Follow
 the
 [complete upgrade procedure](app-qube/README.md#upgrading-an-existing-deployment),
-including migration 15 and embedding activation for 1.28.0. Keep the app
-listener loopback-only, and deploy the shared Caddyfile's public credential
-strip before enabling `ENABLE_NATIVE_TOKENS=true` on the app. Its Compose pins
-the trusted marker requirement. Public Funnel remains OAuth-only; the existing
-restricted `token-admin` tools container uses the app→DB ConnectTCP path. See
-the
+including migrations 15 and 16 and embedding activation. Keep the app listener
+loopback-only, and deploy the shared Caddyfile's public credential strip before
+enabling `ENABLE_NATIVE_TOKENS=true` on the app. Its Compose pins the trusted
+marker requirement. Public Funnel remains OAuth-only; the existing restricted
+`token-admin` tools container uses the app→DB ConnectTCP path. See the
 [rollout, branch matrix and rollback](../../docs/native-access-tokens.md#split-qubes-deployment).
