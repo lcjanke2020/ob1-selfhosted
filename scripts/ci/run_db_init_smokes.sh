@@ -155,6 +155,7 @@ start_database() {
     -v "$GITHUB_WORKSPACE/db/14-native-token-principals.sql:/docker-entrypoint-initdb.d/14-native-token-principals.sql:ro" \
     -v "$GITHUB_WORKSPACE/db/15-embedding-index.sql:/docker-entrypoint-initdb.d/15-embedding-index.sql:ro" \
     -v "$GITHUB_WORKSPACE/db/16-thought-metadata-revisions.sql:/docker-entrypoint-initdb.d/16-thought-metadata-revisions.sql:ro" \
+    -v "$GITHUB_WORKSPACE/db/17-forget-thoughts.sql:/docker-entrypoint-initdb.d/17-forget-thoughts.sql:ro" \
     -v "$GITHUB_WORKSPACE/db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro" \
     "$image" >/dev/null; then
     # Docker may create the named container before failing to bind its port.

@@ -300,22 +300,23 @@ before the relations it asserts on exist. The db qube records the same canonical
 order
 ([First boot / provisioning](../db-qube/README.md#first-boot--provisioning)).
 
-| Server              | Migration                                                                  | Additional requirement                                                                                                                                                                |
-| ------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1.7.0               | `db/05-hybrid-search.sql`                                                  | pgvector 0.8.0+ (filtered iterative scans)                                                                                                                                            |
-| 1.9.0               | `db/06-spaces.sql`                                                         | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner                                                                                                                           |
-| 1.16.0              | `db/07-metadata-degradation.sql`                                           | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env`                                                                                                                         |
-| 1.19.0              | `db/08-access-tokens.sql`                                                  | —                                                                                                                                                                                     |
-| 1.20.0 (historical) | `db/02-observability.sql` (re-apply; converges `mcp_auth_events` in place) | historical env admission; current upgrades must import it into migration 13 before rolling MCP                                                                                        |
-| Arc B               | `db/02-observability.sql`, then `db/09-retire-corpus-funnel.sql`           | sink cutover complete; both legacy tables archived, verified, and empty; retired HBA rules removed                                                                                    |
-| 1.22.0              | `db/10-thought-mutations.sql`                                              | superuser (table-owner SECURITY DEFINER helper; narrows the app's thoughts UPDATE to content columns); rerun `03-grants-assertion.sql` after                                          |
-| 1.24.0              | `db/11-session-update-grants.sql`                                          | database owner; narrows session UPDATE to content columns and removes artifact UPDATE; rerun `03-grants-assertion.sql` after                                                          |
-| 1.25.0              | `db/12-auth-audit-grants.sql`                                              | first provision `openbrain_auth_rollup` and install/reload its HBA lines; rerun `03-grants-assertion.sql` after                                                                       |
-| 1.26.0              | `db/13-oauth-subjects.sql`                                                 | required with OAuth on or off; provision credential administrator and HBA first, then migrate/assert and import/verify OAuth subjects before the MCP roll                             |
-| 1.27.0              | `db/14-native-token-principals.sql`                                        | required with tokens on or off; explicit token principal, fail-closed legacy identity, final grants assertion; deploy ingress confinement before enabling the app flag                |
-| 1.28.0              | `db/15-embedding-index.sql`                                                | PostgreSQL superuser; validated corrected runtime, full offline backfill and activation before MCP starts, including fresh empty databases                                            |
-| 1.29.0              | —                                                                          | from 1.28: PostgreSQL superuser; offline `embedding_backfill.ts --relabel auto` before MCP starts (full backfill if its checks fail); later Ollama version changes need no index work |
-| 1.30.0              | `db/16-thought-metadata-revisions.sql`                                     | PostgreSQL superuser; admits the `metadata` revision kind, rewrites no rows; required before the optional maintenance-only `metadata_reclassify.ts`                                   |
+| Server              | Migration                                                                  | Additional requirement                                                                                                                                                                                                                                          |
+| ------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.7.0               | `db/05-hybrid-search.sql`                                                  | pgvector 0.8.0+ (filtered iterative scans)                                                                                                                                                                                                                      |
+| 1.9.0               | `db/06-spaces.sql`                                                         | PostgreSQL 15+ (`NULLS NOT DISTINCT`); superuser, not owner                                                                                                                                                                                                     |
+| 1.16.0              | `db/07-metadata-degradation.sql`                                           | from 1.17.0, an explicit `METADATA_FALLBACK_POLICY` in `.env`                                                                                                                                                                                                   |
+| 1.19.0              | `db/08-access-tokens.sql`                                                  | —                                                                                                                                                                                                                                                               |
+| 1.20.0 (historical) | `db/02-observability.sql` (re-apply; converges `mcp_auth_events` in place) | historical env admission; current upgrades must import it into migration 13 before rolling MCP                                                                                                                                                                  |
+| Arc B               | `db/02-observability.sql`, then `db/09-retire-corpus-funnel.sql`           | sink cutover complete; both legacy tables archived, verified, and empty; retired HBA rules removed                                                                                                                                                              |
+| 1.22.0              | `db/10-thought-mutations.sql`                                              | superuser (table-owner SECURITY DEFINER helper; narrows the app's thoughts UPDATE to content columns); rerun `03-grants-assertion.sql` after                                                                                                                    |
+| 1.24.0              | `db/11-session-update-grants.sql`                                          | database owner; narrows session UPDATE to content columns and removes artifact UPDATE; rerun `03-grants-assertion.sql` after                                                                                                                                    |
+| 1.25.0              | `db/12-auth-audit-grants.sql`                                              | first provision `openbrain_auth_rollup` and install/reload its HBA lines; rerun `03-grants-assertion.sql` after                                                                                                                                                 |
+| 1.26.0              | `db/13-oauth-subjects.sql`                                                 | required with OAuth on or off; provision credential administrator and HBA first, then migrate/assert and import/verify OAuth subjects before the MCP roll                                                                                                       |
+| 1.27.0              | `db/14-native-token-principals.sql`                                        | required with tokens on or off; explicit token principal, fail-closed legacy identity, final grants assertion; deploy ingress confinement before enabling the app flag                                                                                          |
+| 1.28.0              | `db/15-embedding-index.sql`                                                | PostgreSQL superuser; validated corrected runtime, full offline backfill and activation before MCP starts, including fresh empty databases                                                                                                                      |
+| 1.29.0              | —                                                                          | from 1.28: PostgreSQL superuser; offline `embedding_backfill.ts --relabel auto` before MCP starts (full backfill if its checks fail); later Ollama version changes need no index work                                                                           |
+| 1.30.0              | `db/16-thought-metadata-revisions.sql`                                     | PostgreSQL superuser; admits the `metadata` revision kind, rewrites no rows; required before the optional maintenance-only `metadata_reclassify.ts`                                                                                                             |
+| 1.31.0              | `db/17-forget-thoughts.sql`                                                | PostgreSQL superuser; forget/restore schema, rewrites no rows; MCP stopped (older servers cannot capture against it); always after 06/10/15/16; rerun `03-grants-assertion.sql` after; rolling back to ≤1.30.0 means restoring the pre-migration rollback point |
 
 Server 1.26.0 additionally requires `db/13-oauth-subjects.sql` **even when OAuth
 is disabled**.
@@ -376,10 +377,10 @@ version. Apply migrations before the roll, not with it.
 6. Build the replacement with
    `docker compose --env-file .env build mcp subject-admin token-admin` while
    the current MCP is still serving. Then stop `mcp` and apply earlier pending
-   migrations in ascending order, through 13. Finish with migrations 14, 15, 16
-   and `db/03-grants-assertion.sql` last, **even with native tokens disabled**.
-   From the checkout root, load this deployment's owner-only `.env` and
-   explicitly select the database-superuser connection over ConnectTCP:
+   migrations in ascending order, through 13. Finish with migrations 14, 15, 16,
+   17 and `db/03-grants-assertion.sql` last, **even with native tokens
+   disabled**. From the checkout root, load this deployment's owner-only `.env`
+   and explicitly select the database-superuser connection over ConnectTCP:
 
    ```bash
    (
@@ -394,10 +395,11 @@ version. Apply migrations before the roll, not with it.
            -d "${POSTGRES_DB:-openbrain}" -X -v ON_ERROR_STOP=1 "$@"
      }
      corpus_psql --single-transaction -f ../../../db/14-native-token-principals.sql
-     # Migrations 15 and 16 manage their own transactions; assert after they
-     # commit.
+     # Migrations 15, 16, and 17 manage their own transactions; assert after
+     # they commit.
      corpus_psql -f ../../../db/15-embedding-index.sql
      corpus_psql -f ../../../db/16-thought-metadata-revisions.sql
+     corpus_psql -f ../../../db/17-forget-thoughts.sql
      corpus_psql -f ../../../db/03-grants-assertion.sql
    )
    ```

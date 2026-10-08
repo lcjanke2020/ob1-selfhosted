@@ -93,8 +93,12 @@ function bootQueryHandler(
   requiredSchema: RequiredSchema = COMPLETE_SCHEMA,
   defaultWorkspaceExists = true,
   notificationStateExists = true,
+  forgetSchemaExists = true,
 ): QueryHandler {
   return (sql) => {
+    if (sql.includes("thoughts_app_not_forgotten")) {
+      return { rows: [[forgetSchemaExists]] };
+    }
     if (sql.includes("FROM native_auth.access_token")) return { rows: [] };
     if (sql.includes("FROM oauth_auth.allowed_subject")) return { rows: [] };
     if (sql.includes("oauth_auth.allowed_subject")) return { rows: [[true]] };
@@ -117,7 +121,7 @@ Deno.test("probeDbAtBoot: success path validates connectivity and hybrid schema"
 
   await probeDbAtBoot(fakePool, "db:5432");
   const queries = client.queryArrayCalls.map(({ sql }) => sql);
-  assertEquals(queries.length, 7);
+  assertEquals(queries.length, 8);
   assertEquals(queries[0], "SELECT 1");
   assert(queries[1].includes("idx_thoughts_content_tsv"));
   assert(queries[1].includes("idx_thoughts_content_trgm"));
@@ -176,10 +180,11 @@ Deno.test("probeDbAtBoot: success path validates connectivity and hybrid schema"
   assert(
     queries[2].includes("principal, revoked_at FROM native_auth.access_token"),
   );
-  assert(queries[3].includes("oauth_auth.allowed_subject"));
-  assert(queries[4].includes("FROM oauth_auth.allowed_subject"));
-  assert(queries[5].includes("metadata_degradation_notification_state"));
-  assert(queries[6].includes("memory_scope.workspace"));
+  assert(queries[3].includes("thoughts_app_not_forgotten"));
+  assert(queries[4].includes("oauth_auth.allowed_subject"));
+  assert(queries[5].includes("FROM oauth_auth.allowed_subject"));
+  assert(queries[6].includes("metadata_degradation_notification_state"));
+  assert(queries[7].includes("memory_scope.workspace"));
   assertEquals(client.releaseCalls, 1);
 });
 
@@ -467,6 +472,59 @@ Deno.test("probeDbAtBoot: missing metadata notification singleton rejects with m
   assertStringIncludes(err.message, "notification ledger row");
   assertStringIncludes(err.message, "db/07-metadata-degradation.sql");
   assertEquals(client.releaseCalls, 1);
+});
+
+Deno.test("probeDbAtBoot: missing forget/restore schema rejects before serving", async () => {
+  const { pool: fakePool, client } = makeFakePool(
+    bootQueryHandler(COMPLETE_SCHEMA, true, true, false),
+  );
+
+  const err = await assertRejects(
+    () => probeDbAtBoot(fakePool, "db:5432"),
+    Error,
+  );
+  assertStringIncludes(err.message, "forget/restore schema");
+  assertStringIncludes(err.message, "db/17-forget-thoughts.sql");
+  assertEquals(client.releaseCalls, 1);
+  const forgetQuery = client.queryArrayCalls
+    .map(({ sql }) => sql)
+    .find((sql) => sql.includes("thoughts_app_not_forgotten"));
+  assert(forgetQuery);
+  // The catalog checks the probe relies on, including the forgotten-row
+  // filter in each RLS-bypassing helper that a re-applied older migration
+  // would silently drop.
+  // Compare on collapsed whitespace: the shapes, not the query's layout.
+  const shape = forgetQuery.replace(/\s+/g, " ");
+  for (
+    const expected of [
+      "attname = 'forgotten_at'",
+      "has_column_privilege( marker.attrelid, marker.attnum, 'UPDATE' )",
+      // The exact shapes db/03-grants-assertion.sql pins, so a catalog the
+      // assertion rejects cannot boot.
+      "NOT polpermissive",
+      "pg_get_expr(polqual, polrelid) = '(forgotten_at IS NULL)'",
+      "pg_get_expr(polwithcheck, polrelid) = '(forgotten_at IS NULL)'",
+      "to_regclass('public.idx_thoughts_fingerprint')",
+      "indnullsnotdistinct",
+      "pg_get_expr(indpred, indrelid) = '((content_fingerprint IS NOT NULL) AND (forgotten_at IS NULL))'",
+      "conname = 'thought_revisions_change_kind'",
+      "convalidated",
+      "''metadata''::text, ''forget''::text, ''restore''::text])))'",
+      "'memory_scope.forget_thought(uuid,text,text)',",
+      "'memory_scope.restore_thought(uuid,text,text)' ]",
+      "OR NOT p.prosecdef",
+      "@> ARRAY['search_path=pg_catalog']",
+      // Filter counts per helper: a body that drops the filter from one leg
+      // still fails.
+      "jsonb,jsonb,integer)', 2)",
+      "jsonb,jsonb,integer,text)', 2)",
+      "memory_scope.move_thought(uuid,text,text,memory_scope.visibility,text,text)', 3)",
+      "('memory_scope.restore_thought(uuid,text,text)', 2)",
+      "regexp_count(p.prosrc, 't[.]forgotten_at IS NULL') < required.minimum",
+    ]
+  ) {
+    assertStringIncludes(shape, expected);
+  }
 });
 
 Deno.test("probeDbAtBoot: unknown configured workspace rejects before serving", async () => {

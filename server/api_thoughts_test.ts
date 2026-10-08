@@ -796,6 +796,144 @@ Deno.test("REST /api/v1 — thoughts routes", async (t) => {
       },
     );
 
+    // ─── POST /thoughts/:id/forget + /restore ─────────────────────────
+    const FORGOTTEN_AT = "2026-10-08T12:00:00.000Z";
+    const forgetHandler =
+      (outcome: string | null, calls: unknown[][] = []): QueryHandler =>
+      (sql, params) => {
+        if (sql.includes("memory_scope.forget_thought(")) {
+          calls.push(params);
+          return {
+            rows: outcome === null ? [] : [{
+              outcome,
+              revision: 1,
+              forgotten_at: FORGOTTEN_AT,
+              workspace_id: "default",
+              project_id: null,
+              visibility: "workspace",
+            }],
+          };
+        }
+        return undefined;
+      };
+    const restoreHandler =
+      (outcome: string | null, conflict: string | null = null): QueryHandler =>
+      (sql) => {
+        if (sql.includes("memory_scope.restore_thought(")) {
+          return {
+            rows: outcome === null ? [] : [{
+              outcome,
+              conflict_thought_id: conflict,
+              revision: outcome === "restored" ? 2 : null,
+              workspace_id: "default",
+              project_id: null,
+              visibility: "workspace",
+            }],
+          };
+        }
+        return undefined;
+      };
+
+    await t.step(
+      "POST /thoughts/:id/forget → 200 with the outcome; door is recorded",
+      async () => {
+        const calls: unknown[][] = [];
+        const api = makeApi(forgetHandler("forgotten", calls));
+        const res = await api.request(
+          `/thoughts/${MUTATION_ID}/forget`,
+          authed({ method: "POST", body: JSON.stringify({}) }),
+        );
+        assertEquals(res.status, 200);
+        assertEquals(await res.json(), {
+          id: MUTATION_ID,
+          outcome: "forgotten",
+          revision: 1,
+          forgotten_at: FORGOTTEN_AT,
+          workspace_id: "default",
+          project_id: null,
+          visibility: "workspace",
+        });
+        // id, door, token label — the helper takes no subject argument.
+        assertEquals(calls, [[MUTATION_ID, "tailnet", null]]);
+      },
+    );
+
+    await t.step(
+      "POST /thoughts/:id/forget → 404 when not visible",
+      async () => {
+        const api = makeApi(forgetHandler(null));
+        const res = await api.request(
+          `/thoughts/${MUTATION_ID}/forget`,
+          authed({ method: "POST", body: JSON.stringify({}) }),
+        );
+        assertEquals(res.status, 404);
+        assertEquals((await res.json()).error.code, "not_found");
+      },
+    );
+
+    await t.step(
+      "POST /thoughts/:id/forget → 400 on a malformed id, unknown key, or non-JSON body",
+      async () => {
+        const calls: unknown[][] = [];
+        const api = makeApi(forgetHandler("forgotten", calls));
+        for (
+          const [path, body] of [
+            ["/thoughts/not-a-uuid/forget", "{}"],
+            [`/thoughts/${MUTATION_ID}/forget`, JSON.stringify({ id: "x" })],
+            [`/thoughts/${MUTATION_ID}/forget`, "not json"],
+          ]
+        ) {
+          const res = await api.request(
+            path,
+            authed({ method: "POST", body }),
+          );
+          assertEquals(res.status, 400, `${path} ${body}`);
+          assertEquals((await res.json()).error.code, "validation_error");
+        }
+        assertEquals(calls, []);
+      },
+    );
+
+    await t.step(
+      "POST /thoughts/:id/restore → 200; 404 when not visible",
+      async () => {
+        const ok = await makeApi(restoreHandler("restored")).request(
+          `/thoughts/${MUTATION_ID}/restore`,
+          authed({ method: "POST", body: JSON.stringify({}) }),
+        );
+        assertEquals(ok.status, 200);
+        assertEquals(await ok.json(), {
+          id: MUTATION_ID,
+          outcome: "restored",
+          conflict_thought_id: null,
+          revision: 2,
+          workspace_id: "default",
+          project_id: null,
+          visibility: "workspace",
+        });
+        const missing = await makeApi(restoreHandler(null)).request(
+          `/thoughts/${MUTATION_ID}/restore`,
+          authed({ method: "POST", body: JSON.stringify({}) }),
+        );
+        assertEquals(missing.status, 404);
+      },
+    );
+
+    await t.step(
+      "POST /thoughts/:id/restore → 409 naming the live duplicate",
+      async () => {
+        const other = "0b3d2c1a-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+        const res = await makeApi(restoreHandler("conflict", other)).request(
+          `/thoughts/${MUTATION_ID}/restore`,
+          authed({ method: "POST", body: JSON.stringify({}) }),
+        );
+        assertEquals(res.status, 409);
+        const body = await res.json();
+        assertEquals(body.error.code, "conflict");
+        assert(body.error.message.includes(other));
+      },
+    );
+
     await t.step(
       "unknown path (authed) → 404 with the JSON error shape",
       async () => {

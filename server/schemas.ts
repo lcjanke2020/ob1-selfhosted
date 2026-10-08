@@ -299,6 +299,25 @@ export const moveThoughtShape = {
   ),
 };
 
+// Forget/restore address one thought through its CURRENT audience, exactly
+// like fetch/update/move. Restore uses the same audience the thought was
+// forgotten from (forgetting never changes the audience).
+export const forgetThoughtShape = {
+  id: thoughtIdSchema.describe("The thought ID to forget"),
+  scope: memoryScopeSchema.optional().describe(
+    "The thought's CURRENT workspace/project/visibility. Omitted means the configured default workspace; an id outside this scope reads as not found.",
+  ),
+};
+
+export const restoreThoughtShape = {
+  id: thoughtIdSchema.describe(
+    "The ID of a forgotten thought (as returned by forget_thought)",
+  ),
+  scope: memoryScopeSchema.optional().describe(
+    "The workspace/project/visibility the thought was forgotten from. Omitted means the configured default workspace; an id outside this scope reads as not found.",
+  ),
+};
+
 // ---- sessions ---------------------------------------------------------
 
 export const sessionCaptureShape = {
@@ -371,6 +390,8 @@ export const fetchThoughtSchema = z.object(fetchThoughtShape).strict();
 export const thoughtStatsSchema = z.object(thoughtStatsShape).strict();
 export const updateThoughtSchema = z.object(updateThoughtShape).strict();
 export const moveThoughtSchema = z.object(moveThoughtShape).strict();
+export const forgetThoughtSchema = z.object(forgetThoughtShape).strict();
+export const restoreThoughtSchema = z.object(restoreThoughtShape).strict();
 export const sessionCaptureSchema = z.object(sessionCaptureShape).strict();
 export const sessionLookupSchema = z.object(sessionLookupShape).strict();
 export const sessionSearchSchema = z.object(sessionSearchShape).strict();
@@ -390,13 +411,23 @@ export const compatibilitySearchSchema = z.object({
 
 export const captureThoughtBody = captureThoughtSchema;
 // The thought id arrives via the URL path on REST (PATCH /thoughts/:id and
-// POST /thoughts/:id/move), so the bodies carry everything but the id.
+// POST /thoughts/:id/move|forget|restore), so the bodies carry everything but
+// the id.
 export const updateThoughtBody = z.object({
   content: updateThoughtShape.content,
   scope: memoryScopeSchema.optional(),
 }).strict();
 export const moveThoughtBody = z.object({
   target: moveThoughtTargetSchema,
+  scope: memoryScopeSchema.optional(),
+}).strict();
+// POST /thoughts/:id/forget and /restore: the id is in the path; the body is
+// a JSON object carrying only the optional current scope ({} for the default
+// workspace).
+export const forgetThoughtBody = z.object({
+  scope: memoryScopeSchema.optional(),
+}).strict();
+export const restoreThoughtBody = z.object({
   scope: memoryScopeSchema.optional(),
 }).strict();
 // Search filters narrow or exclude returned memory, so a misspelled envelope

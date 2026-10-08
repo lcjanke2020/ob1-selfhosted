@@ -45,12 +45,16 @@ import {
   type CaptureOutcome,
   captureThought,
   fetchThought,
+  forgetThought,
+  type ForgetThoughtOutcome,
   getStats,
   type ListOptions,
   listThoughts,
   moveThought,
   type MoveThoughtOutcome,
   probeThoughtUnchanged,
+  restoreThought,
+  type RestoreThoughtOutcome,
   searchThoughts,
   type Stats,
   thoughtEmbeddingSource,
@@ -61,11 +65,13 @@ import {
 import {
   captureThoughtShape,
   fetchThoughtShape,
+  forgetThoughtShape,
   listThoughtsShape,
   type MemoryScopeInput,
   memoryScopeSchema,
   moveThoughtShape,
   type MoveThoughtTarget,
+  restoreThoughtShape,
   searchThoughtsShape,
   sessionCaptureShape,
   sessionListShape,
@@ -549,6 +555,69 @@ export async function moveThoughtInScope(
   if (outcome.outcome === "conflict") {
     throw new ConflictError(
       `A thought with identical content already exists in the target audience (id: ${outcome.conflict_thought_id}).`,
+    );
+  }
+  return outcome;
+}
+
+// Forget a thought: remove it from every read path (search, list, fetch,
+// stats) and from update/move, without deleting it. The thought is addressed
+// through its CURRENT audience like fetch. Anyone who can read the row may
+// forget it, exactly like update/move. Forgetting an already-forgotten thought
+// is a no-op ('unchanged'). Recoverable with restoreThoughtInScope; this is not
+// erasure — the row, its history, and backups keep the text.
+export async function forgetThoughtInScope(
+  pool: Pool,
+  input: {
+    id: string;
+    scope?: MemoryScopeInput;
+    auth: AuthContext;
+  },
+): Promise<ForgetThoughtOutcome | null> {
+  const thoughtId = validateServiceInput(forgetThoughtShape.id, input.id, "id");
+  const scope = await resolveReadScope(
+    pool,
+    validateServiceInput(forgetThoughtShape.scope, input.scope),
+    input.auth,
+  );
+  return await forgetThought(pool, {
+    id: thoughtId,
+    actor: mutationActor(input.auth),
+    scope,
+  });
+}
+
+// Return a forgotten thought to recall in the audience it was forgotten from.
+// Restoring a live thought is a no-op ('unchanged'). If the same content has
+// since been captured again in that audience, restoring would duplicate it:
+// a ConflictError names the live copy.
+export async function restoreThoughtInScope(
+  pool: Pool,
+  input: {
+    id: string;
+    scope?: MemoryScopeInput;
+    auth: AuthContext;
+  },
+): Promise<RestoreThoughtOutcome | null> {
+  const thoughtId = validateServiceInput(
+    restoreThoughtShape.id,
+    input.id,
+    "id",
+  );
+  const scope = await resolveReadScope(
+    pool,
+    validateServiceInput(restoreThoughtShape.scope, input.scope),
+    input.auth,
+  );
+  const outcome = await restoreThought(pool, {
+    id: thoughtId,
+    actor: mutationActor(input.auth),
+    scope,
+  });
+  if (!outcome) return null;
+  if (outcome.outcome === "conflict") {
+    throw new ConflictError(
+      `A thought with identical content already exists in this audience (id: ${outcome.conflict_thought_id}); forget or update that copy before restoring this one.`,
     );
   }
   return outcome;

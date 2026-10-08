@@ -95,6 +95,7 @@ services:
       - ../../db/14-native-token-principals.sql:/docker-entrypoint-initdb.d/14-native-token-principals.sql:ro
       - ../../db/15-embedding-index.sql:/docker-entrypoint-initdb.d/15-embedding-index.sql:ro
       - ../../db/16-thought-metadata-revisions.sql:/docker-entrypoint-initdb.d/16-thought-metadata-revisions.sql:ro
+      - ../../db/17-forget-thoughts.sql:/docker-entrypoint-initdb.d/17-forget-thoughts.sql:ro
       # Keep the stable source filename, but run the catalog assertion last so
       # later/future schemas and topology invariants are covered.
       - ../../db/03-grants-assertion.sql:/docker-entrypoint-initdb.d/99-grants-assertion.sql:ro

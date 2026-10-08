@@ -755,6 +755,111 @@ export async function probeDbAtBoot(
             `column grant before starting this server version.`,
         );
       }
+      // forget_thought/restore_thought (1.31.0) need the forgotten marker
+      // (not writable by this role), the restrictive policy that hides
+      // forgotten rows from this role, the live-rows fingerprint index the
+      // capture upsert names as its conflict target, the change-kind CHECK
+      // that admits their revisions, the two table-owner helpers, and the
+      // forgotten-row filters in every RLS-bypassing helper. The exact
+      // expressions and filter counts match db/03-grants-assertion.sql, so a
+      // catalog the assertion rejects (a re-applied db/06, db/10, or db/15,
+      // or a widened policy) never boots. Standalone: an old catalog has no
+      // forgotten_at, and the probe must not fail at parse.
+      const forgetSchema = await client.queryArray<[boolean]>(
+        `SELECT EXISTS (
+                  SELECT 1 FROM pg_attribute
+                  WHERE attrelid = to_regclass('public.thoughts')
+                    AND attname = 'forgotten_at'
+                    AND NOT attisdropped
+                )
+            AND NOT EXISTS (
+                  SELECT 1 FROM pg_attribute AS marker
+                  WHERE marker.attrelid = to_regclass('public.thoughts')
+                    AND marker.attname = 'forgotten_at'
+                    AND NOT marker.attisdropped
+                    AND has_column_privilege(
+                      marker.attrelid, marker.attnum, 'UPDATE'
+                    )
+                )
+            AND EXISTS (
+                  SELECT 1 FROM pg_policy
+                  WHERE polrelid = to_regclass('public.thoughts')
+                    AND polname = 'thoughts_app_not_forgotten'
+                    AND polcmd = '*'
+                    AND NOT polpermissive
+                    AND to_regrole(current_user)::oid = ANY (polroles)
+                    AND pg_get_expr(polqual, polrelid) =
+                      '(forgotten_at IS NULL)'
+                    AND pg_get_expr(polwithcheck, polrelid) =
+                      '(forgotten_at IS NULL)'
+                )
+            AND EXISTS (
+                  SELECT 1 FROM pg_index
+                  WHERE indexrelid = to_regclass('public.idx_thoughts_fingerprint')
+                    AND indrelid = to_regclass('public.thoughts')
+                    AND indisunique
+                    AND indisvalid
+                    AND indnullsnotdistinct
+                    AND pg_get_expr(indpred, indrelid) =
+                      '((content_fingerprint IS NOT NULL) AND (forgotten_at IS NULL))'
+                )
+            AND EXISTS (
+                  SELECT 1 FROM pg_constraint
+                  WHERE conrelid = to_regclass('public.thought_revisions')
+                    AND conname = 'thought_revisions_change_kind'
+                    AND contype = 'c'
+                    AND convalidated
+                    AND pg_get_constraintdef(oid) =
+                      'CHECK ((change_kind = ANY (ARRAY[''content''::text, ''scope''::text, ''metadata''::text, ''forget''::text, ''restore''::text])))'
+                )
+            AND NOT EXISTS (
+                  SELECT 1
+                  FROM unnest(ARRAY[
+                    'memory_scope.forget_thought(uuid,text,text)',
+                    'memory_scope.restore_thought(uuid,text,text)'
+                  ]) AS required(signature)
+                  LEFT JOIN pg_proc AS p
+                    ON p.oid = to_regprocedure(required.signature)
+                  WHERE p.oid IS NULL
+                    OR NOT p.prosecdef
+                    OR p.proowner IS DISTINCT FROM (
+                      SELECT relowner FROM pg_class
+                      WHERE oid = to_regclass('public.thoughts')
+                    )
+                    OR NOT COALESCE(p.proconfig, ARRAY[]::text[])
+                      @> ARRAY['search_path=pg_catalog']
+                    OR NOT has_function_privilege(p.oid, 'EXECUTE')
+                )
+            AND NOT EXISTS (
+                  SELECT 1
+                  FROM (VALUES
+                    ('memory_scope.search_thought_candidates(vector,double precision,text,text,boolean,jsonb,jsonb,integer)', 2),
+                    ('memory_scope.search_thought_candidates(vector,double precision,text,text,boolean,jsonb,jsonb,integer,text)', 2),
+                    ('memory_scope.move_thought(uuid,text,text,memory_scope.visibility,text,text)', 3),
+                    ('memory_scope.restore_thought(uuid,text,text)', 2)
+                  ) AS required(signature, minimum)
+                  LEFT JOIN pg_proc AS p
+                    ON p.oid = to_regprocedure(required.signature)
+                  WHERE p.oid IS NULL
+                    OR regexp_count(p.prosrc, 't[.]forgotten_at IS NULL')
+                      < required.minimum
+                )`,
+      );
+      if (forgetSchema.rows[0]?.[0] !== true) {
+        throw new RequiredSchemaError(
+          `[db] Postgres at ${target} has a missing or regressed ` +
+            `forget/restore schema (public.thoughts.forgotten_at without an ` +
+            `app UPDATE grant, the restrictive thoughts_app_not_forgotten ` +
+            `policy, the live-rows idx_thoughts_fingerprint, the ` +
+            `forget/restore change-kind CHECK, the table-owner ` +
+            `memory_scope.forget_thought/restore_thought helpers, and ` +
+            `forgotten-row filters in the search, move, and restore ` +
+            `helpers). Apply db/17-forget-thoughts.sql as a PostgreSQL ` +
+            `superuser — after any re-applied earlier migration — then run ` +
+            `db/03-grants-assertion.sql, which names the regressed object, ` +
+            `before starting this server version.`,
+        );
+      }
       const oauthSchema = await client.queryArray<[boolean]>(
         `SELECT to_regclass('oauth_auth.allowed_subject') IS NOT NULL
           AND to_regprocedure('oauth_auth.allow_subject(text,text,text)') IS NOT NULL

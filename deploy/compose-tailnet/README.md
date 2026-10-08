@@ -481,14 +481,18 @@ docker compose --env-file .env exec -T postgres psql -X --single-transaction -v 
 docker compose --env-file .env exec -T postgres \
   psql -X --single-transaction -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/14-native-token-principals.sql
-# Migrations 15 and 16 manage their own transactions. Assert only after they
-# commit.
+# Migrations 15, 16, and 17 manage their own transactions. Assert only after
+# they commit. 17 redefines objects 06/10/15/16 create, so it always runs after
+# them.
 docker compose --env-file .env exec -T postgres \
   psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/15-embedding-index.sql
 docker compose --env-file .env exec -T postgres \
   psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/16-thought-metadata-revisions.sql
+docker compose --env-file .env exec -T postgres \
+  psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/17-forget-thoughts.sql
 docker compose --env-file .env exec -T postgres \
   psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/03-grants-assertion.sql
@@ -528,6 +532,25 @@ For **1.30.0**, the block above also applies migration 16, which only admits the
 is no backfill or relabel; start MCP as above. The optional, maintenance-only
 [metadata reclassifier](../../docs/metadata-degradation-monitoring.md#reclassifying-legacy-and-stub-thoughts)
 requires it and can run while MCP serves.
+
+For **1.31.0**, the block above also applies migration 17, which adds
+`forget_thought` / `restore_thought`: a `forgotten_at` marker, a restrictive
+policy hiding forgotten thoughts from the application role, a fingerprint index
+over live rows only, the two helpers, and forgotten-row filters in the search
+and move helpers. It rewrites no rows; the index rebuild takes a brief lock. The
+1.31.0 capture upsert names the new index, and older servers cannot capture once
+it exists, so keep MCP stopped until the migration and assertion pass. Migration
+17 always runs after 06, 10, 15, and 16. Once it is in place, replaying 06 or 16
+leaves its index and change-kind CHECK alone, so later upgrades replay cleanly
+after thoughts have been forgotten; replaying 06, 10, or 15 still restores an
+unfiltered search or move helper, so re-run 17 after them — the assertion and
+boot probe refuse that catalog. [Back up](../compose-local/README.md#backups)
+before applying it: rolling back to 1.30.0 or earlier afterwards means restoring
+that backup (and losing later writes). A 1.30.0 server starts against the
+migrated catalog but every capture fails. The
+[metadata reclassifier](../../docs/metadata-degradation-monitoring.md#reclassifying-legacy-and-stub-thoughts)
+now requires migration 17 as well. See
+[Forgetting and restoring thoughts](../../docs/spaces.md#forgetting-and-restoring-thoughts).
 
 Upgrading to **1.27.0**: migration 14 is required even though Pattern B keeps
 native tokens disabled. Apply it in a transaction, then migrations 15 and 16 and

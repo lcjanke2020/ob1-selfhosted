@@ -363,7 +363,10 @@ export async function thoughtEmbeddingSource(
 // trimmed/lowercased/whitespace-collapsed content, computed inline so dedupe
 // happens via the partial unique index on content_fingerprint. On conflict
 // we refresh the embedding (in case the model changed) and merge any new
-// metadata fields into the existing row's metadata.
+// metadata fields into the existing row's metadata. The index covers live
+// rows only (db/17-forget-thoughts.sql), and the conflict target repeats its
+// full predicate: capturing a forgotten thought's text inserts a new row
+// instead of arbitrating against a row the app can no longer see.
 export async function captureThought(
   pool: Pool,
   input: CaptureInput,
@@ -390,7 +393,7 @@ export async function captureThought(
        ON CONFLICT (
          workspace_id, project_id, visibility, owner_subject,
          content_fingerprint
-       ) WHERE content_fingerprint IS NOT NULL
+       ) WHERE content_fingerprint IS NOT NULL AND forgotten_at IS NULL
        DO UPDATE SET
          embedding = EXCLUDED.embedding,
          metadata = thoughts.metadata || COALESCE(EXCLUDED.metadata, '{}'::jsonb),
@@ -815,6 +818,73 @@ export async function moveThought(
         input.actor.door,
         input.actor.tokenLabel,
       ],
+    );
+    return result.rows[0] ?? null;
+  });
+}
+
+export type ForgetThoughtOutcome = {
+  outcome: "forgotten" | "unchanged";
+  // Number of revision rows on record after this call.
+  revision: number;
+  forgotten_at: string;
+  workspace_id: string;
+  project_id: string | null;
+  visibility: ThoughtRecord["visibility"];
+};
+
+// Delegates to memory_scope.forget_thought (db/17-forget-thoughts.sql). The
+// restrictive thoughts_app_not_forgotten policy hides a forgotten row from
+// every app-role statement, and the app holds no UPDATE on forgotten_at, so
+// the SECURITY DEFINER helper is the only path. It re-checks visibility under
+// the installed audience and records the actor on a 'forget' revision. Null
+// means not visible.
+export async function forgetThought(
+  pool: Pool,
+  input: {
+    id: string;
+    actor: ThoughtMutationActor;
+    scope: ResolvedReadScope;
+  },
+): Promise<ForgetThoughtOutcome | null> {
+  return await withScopeClient(pool, input.scope, async (client) => {
+    const result = await client.queryObject<ForgetThoughtOutcome>(
+      `SELECT outcome, revision, forgotten_at,
+              workspace_id, project_id, visibility
+       FROM memory_scope.forget_thought($1::uuid, $2::text, $3::text)`,
+      [input.id, input.actor.door, input.actor.tokenLabel],
+    );
+    return result.rows[0] ?? null;
+  });
+}
+
+export type RestoreThoughtOutcome = {
+  outcome: "restored" | "unchanged" | "conflict";
+  conflict_thought_id: string | null;
+  revision: number | null;
+  workspace_id: string;
+  project_id: string | null;
+  visibility: ThoughtRecord["visibility"];
+};
+
+// Delegates to memory_scope.restore_thought (db/17-forget-thoughts.sql): the
+// counterpart of forgetThought, returning the row to recall in the audience it
+// was forgotten from. A live thought with the same content in that audience is
+// the 'conflict' outcome. Null means not visible.
+export async function restoreThought(
+  pool: Pool,
+  input: {
+    id: string;
+    actor: ThoughtMutationActor;
+    scope: ResolvedReadScope;
+  },
+): Promise<RestoreThoughtOutcome | null> {
+  return await withScopeClient(pool, input.scope, async (client) => {
+    const result = await client.queryObject<RestoreThoughtOutcome>(
+      `SELECT outcome, conflict_thought_id, revision,
+              workspace_id, project_id, visibility
+       FROM memory_scope.restore_thought($1::uuid, $2::text, $3::text)`,
+      [input.id, input.actor.door, input.actor.tokenLabel],
     );
     return result.rows[0] ?? null;
   });

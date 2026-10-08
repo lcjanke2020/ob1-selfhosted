@@ -58,6 +58,8 @@ on:
       - "server/session_ordering_db_smoke.ts"
       - "server/session_grants_db_smoke.ts"
       - "server/thought_mutations_db_smoke.ts"
+      - "server/thought_forget_db_smoke.ts"
+      - "server/thought_forget_probe_db_smoke.ts"
       - "server/metadata.ts"
       - "server/metadata_reclassify.ts"
       - "server/metadata_reclassify_db_smoke.ts"

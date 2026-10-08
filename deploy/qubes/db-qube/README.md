@@ -161,6 +161,7 @@ sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
 #   db/14-native-token-principals.sql
 #   db/15-embedding-index.sql
 #   db/16-thought-metadata-revisions.sql
+#   db/17-forget-thoughts.sql
 #   db/03-grants-assertion.sql  # always last
 ```
 
@@ -258,6 +259,20 @@ admits the `metadata` change kind in thought revision history for the
 maintenance-only
 [metadata reclassifier](../../../docs/metadata-degradation-monitoring.md#reclassifying-legacy-and-stub-thoughts).
 It rewrites no rows; the final grants assertion requires it.
+
+Version 1.31.0 adds `db/17-forget-thoughts.sql` (superuser), the schema behind
+`forget_thought` / `restore_thought`
+([Forgetting and restoring thoughts](../../../docs/spaces.md#forgetting-and-restoring-thoughts)).
+It rewrites no rows. Stop MCP before applying it: the replaced fingerprint index
+no longer matches an older server's capture upsert. It redefines objects that
+migrations 06, 10, 15, and 16 create, so it runs after them. Replaying 06 or 16
+afterwards leaves its fingerprint index and change-kind CHECK in place, so the
+upgrade replay keeps working once thoughts have been forgotten; replaying 06,
+10, or 15 restores an unfiltered search or move helper, so re-run 17 after them.
+The final grants assertion and the 1.31.0 boot probe refuse that catalog.
+Rolling back to 1.30.0 or earlier after migration 17 means restoring the
+labelled pre-migration rollback point (losing later writes): a 1.30.0 server
+starts against the migrated catalog, but every capture fails.
 
 Server 1.25.0 adds the `openbrain_auth_rollup` login. On a fresh cluster, create
 it from the exact definition in `db/00-roles.sh`; on an existing split install,

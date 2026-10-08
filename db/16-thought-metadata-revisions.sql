@@ -25,16 +25,35 @@
 -- the table owner or a PostgreSQL superuser (normally `postgres`). Idempotent.
 -- Re-adding the CHECK validates the existing history under a brief ACCESS
 -- EXCLUSIVE lock on thought_revisions; thoughts themselves are not locked.
+-- Once 17-forget-thoughts.sql has widened the CHECK, replaying this file
+-- leaves it unchanged: history may then hold forget/restore revisions.
 
 BEGIN;
 
-ALTER TABLE public.thought_revisions
-  DROP CONSTRAINT IF EXISTS thought_revisions_change_kind,
-  ADD CONSTRAINT thought_revisions_change_kind CHECK (
-    change_kind IN ('content', 'scope', 'metadata')
-  );
-
-COMMENT ON TABLE public.thought_revisions IS
-  'Append-only prior-state history for thought content updates, audience moves, and maintenance metadata reclassification (changed_by_door = maintenance); readable only when the head thought is readable.';
+-- 17-forget-thoughts.sql widens this CHECK to forget/restore. Narrowing it
+-- back would fail validation once any thought has been forgotten, so a replay
+-- after 17 leaves 17's exact, validated CHECK (and its table comment) in place.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'public.thought_revisions'::regclass
+      AND conname = 'thought_revisions_change_kind'
+      AND contype = 'c'
+      AND convalidated
+      AND pg_get_constraintdef(oid) =
+        'CHECK ((change_kind = ANY (ARRAY[''content''::text, ''scope''::text, ''metadata''::text, ''forget''::text, ''restore''::text])))'
+  ) THEN
+    RETURN;
+  END IF;
+  ALTER TABLE public.thought_revisions
+    DROP CONSTRAINT IF EXISTS thought_revisions_change_kind,
+    ADD CONSTRAINT thought_revisions_change_kind CHECK (
+      change_kind IN ('content', 'scope', 'metadata')
+    );
+  COMMENT ON TABLE public.thought_revisions IS
+    'Append-only prior-state history for thought content updates, audience moves, and maintenance metadata reclassification (changed_by_door = maintenance); readable only when the head thought is readable.';
+END;
+$$;
 
 COMMIT;

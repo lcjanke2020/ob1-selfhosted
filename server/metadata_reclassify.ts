@@ -31,12 +31,16 @@ import {
 } from "./metadata.ts";
 import { PRESERVED_METADATA_KEYS_ON_UPDATE } from "./queries.ts";
 
-// Thoughts whose metadata predates the classifier stamp, or whose stamp is the
-// uncategorized stub. Primary- and fallback-stamped rows are never selected,
-// so a rerun picks up only what is still unclassified.
+// Live thoughts whose metadata predates the classifier stamp, or whose stamp
+// is the uncategorized stub. Primary- and fallback-stamped rows are never
+// selected, so a rerun picks up only what is still unclassified. Forgotten
+// thoughts (db/17-forget-thoughts.sql) are never sent to the classifier.
 const CANDIDATE_SQL = `(
-  NOT (t.metadata ? 'metadata_extraction')
-  OR t.metadata->'metadata_extraction'->>'endpoint' = 'stub'
+  t.forgotten_at IS NULL
+  AND (
+    NOT (t.metadata ? 'metadata_extraction')
+    OR t.metadata->'metadata_extraction'->>'endpoint' = 'stub'
+  )
 )`;
 
 // Revision rows written by operator tools carry this door label and no
@@ -102,13 +106,15 @@ function classification(type: unknown, topics: unknown): Classification {
   };
 }
 
-// Migration 16's CHECK exactly as PostgreSQL prints it; the grants assertion
-// pins the same text.
+// The change-kind CHECK exactly as PostgreSQL prints it after migration 17
+// (which adds 'forget'/'restore' to migration 16's 'metadata'); the grants
+// assertion pins the same text. This tool's candidate SQL also needs
+// migration 17's forgotten_at column.
 const CHANGE_KIND_CHECK =
-  "CHECK ((change_kind = ANY (ARRAY['content'::text, 'scope'::text, 'metadata'::text])))";
+  "CHECK ((change_kind = ANY (ARRAY['content'::text, 'scope'::text, 'metadata'::text, 'forget'::text, 'restore'::text])))";
 
 // Proves before any thought is read that a 'metadata' revision will pass every
-// CHECK on change_kind: the named CHECK has migration 16's exact, validated
+// CHECK on change_kind: the named CHECK has migration 17's exact, validated
 // definition, and no other CHECK reads change_kind. PostgreSQL ANDs every
 // CHECK, and one added NOT VALID still binds new rows. Mirrors the grants
 // assertion.
@@ -141,7 +147,7 @@ async function requireMetadataRevisionKind(client: PoolClient) {
   const row = kind.rows[0];
   if (row?.ready !== true) {
     throw new Error(
-      "public.thought_revisions does not accept change_kind 'metadata'; apply db/16-thought-metadata-revisions.sql as a PostgreSQL superuser, then db/03-grants-assertion.sql",
+      "public.thought_revisions change_kind is not the expected CHECK; apply db/16-thought-metadata-revisions.sql and db/17-forget-thoughts.sql as a PostgreSQL superuser, then db/03-grants-assertion.sql",
     );
   }
   if (row.narrowing.length > 0) {
@@ -166,7 +172,9 @@ async function writeReclassified(
   freshMetadata: Record<string, unknown>,
 ): Promise<Classification | null> {
   const locked = await client.queryObject<{ unchanged: boolean }>(
-    `SELECT (t.content = $2 AND t.metadata = $3::jsonb) AS unchanged
+    `SELECT (
+       t.content = $2 AND t.metadata = $3::jsonb AND t.forgotten_at IS NULL
+     ) AS unchanged
      FROM public.thoughts AS t WHERE t.id = $1
      FOR UPDATE`,
     [id, classified.content, classified.metadata],

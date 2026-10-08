@@ -43,6 +43,8 @@ const representativeChanges = [
   "server/embedding_empty_search_db_smoke.ts",
   "server/metadata_reclassify.ts",
   "server/metadata_reclassify_db_smoke.ts",
+  "server/thought_forget_db_smoke.ts",
+  "server/thought_forget_probe_db_smoke.ts",
   "server/maintenance.ts",
   "server/scope.ts",
   "deploy/qubes/ingress-qube/docker-compose.yml",

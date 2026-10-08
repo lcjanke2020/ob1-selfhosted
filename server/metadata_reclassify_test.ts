@@ -24,10 +24,10 @@ const ENV = {
 // metadata_config_test.ts.
 const PRIMARY = { base_url: "http://primary.invalid/v1", model: "test-model" };
 
-// Migration 16's CHECK as PostgreSQL prints it, pinned independently of the
+// Migration 17's CHECK as PostgreSQL prints it, pinned independently of the
 // tool's own copy.
 const CHANGE_KIND_CHECK =
-  "CHECK ((change_kind = ANY (ARRAY['content'::text, 'scope'::text, 'metadata'::text])))";
+  "CHECK ((change_kind = ANY (ARRAY['content'::text, 'scope'::text, 'metadata'::text, 'forget'::text, 'restore'::text])))";
 
 const ID_A = "00000000-0000-4000-8000-00000000000a";
 const ID_B = "00000000-0000-4000-8000-00000000000b";
@@ -310,10 +310,10 @@ Deno.test(
       ],
       ["primary disabled", {}, false, "ENABLE_PRIMARY_EXTRACTION=true"],
       [
-        "migration 16 missing",
+        "migration 16/17 missing",
         { migrated: false },
         true,
-        "apply db/16-thought-metadata-revisions.sql",
+        "apply db/16-thought-metadata-revisions.sql and db/17-forget-thoughts.sql",
       ],
       [
         "another CHECK reads change_kind",
@@ -386,6 +386,8 @@ Deno.test(
       c.sql.includes("ORDER BY t.created_at, t.id")
     );
     assert(listing);
+    // Forgotten thoughts are never sent to the classifier.
+    assert(listing.sql.includes("t.forgotten_at IS NULL"));
     assert(listing.sql.includes("NOT (t.metadata ? 'metadata_extraction')"));
     assert(
       listing.sql.includes(
@@ -498,6 +500,8 @@ Deno.test(
     );
     assert(lock);
     assert(lock.sql.includes("FOR UPDATE"));
+    // A thought forgotten after the re-read is not written.
+    assert(lock.sql.includes("t.forgotten_at IS NULL"));
     assertEquals(lock.params, [
       ID_A,
       original.content,
