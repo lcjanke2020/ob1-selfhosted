@@ -40,8 +40,11 @@ const SCRIPT = `
     }), { status: 200 });
   };
   const metadata = await import("./metadata.ts");
-  const result = Deno.env.get("TEST_METADATA_ENTRYPOINT") === "primary"
+  const entrypoint = Deno.env.get("TEST_METADATA_ENTRYPOINT");
+  const result = entrypoint === "primary"
     ? await metadata.classifyWithPrimary("content must not be echoed")
+    : entrypoint === "reclassify-destination"
+    ? (await import("./metadata_reclassify.ts")).defaultReclassifyDeps.primary
     : await metadata.extractMetadata("content must not be echoed");
   writeOutput(JSON.stringify({ result, urls, warnings, logs }));
 `;
@@ -215,5 +218,23 @@ Deno.test("primary-only classification refuses a disabled primary without any re
   assertEquals(run.result, { ok: false, reason: "primary_disabled" });
   assertEquals(run.urls, []);
   assertEquals(run.warnings, []);
+  assertEquals(run.logs, []);
+});
+
+Deno.test("metadata reclassify reports a credential-stripped primary destination", async () => {
+  const output = await runConfigSubprocess(SCRIPT, BASE_ENV, {
+    ENABLE_PRIMARY_EXTRACTION: "true",
+    CHAT_API_BASE:
+      "http://operator:secret@primary.invalid/v1?api_key=secret#fragment",
+    CHAT_MODEL: "local-model",
+    TEST_METADATA_ENTRYPOINT: "reclassify-destination",
+  });
+  assertEquals(output.code, 0, output.stderr);
+  const run = JSON.parse(output.stdout);
+  assertEquals(run.result, {
+    base_url: "http://primary.invalid/v1",
+    model: "local-model",
+  });
+  assertEquals(run.urls, []);
   assertEquals(run.logs, []);
 });

@@ -186,9 +186,12 @@ The tool refuses to start, before reading any thought, unless:
   audience, including personal and `sensitive` rows (as for the
   [embedding backfill](embedding-limits.md#compose-backfill-runner));
 - `ENABLE_PRIMARY_EXTRACTION=true` with `CHAT_API_BASE` and `CHAT_MODEL`;
-- `db/16-thought-metadata-revisions.sql` has been applied. The server itself
-  does not need migration 16, but the deployment upgrade procedures and the
-  final grants assertion include it.
+- `db/16-thought-metadata-revisions.sql` has been applied, exactly, and no other
+  CHECK constraint reads `thought_revisions.change_kind`. PostgreSQL ANDs every
+  CHECK, so such a constraint could reject the `metadata` revision after the
+  first thought was already sent; the grants assertion rejects the same drift.
+  The server itself does not need migration 16, but the deployment upgrade
+  procedures and the final grants assertion include it.
 
 **Privacy:** an apply run sends the full content of every selected thought,
 including personal and `sensitive` rows, to the primary endpoint, and only
@@ -215,7 +218,8 @@ docker compose --env-file .env run --rm --no-deps -T \
   -e DB_USER=postgres -e DB_PASSWORD mcp \
   deno run --cached-only --frozen --allow-env --allow-net metadata_reclassify.ts
 
-# Review the candidates and confirm CHAT_API_BASE is the local classifier.
+# Review the candidates, and confirm the summary's primary base_url and model
+# are the local classifier.
 read -r -p 'Send these thoughts to the primary classifier? Type reclassify: ' reclassify_review
 test "$reclassify_review" = reclassify
 docker compose --env-file .env run --rm --no-deps -T \
@@ -226,26 +230,32 @@ docker compose --env-file .env run --rm --no-deps -T \
 
 `--id <uuid>` (repeatable) restricts a run to those thoughts; a requested id
 that is not a candidate is reported as `not_candidate`. `--limit <n>` processes
-at most the `n` oldest candidates, for a trial batch before the full run.
+at most the `n` oldest candidates, for a trial batch before the full run. The
+apply run selects candidates again, so a thought stored with the stub after the
+plan is included; to send exactly the reviewed set, pass its ids with `--id`.
 
 Output is one JSON line per thought, then a summary line:
 
 ```json
 {"id":"…","outcome":"reclassified","before":{"type":"task","topics":["setup"]},"after":{"type":"observation","topics":["setup"]}}
-{"id":"…","outcome":"primary_failed","reason":"transport_or_timeout","before":{"type":"observation","topics":["uncategorized"]}}
-{"summary":{"mode":"apply","candidates":2,"selected":2,"would_reclassify":0,"reclassified":1,"primary_failed":1,"changed_concurrently":0,"not_candidate":0}}
+{"id":"…","outcome":"primary_failed","reason":"non_2xx","http_status":401,"before":{"type":"observation","topics":["uncategorized"]}}
+{"summary":{"mode":"apply","primary":{"base_url":"http://classifier.internal:11434/v1","model":"local-model"},"candidates":2,"selected":2,"would_reclassify":0,"reclassified":1,"primary_failed":1,"changed_concurrently":0,"not_candidate":0}}
 ```
 
-A plan reports `would_reclassify` instead. Lines carry only ids, outcomes,
-failure reasons, and the before/after `type` and `topics`; never content,
-people, action items or dates. Topics still derive from content, so handle the
-output like the corpus.
+A plan reports `would_reclassify` instead, and its summary names the same
+destination an apply run would use. Lines carry only ids, outcomes, failure
+reasons (with the HTTP status of a `non_2xx` failure: 401 or 403 is the key, 404
+usually a base URL missing `/v1`, 429 or 5xx the primary itself), and the
+before/after `type` and `topics`; never content, people, action items or dates.
+The summary's `primary` is the base URL with any userinfo, query and fragment
+removed, plus the model. Topics still derive from content, so handle the output
+like the corpus.
 
-| Exit | Meaning                                                                                                                                                                                                    |
-| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0    | Completed. Every selected thought was planned or reclassified; `not_candidate` ids are informational.                                                                                                      |
-| 1    | Refused or aborted: usage error, non-superuser connection, primary extraction disabled, migration 16 missing, or a database error. Thoughts committed before an abort keep their revisions; rerun resumes. |
-| 2    | Completed, but at least one thought was `primary_failed` or `changed_concurrently` and was left untouched. Rerun to retry it.                                                                              |
+| Exit | Meaning                                                                                                                                                                                                                                      |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | Completed. Every selected thought was planned or reclassified; `not_candidate` ids are informational.                                                                                                                                        |
+| 1    | Refused or aborted: usage error, non-superuser connection, primary extraction disabled, migration 16 missing or another CHECK on `change_kind`, or a database error. Thoughts committed before an abort keep their revisions; rerun resumes. |
+| 2    | Completed, but at least one thought was `primary_failed` or `changed_concurrently` and was left untouched. Rerun to retry it.                                                                                                                |
 
 Each rewrite's prior metadata stays in its revision row for audit:
 

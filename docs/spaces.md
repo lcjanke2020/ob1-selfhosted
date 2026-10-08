@@ -108,21 +108,22 @@ content, metadata, workspace/project/visibility/owner, plus the subject, door,
 and token label the server verified for the request — into
 `public.thought_revisions` (`db/10-thought-mutations.sql`), as `change_kind`
 `content` or `scope`. A third kind, `metadata`
-(`db/16-thought-metadata-revisions.sql`), is never written by the server itself,
-only by the maintenance-only superuser tool that
-[reclassifies legacy and stub thoughts](metadata-degradation-monitoring.md#reclassifying-legacy-and-stub-thoughts):
-it snapshots the same prior state with door `maintenance` and no subject or
-token label, because no authenticated request made the change. The application
-role can append and read that history but never rewrite or erase it. Revision
-rows are readable exactly when their head thought is readable, so once a
-misfiled thought has been moved to a narrower audience its earlier text is no
-longer visible to the audience it left. `fetch` and search return heads only;
-the history is an audit trail, not a second recall surface. There is no
-soft-delete yet; that remains follow-up work. This attribution is
-server-verified but still application-trusted at the database boundary: a
-compromised `openbrain_app` credential can append fabricated history or actor
-fields even though it cannot alter genuine rows. The rationale for documenting
-that boundary instead of adding privileged mutation triggers/functions is in the
+(`db/16-thought-metadata-revisions.sql`), is written only by the
+maintenance-only superuser tool that
+[reclassifies legacy and stub thoughts](metadata-degradation-monitoring.md#reclassifying-legacy-and-stub-thoughts),
+never by the server code: it snapshots the same prior state with door
+`maintenance` and no subject or token label, because no authenticated request
+made the change. The application role can append and read that history but never
+rewrite or erase it. Revision rows are readable exactly when their head thought
+is readable, so once a misfiled thought has been moved to a narrower audience
+its earlier text is no longer visible to the audience it left. `fetch` and
+search return heads only; the history is an audit trail, not a second recall
+surface. There is no soft-delete yet; that remains follow-up work. This
+attribution is server-verified but still application-trusted at the database
+boundary: a compromised `openbrain_app` credential can append fabricated history
+or actor fields even though it cannot alter genuine rows. The rationale for
+documenting that boundary instead of adding privileged mutation
+triggers/functions is in the
 [security model](security-model.md#known-limitations).
 
 Under the hood, an update is an ordinary application-role `UPDATE` of the

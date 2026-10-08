@@ -580,33 +580,37 @@ async function testMetadata(t: Deno.TestContext): Promise<void> {
             `${PRIMARY_BASE}/chat/completions`,
           ]);
 
-          const failures: [string, () => Response, string][] = [
-            ["non-2xx", () => chatErr(503), "non_2xx"],
+          const failures: [string, () => Response, Record<string, unknown>][] =
             [
-              "schema-invalid",
-              () => chatOk(validMetadata({ type: "diary" })),
-              "schema_rejection",
-            ],
-            [
-              "unparseable",
-              () =>
-                new Response(
-                  JSON.stringify({
-                    choices: [{ message: { content: "not json" } }],
-                  }),
-                  { status: 200 },
-                ),
-              "unparseable_output",
-            ],
-            [
-              "transport",
-              () => {
-                throw new TypeError("connection refused");
-              },
-              "transport_or_timeout",
-            ],
-          ];
-          for (const [label, primaryResponse, reason] of failures) {
+              ["non-2xx", () => chatErr(503), {
+                reason: "non_2xx",
+                status: 503,
+              }],
+              [
+                "schema-invalid",
+                () => chatOk(validMetadata({ type: "diary" })),
+                { reason: "schema_rejection" },
+              ],
+              [
+                "unparseable",
+                () =>
+                  new Response(
+                    JSON.stringify({
+                      choices: [{ message: { content: "not json" } }],
+                    }),
+                    { status: 200 },
+                  ),
+                { reason: "unparseable_output" },
+              ],
+              [
+                "transport",
+                () => {
+                  throw new TypeError("connection refused");
+                },
+                { reason: "transport_or_timeout" },
+              ],
+            ];
+          for (const [label, primaryResponse, failure] of failures) {
             calls.length = 0;
             responder = (c) =>
               c.url.startsWith(PRIMARY_BASE)
@@ -614,7 +618,7 @@ async function testMetadata(t: Deno.TestContext): Promise<void> {
                 : chatOk(validMetadata({ topics: ["wrong-endpoint"] }));
             assertEquals<unknown>(
               await classifyWithPrimary("any text"),
-              { ok: false, reason },
+              { ok: false, ...failure },
               label,
             );
             assertEquals(

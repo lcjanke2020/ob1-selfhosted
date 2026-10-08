@@ -13,6 +13,8 @@
 // content, people, action items, or dates.
 import { Pool, type PoolClient } from "postgres";
 import {
+  CHAT_API_BASE,
+  CHAT_MODEL,
   DB_HOST,
   DB_NAME,
   DB_PASSWORD,
@@ -24,6 +26,7 @@ import { requireSuperuser } from "./maintenance.ts";
 import {
   classifyWithPrimary,
   type PrimaryClassification,
+  sanitizeMetadataEndpointBase,
   withoutReservedMetadataKeys,
 } from "./metadata.ts";
 import { PRESERVED_METADATA_KEYS_ON_UPDATE } from "./queries.ts";
@@ -55,20 +58,32 @@ export type ReclassifyOptions = {
   limit?: number;
 };
 
+// Where an apply run sends content: the credential-stripped base URL (as
+// stamped on degradation events) and the model of the primary endpoint.
+export type PrimaryDestination = { base_url: string; model: string };
+
 export type ReclassifyDeps = {
   primaryEnabled: boolean;
+  primary: PrimaryDestination;
   classify: (text: string) => Promise<PrimaryClassification>;
   emit: (record: Record<string, unknown>) => void;
 };
 
 export const defaultReclassifyDeps: ReclassifyDeps = {
   primaryEnabled: ENABLE_PRIMARY_EXTRACTION,
+  primary: {
+    base_url: sanitizeMetadataEndpointBase(CHAT_API_BASE),
+    model: CHAT_MODEL,
+  },
   classify: classifyWithPrimary,
   emit: (record) => console.log(JSON.stringify(record)),
 };
 
 export type ReclassifySummary = {
   mode: "plan" | "apply";
+  // Printed by plan too, so the operator confirms the destination before
+  // approving an apply run.
+  primary: PrimaryDestination;
   // Every candidate matching the id restriction, before --limit.
   candidates: number;
   selected: number;
@@ -87,20 +102,53 @@ function classification(type: unknown, topics: unknown): Classification {
   };
 }
 
+// Migration 16's CHECK exactly as PostgreSQL prints it; the grants assertion
+// pins the same text.
+const CHANGE_KIND_CHECK =
+  "CHECK ((change_kind = ANY (ARRAY['content'::text, 'scope'::text, 'metadata'::text])))";
+
+// Proves before any thought is read that a 'metadata' revision will pass every
+// CHECK on change_kind: the named CHECK has migration 16's exact, validated
+// definition, and no other CHECK reads change_kind. PostgreSQL ANDs every
+// CHECK, and one added NOT VALID still binds new rows. Mirrors the grants
+// assertion.
 async function requireMetadataRevisionKind(client: PoolClient) {
-  const kind = await client.queryObject<{ ready: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1 FROM pg_constraint AS c
-       WHERE c.conrelid = to_regclass('public.thought_revisions')
-         AND c.conname = 'thought_revisions_change_kind'
-         AND c.contype = 'c'
-         AND c.convalidated
-         AND pg_get_constraintdef(c.oid) LIKE '%''metadata''%'
-     ) AS ready`,
+  const kind = await client.queryObject<
+    { ready: boolean; narrowing: string[] }
+  >(
+    `SELECT
+       EXISTS (
+         SELECT 1 FROM pg_constraint AS c
+         WHERE c.conrelid = to_regclass('public.thought_revisions')
+           AND c.conname = 'thought_revisions_change_kind'
+           AND c.contype = 'c'
+           AND c.convalidated
+           AND pg_get_constraintdef(c.oid) = $1
+       ) AS ready,
+       ARRAY(
+         SELECT c.conname::text
+         FROM pg_constraint AS c
+         JOIN pg_attribute AS a
+           ON a.attrelid = c.conrelid AND a.attname = 'change_kind'
+         WHERE c.conrelid = to_regclass('public.thought_revisions')
+           AND c.contype = 'c'
+           AND c.conname <> 'thought_revisions_change_kind'
+           AND a.attnum = ANY (c.conkey)
+         ORDER BY 1
+       ) AS narrowing`,
+    [CHANGE_KIND_CHECK],
   );
-  if (kind.rows[0]?.ready !== true) {
+  const row = kind.rows[0];
+  if (row?.ready !== true) {
     throw new Error(
       "public.thought_revisions does not accept change_kind 'metadata'; apply db/16-thought-metadata-revisions.sql as a PostgreSQL superuser, then db/03-grants-assertion.sql",
+    );
+  }
+  if (row.narrowing.length > 0) {
+    throw new Error(
+      `public.thought_revisions change_kind must be constrained only by thought_revisions_change_kind; drop ${
+        row.narrowing.join(", ")
+      } as a PostgreSQL superuser, then run db/03-grants-assertion.sql`,
     );
   }
 }
@@ -180,6 +228,7 @@ export async function reclassifyMetadata(
   const apply = options.apply === true;
   const summary: ReclassifySummary = {
     mode: apply ? "apply" : "plan",
+    primary: deps.primary,
     candidates: 0,
     selected: 0,
     would_reclassify: 0,
@@ -253,7 +302,11 @@ export async function reclassifyMetadata(
     if (!result.ok) {
       // The capture-path degradation ledger is not written: this is an
       // operator run, reported here and retried by rerunning.
-      report(candidate.id, "primary_failed", { reason: result.reason, before });
+      report(candidate.id, "primary_failed", {
+        reason: result.reason,
+        ...(result.reason === "non_2xx" ? { http_status: result.status } : {}),
+        before,
+      });
       continue;
     }
     const freshMetadata = {

@@ -20,10 +20,11 @@
 -- this migration to start; metadata_reclassify.ts refuses to run without it.
 -- Apply after 10-thought-mutations.sql (and the rest of the numbered
 -- migrations), then run the stable 03-grants-assertion.sql source last; the
--- assertion pins the exact set of change kinds. Requires the table owner or a
--- PostgreSQL superuser (normally `postgres`). Idempotent. Re-adding the CHECK
--- validates the existing history under a brief ACCESS EXCLUSIVE lock on
--- thought_revisions; thoughts themselves are not locked.
+-- assertion pins the exact set of change kinds and rejects any other CHECK on
+-- change_kind, which this migration leaves for the operator to drop. Requires
+-- the table owner or a PostgreSQL superuser (normally `postgres`). Idempotent.
+-- Re-adding the CHECK validates the existing history under a brief ACCESS
+-- EXCLUSIVE lock on thought_revisions; thoughts themselves are not locked.
 
 BEGIN;
 

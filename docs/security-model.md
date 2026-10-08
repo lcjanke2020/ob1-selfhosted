@@ -347,12 +347,13 @@ readable only when the head thought is readable, so a thought moved to a
 narrower audience takes its history with it. The maintenance-only superuser
 reclassifier (`server/metadata_reclassify.ts`) records a third kind, `metadata`,
 labeled `changed_by_door = 'maintenance'`. Revision values and actor attribution
-are nevertheless supplied by the trusted application tier; the database prevents
-rewriting or erasing genuine rows but does not attest that every insert
-describes a real mutation. The grants assertion pins the column-scoped grant,
-the function's definer/owner/config shape and grantee set, and the history
-table's grants, forced policy, and exact change kinds; the boot probe requires
-the function and the table.
+are nevertheless supplied by trusted code, the application tier or that operator
+tool; the database prevents rewriting or erasing genuine rows but does not
+attest that every insert describes a real mutation (the application role could,
+for example, insert a row labeled `maintenance`). The grants assertion pins the
+column-scoped grant, the function's definer/owner/config shape and grantee set,
+and the history table's grants, forced policy, and exact change kinds; the boot
+probe requires the function and the table.
 
 `db/11-session-update-grants.sql` closes the corresponding session-side gap.
 Session recapture addresses a row through its current exact audience and can

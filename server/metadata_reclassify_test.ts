@@ -20,6 +20,15 @@ const ENV = {
   METADATA_FALLBACK_POLICY: "off",
 };
 
+// The injected destination; the CLI's default is proven fresh-process in
+// metadata_config_test.ts.
+const PRIMARY = { base_url: "http://primary.invalid/v1", model: "test-model" };
+
+// Migration 16's CHECK as PostgreSQL prints it, pinned independently of the
+// tool's own copy.
+const CHANGE_KIND_CHECK =
+  "CHECK ((change_kind = ANY (ARRAY['content'::text, 'scope'::text, 'metadata'::text])))";
+
 const ID_A = "00000000-0000-4000-8000-00000000000a";
 const ID_B = "00000000-0000-4000-8000-00000000000b";
 const ID_C = "00000000-0000-4000-8000-00000000000c";
@@ -108,6 +117,7 @@ function fakeDatabase(
   options: {
     superuser?: boolean;
     migrated?: boolean;
+    narrowing?: string[];
     failOn?: (sql: string) => Error | undefined;
   } = {},
 ) {
@@ -120,7 +130,12 @@ function fakeDatabase(
       return { rows: [{ owner: options.superuser ?? true }] };
     }
     if (sql.includes("pg_get_constraintdef")) {
-      return { rows: [{ ready: options.migrated ?? true }] };
+      return {
+        rows: [{
+          ready: (options.migrated ?? true) && params[0] === CHANGE_KIND_CHECK,
+          narrowing: options.narrowing ?? [],
+        }],
+      };
     }
     if (sql.includes("ORDER BY t.created_at, t.id")) {
       const ids = params[0] as string[] | null;
@@ -300,6 +315,12 @@ Deno.test(
         true,
         "apply db/16-thought-metadata-revisions.sql",
       ],
+      [
+        "another CHECK reads change_kind",
+        { narrowing: ["drift_a", "drift_b"] },
+        true,
+        "constrained only by thought_revisions_change_kind; drop drift_a, drift_b",
+      ],
     ];
     for (const [label, database, primaryEnabled, message] of cases) {
       for (const apply of [false, true]) {
@@ -314,6 +335,7 @@ Deno.test(
                 { apply },
                 {
                   primaryEnabled,
+                  primary: PRIMARY,
                   classify,
                   emit: (record) => emitted.push(record),
                 },
@@ -347,7 +369,12 @@ Deno.test(
       const summary = await reclassifyMetadata(
         client as unknown as PoolClient,
         options,
-        { primaryEnabled: true, classify, emit: (r) => emitted.push(r) },
+        {
+          primaryEnabled: true,
+          primary: PRIMARY,
+          classify,
+          emit: (r) => emitted.push(r),
+        },
       );
       assertEquals(texts, [], "plan never contacts the classifier");
       assertEquals(writes(client), [], "plan never writes");
@@ -380,6 +407,7 @@ Deno.test(
       {
         summary: {
           mode: "plan",
+          primary: PRIMARY,
           candidates: 2,
           selected: 2,
           would_reclassify: 2,
@@ -448,7 +476,12 @@ Deno.test(
     const summary = await reclassifyMetadata(
       client as unknown as PoolClient,
       { apply: true, ids: [ID_A] },
-      { primaryEnabled: true, classify, emit: (r) => emitted.push(r) },
+      {
+        primaryEnabled: true,
+        primary: PRIMARY,
+        classify,
+        emit: (r) => emitted.push(r),
+      },
     );
     assertEquals(texts, [original.content]);
     assertEquals(reclassifyExitCode(summary), 0);
@@ -514,6 +547,7 @@ Deno.test(
       {
         summary: {
           mode: "apply",
+          primary: PRIMARY,
           candidates: 1,
           selected: 1,
           would_reclassify: 0,
@@ -559,21 +593,38 @@ Deno.test(
     const { texts, classify } = classifier((text) =>
       text === thoughts[0].content
         ? { ok: false, reason: "transport_or_timeout" }
+        : text === thoughts[1].content
+        ? { ok: false, reason: "non_2xx", status: 401 }
         : ok(OBSERVATION)
     );
     const summary = await reclassifyMetadata(
       client as unknown as PoolClient,
-      { apply: true, ids: [ID_A] },
-      { primaryEnabled: true, classify, emit: (r) => emitted.push(r) },
+      { apply: true, ids: [ID_A, ID_B] },
+      {
+        primaryEnabled: true,
+        primary: PRIMARY,
+        classify,
+        emit: (r) => emitted.push(r),
+      },
     );
-    assertEquals(texts.length, 1);
-    assertEquals(emitted[0], {
-      id: ID_A,
-      outcome: "primary_failed",
-      reason: "transport_or_timeout",
-      before: { type: "task", topics: ["report"] },
-    });
-    assertEquals(summary.primary_failed, 1);
+    assertEquals(texts.length, 2);
+    assertEquals(emitted.slice(0, 2), [
+      {
+        id: ID_A,
+        outcome: "primary_failed",
+        reason: "transport_or_timeout",
+        before: { type: "task", topics: ["report"] },
+      },
+      {
+        // The status tells a bad key or base path from an overloaded primary.
+        id: ID_B,
+        outcome: "primary_failed",
+        reason: "non_2xx",
+        http_status: 401,
+        before: { type: "observation", topics: ["uncategorized"] },
+      },
+    ]);
+    assertEquals(summary.primary_failed, 2);
     assertEquals(reclassifyExitCode(summary), 2);
     assertEquals(writes(client), [], "a failed row opens no transaction");
     assertEquals(thoughts, before);
@@ -599,7 +650,12 @@ Deno.test(
       const summary = await reclassifyMetadata(
         client as unknown as PoolClient,
         { apply: true, ids: [ID_A] },
-        { primaryEnabled: true, classify, emit: (r) => emitted.push(r) },
+        {
+          primaryEnabled: true,
+          primary: PRIMARY,
+          classify,
+          emit: (r) => emitted.push(r),
+        },
       );
       assertEquals(emitted[0], {
         id: ID_A,
@@ -636,7 +692,12 @@ Deno.test(
       const summary = await reclassifyMetadata(
         client as unknown as PoolClient,
         { apply: true },
-        { primaryEnabled: true, classify, emit: (r) => emitted.push(r) },
+        {
+          primaryEnabled: true,
+          primary: PRIMARY,
+          classify,
+          emit: (r) => emitted.push(r),
+        },
       );
       assertEquals(texts, [thoughts[0].content], "B is never classified");
       assertEquals(emitted.slice(0, -1).map((r) => [r.id, r.outcome]), [
@@ -673,6 +734,7 @@ Deno.test(
               { apply: true },
               {
                 primaryEnabled: true,
+                primary: PRIMARY,
                 classify: () => Promise.resolve(ok(OBSERVATION)),
                 emit: (r) => emitted.push(r),
               },

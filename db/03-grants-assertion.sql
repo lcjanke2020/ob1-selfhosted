@@ -1127,6 +1127,7 @@ DO $$
 DECLARE
   revisions oid := to_regclass('public.thought_revisions');
   revisions_seq oid := to_regclass('public.thought_revisions_id_seq');
+  narrowing text;
 BEGIN
   IF revisions IS NULL OR revisions_seq IS NULL THEN
     RAISE EXCEPTION
@@ -1190,7 +1191,8 @@ BEGIN
   -- History records exactly the content/scope mutations and the maintenance
   -- metadata reclassification (16-thought-metadata-revisions.sql). A missing,
   -- unvalidated, or widened CHECK would let a writer label history with an
-  -- arbitrary kind; constraints only narrow, so pinning this one suffices.
+  -- arbitrary kind, so the named CHECK must carry migration 16's exact
+  -- definition, validated.
   IF NOT EXISTS (
        SELECT 1 FROM pg_constraint
        WHERE conrelid = revisions
@@ -1202,6 +1204,25 @@ BEGIN
      ) THEN
     RAISE EXCEPTION
       'grants assertion failed: public.thought_revisions change_kind must admit exactly content, scope, and metadata; apply db/16-thought-metadata-revisions.sql.';
+  END IF;
+
+  -- PostgreSQL ANDs every CHECK, and one added NOT VALID still binds new
+  -- rows, so any other CHECK that reads change_kind could reject a kind the
+  -- named one admits. metadata_reclassify.ts refuses to start on the same
+  -- condition. Migrations never create one; it is drift to remove by hand.
+  SELECT string_agg(c.conname::text, ', ' ORDER BY c.conname)
+  INTO narrowing
+  FROM pg_constraint AS c
+  JOIN pg_attribute AS a
+    ON a.attrelid = c.conrelid AND a.attname = 'change_kind'
+  WHERE c.conrelid = revisions
+    AND c.contype = 'c'
+    AND c.conname <> 'thought_revisions_change_kind'
+    AND a.attnum = ANY (c.conkey);
+  IF narrowing IS NOT NULL THEN
+    RAISE EXCEPTION
+      'grants assertion failed: public.thought_revisions change_kind must be constrained only by thought_revisions_change_kind; drop %.',
+      narrowing;
   END IF;
 END;
 $$ LANGUAGE plpgsql;

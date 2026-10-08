@@ -107,6 +107,21 @@ for drift in pre16 widened unvalidated dropped; do
   run_assertion >/dev/null
 done
 
+# PostgreSQL ANDs every CHECK, and a NOT VALID one still binds new rows, so a
+# second CHECK on change_kind fails the assertion even beside the exact named
+# one, whether it would reject 'metadata' or not. No migration creates one;
+# the operator drops it, and the assertion passes again.
+for drift in "CHECK (change_kind <> 'metadata') NOT VALID" \
+  "CHECK (change_kind IN ('content', 'scope', 'metadata', 'other'))"; do
+  super_psql -v ON_ERROR_STOP=1 -c "ALTER TABLE public.thought_revisions
+    ADD CONSTRAINT drifted_change_kind $drift" >/dev/null
+  expect_rejected "thought revision extra change-kind $drift" \
+    "change_kind must be constrained only by thought_revisions_change_kind; drop drifted_change_kind."
+  super_psql -v ON_ERROR_STOP=1 -c "ALTER TABLE public.thought_revisions
+    DROP CONSTRAINT drifted_change_kind" >/dev/null
+  run_assertion >/dev/null
+done
+
 # Table SELECT alone is insufficient for a backup: schema USAGE is also
 # required. Prove the actual dump fails on drift and recovers after migration.
 dump_oauth_as_backup() {

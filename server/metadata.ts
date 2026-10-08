@@ -479,16 +479,16 @@ export type PrimaryClassification =
     metadata: ThoughtMetadata;
     classifier: { schema_version: 1; endpoint: "primary"; model: string };
   }
-  | {
-    ok: false;
-    reason: ClassificationFailure["reason"] | "primary_disabled";
-  };
+  // A non_2xx failure keeps its HTTP status so the operator can tell an auth
+  // or base-path error from a rate limit or a server error.
+  | ({ ok: false } & (ClassificationFailure | { reason: "primary_disabled" }));
 
 // Classify with the configured PRIMARY endpoint only, for maintenance tools
 // that re-run classification over stored thoughts (metadata_reclassify.ts).
 // Unlike extractMetadata it never calls the fallback endpoint, never returns
 // the stub, records no degradation events, and logs nothing: a failure is
-// returned as its finite reason so the caller can leave the row untouched.
+// returned as its finite reason (plus the HTTP status of a non-2xx response)
+// so the caller can leave the row untouched.
 // The capture path keeps using extractMetadata. Never throws.
 export async function classifyWithPrimary(
   text: string,
@@ -501,7 +501,11 @@ export async function classifyWithPrimary(
     key: CHAT_API_KEY,
     model: CHAT_MODEL,
   });
-  if (!attempt.ok) return { ok: false, reason: attempt.reason };
+  if (!attempt.ok) {
+    return attempt.reason === "non_2xx"
+      ? { ok: false, reason: attempt.reason, status: attempt.status }
+      : { ok: false, reason: attempt.reason };
+  }
   return {
     ok: true,
     metadata: attempt.metadata,

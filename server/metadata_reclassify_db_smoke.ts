@@ -8,9 +8,11 @@
 // audiences (default/workspace, default/personal, sensitive/personal):
 // candidate selection (unstamped and stub only), a read-only plan, the
 // locked write with its 'metadata' revision and SQL stamp merge, refusal for
-// a non-superuser and for a pre-16 CHECK, a concurrent edit between classify
-// and write, a primary failure, app-role visibility afterwards, and an
-// idempotent rerun. The classifier is a fake; no endpoint is contacted.
+// a non-superuser, for a pre-16 or contradicting named CHECK, and for another
+// CHECK on change_kind, a concurrent edit between classify and write, the
+// re-read and lock guards against rows stamped or edited after the listing, a
+// primary failure, app-role visibility afterwards, and an idempotent rerun.
+// The classifier is a fake; no endpoint is contacted.
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { Pool } from "postgres";
@@ -45,6 +47,7 @@ const OWNER = "auth0|reclassify-smoke-owner";
 const OTHER = "auth0|reclassify-smoke-other";
 const UNKNOWN = "00000000-0000-4000-8000-0000000000ff";
 const MODEL = "smoke-primary-model";
+const PRIMARY = { base_url: "http://primary.invalid/v1", model: MODEL };
 
 // One pool for fixtures and the "concurrent writer", one connection for the
 // tool itself (the CLI also runs on a single superuser connection).
@@ -205,6 +208,7 @@ async function runTool(
     (client) =>
       reclassifyMetadata(client, options, {
         primaryEnabled: true,
+        primary: PRIMARY,
         classify,
         emit: (record) => emitted.push(record),
       }),
@@ -371,6 +375,7 @@ try {
       () =>
         reclassifyMetadata(client, {}, {
           primaryEnabled: true,
+          primary: PRIMARY,
           classify: neverClassify,
           emit: () => {
             throw new Error("a refused run must emit nothing");
@@ -380,33 +385,61 @@ try {
       "requires a PostgreSQL superuser",
     );
   });
-  // A pre-16 CHECK (as migration 10 created it), inside a rolled-back
-  // transaction on the tool's own connection.
-  await withPool(toolPool, async (client) => {
-    await client.queryArray("BEGIN");
-    try {
-      await client.queryArray(
-        `ALTER TABLE public.thought_revisions
-           DROP CONSTRAINT thought_revisions_change_kind,
-           ADD CONSTRAINT thought_revisions_change_kind
-             CHECK (change_kind IN ('content', 'scope'))`,
-      );
-      await assertRejects(
-        () =>
-          reclassifyMetadata(client, { apply: true }, {
-            primaryEnabled: true,
-            classify: neverClassify,
-            emit: () => {
-              throw new Error("a refused run must emit nothing");
-            },
-          }),
-        Error,
-        "apply db/16-thought-metadata-revisions.sql",
-      );
-    } finally {
-      await client.queryArray("ROLLBACK");
-    }
-  });
+  // Catalogs that would reject a 'metadata' revision, each inside a
+  // rolled-back transaction on the tool's own connection: the pre-16 CHECK (as
+  // migration 10 created it), a named CHECK that mentions 'metadata' but
+  // excludes it, and another CHECK on change_kind. PostgreSQL ANDs every
+  // CHECK, and a NOT VALID one still binds new rows; a second CHECK is refused
+  // even when it would admit 'metadata'. Each refusal precedes any read.
+  const drifts: [string, string][] = [
+    [
+      `DROP CONSTRAINT thought_revisions_change_kind,
+       ADD CONSTRAINT thought_revisions_change_kind
+         CHECK (change_kind IN ('content', 'scope'))`,
+      "apply db/16-thought-metadata-revisions.sql",
+    ],
+    [
+      `DROP CONSTRAINT thought_revisions_change_kind,
+       ADD CONSTRAINT thought_revisions_change_kind
+         CHECK (change_kind <> 'metadata')`,
+      "apply db/16-thought-metadata-revisions.sql",
+    ],
+    [
+      `ADD CONSTRAINT reclassify_smoke_no_metadata
+         CHECK (change_kind <> 'metadata') NOT VALID`,
+      "drop reclassify_smoke_no_metadata as a PostgreSQL superuser",
+    ],
+    [
+      `ADD CONSTRAINT reclassify_smoke_widened
+         CHECK (change_kind IN ('content', 'scope', 'metadata', 'other'))`,
+      "drop reclassify_smoke_widened as a PostgreSQL superuser",
+    ],
+  ];
+  for (const [drift, message] of drifts) {
+    await withPool(toolPool, async (client) => {
+      await client.queryArray("BEGIN");
+      try {
+        await client.queryArray(
+          `ALTER TABLE public.thought_revisions ${drift}`,
+        );
+        await assertRejects(
+          () =>
+            reclassifyMetadata(client, { apply: true }, {
+              primaryEnabled: true,
+              primary: PRIMARY,
+              classify: neverClassify,
+              emit: () => {
+                throw new Error("a refused run must emit nothing");
+              },
+            }),
+          Error,
+          message,
+        );
+      } finally {
+        await client.queryArray("ROLLBACK");
+      }
+    });
+  }
 
   // ---- plan: candidates only, zero writes --------------------------------
   const beforePlan = await corpusDigest();
@@ -480,7 +513,10 @@ try {
     ],
     [
       fixtures.failing,
-      () => Promise.resolve({ ok: false, reason: "non_2xx" } as const),
+      () =>
+        Promise.resolve(
+          { ok: false, reason: "non_2xx", status: 503 } as const,
+        ),
     ],
   ]);
   const contentToId = new Map(
@@ -496,6 +532,7 @@ try {
   assertEquals(classifiedIds, candidateOrder);
   assertEquals(applied.summary, {
     mode: "apply",
+    primary: PRIMARY,
     candidates: 5,
     selected: 5,
     would_reclassify: 0,
@@ -518,6 +555,7 @@ try {
     id: fixtures.failing,
     outcome: "primary_failed",
     reason: "non_2xx",
+    http_status: 503,
     before: { type: "task", topics: ["retry"] },
   });
   assertEquals(outcomes.get(fixtures.race)?.outcome, "changed_concurrently");
@@ -773,8 +811,71 @@ try {
     "no fixture remains a candidate",
   );
 
+  // ---- SQL guards the hermetic fake re-implements ---------------------------
+  // Only this smoke executes the real statements. A row stamped elsewhere
+  // after the listing must not be classified, and a content-only edit during
+  // classification must not receive metadata derived from the old text.
+  const late = await withAdmin(async (client) => ({
+    first: await insertThought(
+      client,
+      "guard first",
+      DEFAULT_WORKSPACE,
+      { type: "task", topics: ["guard"] },
+      3,
+    ),
+    stamped: await insertThought(
+      client,
+      "guard stamped after listing",
+      DEFAULT_WORKSPACE,
+      { type: "task", topics: ["guard"] },
+      2,
+    ),
+    edited: await insertThought(
+      client,
+      "guard edited during classification",
+      DEFAULT_WORKSPACE,
+      { type: "task", topics: ["guard"] },
+      1,
+    ),
+  }));
+  const guarded = await runTool(
+    { apply: true, ids: [late.first, late.stamped, late.edited] },
+    async (text) => {
+      if (text.endsWith("guard first")) {
+        await withAdmin((client) =>
+          client.queryArray(
+            `UPDATE public.thoughts
+             SET metadata = metadata || '{"metadata_extraction":{"schema_version":1,"endpoint":"fallback","model":"elsewhere"}}'::jsonb
+             WHERE id = $1`,
+            [late.stamped],
+          )
+        );
+      } else if (text.endsWith("guard edited during classification")) {
+        await withAdmin((client) =>
+          client.queryArray(
+            `UPDATE public.thoughts SET content = content || ' (edited)'
+             WHERE id = $1`,
+            [late.edited],
+          )
+        );
+      } else {
+        throw new Error("a row stamped after the listing was classified");
+      }
+      return classified(metadataFor("observation", "guard"));
+    },
+  );
+  assertEquals(guarded.emitted.slice(0, -1).map((r) => [r.id, r.outcome]), [
+    [late.first, "reclassified"],
+    [late.stamped, "changed_concurrently"],
+    [late.edited, "changed_concurrently"],
+  ]);
+  const guardHeads = await snapshot([late.stamped, late.edited]);
+  assertEquals(guardHeads.get(late.stamped)?.revisions, 0);
+  assertEquals(guardHeads.get(late.edited)?.revisions, 0);
+  assertEquals(JSON.parse(guardHeads.get(late.edited)!.metadata).type, "task");
+
   console.log(
-    "metadata reclassify: superuser and migration-16 refusals, read-only plan, unstamped/stub selection across workspace/personal/sensitive audiences, locked 'metadata' revisions with SQL stamp merge, concurrent-change and primary-failure no-writes, app-role visibility, and idempotent rerun passed",
+    "metadata reclassify: superuser, migration-16 and change_kind-drift refusals, read-only plan, unstamped/stub selection across workspace/personal/sensitive audiences, locked 'metadata' revisions with SQL stamp merge, concurrent-change and primary-failure no-writes, app-role visibility, idempotent rerun, and the re-read and lock guards passed",
   );
 } finally {
   await cleanFixture();
