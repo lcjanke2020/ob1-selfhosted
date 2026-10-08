@@ -52,11 +52,15 @@
 -- re-embedding.
 --
 -- Ordering: apply after every earlier numbered migration, then run the stable
--- 03-grants-assertion.sql source last. Re-applying db/06, db/10, db/15, or
--- db/16 on a deployment that has this migration restores their older
--- definitions (fingerprint index, search/move bodies, change-kind CHECK);
--- re-apply this migration after them. The grants assertion and the server's
--- boot probe pin every object below and refuse a regressed catalog.
+-- 03-grants-assertion.sql source last. The documented upgrades replay older
+-- migrations in numeric order, so this file always follows them. Replaying
+-- db/06 or db/16 leaves this migration's fingerprint index and change-kind
+-- CHECK unchanged: once history holds forget/restore revisions or a
+-- forgotten thought's text was captured again, their older shapes no longer
+-- fit the data. Replaying db/06, db/10, or db/15 does restore an unfiltered
+-- search or move helper; re-apply this migration after them. The grants
+-- assertion pins every object below, and the server's boot probe refuses a
+-- catalog where any of them is missing or regressed.
 --
 -- Rollout: the server's capture upsert names the new index predicate, so a
 -- server older than 1.31.0 cannot capture once this migration is applied —
@@ -225,8 +229,10 @@ BEGIN
 END;
 $$;
 
+-- Revoking from openbrain_app too drops any grant option it picked up (and,
+-- by CASCADE, anything it re-delegated) before the plain re-grant.
 REVOKE ALL ON FUNCTION memory_scope.forget_thought(UUID, TEXT, TEXT)
-  FROM PUBLIC;
+  FROM PUBLIC, openbrain_app CASCADE;
 GRANT EXECUTE ON FUNCTION memory_scope.forget_thought(UUID, TEXT, TEXT)
   TO openbrain_app;
 
@@ -432,8 +438,10 @@ BEGIN
 END;
 $$;
 
+-- Revoking from openbrain_app too drops any grant option it picked up (and,
+-- by CASCADE, anything it re-delegated) before the plain re-grant.
 REVOKE ALL ON FUNCTION memory_scope.restore_thought(UUID, TEXT, TEXT)
-  FROM PUBLIC;
+  FROM PUBLIC, openbrain_app CASCADE;
 GRANT EXECUTE ON FUNCTION memory_scope.restore_thought(UUID, TEXT, TEXT)
   TO openbrain_app;
 

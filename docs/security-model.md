@@ -365,14 +365,14 @@ well. Keeping it separate from the audience policy means re-running
 `db/06-spaces.sql` cannot drop it. `forgotten_at` is not in the application
 role's column-scoped `UPDATE` grant; only `memory_scope.forget_thought` and
 `memory_scope.restore_thought` — table-owner-owned, fixed `search_path`,
-executable only by `openbrain_app` — set or clear it, after re-checking that the
-caller can see the row by audience, and each writes a `forget`/`restore`
-revision. Because the candidate-search and move helpers bypass RLS, they filter
-forgotten rows explicitly; the assertion requires that filter in each and the
-boot probe refuses a catalog whose helper bodies lost it (re-applying an older
-migration restores the unfiltered body). Forgetting is not erasure: the text
-remains readable to the database superuser and the `BYPASSRLS` backup role and
-is carried by every backup.
+executable only by `openbrain_app`, without grant option — set or clear it,
+after re-checking that the caller can see the row by audience, and each writes a
+`forget`/`restore` revision. Because the candidate-search and move helpers
+bypass RLS, they filter forgotten rows explicitly; the assertion requires that
+filter in each and the boot probe refuses a catalog whose helper bodies lost it
+(re-applying an older migration restores the unfiltered body). Forgetting is not
+erasure: the text remains readable to the database superuser and the `BYPASSRLS`
+backup role and is carried by every backup.
 
 `db/11-session-update-grants.sql` closes the corresponding session-side gap.
 Session recapture addresses a row through its current exact audience and can

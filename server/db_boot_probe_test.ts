@@ -493,17 +493,38 @@ Deno.test("probeDbAtBoot: missing forget/restore schema rejects before serving",
   // The catalog checks the probe relies on, including the forgotten-row
   // filter in each RLS-bypassing helper that a re-applied older migration
   // would silently drop.
-  assert(forgetQuery.includes("attname = 'forgotten_at'"));
-  assert(forgetQuery.includes("NOT polpermissive"));
-  assert(forgetQuery.includes("idx_thoughts_fingerprint"));
-  assert(forgetQuery.includes("memory_scope.forget_thought(uuid,text,text)"));
-  assert(forgetQuery.includes("memory_scope.restore_thought(uuid,text,text)"));
-  assert(forgetQuery.includes("jsonb,jsonb,integer)'"));
-  assert(forgetQuery.includes("jsonb,jsonb,integer,text)'"));
-  assert(forgetQuery.includes("memory_scope.move_thought("));
-  assert(
-    forgetQuery.includes("position('t.forgotten_at IS NULL' IN p.prosrc)"),
-  );
+  // Compare on collapsed whitespace: the shapes, not the query's layout.
+  const shape = forgetQuery.replace(/\s+/g, " ");
+  for (
+    const expected of [
+      "attname = 'forgotten_at'",
+      "has_column_privilege( marker.attrelid, marker.attnum, 'UPDATE' )",
+      // The exact shapes db/03-grants-assertion.sql pins, so a catalog the
+      // assertion rejects cannot boot.
+      "NOT polpermissive",
+      "pg_get_expr(polqual, polrelid) = '(forgotten_at IS NULL)'",
+      "pg_get_expr(polwithcheck, polrelid) = '(forgotten_at IS NULL)'",
+      "to_regclass('public.idx_thoughts_fingerprint')",
+      "indnullsnotdistinct",
+      "pg_get_expr(indpred, indrelid) = '((content_fingerprint IS NOT NULL) AND (forgotten_at IS NULL))'",
+      "conname = 'thought_revisions_change_kind'",
+      "convalidated",
+      "''metadata''::text, ''forget''::text, ''restore''::text])))'",
+      "'memory_scope.forget_thought(uuid,text,text)',",
+      "'memory_scope.restore_thought(uuid,text,text)' ]",
+      "OR NOT p.prosecdef",
+      "@> ARRAY['search_path=pg_catalog']",
+      // Filter counts per helper: a body that drops the filter from one leg
+      // still fails.
+      "jsonb,jsonb,integer)', 2)",
+      "jsonb,jsonb,integer,text)', 2)",
+      "memory_scope.move_thought(uuid,text,text,memory_scope.visibility,text,text)', 3)",
+      "('memory_scope.restore_thought(uuid,text,text)', 2)",
+      "regexp_count(p.prosrc, 't[.]forgotten_at IS NULL') < required.minimum",
+    ]
+  ) {
+    assertStringIncludes(shape, expected);
+  }
 });
 
 Deno.test("probeDbAtBoot: unknown configured workspace rejects before serving", async () => {

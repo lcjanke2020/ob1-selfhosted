@@ -203,9 +203,11 @@ fingerprint is compared on its derived fingerprint and gains it on restore.
 `memory_scope.embedding_ready` still covers forgotten rows, and the offline
 backfill keeps them indexed, so a restore needs no re-embedding. The grants
 assertion and the boot probe pin the column grant, the policy, the index
-predicate, the helpers' definer shape, and the filters; re-applying migration
-06, 10, 15, or 16 restores a pre-forget definition and must be followed by
-migration 17 again.
+predicate, the change-kind CHECK, the helpers' definer shape, and the filters.
+Once migration 17 is in place, replaying migration 06 or 16 leaves its index and
+CHECK alone, because forget history and forgotten/live duplicates no longer fit
+the older shapes. Replaying 06, 10, or 15 still restores an unfiltered search or
+move helper and must be followed by migration 17 again.
 
 ## The seeded `sensitive` space
 

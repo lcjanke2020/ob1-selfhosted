@@ -86,10 +86,17 @@ for relation in public.thought_embedding_index sessions.embedding_index; do
   done
 done
 
+# The 1.31.0 boot probe pins the same forget/restore shapes as the
+# assertion: run it as openbrain_app after each such drift below.
+probe_forget() {
+  run_deno_db_smoke server/thought_forget_probe_db_smoke.ts "$1"
+}
+probe_forget ready
+
 # Revision history admits exactly the content/scope/metadata/forget/restore
 # kinds. The pre-16 and pre-17 shapes, a widened or unvalidated CHECK, and a
-# dropped CHECK each fail the assertion; migrations 16 then 17 converge every
-# one of them.
+# dropped CHECK each fail the assertion and the boot probe; migrations 16 then
+# 17 converge every one of them.
 for drift in pre16 pre17 widened unvalidated dropped; do
   case "$drift" in
     pre16) kinds="'content', 'scope'"; validity= ;;
@@ -107,20 +114,26 @@ for drift in pre16 pre17 widened unvalidated dropped; do
   super_psql -v ON_ERROR_STOP=1 -c "$mutation" >/dev/null
   expect_rejected "thought revision change-kind $drift drift" \
     "change_kind must admit exactly content, scope, metadata, forget, and restore"
+  probe_forget refuse
   apply_sql db/16-thought-metadata-revisions.sql >/dev/null
   apply_sql db/17-forget-thoughts.sql >/dev/null
   run_assertion >/dev/null
 done
+# Replaying 16 after 17 leaves 17's CHECK in place: no re-run of 17 needed.
+apply_sql db/16-thought-metadata-revisions.sql >/dev/null
+run_assertion >/dev/null
 
 # Forgotten thoughts stay invisible to the app only while the marker is not
 # app-writable, the restrictive policy is intact, deduplication covers live
 # rows only, the forget/restore helpers keep the move helper's definer shape,
 # and every RLS-bypassing helper filters forgotten rows. Re-applying an older
-# migration (06, 10, 15) restores an unfiltered definition; 17 converges it.
+# migration (06, 10, 15) restores an unfiltered helper; 17 converges it. 06
+# leaves 17's live-rows index alone, so the assertion names the helper.
 super_psql -v ON_ERROR_STOP=1 -c \
   "GRANT UPDATE (forgotten_at) ON public.thoughts TO openbrain_app" >/dev/null
 expect_rejected "app UPDATE on forgotten_at" \
   "openbrain_app can UPDATE public.thoughts.forgotten_at"
+probe_forget refuse
 super_psql -v ON_ERROR_STOP=1 -c \
   "REVOKE UPDATE (forgotten_at) ON public.thoughts FROM openbrain_app" >/dev/null
 run_assertion >/dev/null
@@ -137,17 +150,19 @@ for drift in dropped permissive using check; do
   super_psql -v ON_ERROR_STOP=1 -c "$mutation" >/dev/null
   expect_rejected "forgotten-row policy $drift drift" \
     "restrictive thoughts_app_not_forgotten policy"
+  probe_forget refuse
   apply_sql db/17-forget-thoughts.sql >/dev/null
   run_assertion >/dev/null
 done
 for older in 06-spaces 10-thought-mutations 15-embedding-index; do
   case "$older" in
-    06-spaces) expected="idx_thoughts_fingerprint must be the audience-aware" ;;
+    06-spaces) expected="jsonb,jsonb,integer) must skip forgotten rows" ;;
     10-thought-mutations) expected="memory_scope.move_thought(uuid,text,text,memory_scope.visibility,text,text) must skip forgotten rows" ;;
     15-embedding-index) expected="jsonb,jsonb,integer,text) must skip forgotten rows" ;;
   esac
   apply_sql "db/$older.sql" >/dev/null
   expect_rejected "re-applied db/$older.sql without db/17" "$expected"
+  probe_forget refuse
   apply_sql db/17-forget-thoughts.sql >/dev/null
   run_assertion >/dev/null
 done
@@ -155,6 +170,7 @@ super_psql -v ON_ERROR_STOP=1 -c \
   "ALTER FUNCTION memory_scope.restore_thought(uuid,text,text) SECURITY INVOKER" >/dev/null
 expect_rejected "invoker restore helper" \
   "memory_scope.restore_thought(uuid,text,text) must be SECURITY DEFINER"
+probe_forget refuse
 apply_sql db/17-forget-thoughts.sql >/dev/null
 super_psql -v ON_ERROR_STOP=1 -c \
   "GRANT EXECUTE ON FUNCTION memory_scope.forget_thought(uuid,text,text) TO openbrain_readonly" >/dev/null
@@ -163,6 +179,15 @@ expect_rejected "forget helper executable by the read-only role" \
 super_psql -v ON_ERROR_STOP=1 -c \
   "REVOKE EXECUTE ON FUNCTION memory_scope.forget_thought(uuid,text,text) FROM openbrain_readonly" >/dev/null
 run_assertion >/dev/null
+# A grant option would let the runtime role delegate a table-owner helper;
+# re-applying 17 re-grants EXECUTE without it.
+super_psql -v ON_ERROR_STOP=1 -c \
+  "GRANT EXECUTE ON FUNCTION memory_scope.restore_thought(uuid,text,text) TO openbrain_app WITH GRANT OPTION" >/dev/null
+expect_rejected "restore helper grant option for the app role" \
+  "openbrain_app has grant option on memory_scope.restore_thought(uuid,text,text)"
+apply_sql db/17-forget-thoughts.sql >/dev/null
+run_assertion >/dev/null
+probe_forget ready
 
 # PostgreSQL ANDs every CHECK, and a NOT VALID one still binds new rows, so a
 # second CHECK on change_kind fails the assertion even beside the exact named

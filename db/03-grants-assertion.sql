@@ -71,7 +71,8 @@
 --       on that table alone and no persistent-object creation route.
 --   (j) forgotten thoughts are invisible to the app: a restrictive
 --       forgotten_at IS NULL policy, a fingerprint index over live rows only,
---       forget/restore helpers shaped like the move helper, and the explicit
+--       forget/restore helpers shaped like the move helper (executable only
+--       by openbrain_app, without grant option), and the explicit
 --       forgotten_at filter in every SECURITY DEFINER function that reads
 --       thoughts with RLS bypassed.
 --
@@ -1750,6 +1751,20 @@ BEGIN
     ) OR NOT has_function_privilege('openbrain_app', fn, 'EXECUTE') THEN
       RAISE EXCEPTION
         'grants assertion failed: % must be executable by openbrain_app and no other non-owner role (including PUBLIC).',
+        fn;
+    END IF;
+    -- A grant option would let the runtime role delegate a table-owner
+    -- helper to any other role.
+    IF EXISTS (
+      SELECT 1
+      FROM pg_proc AS p
+      CROSS JOIN LATERAL aclexplode(p.proacl) AS acl
+      WHERE p.oid = fn
+        AND acl.grantee = to_regrole('openbrain_app')
+        AND acl.is_grantable
+    ) THEN
+      RAISE EXCEPTION
+        'grants assertion failed: openbrain_app has grant option on %; re-apply db/17-forget-thoughts.sql.',
         fn;
     END IF;
   END LOOP;

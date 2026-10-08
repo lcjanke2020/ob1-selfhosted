@@ -345,8 +345,14 @@ over live rows only, the two helpers, and forgotten-row filters in the search
 and move helpers. It rewrites no rows; the index rebuild takes a brief lock. The
 1.31.0 capture upsert names the new index, and older servers cannot capture once
 it exists, so keep MCP stopped until the migration and assertion pass. Migration
-17 always runs after 06, 10, 15, and 16; if you re-run any of those later,
-re-run 17 too — the assertion and boot probe refuse the regressed catalog. The
+17 always runs after 06, 10, 15, and 16. Once it is in place, replaying 06 or 16
+leaves its index and change-kind CHECK alone, so later upgrades replay cleanly
+after thoughts have been forgotten; replaying 06, 10, or 15 still restores an
+unfiltered search or move helper, so re-run 17 after them — the assertion and
+boot probe refuse that catalog. [Back up](#backups) before applying it: rolling
+back to 1.30.0 or earlier afterwards means restoring that backup (and losing
+later writes). A 1.30.0 server starts against the migrated catalog but every
+capture fails. The
 [metadata reclassifier](../../docs/metadata-degradation-monitoring.md#reclassifying-legacy-and-stub-thoughts)
 now requires migration 17 as well. See
 [Forgetting and restoring thoughts](../../docs/spaces.md#forgetting-and-restoring-thoughts).

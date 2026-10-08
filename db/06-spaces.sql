@@ -17,6 +17,9 @@
 -- This migration takes table locks while
 -- adding/backfilling audience columns and rebuilding the thought fingerprint
 -- unique index; use a full application maintenance window on an existing DB.
+-- Once 17-forget-thoughts.sql has narrowed that index to live rows, a replay
+-- leaves it unchanged; re-apply 17 after this file to restore the search
+-- helper's forgotten-row filter.
 
 BEGIN;
 
@@ -165,16 +168,35 @@ $$;
 -- The old global fingerprint index would merge identical content across
 -- audiences. NULLS NOT DISTINCT makes the canonical NULL fields participate in
 -- uniqueness, so the same content dedupes only inside one exact audience.
-DROP INDEX IF EXISTS public.idx_thoughts_fingerprint;
-CREATE UNIQUE INDEX idx_thoughts_fingerprint
-  ON public.thoughts (
-    workspace_id,
-    project_id,
-    visibility,
-    owner_subject,
-    content_fingerprint
-  ) NULLS NOT DISTINCT
-  WHERE content_fingerprint IS NOT NULL;
+--
+-- 17-forget-thoughts.sql narrows this index to live rows. Once a forgotten
+-- thought's text has been captured again, rebuilding the broader index here
+-- would fail on that legitimate duplicate, so a replay after 17 leaves 17's
+-- exact shape in place (17 and the grants assertion own it from then on).
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_index AS i
+    WHERE i.indexrelid = to_regclass('public.idx_thoughts_fingerprint')
+      AND i.indisunique
+      AND i.indnullsnotdistinct
+      AND pg_get_expr(i.indpred, i.indrelid) =
+        '((content_fingerprint IS NOT NULL) AND (forgotten_at IS NULL))'
+  ) THEN
+    RETURN;
+  END IF;
+  DROP INDEX IF EXISTS public.idx_thoughts_fingerprint;
+  CREATE UNIQUE INDEX idx_thoughts_fingerprint
+    ON public.thoughts (
+      workspace_id,
+      project_id,
+      visibility,
+      owner_subject,
+      content_fingerprint
+    ) NULLS NOT DISTINCT
+    WHERE content_fingerprint IS NOT NULL;
+END;
+$$;
 
 CREATE INDEX IF NOT EXISTS idx_thoughts_scope_audience
   ON public.thoughts (

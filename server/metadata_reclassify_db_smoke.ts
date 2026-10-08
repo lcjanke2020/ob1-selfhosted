@@ -6,12 +6,13 @@
 //
 // It proves the tool's exact statements as a real superuser across three
 // audiences (default/workspace, default/personal, sensitive/personal):
-// candidate selection (unstamped and stub only), a read-only plan, the
-// locked write with its 'metadata' revision and SQL stamp merge, refusal for
-// a non-superuser, for a pre-16 or contradicting named CHECK, and for another
-// CHECK on change_kind, a concurrent edit between classify and write, the
-// re-read and lock guards against rows stamped or edited after the listing, a
-// primary failure, app-role visibility afterwards, and an idempotent rerun.
+// candidate selection (unstamped and stub only, never forgotten), a read-only
+// plan, the locked write with its 'metadata' revision and SQL stamp merge,
+// refusal for a non-superuser, for a pre-16 or contradicting named CHECK, and
+// for another CHECK on change_kind, a concurrent edit between classify and
+// write, the re-read and lock guards against rows stamped, edited, or
+// forgotten after the listing, a primary failure, app-role visibility
+// afterwards, and an idempotent rerun.
 // The classifier is a fake; no endpoint is contacted.
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
@@ -354,6 +355,26 @@ try {
     fixtures.failing,
   ];
   const allIds = Object.values(fixtures);
+  // A forgotten stub is never a candidate: its text must not reach the
+  // classifier, and it gets no 'metadata' revision. Kept out of allIds.
+  const forgottenStub = await withAdmin(async (client) => {
+    const id = await insertThought(
+      client,
+      "forgotten stub",
+      DEFAULT_WORKSPACE,
+      {
+        topics: ["uncategorized"],
+        type: "observation",
+        metadata_extraction: { schema_version: 1, endpoint: "stub" },
+      },
+      45,
+    );
+    await client.queryArray(
+      "UPDATE public.thoughts SET forgotten_at = now() WHERE id = $1",
+      [id],
+    );
+    return id;
+  });
 
   // An earlier content revision: the metadata revision must number after it.
   await withAdmin((client) =>
@@ -453,6 +474,21 @@ try {
     planned.filter((id) => allIds.includes(id)),
     candidateOrder,
     "unstamped and stub rows, ordered by created_at; stamped rows ignored",
+  );
+  assert(!planned.includes(forgottenStub), "a forgotten stub is not listed");
+  const forgottenRun = await runTool(
+    { apply: true, ids: [forgottenStub] },
+    neverClassify,
+  );
+  assertEquals(
+    forgottenRun.emitted.slice(0, -1).map((r) => [r.id, r.outcome]),
+    [[forgottenStub, "not_candidate"]],
+  );
+  assertEquals(forgottenRun.summary.candidates, 0);
+  assertEquals(
+    await corpusDigest(),
+    beforePlan,
+    "a forgotten stub is never rewritten",
   );
 
   const restricted = await runTool(
@@ -837,9 +873,19 @@ try {
       { type: "task", topics: ["guard"] },
       1,
     ),
+    forgotten: await insertThought(
+      client,
+      "guard forgotten during classification",
+      DEFAULT_WORKSPACE,
+      { type: "task", topics: ["guard"] },
+      0,
+    ),
   }));
   const guarded = await runTool(
-    { apply: true, ids: [late.first, late.stamped, late.edited] },
+    {
+      apply: true,
+      ids: [late.first, late.stamped, late.edited, late.forgotten],
+    },
     async (text) => {
       if (text.endsWith("guard first")) {
         await withAdmin((client) =>
@@ -858,6 +904,13 @@ try {
             [late.edited],
           )
         );
+      } else if (text.endsWith("guard forgotten during classification")) {
+        await withAdmin((client) =>
+          client.queryArray(
+            "UPDATE public.thoughts SET forgotten_at = now() WHERE id = $1",
+            [late.forgotten],
+          )
+        );
       } else {
         throw new Error("a row stamped after the listing was classified");
       }
@@ -868,14 +921,25 @@ try {
     [late.first, "reclassified"],
     [late.stamped, "changed_concurrently"],
     [late.edited, "changed_concurrently"],
+    [late.forgotten, "changed_concurrently"],
   ]);
-  const guardHeads = await snapshot([late.stamped, late.edited]);
+  const guardHeads = await snapshot([
+    late.stamped,
+    late.edited,
+    late.forgotten,
+  ]);
   assertEquals(guardHeads.get(late.stamped)?.revisions, 0);
   assertEquals(guardHeads.get(late.edited)?.revisions, 0);
+  assertEquals(guardHeads.get(late.forgotten)?.revisions, 0);
+  assertEquals(
+    JSON.parse(guardHeads.get(late.forgotten)!.metadata).type,
+    "task",
+    "a thought forgotten during classification is not rewritten",
+  );
   assertEquals(JSON.parse(guardHeads.get(late.edited)!.metadata).type, "task");
 
   console.log(
-    "metadata reclassify: superuser, migration-16 and change_kind-drift refusals, read-only plan, unstamped/stub selection across workspace/personal/sensitive audiences, locked 'metadata' revisions with SQL stamp merge, concurrent-change and primary-failure no-writes, app-role visibility, idempotent rerun, and the re-read and lock guards passed",
+    "metadata reclassify: superuser, migration-16 and change_kind-drift refusals, read-only plan, unstamped/stub selection across workspace/personal/sensitive audiences, forgotten thoughts never listed or rewritten, locked 'metadata' revisions with SQL stamp merge, concurrent-change and primary-failure no-writes, app-role visibility, idempotent rerun, and the re-read and lock guards passed",
   );
 } finally {
   await cleanFixture();

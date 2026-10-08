@@ -128,6 +128,28 @@ apply_sql db/03-grants-assertion.sql >/dev/null
 apply_sql db/forget-thoughts-smoke.sql >/dev/null
 echo "forget/restore helpers, forgotten-row invisibility (reads, history, index rows, candidate search, update, move), marker and insert refusal, fresh re-capture, restore conflicts (stored and legacy fingerprints), fingerprint healing, and audit retention passed"
 run_deno_db_smoke server/thought_forget_db_smoke.ts
+smoke_step "Smoke test — documented upgrade replay keeps forget history"
+# The Compose upgrades replay 02 and 05-17, and the Qubes upgrade 14-17, each
+# with the runbook's psql flags and the assertion last. Replay them over
+# retained forget/restore revisions and a forgotten/live duplicate pair: every
+# file must still apply (06 and 16 leave 17's index and CHECK alone, 17
+# restores the filtered helpers), and forget/restore must still work after.
+apply_sql db/forget-replay-fixture.sql >/dev/null
+for migration in 02-observability 05-hybrid-search 06-spaces \
+  07-metadata-degradation 08-access-tokens 09-retire-corpus-funnel \
+  10-thought-mutations 11-session-update-grants 12-auth-audit-grants; do
+  apply_sql "db/$migration.sql" >/dev/null
+done
+for migration in 13-oauth-subjects 14-native-token-principals; do
+  super_psql -X --single-transaction -v ON_ERROR_STOP=1 \
+    < "db/$migration.sql" >/dev/null
+done
+for migration in 15-embedding-index 16-thought-metadata-revisions \
+  17-forget-thoughts 03-grants-assertion; do
+  super_psql -X -v ON_ERROR_STOP=1 < "db/$migration.sql" >/dev/null
+done
+apply_sql db/forget-replay-smoke.sql >/dev/null
+echo "upgrade replay over forget/restore history and a forgotten/live duplicate pair, retained state, and forget/restore afterwards passed"
 smoke_step "Smoke test — openbrain_readonly can run a full pg_dump"
 # The exact operation the off-box backup performs. Exits non-zero
 # with "permission denied for sequence/relation" if the read-only
