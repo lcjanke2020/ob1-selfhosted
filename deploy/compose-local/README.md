@@ -279,10 +279,14 @@ docker compose --env-file .env exec -T postgres \
 docker compose --env-file .env exec -T postgres \
   psql -X --single-transaction -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/14-native-token-principals.sql
-# Migration 15 manages its own transaction. Assert only after it commits.
+# Migrations 15 and 16 manage their own transactions. Assert only after they
+# commit.
 docker compose --env-file .env exec -T postgres \
   psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/15-embedding-index.sql
+docker compose --env-file .env exec -T postgres \
+  psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain \
+  < ../../db/16-thought-metadata-revisions.sql
 docker compose --env-file .env exec -T postgres \
   psql -X -v ON_ERROR_STOP=1 -U postgres -d openbrain \
   < ../../db/03-grants-assertion.sql
@@ -323,6 +327,12 @@ vector-sample check fails, it changes nothing; run the backfill instead. Then
 start MCP as above. An older release upgrading straight to 1.29 uses the
 backfill, which activates the 1.29 contract directly. From 1.29 on, an Ollama
 upgrade with the same model manifest needs no index work.
+
+For **1.30.0**, the block above also applies migration 16, which only admits the
+`metadata` change kind in thought revision history; it rewrites no rows. There
+is no backfill or relabel; start MCP as above. The optional, maintenance-only
+[metadata reclassifier](../../docs/metadata-degradation-monitoring.md#reclassifying-legacy-and-stub-thoughts)
+requires it and can run while MCP serves.
 
 Upgrading to **1.25.0+** adds a dedicated `openbrain_auth_rollup` login for the
 auth-event report and retention pass. Set its new password, run the role helper
@@ -442,7 +452,7 @@ represented in the token inventory and cannot be revoked there.
 ## Database-backed OAuth admission
 
 Use the [complete upgrade procedure](#upgrading-an-existing-database), including
-migrations through 15 and embedding activation before MCP starts. At its
+migrations through 16 and embedding activation before MCP starts. At its
 admission stage, import or explicitly enroll existing OAuth subjects with the
 tools-profile `subject-admin` CLI. Follow
 [OAuth subject admission](../../docs/oauth-subjects.md) for the dedicated

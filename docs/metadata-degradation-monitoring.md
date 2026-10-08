@@ -130,7 +130,7 @@ current upgrade, follow the complete
 [Pattern B](../deploy/compose-tailnet/README.md#upgrading-an-existing-deployment),
 or
 [split Qubes](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
-procedure. These apply all pending migrations through 15 before the final grants
+procedure. These apply all pending migrations through 16 before the final grants
 assertion and keep corpus writers/search consumers stopped through offline
 superuser embedding backfill and activation before MCP starts. The boot probe
 fails closed when an audit/outbox relation, required column/constraint,
@@ -144,6 +144,127 @@ This release also makes every positive-integer environment setting strict.
 Values with trailing text or scientific notation that older `parseInt` behavior
 accepted now fail at boot; correct them to complete decimal integers before the
 restart.
+
+## Reclassifying legacy and stub thoughts
+
+Thoughts captured before server 1.16.0 carry no `metadata.metadata_extraction`
+stamp. Some of them were classified by an earlier classifier that typed
+completed-work reports as `task`. Thoughts stored with the uncategorized stub
+(`endpoint: "stub"`) stay out of topic/type filters. Normal operation never
+revisits either: `update_thought` re-runs extraction only when content changes.
+
+Server 1.30.0 adds a maintenance-only operator tool,
+[`server/metadata_reclassify.ts`](../server/metadata_reclassify.ts). It selects
+every thought whose metadata has no `metadata_extraction` stamp or whose stamp
+is `stub`, oldest first. Primary- and fallback-stamped thoughts are never
+selected, so a rerun picks up only what remains. For each selected thought it:
+
+1. reads the content and metadata outside any transaction and sends the content
+   to the configured **primary** classifier (`CHAT_API_BASE`/`CHAT_MODEL`). It
+   never calls the fallback and never substitutes the stub;
+2. opens one transaction, locks the thought, and writes nothing
+   (`changed_concurrently`) if its content or metadata changed since step 1;
+3. appends a `public.thought_revisions` row with `change_kind = 'metadata'`, the
+   prior content, metadata and audience, `changed_by_door = 'maintenance'`, and
+   no subject or token label, because no authenticated request made the change;
+4. replaces the classifier fields (`type`, `topics`, `people`, `action_items`,
+   `dates_mentioned`, and any other non-capture key) and the stamp with the
+   fresh primary result. The original capture keys (`source`, `door`, `sub`,
+   `token_label`, `provenance`) are kept from the locked row, exactly as
+   `update_thought` merges them. Content, embedding, fingerprint, audience and
+   `created_at` are untouched; `updated_at` advances.
+
+MCP may keep serving during a run. A primary failure (`primary_failed`, with its
+finite reason) leaves that thought untouched. The tool does **not** write
+`metadata_degradation_events` or trigger alerts: that ledger audits the capture
+path, and an operator run reports its failures in its own output. Rerun to
+retry.
+
+The tool refuses to start, before reading any thought, unless:
+
+- the connection is a **PostgreSQL superuser**, because it must see every
+  audience, including personal and `sensitive` rows (as for the
+  [embedding backfill](embedding-limits.md#compose-backfill-runner));
+- `ENABLE_PRIMARY_EXTRACTION=true` with `CHAT_API_BASE` and `CHAT_MODEL`;
+- `db/16-thought-metadata-revisions.sql` has been applied, exactly, and no other
+  CHECK constraint reads `thought_revisions.change_kind`. PostgreSQL ANDs every
+  CHECK, so such a constraint could reject the `metadata` revision after the
+  first thought was already sent; the grants assertion rejects the same drift.
+  The server itself does not need migration 16, but the deployment upgrade
+  procedures and the final grants assertion include it.
+
+**Privacy:** an apply run sends the full content of every selected thought,
+including personal and `sensitive` rows, to the primary endpoint, and only
+there. Run it only when the primary is the local/on-network classifier you
+already trust with capture content. Planning sends nothing.
+
+### Operator recipe
+
+Plan, review, then apply. Use the same runner shape as the
+[embedding backfill](embedding-limits.md#compose-backfill-runner), from the
+deployment's Compose directory, with the database and the primary classifier
+running; MCP can stay up. Enter the corpus superuser password (the corpus
+`POSTGRES_PASSWORD`) at the prompt. The temporary container inherits the app's
+classifier configuration with only its database identity overridden, and the
+password leaves the shell with the subshell.
+
+```bash
+(
+set -euo pipefail
+read -r -s -p 'Corpus PostgreSQL superuser password: ' DB_PASSWORD
+printf '\n'
+export DB_PASSWORD
+docker compose --env-file .env run --rm --no-deps -T \
+  -e DB_USER=postgres -e DB_PASSWORD mcp \
+  deno run --cached-only --frozen --allow-env --allow-net metadata_reclassify.ts
+
+# Review the candidates, and confirm the summary's primary base_url and model
+# are the local classifier.
+read -r -p 'Send these thoughts to the primary classifier? Type reclassify: ' reclassify_review
+test "$reclassify_review" = reclassify
+docker compose --env-file .env run --rm --no-deps -T \
+  -e DB_USER=postgres -e DB_PASSWORD mcp \
+  deno run --cached-only --frozen --allow-env --allow-net metadata_reclassify.ts --apply
+)
+```
+
+`--id <uuid>` (repeatable) restricts a run to those thoughts; a requested id
+that is not a candidate is reported as `not_candidate`. `--limit <n>` processes
+at most the `n` oldest candidates, for a trial batch before the full run. The
+apply run selects candidates again, so a thought stored with the stub after the
+plan is included; to send exactly the reviewed set, pass its ids with `--id`.
+
+Output is one JSON line per thought, then a summary line:
+
+```json
+{"id":"…","outcome":"reclassified","before":{"type":"task","topics":["setup"]},"after":{"type":"observation","topics":["setup"]}}
+{"id":"…","outcome":"primary_failed","reason":"non_2xx","http_status":401,"before":{"type":"observation","topics":["uncategorized"]}}
+{"summary":{"mode":"apply","primary":{"base_url":"http://classifier.internal:11434/v1","model":"local-model"},"candidates":2,"selected":2,"would_reclassify":0,"reclassified":1,"primary_failed":1,"changed_concurrently":0,"not_candidate":0}}
+```
+
+A plan reports `would_reclassify` instead, and its summary names the same
+destination an apply run would use. Lines carry only ids, outcomes, failure
+reasons (with the HTTP status of a `non_2xx` failure: 401 or 403 is the key, 404
+usually a base URL missing `/v1`, 429 or 5xx the primary itself), and the
+before/after `type` and `topics`; never content, people, action items or dates.
+The summary's `primary` is the base URL with any userinfo, query and fragment
+removed, plus the model. Topics still derive from content, so handle the output
+like the corpus.
+
+| Exit | Meaning                                                                                                                                                                                                                                      |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | Completed. Every selected thought was planned or reclassified; `not_candidate` ids are informational.                                                                                                                                        |
+| 1    | Refused or aborted: usage error, non-superuser connection, primary extraction disabled, migration 16 missing or another CHECK on `change_kind`, or a database error. Thoughts committed before an abort keep their revisions; rerun resumes. |
+| 2    | Completed, but at least one thought was `primary_failed` or `changed_concurrently` and was left untouched. Rerun to retry it.                                                                                                                |
+
+Each rewrite's prior metadata stays in its revision row for audit:
+
+```sql
+SELECT thought_id, revision, prior_metadata->>'type' AS prior_type, changed_at
+FROM public.thought_revisions
+WHERE change_kind = 'metadata'
+ORDER BY changed_at DESC;
+```
 
 ## Durable notification worker
 
@@ -242,7 +363,7 @@ and use the stable substrings shown.
 | log line (substring)                                | what it means                                                                                                                                                                                                                                                                   | suggested priority |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
 | `classified via FALLBACK endpoint`                  | Content may have left your network (depends on `FALLBACK_CHAT_API_BASE`). The headline event.                                                                                                                                                                                   | high               |
-| `stamping uncategorized stub`                       | Every configured endpoint failed; the thought is stored with placeholder metadata and won't surface under topic/type filters until backfilled.                                                                                                                                  | normal             |
+| `stamping uncategorized stub`                       | Every configured endpoint failed; the thought is stored with placeholder metadata and won't surface under topic/type filters until [reclassified](#reclassifying-legacy-and-stub-thoughts).                                                                                     | normal             |
 | `primary endpoint failed (transport/timeout)`       | The request could not complete. On a deployment that keeps a resident local model, recurring firings are an availability signal: diagnose reachability, cold starts, timeouts, and residency (see the [GPU-qube transport doc](../deploy/qubes/gpu-offload-transport.md) §6–7). | normal             |
 | `primary endpoint failed (non-2xx response)`        | The endpoint was reachable but rejected or failed the request. The line appends the final HTTP status (for example, `— HTTP 401`) so authentication/configuration failures, rate limits, and server failures can be distinguished before consulting the endpoint's logs.        | normal             |
 | `primary endpoint returned an invalid response`     | The endpoint returned 2xx, but not a usable OpenAI-compatible completion envelope.                                                                                                                                                                                              | normal             |

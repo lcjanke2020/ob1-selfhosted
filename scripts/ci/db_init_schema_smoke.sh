@@ -79,11 +79,13 @@ apply_sql db/06-spaces.sql >/dev/null
 apply_sql db/spaces-smoke.sql >/dev/null
 echo "spaces RLS, sensitive ownership, dedupe, artifacts, and GUC reuse passed"
 smoke_step "Smoke test — thought mutations stay inside the caller's audience"
-# Reapply the migration first (idempotent upgrade path on a live
-# volume), re-run the completed-catalog assertion so the new
-# SECURITY DEFINER helper and append-only history are pinned, then
-# exercise the move helper + app-role update path as the real roles.
+# Reapply the migrations first (idempotent upgrade path on a live
+# volume; 16 follows 10 because 10 restates the table comment), re-run
+# the completed-catalog assertion so the new SECURITY DEFINER helper,
+# append-only history, and its change kinds are pinned, then exercise
+# the move helper + app-role update path as the real roles.
 apply_sql db/10-thought-mutations.sql >/dev/null
+apply_sql db/16-thought-metadata-revisions.sql >/dev/null
 apply_sql db/03-grants-assertion.sql >/dev/null
 apply_sql db/thought-mutations-smoke.sql >/dev/null
 echo "move helper source/target checks, principal-stamped ownership, dedupe conflicts, head-gated append-only history, and the RLS-confined update path passed"
@@ -92,6 +94,11 @@ echo "move helper source/target checks, principal-stamped ownership, dedupe conf
 # exact bound statements, jsonb stamp merge, recomputed fingerprint,
 # generated tsvector, degradation-event enqueue, and outcomes.
 run_deno_db_smoke server/thought_mutations_db_smoke.ts
+smoke_step "Smoke test — metadata reclassification records 'metadata' revisions"
+# The maintenance-only tool as a real superuser across workspace, personal,
+# and sensitive audiences: read-only plan, locked writes with history,
+# concurrent-change and primary-failure no-writes, idempotent rerun.
+run_deno_db_smoke server/metadata_reclassify_db_smoke.ts
 smoke_step "Smoke test — session UPDATE grants preserve production writes"
 # Reapply the ACL-only migration to exercise the existing-deployment
 # convergence path, then run both the catalog gate and the exact production

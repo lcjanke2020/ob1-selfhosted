@@ -160,6 +160,7 @@ sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
 #   db/13-oauth-subjects.sql
 #   db/14-native-token-principals.sql
 #   db/15-embedding-index.sql
+#   db/16-thought-metadata-revisions.sql
 #   db/03-grants-assertion.sql  # always last
 ```
 
@@ -195,7 +196,7 @@ For an existing deployment, follow the app-qube's
 [complete upgrade procedure](../app-qube/README.md#upgrading-an-existing-deployment),
 using either its superuser ConnectTCP route or this qube's local socket for SQL.
 Keep all corpus writers/search consumers stopped while applying pending
-migrations through 15, the final grants assertion, and the offline superuser
+migrations through 16, the final grants assertion, and the offline superuser
 embedding backfill/activation before MCP restarts. The feature-specific notes
 below explain individual prerequisites; they are not standalone upgrade recipes.
 
@@ -251,6 +252,12 @@ path; see
 Version 1.28.0 adds `db/15-embedding-index.sql` and the offline full-corpus
 rebuild/activation above. Apply all pending migrations before the final
 assertion; complete activation before starting the replacement MCP.
+
+Version 1.30.0 adds `db/16-thought-metadata-revisions.sql` (superuser), which
+admits the `metadata` change kind in thought revision history for the
+maintenance-only
+[metadata reclassifier](../../../docs/metadata-degradation-monitoring.md#reclassifying-legacy-and-stub-thoughts).
+It rewrites no rows; the final grants assertion requires it.
 
 Server 1.25.0 adds the `openbrain_auth_rollup` login. On a fresh cluster, create
 it from the exact definition in `db/00-roles.sh`; on an existing split install,

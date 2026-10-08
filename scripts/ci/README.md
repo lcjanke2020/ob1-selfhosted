@@ -21,16 +21,16 @@ intentional caller override.
 
 ### Commands
 
-| Family            | Local command                                 | Coverage                                                                                 |
-| ----------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| All corpus checks | `scripts/ci/run_db_init_smokes.sh all`        | CI-equivalent preflight plus every family below                                          |
-| Preflight         | `scripts/ci/run_db_init_smokes.sh preflight`  | Workflow paths, Funnel monitor, encrypted backup publication                             |
-| Schema/data       | `scripts/ci/run_db_init_smokes.sh schema`     | Fresh-init shape, metadata upgrade, spaces, thought mutations, read-only dump            |
-| Auth              | `scripts/ci/run_db_init_smokes.sh auth`       | OAuth admission/import/rollback, native tokens, audit emitter, upgrades, middleware seam |
-| Grants            | `scripts/ci/run_db_init_smokes.sh grants`     | Role attributes/membership, current/default PUBLIC ACLs, definer, HBA, retired shape     |
-| Retirement        | `scripts/ci/run_db_init_smokes.sh retirement` | Archive gates, concurrency, restrictive drop, idempotency                                |
-| Search            | `scripts/ci/run_db_init_smokes.sh search`     | Session HNSW/order plus thought-filter and hybrid plans                                  |
-| Summary           | `scripts/ci/run_db_init_smokes.sh summary`    | App-qube and Compose target-pinned summary wrappers                                      |
+| Family            | Local command                                 | Coverage                                                                                                 |
+| ----------------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| All corpus checks | `scripts/ci/run_db_init_smokes.sh all`        | CI-equivalent preflight plus every family below                                                          |
+| Preflight         | `scripts/ci/run_db_init_smokes.sh preflight`  | Workflow paths, Funnel monitor, encrypted backup publication                                             |
+| Schema/data       | `scripts/ci/run_db_init_smokes.sh schema`     | Fresh-init shape, metadata upgrade, spaces, thought mutations, metadata reclassification, read-only dump |
+| Auth              | `scripts/ci/run_db_init_smokes.sh auth`       | OAuth admission/import/rollback, native tokens, audit emitter, upgrades, middleware seam                 |
+| Grants            | `scripts/ci/run_db_init_smokes.sh grants`     | Role attributes/membership, current/default PUBLIC ACLs, definer, HBA, retired shape                     |
+| Retirement        | `scripts/ci/run_db_init_smokes.sh retirement` | Archive gates, concurrency, restrictive drop, idempotency                                                |
+| Search            | `scripts/ci/run_db_init_smokes.sh search`     | Session HNSW/order plus thought-filter and hybrid plans                                                  |
+| Summary           | `scripts/ci/run_db_init_smokes.sh summary`    | App-qube and Compose target-pinned summary wrappers                                                      |
 
 Multiple families can share one fresh fixture:
 

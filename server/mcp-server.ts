@@ -298,7 +298,10 @@ export function createMcpServer(
     // failing closed. Existing 1.28 generations need the one-time offline
     // relabel (embedding_backfill.ts --relabel auto; full backfill if its
     // checks fail) before this server starts.
-    version: "1.29.0",
+    // 1.30.0: maintenance-only metadata_reclassify.ts re-runs the primary
+    // classifier over unstamped/stub thoughts, recording 'metadata' revisions
+    // (migration 16); no tool or request-path behavior changes.
+    version: "1.30.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names

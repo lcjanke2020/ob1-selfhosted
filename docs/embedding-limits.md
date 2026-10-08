@@ -390,7 +390,7 @@ generation and `--apply` activates it only after checking coverage. Starting MCP
 before activation fails its startup gate. For an upgrade, keep MCP and all other
 corpus writers/search consumers stopped throughout this procedure.
 
-First complete migrations 01–15 and the final grants assertion, start only the
+First complete migrations 01–16 and the final grants assertion, start only the
 database and validated embedding backend, and build the new `mcp` image. Run the
 block below from the deployment's Compose directory. Local Compose uses
 `deploy/compose-local`; Pattern B uses `deploy/compose-tailnet` with its

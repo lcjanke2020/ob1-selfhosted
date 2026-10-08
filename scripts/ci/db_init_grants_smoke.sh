@@ -84,6 +84,44 @@ for relation in public.thought_embedding_index sessions.embedding_index; do
   done
 done
 
+# Revision history admits exactly the content/scope/metadata kinds. The
+# pre-16 shape, a widened or unvalidated CHECK, and a dropped CHECK each fail
+# the assertion; migration 16 converges every one of them.
+for drift in pre16 widened unvalidated dropped; do
+  case "$drift" in
+    pre16) kinds="'content', 'scope'"; validity= ;;
+    widened) kinds="'content', 'scope', 'metadata', 'other'"; validity= ;;
+    unvalidated) kinds="'content', 'scope', 'metadata'"; validity="NOT VALID" ;;
+    dropped) kinds= ;;
+  esac
+  mutation="ALTER TABLE public.thought_revisions
+    DROP CONSTRAINT thought_revisions_change_kind"
+  if [[ -n "$kinds" ]]; then
+    mutation+=", ADD CONSTRAINT thought_revisions_change_kind
+      CHECK (change_kind IN ($kinds)) $validity"
+  fi
+  super_psql -v ON_ERROR_STOP=1 -c "$mutation" >/dev/null
+  expect_rejected "thought revision change-kind $drift drift" \
+    "change_kind must admit exactly content, scope, and metadata"
+  apply_sql db/16-thought-metadata-revisions.sql >/dev/null
+  run_assertion >/dev/null
+done
+
+# PostgreSQL ANDs every CHECK, and a NOT VALID one still binds new rows, so a
+# second CHECK on change_kind fails the assertion even beside the exact named
+# one, whether it would reject 'metadata' or not. No migration creates one;
+# the operator drops it, and the assertion passes again.
+for drift in "CHECK (change_kind <> 'metadata') NOT VALID" \
+  "CHECK (change_kind IN ('content', 'scope', 'metadata', 'other'))"; do
+  super_psql -v ON_ERROR_STOP=1 -c "ALTER TABLE public.thought_revisions
+    ADD CONSTRAINT drifted_change_kind $drift" >/dev/null
+  expect_rejected "thought revision extra change-kind $drift" \
+    "change_kind must be constrained only by thought_revisions_change_kind; drop drifted_change_kind."
+  super_psql -v ON_ERROR_STOP=1 -c "ALTER TABLE public.thought_revisions
+    DROP CONSTRAINT drifted_change_kind" >/dev/null
+  run_assertion >/dev/null
+done
+
 # Table SELECT alone is insufficient for a backup: schema USAGE is also
 # required. Prove the actual dump fails on drift and recovers after migration.
 dump_oauth_as_backup() {
