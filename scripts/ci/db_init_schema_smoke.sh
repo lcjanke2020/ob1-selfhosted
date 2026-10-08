@@ -80,12 +80,15 @@ apply_sql db/spaces-smoke.sql >/dev/null
 echo "spaces RLS, sensitive ownership, dedupe, artifacts, and GUC reuse passed"
 smoke_step "Smoke test — thought mutations stay inside the caller's audience"
 # Reapply the migrations first (idempotent upgrade path on a live
-# volume; 16 follows 10 because 10 restates the table comment), re-run
+# volume; 16 follows 10 because 10 restates the table comment, and 17
+# follows 06/10/16 because it redefines the fingerprint index, the
+# search and move helpers, and the change-kind CHECK they restore), re-run
 # the completed-catalog assertion so the new SECURITY DEFINER helper,
 # append-only history, and its change kinds are pinned, then exercise
 # the move helper + app-role update path as the real roles.
 apply_sql db/10-thought-mutations.sql >/dev/null
 apply_sql db/16-thought-metadata-revisions.sql >/dev/null
+apply_sql db/17-forget-thoughts.sql >/dev/null
 apply_sql db/03-grants-assertion.sql >/dev/null
 apply_sql db/thought-mutations-smoke.sql >/dev/null
 echo "move helper source/target checks, principal-stamped ownership, dedupe conflicts, head-gated append-only history, and the RLS-confined update path passed"
@@ -114,6 +117,17 @@ run_deno_db_smoke server/embedding_index_db_smoke.ts
 smoke_step "Smoke test — 1.28 generation relabels without re-embedding"
 # Uses the corpus the index smoke left behind and restores its label.
 run_deno_db_smoke --allow-read=docs/embedding-limits.md server/embedding_relabel_db_smoke.ts
+smoke_step "Smoke test — forgotten thoughts leave every application path"
+# Reapply 17 (idempotent) and the assertion, then prove the database side
+# as the real roles — the restrictive policy, the live-rows fingerprint
+# index, the forget/restore helpers, and the filtered search/move helpers —
+# followed by the production services path (contract search, list, fetch,
+# stats, update, move, re-capture, restore) as openbrain_app.
+apply_sql db/17-forget-thoughts.sql >/dev/null
+apply_sql db/03-grants-assertion.sql >/dev/null
+apply_sql db/forget-thoughts-smoke.sql >/dev/null
+echo "forget/restore helpers, forgotten-row invisibility (reads, history, index rows, candidate search, update, move), marker and insert refusal, fresh re-capture, restore conflicts (stored and legacy fingerprints), fingerprint healing, and audit retention passed"
+run_deno_db_smoke server/thought_forget_db_smoke.ts
 smoke_step "Smoke test — openbrain_readonly can run a full pg_dump"
 # The exact operation the off-box backup performs. Exits non-zero
 # with "permission denied for sequence/relation" if the read-only

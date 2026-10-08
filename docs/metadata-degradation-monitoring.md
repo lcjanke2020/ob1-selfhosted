@@ -186,12 +186,14 @@ The tool refuses to start, before reading any thought, unless:
   audience, including personal and `sensitive` rows (as for the
   [embedding backfill](embedding-limits.md#compose-backfill-runner));
 - `ENABLE_PRIMARY_EXTRACTION=true` with `CHAT_API_BASE` and `CHAT_MODEL`;
-- `db/16-thought-metadata-revisions.sql` has been applied, exactly, and no other
-  CHECK constraint reads `thought_revisions.change_kind`. PostgreSQL ANDs every
-  CHECK, so such a constraint could reject the `metadata` revision after the
-  first thought was already sent; the grants assertion rejects the same drift.
-  The server itself does not need migration 16, but the deployment upgrade
-  procedures and the final grants assertion include it.
+- `db/16-thought-metadata-revisions.sql` and then `db/17-forget-thoughts.sql`
+  have been applied, so the change-kind CHECK is exactly migration 17's, and no
+  other CHECK constraint reads `thought_revisions.change_kind`. PostgreSQL ANDs
+  every CHECK, so such a constraint could reject the `metadata` revision after
+  the first thought was already sent; the grants assertion rejects the same
+  drift. Migration 17 also provides `forgotten_at`:
+  [forgotten](spaces.md#forgetting-and-restoring-thoughts) thoughts are never
+  selected or sent to the classifier.
 
 **Privacy:** an apply run sends the full content of every selected thought,
 including personal and `sensitive` rows, to the primary endpoint, and only

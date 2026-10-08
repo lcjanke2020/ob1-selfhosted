@@ -316,6 +316,7 @@ order
 | 1.28.0              | `db/15-embedding-index.sql`                                                | PostgreSQL superuser; validated corrected runtime, full offline backfill and activation before MCP starts, including fresh empty databases                                            |
 | 1.29.0              | —                                                                          | from 1.28: PostgreSQL superuser; offline `embedding_backfill.ts --relabel auto` before MCP starts (full backfill if its checks fail); later Ollama version changes need no index work |
 | 1.30.0              | `db/16-thought-metadata-revisions.sql`                                     | PostgreSQL superuser; admits the `metadata` revision kind, rewrites no rows; required before the optional maintenance-only `metadata_reclassify.ts`                                   |
+| 1.31.0              | `db/17-forget-thoughts.sql`                                                | PostgreSQL superuser; forget/restore schema, rewrites no rows; MCP stopped (older servers cannot capture against it); always after 06/10/15/16; rerun `03-grants-assertion.sql` after |
 
 Server 1.26.0 additionally requires `db/13-oauth-subjects.sql` **even when OAuth
 is disabled**.
@@ -376,10 +377,10 @@ version. Apply migrations before the roll, not with it.
 6. Build the replacement with
    `docker compose --env-file .env build mcp subject-admin token-admin` while
    the current MCP is still serving. Then stop `mcp` and apply earlier pending
-   migrations in ascending order, through 13. Finish with migrations 14, 15, 16
-   and `db/03-grants-assertion.sql` last, **even with native tokens disabled**.
-   From the checkout root, load this deployment's owner-only `.env` and
-   explicitly select the database-superuser connection over ConnectTCP:
+   migrations in ascending order, through 13. Finish with migrations 14, 15, 16,
+   17 and `db/03-grants-assertion.sql` last, **even with native tokens
+   disabled**. From the checkout root, load this deployment's owner-only `.env`
+   and explicitly select the database-superuser connection over ConnectTCP:
 
    ```bash
    (
@@ -394,10 +395,11 @@ version. Apply migrations before the roll, not with it.
            -d "${POSTGRES_DB:-openbrain}" -X -v ON_ERROR_STOP=1 "$@"
      }
      corpus_psql --single-transaction -f ../../../db/14-native-token-principals.sql
-     # Migrations 15 and 16 manage their own transactions; assert after they
-     # commit.
+     # Migrations 15, 16, and 17 manage their own transactions; assert after
+     # they commit.
      corpus_psql -f ../../../db/15-embedding-index.sql
      corpus_psql -f ../../../db/16-thought-metadata-revisions.sql
+     corpus_psql -f ../../../db/17-forget-thoughts.sql
      corpus_psql -f ../../../db/03-grants-assertion.sql
    )
    ```

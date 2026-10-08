@@ -20,9 +20,11 @@ import {
   captureThoughtSchema,
   compatibilitySearchSchema,
   fetchThoughtSchema,
+  forgetThoughtSchema,
   listThoughtsSchema,
   type MemoryScopeInput,
   moveThoughtSchema,
+  restoreThoughtSchema,
   searchThoughtsSchema,
   sessionCaptureSchema,
   sessionListSchema,
@@ -37,11 +39,13 @@ import {
   captureThoughtWithMetadata,
   defaultDeps,
   fetchThoughtInScope,
+  forgetThoughtInScope,
   getThoughtStatsInScope,
   listSessionsInScope,
   listThoughtsInScope,
   lookupSessionInScope,
   moveThoughtInScope,
+  restoreThoughtInScope,
   searchSessionsByQuery,
   searchThoughtsByQuery,
   type ServiceDeps,
@@ -301,7 +305,12 @@ export function createMcpServer(
     // 1.30.0: maintenance-only metadata_reclassify.ts re-runs the primary
     // classifier over unstamped/stub thoughts, recording 'metadata' revisions
     // (migration 16); no tool or request-path behavior changes.
-    version: "1.30.0",
+    // 1.31.0: forget_thought removes a thought from every read path (search,
+    // list, fetch, stats) and from update/move without deleting it, and
+    // restore_thought returns it; both record 'forget'/'restore' revisions.
+    // Re-capturing a forgotten thought's text creates a new thought. Requires
+    // migration 17; the capture upsert names its live-rows fingerprint index.
+    version: "1.31.0",
   });
 
   // ChatGPT-compatible search/fetch shapes (read-only). The standard names
@@ -652,6 +661,73 @@ export function createMcpServer(
     async ({ id, target, scope }) => {
       try {
         const res = await moveThoughtInScope(pool, { id, target, scope, auth });
+        if (!res) return err(`No thought found for ID ${id}.`);
+        return text(JSON.stringify({
+          id,
+          outcome: res.outcome,
+          revision: res.revision,
+          workspace_id: res.workspace_id,
+          project_id: res.project_id,
+          visibility: res.visibility,
+        }));
+      } catch (e) {
+        return err((e as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    "forget_thought",
+    {
+      title: "Forget Thought",
+      description:
+        "Forget a thought: it disappears from search, list, fetch, and stats and can no longer be updated or moved, but it is not deleted — restore_thought brings it back with the same id, content, and audience. Use it for test captures, superseded notes, and mistakes. It is NOT erasure: the text stays in the database, its revision history, and backups. Address the thought through its CURRENT scope, exactly like fetch: an id outside that scope reads as not found. Forgetting an already-forgotten thought is a no-op. Capturing the same text again later creates a new thought.",
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+        // Removes the thought from every read path for every reader of its
+        // audience. Recoverable (restore_thought), but not additive.
+        destructiveHint: true,
+        idempotentHint: true,
+      },
+      inputSchema: forgetThoughtSchema,
+    },
+    async ({ id, scope }) => {
+      try {
+        const res = await forgetThoughtInScope(pool, { id, scope, auth });
+        if (!res) return err(`No thought found for ID ${id}.`);
+        return text(JSON.stringify({
+          id,
+          outcome: res.outcome,
+          revision: res.revision,
+          forgotten_at: res.forgotten_at,
+          workspace_id: res.workspace_id,
+          project_id: res.project_id,
+          visibility: res.visibility,
+        }));
+      } catch (e) {
+        return err((e as Error).message);
+      }
+    },
+  );
+
+  server.registerTool(
+    "restore_thought",
+    {
+      title: "Restore Thought",
+      description:
+        "Restore a thought that forget_thought removed: it returns to search, list, fetch, and stats with its original id, content, and audience. Pass the scope it was forgotten from. Restoring a thought that is not forgotten is a no-op. If the same text has since been captured again in that audience, the restore is refused as a conflict naming the live copy.",
+      annotations: {
+        readOnlyHint: false,
+        openWorldHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+      },
+      inputSchema: restoreThoughtSchema,
+    },
+    async ({ id, scope }) => {
+      try {
+        const res = await restoreThoughtInScope(pool, { id, scope, auth });
         if (!res) return err(`No thought found for ID ${id}.`);
         return text(JSON.stringify({
           id,

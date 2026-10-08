@@ -23,9 +23,11 @@ import {
 } from "./auth.ts";
 import {
   captureThoughtBody,
+  forgetThoughtBody,
   listSessionsQuery,
   listThoughtsQuery,
   moveThoughtBody,
+  restoreThoughtBody,
   scopeQuery,
   searchThoughtsBody,
   sessionCaptureBody,
@@ -43,6 +45,7 @@ import {
   ConflictError,
   defaultDeps,
   fetchThoughtInScope,
+  forgetThoughtInScope,
   getSessionInScope,
   getThoughtStatsInScope,
   listSessionsInScope,
@@ -50,6 +53,7 @@ import {
   lookupSessionInScope,
   moveThoughtInScope,
   NotFoundError,
+  restoreThoughtInScope,
   searchSessionsByQuery,
   searchThoughtsByQuery,
   type ServiceDeps,
@@ -303,6 +307,33 @@ export function createApiRouter(
     const res = await moveThoughtInScope(pool, {
       id,
       target,
+      scope,
+      auth: authOr500(c),
+    });
+    if (!res) throw new NotFoundError(`No thought found for ID ${id}.`);
+    return c.json({ id, ...res });
+  });
+
+  // Forget/restore are actions on the resource like move. DELETE is avoided on
+  // purpose: forgetting is recoverable, not removal. The body is a JSON object
+  // carrying only the thought's current scope ({} for the default workspace).
+  api.post("/thoughts/:id/forget", async (c) => {
+    const id = parseOr400(thoughtIdParam, c.req.param("id"));
+    const { scope } = parseOr400(forgetThoughtBody, await readJsonBody(c));
+    const res = await forgetThoughtInScope(pool, {
+      id,
+      scope,
+      auth: authOr500(c),
+    });
+    if (!res) throw new NotFoundError(`No thought found for ID ${id}.`);
+    return c.json({ id, ...res });
+  });
+
+  api.post("/thoughts/:id/restore", async (c) => {
+    const id = parseOr400(thoughtIdParam, c.req.param("id"));
+    const { scope } = parseOr400(restoreThoughtBody, await readJsonBody(c));
+    const res = await restoreThoughtInScope(pool, {
+      id,
       scope,
       auth: authOr500(c),
     });

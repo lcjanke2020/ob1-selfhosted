@@ -49,7 +49,9 @@ membership and role administration remain future multi-user work.
 
 Thought deduplication follows the same audience. Identical content deduplicates
 inside one exact workspace/project/visibility/owner tuple but remains distinct
-across audiences.
+across audiences. Only live thoughts take part: a
+[forgotten](#forgetting-and-restoring-thoughts) thought never deduplicates
+against a new capture.
 
 Every operation addresses a row through its stored scope. A session recapture or
 status update, and a thought update or move, must name the row's CURRENT
@@ -57,7 +59,8 @@ audience; supplying another scope gets the same not-found result as an unknown
 ID. Session audience is immutable through the application APIs and, from server
 1.24.0, through the application role's column-scoped database grant; thoughts
 can be corrected and re-scoped in place — see
-[Correcting and moving thoughts](#correcting-and-moving-thoughts). There is no
+[Correcting and moving thoughts](#correcting-and-moving-thoughts) — and
+[forgotten and restored](#forgetting-and-restoring-thoughts). There is no
 application-level delete for either.
 
 ## Correcting and moving thoughts
@@ -118,7 +121,9 @@ rewrite or erase it. Revision rows are readable exactly when their head thought
 is readable, so once a misfiled thought has been moved to a narrower audience
 its earlier text is no longer visible to the audience it left. `fetch` and
 search return heads only; the history is an audit trail, not a second recall
-surface. There is no soft-delete yet; that remains follow-up work. This
+surface. Forgetting and restoring a thought append `forget` and `restore`
+revisions the same way (`db/17-forget-thoughts.sql`); see
+[Forgetting and restoring thoughts](#forgetting-and-restoring-thoughts). This
 attribution is server-verified but still application-trusted at the database
 boundary: a compromised `openbrain_app` credential can append fabricated history
 or actor fields even though it cannot alter genuine rows. The rationale for
@@ -142,6 +147,65 @@ outcome whether the pre-check found it or it landed between the pre-check and
 the write. Its owner, fixed `search_path`, and app-only execute grant, and the
 column-scoped table grant, are pinned by the grants assertion; the boot probe
 requires the function and the history table.
+
+## Forgetting and restoring thoughts
+
+Two more tools (server 1.31.0+; MCP `forget_thought` / `restore_thought`, REST
+`POST /api/v1/thoughts/:id/forget` / `POST /api/v1/thoughts/:id/restore`, each
+with a JSON body carrying only the optional `scope`) retire a thought without
+deleting it — for test captures, superseded notes, and mistakes.
+
+**`forget_thought(id, scope?)`** removes the thought from every read path —
+`search_thoughts`, `list_thoughts`, `fetch`, `thought_stats`, and the
+ChatGPT-compatible `search`/`fetch` — and from `update_thought` and
+`move_thought`, which then report it as not found. Its id, content, embedding,
+audience, `created_at`, and revision history are kept. Forgetting an
+already-forgotten thought is a no-op. Capturing the same text again later
+creates a new thought with a new id rather than reviving the forgotten one.
+
+**`restore_thought(id, scope?)`** returns a forgotten thought to recall with its
+original id, content, and audience; pass the scope it was forgotten from.
+Restoring a thought that is not forgotten is a no-op. If the same text has since
+been captured again in that audience, the restore is refused as a conflict
+(REST 409) naming the live copy, because restoring would duplicate it; forget or
+correct that copy first. There is no tool that lists forgotten thoughts:
+`forget_thought` returns the id, and its revision history records it.
+
+Both follow the same rules as update and move: the caller must be able to read
+the row under the requested scope (otherwise it is indistinguishable from an
+unknown id), so a personal thought can be forgotten or restored only by its
+owner. Each change appends a `forget` or `restore` revision with the verified
+subject, door, and token label. While a thought is forgotten its revisions are
+hidden along with it; they reappear on restore.
+
+**Forgetting is not erasure.** The text stays in the database, in its revision
+history and passage index, and in every backup taken while it exists; operators
+with the database superuser or the read-only backup role still see it.
+Permanently removing a thought is a separate, deliberately gated operation that
+does not exist yet.
+
+Under the hood (`db/17-forget-thoughts.sql`), `public.thoughts.forgotten_at`
+marks a forgotten row. A restrictive row-level-security policy,
+`thoughts_app_not_forgotten`, requires `forgotten_at IS NULL` for every
+application-role statement, in addition to the audience policy, so every present
+and future read path through the table — and the head-gated revision and
+passage-index policies — loses the row at once; the application role also cannot
+insert a forgotten row. It has no `UPDATE` privilege on `forgotten_at`: only the
+narrowly granted `SECURITY DEFINER` functions `memory_scope.forget_thought` and
+`memory_scope.restore_thought`, built like `move_thought`, set or clear it. The
+functions that read thoughts with RLS bypassed — both
+`memory_scope.search_thought_candidates` overloads and
+`memory_scope.move_thought` — filter forgotten rows explicitly, so forgotten
+thoughts never occupy search candidate slots or count as move collisions. The
+audience-aware fingerprint index covers live rows only; restoring re-enters it,
+which is why a live duplicate is a conflict, and a legacy row without a stored
+fingerprint is compared on its derived fingerprint and gains it on restore.
+`memory_scope.embedding_ready` still covers forgotten rows, and the offline
+backfill keeps them indexed, so a restore needs no re-embedding. The grants
+assertion and the boot probe pin the column grant, the policy, the index
+predicate, the helpers' definer shape, and the filters; re-applying migration
+06, 10, 15, or 16 restores a pre-forget definition and must be followed by
+migration 17 again.
 
 ## The seeded `sensitive` space
 
@@ -297,7 +361,7 @@ Use the complete current upgrade procedure for your deployment:
 - [Pattern B upgrade](../deploy/compose-tailnet/README.md#upgrading-an-existing-deployment)
 - [Split Qubes upgrade](../deploy/qubes/app-qube/README.md#upgrading-an-existing-deployment)
 
-Each procedure applies all pending migrations through 16 before the final grants
+Each procedure applies all pending migrations through 17 before the final grants
 assertion. Server 1.28.0 also requires the offline superuser embedding backfill
 and activation; keep all corpus writers/search consumers stopped until
 activation succeeds. The split Qubes procedure uses the existing ConnectTCP
@@ -315,7 +379,13 @@ Migration 12 separates request-path auth-event insertion from the dedicated
 report/retention role, removes direct grant-option and persistent-object
 creation drift (including dependent delegated grants), and likewise rewrites no
 rows. Migration 16 only admits the `metadata` revision kind; it changes no
-audience boundary and rewrites no rows.
+audience boundary and rewrites no rows. Migration 17 adds
+[forgetting](#forgetting-and-restoring-thoughts): it narrows what the
+application role can see inside every audience (never widens one), rewrites no
+rows, and rebuilds the fingerprint index over live rows only. Because it
+redefines the fingerprint index, the search and move helpers, and the
+change-kind CHECK that migrations 06, 10, 15, and 16 create, re-running any of
+those must be followed by re-running 17.
 
 Migration 06 backfills existing thoughts and sessions into the `default`
 workspace at workspace visibility. It takes table locks while adding and
@@ -323,10 +393,11 @@ backfilling audience columns and rebuilding the fingerprint unique index, so use
 a full maintenance window and budget index headroom. It is idempotent, but not
 cheap: every reapplication intentionally restores the canonical `default` and
 `sensitive` registry settings and unconditionally drops and rebuilds the
-audience-aware fingerprint index. Budget the same lock window and temporary
-index headroom on every run. Rollback of a completed migration is
-restore-from-backup rather than dropping the new columns: once audience-aware
-rows exist, removing the boundary would be a security-sensitive data merge.
+audience-aware fingerprint index — in its pre-forget form, so migration 17 must
+follow it. Budget the same lock window and temporary index headroom on every
+run. Rollback of a completed migration is restore-from-backup rather than
+dropping the new columns: once audience-aware rows exist, removing the boundary
+would be a security-sensitive data merge.
 
 After the complete upgrade and activation, test both default and sensitive
 capture/recall before reopening the service. The boot probe fails closed if

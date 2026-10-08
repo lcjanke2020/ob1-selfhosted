@@ -93,8 +93,12 @@ function bootQueryHandler(
   requiredSchema: RequiredSchema = COMPLETE_SCHEMA,
   defaultWorkspaceExists = true,
   notificationStateExists = true,
+  forgetSchemaExists = true,
 ): QueryHandler {
   return (sql) => {
+    if (sql.includes("thoughts_app_not_forgotten")) {
+      return { rows: [[forgetSchemaExists]] };
+    }
     if (sql.includes("FROM native_auth.access_token")) return { rows: [] };
     if (sql.includes("FROM oauth_auth.allowed_subject")) return { rows: [] };
     if (sql.includes("oauth_auth.allowed_subject")) return { rows: [[true]] };
@@ -117,7 +121,7 @@ Deno.test("probeDbAtBoot: success path validates connectivity and hybrid schema"
 
   await probeDbAtBoot(fakePool, "db:5432");
   const queries = client.queryArrayCalls.map(({ sql }) => sql);
-  assertEquals(queries.length, 7);
+  assertEquals(queries.length, 8);
   assertEquals(queries[0], "SELECT 1");
   assert(queries[1].includes("idx_thoughts_content_tsv"));
   assert(queries[1].includes("idx_thoughts_content_trgm"));
@@ -176,10 +180,11 @@ Deno.test("probeDbAtBoot: success path validates connectivity and hybrid schema"
   assert(
     queries[2].includes("principal, revoked_at FROM native_auth.access_token"),
   );
-  assert(queries[3].includes("oauth_auth.allowed_subject"));
-  assert(queries[4].includes("FROM oauth_auth.allowed_subject"));
-  assert(queries[5].includes("metadata_degradation_notification_state"));
-  assert(queries[6].includes("memory_scope.workspace"));
+  assert(queries[3].includes("thoughts_app_not_forgotten"));
+  assert(queries[4].includes("oauth_auth.allowed_subject"));
+  assert(queries[5].includes("FROM oauth_auth.allowed_subject"));
+  assert(queries[6].includes("metadata_degradation_notification_state"));
+  assert(queries[7].includes("memory_scope.workspace"));
   assertEquals(client.releaseCalls, 1);
 });
 
@@ -467,6 +472,38 @@ Deno.test("probeDbAtBoot: missing metadata notification singleton rejects with m
   assertStringIncludes(err.message, "notification ledger row");
   assertStringIncludes(err.message, "db/07-metadata-degradation.sql");
   assertEquals(client.releaseCalls, 1);
+});
+
+Deno.test("probeDbAtBoot: missing forget/restore schema rejects before serving", async () => {
+  const { pool: fakePool, client } = makeFakePool(
+    bootQueryHandler(COMPLETE_SCHEMA, true, true, false),
+  );
+
+  const err = await assertRejects(
+    () => probeDbAtBoot(fakePool, "db:5432"),
+    Error,
+  );
+  assertStringIncludes(err.message, "forget/restore schema");
+  assertStringIncludes(err.message, "db/17-forget-thoughts.sql");
+  assertEquals(client.releaseCalls, 1);
+  const forgetQuery = client.queryArrayCalls
+    .map(({ sql }) => sql)
+    .find((sql) => sql.includes("thoughts_app_not_forgotten"));
+  assert(forgetQuery);
+  // The catalog checks the probe relies on, including the forgotten-row
+  // filter in each RLS-bypassing helper that a re-applied older migration
+  // would silently drop.
+  assert(forgetQuery.includes("attname = 'forgotten_at'"));
+  assert(forgetQuery.includes("NOT polpermissive"));
+  assert(forgetQuery.includes("idx_thoughts_fingerprint"));
+  assert(forgetQuery.includes("memory_scope.forget_thought(uuid,text,text)"));
+  assert(forgetQuery.includes("memory_scope.restore_thought(uuid,text,text)"));
+  assert(forgetQuery.includes("jsonb,jsonb,integer)'"));
+  assert(forgetQuery.includes("jsonb,jsonb,integer,text)'"));
+  assert(forgetQuery.includes("memory_scope.move_thought("));
+  assert(
+    forgetQuery.includes("position('t.forgotten_at IS NULL' IN p.prosrc)"),
+  );
 });
 
 Deno.test("probeDbAtBoot: unknown configured workspace rejects before serving", async () => {

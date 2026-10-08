@@ -19,7 +19,7 @@
 --   1. Fresh init: the Compose/CI paths mount this source file as
 --      99-grants-assertion.sql, after every schema migration. Native
 --      provisioning applies 01-, 02-, 04-, 05-, 06-, 07-, 08-, 09-, 10-,
---      11-, 12-, 13-, 14-, 15-, and 16-, then invokes
+--      11-, 12-, 13-, 14-, 15-, 16-, and 17-, then invokes
 --      this stable source path last. In both cases the assertion sees the
 --      completed catalog, so an init file that widens a protected role fails
 --      loudly.
@@ -47,7 +47,9 @@
 --   (c) `openbrain_app` MUST have SELECT and INSERT on `public.thoughts`,
 --       plus UPDATE on its content columns only — and no UPDATE (table-wide or
 --       per column) on workspace_id/project_id/visibility/owner_subject, so the
---       audience-move helper is the sole application audience-change path.
+--       audience-move helper is the sole application audience-change path,
+--       and none on forgotten_at, so forget/restore are the only path that
+--       retires or revives a thought.
 --   (d) session UPDATE is likewise limited to refresh/status content columns;
 --       session audience/identity columns are immutable to the app, and
 --       artifacts are delete-and-reinsert only with no UPDATE privilege.
@@ -61,12 +63,17 @@
 --       are absent from the corpus.
 --   (h) thought revision history is append-only (SELECT/INSERT) to the app,
 --       dumpable by the read-only role, under forced head-gated RLS, and
---       admits exactly the content/scope/metadata change kinds; the
+--       admits exactly the content/scope/metadata/forget/restore change kinds; the
 --       audience-move helper is a table-owner-owned, fixed-search-path
 --       SECURITY DEFINER function executable only by the app.
 --   (i) auth-decision history is non-delegable SELECT/INSERT-only to the app,
 --       while a standalone corpus rollup role has non-delegable SELECT/DELETE
 --       on that table alone and no persistent-object creation route.
+--   (j) forgotten thoughts are invisible to the app: a restrictive
+--       forgotten_at IS NULL policy, a fingerprint index over live rows only,
+--       forget/restore helpers shaped like the move helper, and the explicit
+--       forgotten_at filter in every SECURITY DEFINER function that reads
+--       thoughts with RLS bypassed.
 --
 -- The openbrain_app content/audience checks are deliberately scoped to thoughts
 -- and sessions: 02-observability.sql legitimately grants it access to other
@@ -1188,11 +1195,11 @@ BEGIN
       'grants assertion failed: public.thought_revisions must be under forced RLS with the thought_revisions_app_head policy.';
   END IF;
 
-  -- History records exactly the content/scope mutations and the maintenance
-  -- metadata reclassification (16-thought-metadata-revisions.sql). A missing,
-  -- unvalidated, or widened CHECK would let a writer label history with an
-  -- arbitrary kind, so the named CHECK must carry migration 16's exact
-  -- definition, validated.
+  -- History records exactly the content/scope mutations, the maintenance
+  -- metadata reclassification (16-thought-metadata-revisions.sql), and
+  -- forget/restore (17-forget-thoughts.sql). A missing, unvalidated, or
+  -- widened CHECK would let a writer label history with an arbitrary kind, so
+  -- the named CHECK must carry migration 17's exact definition, validated.
   IF NOT EXISTS (
        SELECT 1 FROM pg_constraint
        WHERE conrelid = revisions
@@ -1200,10 +1207,10 @@ BEGIN
          AND contype = 'c'
          AND convalidated
          AND pg_get_constraintdef(oid) =
-           'CHECK ((change_kind = ANY (ARRAY[''content''::text, ''scope''::text, ''metadata''::text])))'
+           'CHECK ((change_kind = ANY (ARRAY[''content''::text, ''scope''::text, ''metadata''::text, ''forget''::text, ''restore''::text])))'
      ) THEN
     RAISE EXCEPTION
-      'grants assertion failed: public.thought_revisions change_kind must admit exactly content, scope, and metadata; apply db/16-thought-metadata-revisions.sql.';
+      'grants assertion failed: public.thought_revisions change_kind must admit exactly content, scope, metadata, forget, and restore; apply db/17-forget-thoughts.sql (after db/16-thought-metadata-revisions.sql).';
   END IF;
 
   -- PostgreSQL ANDs every CHECK, and one added NOT VALID still binds new
@@ -1638,6 +1645,129 @@ BEGIN
       WHERE p.oid=helper AND a.grantee=0
     ) THEN
       RAISE EXCEPTION 'grants assertion failed: embedding helper must be owner-owned, fixed-search-path SECURITY DEFINER without PUBLIC access';
+    END IF;
+  END LOOP;
+END;
+$$;
+
+-- Forgotten thoughts (17-forget-thoughts.sql) are invisible to the app. The
+-- marker column is writable only through the forget/restore helpers; a
+-- restrictive policy hides forgotten rows from every app-role statement; the
+-- fingerprint index deduplicates live rows only; and each SECURITY DEFINER
+-- function that reads thoughts with RLS bypassed filters forgotten rows
+-- explicitly. Re-applying db/06, db/10, or db/15 restores a pre-forget body
+-- with no filter, so the filter count below is a tripwire for exactly that.
+-- memory_scope.embedding_ready deliberately covers forgotten rows.
+DO $$
+DECLARE
+  thoughts regclass := to_regclass('public.thoughts');
+  thoughts_owner oid;
+  fn regprocedure;
+  expected record;
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = thoughts
+      AND attname = 'forgotten_at'
+      AND NOT attisdropped
+      AND atttypid = 'timestamptz'::regtype
+      AND NOT attnotnull
+  ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: public.thoughts.forgotten_at (nullable timestamptz) is missing; apply db/17-forget-thoughts.sql.';
+  END IF;
+  IF has_column_privilege('openbrain_app', thoughts, 'forgotten_at', 'UPDATE') THEN
+    RAISE EXCEPTION
+      'grants assertion failed: openbrain_app can UPDATE public.thoughts.forgotten_at; only memory_scope.forget_thought/restore_thought may change it.';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policy
+    WHERE polrelid = thoughts
+      AND polname = 'thoughts_app_not_forgotten'
+      AND polcmd = '*'
+      AND NOT polpermissive
+      AND polroles = ARRAY['openbrain_app'::regrole::oid]
+      AND pg_get_expr(polqual, polrelid) = '(forgotten_at IS NULL)'
+      AND pg_get_expr(polwithcheck, polrelid) = '(forgotten_at IS NULL)'
+  ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: public.thoughts must carry the restrictive thoughts_app_not_forgotten policy (openbrain_app, ALL, USING and WITH CHECK forgotten_at IS NULL); apply db/17-forget-thoughts.sql.';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_index AS i
+    WHERE i.indexrelid = to_regclass('public.idx_thoughts_fingerprint')
+      AND i.indrelid = thoughts
+      AND i.indisunique
+      AND i.indisvalid
+      AND i.indnullsnotdistinct
+      AND pg_get_expr(i.indpred, i.indrelid) =
+        '((content_fingerprint IS NOT NULL) AND (forgotten_at IS NULL))'
+      AND (
+        SELECT array_agg(a.attname::text ORDER BY k.ord)
+        FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+        JOIN pg_attribute AS a
+          ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+      ) = ARRAY[
+        'workspace_id', 'project_id', 'visibility', 'owner_subject',
+        'content_fingerprint'
+      ]
+  ) THEN
+    RAISE EXCEPTION
+      'grants assertion failed: idx_thoughts_fingerprint must be the audience-aware NULLS NOT DISTINCT unique index over live rows (content_fingerprint IS NOT NULL AND forgotten_at IS NULL); re-apply db/17-forget-thoughts.sql.';
+  END IF;
+
+  SELECT relowner INTO thoughts_owner FROM pg_class WHERE oid = thoughts;
+  FOREACH fn IN ARRAY ARRAY[
+    to_regprocedure('memory_scope.forget_thought(uuid,text,text)'),
+    to_regprocedure('memory_scope.restore_thought(uuid,text,text)')
+  ] LOOP
+    IF fn IS NULL THEN
+      RAISE EXCEPTION
+        'grants assertion failed: memory_scope.forget_thought/restore_thought are missing; apply db/17-forget-thoughts.sql.';
+    END IF;
+    IF NOT COALESCE((
+         SELECT prosecdef
+           AND proowner = thoughts_owner
+           AND COALESCE(proconfig, ARRAY[]::text[])
+                 @> ARRAY['search_path=pg_catalog']
+         FROM pg_proc WHERE oid = fn
+       ), false) THEN
+      RAISE EXCEPTION
+        'grants assertion failed: % must be SECURITY DEFINER, owned by the thoughts table owner, with search_path pinned to pg_catalog.',
+        fn;
+    END IF;
+    IF EXISTS (
+      SELECT 1
+      FROM pg_proc AS p
+      CROSS JOIN LATERAL aclexplode(
+        COALESCE(p.proacl, acldefault('f', p.proowner))
+      ) AS acl
+      WHERE p.oid = fn
+        AND acl.grantee <> p.proowner
+        AND acl.grantee <> to_regrole('openbrain_app')
+    ) OR NOT has_function_privilege('openbrain_app', fn, 'EXECUTE') THEN
+      RAISE EXCEPTION
+        'grants assertion failed: % must be executable by openbrain_app and no other non-owner role (including PUBLIC).',
+        fn;
+    END IF;
+  END LOOP;
+
+  FOR expected IN SELECT * FROM (VALUES
+    ('memory_scope.search_thought_candidates(vector,double precision,text,text,boolean,jsonb,jsonb,integer)', 2),
+    ('memory_scope.search_thought_candidates(vector,double precision,text,text,boolean,jsonb,jsonb,integer,text)', 2),
+    ('memory_scope.move_thought(uuid,text,text,memory_scope.visibility,text,text)', 3),
+    ('memory_scope.restore_thought(uuid,text,text)', 2)
+  ) AS functions(signature, minimum) LOOP
+    fn := to_regprocedure(expected.signature);
+    IF fn IS NULL OR (
+      SELECT regexp_count(prosrc, 't\.forgotten_at IS NULL')
+      FROM pg_proc WHERE oid = fn
+    ) < expected.minimum THEN
+      RAISE EXCEPTION
+        'grants assertion failed: % must skip forgotten rows (t.forgotten_at IS NULL); re-apply db/17-forget-thoughts.sql after the migration that redefined it.',
+        expected.signature;
     END IF;
   END LOOP;
 END;

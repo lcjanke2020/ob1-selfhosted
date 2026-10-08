@@ -72,7 +72,7 @@ INSERT INTO public.thoughts (
 )
 ON CONFLICT (
   workspace_id, project_id, visibility, owner_subject, content_fingerprint
-) WHERE content_fingerprint IS NOT NULL
+) WHERE content_fingerprint IS NOT NULL AND forgotten_at IS NULL
 DO UPDATE SET
   content = EXCLUDED.content,
   metadata = public.thoughts.metadata || EXCLUDED.metadata;

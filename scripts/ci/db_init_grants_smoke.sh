@@ -80,18 +80,22 @@ for relation in public.thought_embedding_index sessions.embedding_index; do
         "DROP POLICY drifted_embedding_policy ON $relation" >/dev/null
     fi
     apply_sql db/15-embedding-index.sql >/dev/null
+    # 15 restores its pre-forget search body; 17 re-adds the filter.
+    apply_sql db/17-forget-thoughts.sql >/dev/null
     run_assertion >/dev/null
   done
 done
 
-# Revision history admits exactly the content/scope/metadata kinds. The
-# pre-16 shape, a widened or unvalidated CHECK, and a dropped CHECK each fail
-# the assertion; migration 16 converges every one of them.
-for drift in pre16 widened unvalidated dropped; do
+# Revision history admits exactly the content/scope/metadata/forget/restore
+# kinds. The pre-16 and pre-17 shapes, a widened or unvalidated CHECK, and a
+# dropped CHECK each fail the assertion; migrations 16 then 17 converge every
+# one of them.
+for drift in pre16 pre17 widened unvalidated dropped; do
   case "$drift" in
     pre16) kinds="'content', 'scope'"; validity= ;;
-    widened) kinds="'content', 'scope', 'metadata', 'other'"; validity= ;;
-    unvalidated) kinds="'content', 'scope', 'metadata'"; validity="NOT VALID" ;;
+    pre17) kinds="'content', 'scope', 'metadata'"; validity= ;;
+    widened) kinds="'content', 'scope', 'metadata', 'forget', 'restore', 'other'"; validity= ;;
+    unvalidated) kinds="'content', 'scope', 'metadata', 'forget', 'restore'"; validity="NOT VALID" ;;
     dropped) kinds= ;;
   esac
   mutation="ALTER TABLE public.thought_revisions
@@ -102,10 +106,63 @@ for drift in pre16 widened unvalidated dropped; do
   fi
   super_psql -v ON_ERROR_STOP=1 -c "$mutation" >/dev/null
   expect_rejected "thought revision change-kind $drift drift" \
-    "change_kind must admit exactly content, scope, and metadata"
+    "change_kind must admit exactly content, scope, metadata, forget, and restore"
   apply_sql db/16-thought-metadata-revisions.sql >/dev/null
+  apply_sql db/17-forget-thoughts.sql >/dev/null
   run_assertion >/dev/null
 done
+
+# Forgotten thoughts stay invisible to the app only while the marker is not
+# app-writable, the restrictive policy is intact, deduplication covers live
+# rows only, the forget/restore helpers keep the move helper's definer shape,
+# and every RLS-bypassing helper filters forgotten rows. Re-applying an older
+# migration (06, 10, 15) restores an unfiltered definition; 17 converges it.
+super_psql -v ON_ERROR_STOP=1 -c \
+  "GRANT UPDATE (forgotten_at) ON public.thoughts TO openbrain_app" >/dev/null
+expect_rejected "app UPDATE on forgotten_at" \
+  "openbrain_app can UPDATE public.thoughts.forgotten_at"
+super_psql -v ON_ERROR_STOP=1 -c \
+  "REVOKE UPDATE (forgotten_at) ON public.thoughts FROM openbrain_app" >/dev/null
+run_assertion >/dev/null
+for drift in dropped permissive using check; do
+  case "$drift" in
+    dropped) mutation="DROP POLICY thoughts_app_not_forgotten ON public.thoughts" ;;
+    permissive) mutation="DROP POLICY thoughts_app_not_forgotten ON public.thoughts;
+      CREATE POLICY thoughts_app_not_forgotten ON public.thoughts
+        FOR ALL TO openbrain_app
+        USING (forgotten_at IS NULL) WITH CHECK (forgotten_at IS NULL)" ;;
+    using) mutation="ALTER POLICY thoughts_app_not_forgotten ON public.thoughts USING (true)" ;;
+    check) mutation="ALTER POLICY thoughts_app_not_forgotten ON public.thoughts WITH CHECK (true)" ;;
+  esac
+  super_psql -v ON_ERROR_STOP=1 -c "$mutation" >/dev/null
+  expect_rejected "forgotten-row policy $drift drift" \
+    "restrictive thoughts_app_not_forgotten policy"
+  apply_sql db/17-forget-thoughts.sql >/dev/null
+  run_assertion >/dev/null
+done
+for older in 06-spaces 10-thought-mutations 15-embedding-index; do
+  case "$older" in
+    06-spaces) expected="idx_thoughts_fingerprint must be the audience-aware" ;;
+    10-thought-mutations) expected="memory_scope.move_thought(uuid,text,text,memory_scope.visibility,text,text) must skip forgotten rows" ;;
+    15-embedding-index) expected="jsonb,jsonb,integer,text) must skip forgotten rows" ;;
+  esac
+  apply_sql "db/$older.sql" >/dev/null
+  expect_rejected "re-applied db/$older.sql without db/17" "$expected"
+  apply_sql db/17-forget-thoughts.sql >/dev/null
+  run_assertion >/dev/null
+done
+super_psql -v ON_ERROR_STOP=1 -c \
+  "ALTER FUNCTION memory_scope.restore_thought(uuid,text,text) SECURITY INVOKER" >/dev/null
+expect_rejected "invoker restore helper" \
+  "memory_scope.restore_thought(uuid,text,text) must be SECURITY DEFINER"
+apply_sql db/17-forget-thoughts.sql >/dev/null
+super_psql -v ON_ERROR_STOP=1 -c \
+  "GRANT EXECUTE ON FUNCTION memory_scope.forget_thought(uuid,text,text) TO openbrain_readonly" >/dev/null
+expect_rejected "forget helper executable by the read-only role" \
+  "must be executable by openbrain_app and no other non-owner role"
+super_psql -v ON_ERROR_STOP=1 -c \
+  "REVOKE EXECUTE ON FUNCTION memory_scope.forget_thought(uuid,text,text) FROM openbrain_readonly" >/dev/null
+run_assertion >/dev/null
 
 # PostgreSQL ANDs every CHECK, and a NOT VALID one still binds new rows, so a
 # second CHECK on change_kind fails the assertion even beside the exact named
@@ -810,5 +867,6 @@ apply_sql db/15-embedding-index.sql >/dev/null
 super_psql -v ON_ERROR_STOP=1 -c "GRANT DELETE ON public.thought_embedding_index TO openbrain_app"
 expect_rejected "embedding index DELETE" "embedding index must be parent-gated"
 apply_sql db/15-embedding-index.sql >/dev/null
+apply_sql db/17-forget-thoughts.sql >/dev/null
 run_assertion >/dev/null
-echo "protected-role assertions accepted the clean catalog and rejected auth-audit mutation/delegation/object-creation/default-ACL drift, readonly SET ROLE mutation, session UPDATE widening, role attributes/membership, current and default PUBLIC access, PUBLIC SECURITY DEFINER execution, retired topology, and HBA drift"
+echo "protected-role assertions accepted the clean catalog and rejected auth-audit mutation/delegation/object-creation/default-ACL drift, readonly SET ROLE mutation, session UPDATE widening, role attributes/membership, current and default PUBLIC access, PUBLIC SECURITY DEFINER execution, retired topology, and HBA drift, and forgotten-thought marker/policy/index/helper drift"

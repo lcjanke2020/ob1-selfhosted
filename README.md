@@ -161,6 +161,10 @@ detail — both auth branches, step by step — is in
   explicit workspace/project/visibility; both snapshot the prior state to an
   append-only, head-gated revision history. See
   [Correcting and moving thoughts](docs/spaces.md#correcting-and-moving-thoughts).
+  `forget_thought` retires a test capture or superseded note from every read
+  path without deleting it, and `restore_thought` brings it back; forgetting is
+  recoverable, not erasure. See
+  [Forgetting and restoring thoughts](docs/spaces.md#forgetting-and-restoring-thoughts).
 - **Fail-closed memory spaces** — thoughts and sessions carry a registered
   workspace, optional project, and `personal | project | workspace` visibility
   enforced by PostgreSQL RLS. Omitted scope selects one configured default,
@@ -304,7 +308,7 @@ sequenceDiagram
 
 ```
 .
-├── server/                    Deno + Hono server: MCP (13 tools) + REST gateway
+├── server/                    Deno + Hono server: MCP (15 tools) + REST gateway
 │                              (/api/v1), unit tests, Dockerfiles for mcp and
 │                              the log-ingester sidecar
 ├── db/                        Corpus + separate Funnel-log-sink schemas, migrations,
@@ -350,30 +354,33 @@ posture is minimum attack surface — when the flag is unset the router is never
 mounted, so the paths 404). On the Funnel deployment Caddy 404s `/api/v1*` on
 the public branch, so REST is reachable from the tailnet only.
 
-| Method | Path                          | Body / query                                                                        | Success                                                             |
-| ------ | ----------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| POST   | `/api/v1/thoughts`            | `{content, provenance?: {...}, scope?: {workspace_id?, project_id?, visibility?}}`  | 201 `{id, metadata, workspace_id, project_id, visibility}`          |
-| POST   | `/api/v1/thoughts/search`     | `{query, limit?, threshold?, filter?: {...}, scope?: {...}}`                        | 200 `{results}` ordered by `rrf_score` (`similarity` retained)      |
-| GET    | `/api/v1/thoughts`            | `?limit&type&topic&person&days&workspace_id&project_id&visibility`                  | 200 `{thoughts}`                                                    |
-| GET    | `/api/v1/thoughts/stats`      | `?workspace_id&project_id&visibility`                                               | 200 stats                                                           |
-| GET    | `/api/v1/thoughts/:id`        | UUID path param + optional scope query                                              | 200 thought                                                         |
-| PATCH  | `/api/v1/thoughts/:id`        | `{content, scope?: {...}}` — full replacement text; `scope` is the CURRENT audience | 200 updated thought + `{outcome, revision}`                         |
-| POST   | `/api/v1/thoughts/:id/move`   | `{target: {workspace_id, project_id?, visibility}, scope?: {...}}` — all explicit   | 200 `{id, outcome, revision, workspace_id, project_id, visibility}` |
-| POST   | `/api/v1/sessions`            | `{toml_text}` (session TOML)                                                        | 201 created / 200 updated                                           |
-| POST   | `/api/v1/sessions/search`     | `{query, limit?, threshold?, status?, repo_url?, tag?, scope?: {...}}`              | 200 `{results}`                                                     |
-| GET    | `/api/v1/sessions`            | filters plus optional `workspace_id`, `project_id`, `visibility`                    | 200 `{sessions}`                                                    |
-| GET    | `/api/v1/sessions/lookup`     | `?id` or `?branch`, plus optional scope                                             | 200 session record                                                  |
-| GET    | `/api/v1/sessions/:id`        | integer path param + optional scope query                                           | 200 session record                                                  |
-| PATCH  | `/api/v1/sessions/:id/status` | `{status, scope?: {...}}`                                                           | 200 `{id, status}`                                                  |
+| Method | Path                           | Body / query                                                                         | Success                                                              |
+| ------ | ------------------------------ | ------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| POST   | `/api/v1/thoughts`             | `{content, provenance?: {...}, scope?: {workspace_id?, project_id?, visibility?}}`   | 201 `{id, metadata, workspace_id, project_id, visibility}`           |
+| POST   | `/api/v1/thoughts/search`      | `{query, limit?, threshold?, filter?: {...}, scope?: {...}}`                         | 200 `{results}` ordered by `rrf_score` (`similarity` retained)       |
+| GET    | `/api/v1/thoughts`             | `?limit&type&topic&person&days&workspace_id&project_id&visibility`                   | 200 `{thoughts}`                                                     |
+| GET    | `/api/v1/thoughts/stats`       | `?workspace_id&project_id&visibility`                                                | 200 stats                                                            |
+| GET    | `/api/v1/thoughts/:id`         | UUID path param + optional scope query                                               | 200 thought                                                          |
+| PATCH  | `/api/v1/thoughts/:id`         | `{content, scope?: {...}}` — full replacement text; `scope` is the CURRENT audience  | 200 updated thought + `{outcome, revision}`                          |
+| POST   | `/api/v1/thoughts/:id/move`    | `{target: {workspace_id, project_id?, visibility}, scope?: {...}}` — all explicit    | 200 `{id, outcome, revision, workspace_id, project_id, visibility}`  |
+| POST   | `/api/v1/thoughts/:id/forget`  | `{scope?: {...}}` (`{}` for the default workspace) — `scope` is the CURRENT audience | 200 `{id, outcome, revision, forgotten_at, workspace_id, ...}`       |
+| POST   | `/api/v1/thoughts/:id/restore` | `{scope?: {...}}` — the audience it was forgotten from                               | 200 `{id, outcome, revision, workspace_id, ...}`; 409 live duplicate |
+| POST   | `/api/v1/sessions`             | `{toml_text}` (session TOML)                                                         | 201 created / 200 updated                                            |
+| POST   | `/api/v1/sessions/search`      | `{query, limit?, threshold?, status?, repo_url?, tag?, scope?: {...}}`               | 200 `{results}`                                                      |
+| GET    | `/api/v1/sessions`             | filters plus optional `workspace_id`, `project_id`, `visibility`                     | 200 `{sessions}`                                                     |
+| GET    | `/api/v1/sessions/lookup`      | `?id` or `?branch`, plus optional scope                                              | 200 session record                                                   |
+| GET    | `/api/v1/sessions/:id`         | integer path param + optional scope query                                            | 200 session record                                                   |
+| PATCH  | `/api/v1/sessions/:id/status`  | `{status, scope?: {...}}`                                                            | 200 `{id, status}`                                                   |
 
 Notes: thought capture upserts by content fingerprint, so re-posting identical
 content returns the existing id (still 201) only inside the same exact audience.
-`PATCH /thoughts/:id` and `POST /thoughts/:id/move` address the row through its
-CURRENT scope (an id outside it 404s like a GET), never widen anything
-implicitly, and keep the prior state in revision history. POST/PATCH bodies use
-a nested `scope`; GET routes use the three flat query parameters. Omitted scope
-selects `DEFAULT_WORKSPACE_ID`, never all workspaces. The complete union,
-principal, and seeded `sensitive` semantics are in
+`PATCH /thoughts/:id`, `POST /thoughts/:id/move`, `/forget`, and `/restore`
+address the row through its CURRENT scope (an id outside it 404s like a GET),
+never widen anything implicitly, and keep the prior state in revision history. A
+forgotten thought 404s on every other route until it is restored. POST/PATCH
+bodies use a nested `scope`; GET routes use the three flat query parameters.
+Omitted scope selects `DEFAULT_WORKSPACE_ID`, never all workspaces. The complete
+union, principal, and seeded `sensitive` semantics are in
 [Memory spaces](docs/spaces.md).
 
 Compatibility note for server 1.9.0: REST request bodies and query envelopes are

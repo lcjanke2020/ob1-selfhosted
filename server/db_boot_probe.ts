@@ -755,6 +755,58 @@ export async function probeDbAtBoot(
             `column grant before starting this server version.`,
         );
       }
+      // forget_thought/restore_thought (1.31.0) need the forgotten marker,
+      // the restrictive policy that hides forgotten rows from this role, the
+      // live-rows fingerprint index the capture upsert names as its conflict
+      // target, the two helpers, and the forgotten-row filters in the
+      // RLS-bypassing search/move helpers (re-applying db/06, db/10, or db/15
+      // after db/17 silently restores an unfiltered body). Standalone: an old
+      // catalog has no forgotten_at, and the probe must not fail at parse.
+      const forgetSchema = await client.queryArray<[boolean]>(
+        `SELECT EXISTS (
+                  SELECT 1 FROM pg_attribute
+                  WHERE attrelid = to_regclass('public.thoughts')
+                    AND attname = 'forgotten_at'
+                    AND NOT attisdropped
+                )
+            AND EXISTS (
+                  SELECT 1 FROM pg_policy
+                  WHERE polrelid = to_regclass('public.thoughts')
+                    AND polname = 'thoughts_app_not_forgotten'
+                    AND NOT polpermissive
+                )
+            AND EXISTS (
+                  SELECT 1 FROM pg_index
+                  WHERE indexrelid = to_regclass('public.idx_thoughts_fingerprint')
+                    AND pg_get_expr(indpred, indrelid) LIKE '%forgotten_at IS NULL%'
+                )
+            AND to_regprocedure('memory_scope.forget_thought(uuid,text,text)') IS NOT NULL
+            AND to_regprocedure('memory_scope.restore_thought(uuid,text,text)') IS NOT NULL
+            AND NOT EXISTS (
+                  SELECT 1
+                  FROM unnest(ARRAY[
+                    'memory_scope.search_thought_candidates(vector,double precision,text,text,boolean,jsonb,jsonb,integer)',
+                    'memory_scope.search_thought_candidates(vector,double precision,text,text,boolean,jsonb,jsonb,integer,text)',
+                    'memory_scope.move_thought(uuid,text,text,memory_scope.visibility,text,text)'
+                  ]) AS required(signature)
+                  LEFT JOIN pg_proc AS p
+                    ON p.oid = to_regprocedure(required.signature)
+                  WHERE p.oid IS NULL
+                    OR position('t.forgotten_at IS NULL' IN p.prosrc) = 0
+                )`,
+      );
+      if (forgetSchema.rows[0]?.[0] !== true) {
+        throw new RequiredSchemaError(
+          `[db] Postgres at ${target} is missing the forget/restore schema ` +
+            `(public.thoughts.forgotten_at, the restrictive ` +
+            `thoughts_app_not_forgotten policy, the live-rows ` +
+            `idx_thoughts_fingerprint, memory_scope.forget_thought/` +
+            `restore_thought, and forgotten-row filters in the search and ` +
+            `move helpers). Apply db/17-forget-thoughts.sql as a PostgreSQL ` +
+            `superuser — after any re-applied earlier migration — then run ` +
+            `db/03-grants-assertion.sql before starting this server version.`,
+        );
+      }
       const oauthSchema = await client.queryArray<[boolean]>(
         `SELECT to_regclass('oauth_auth.allowed_subject') IS NOT NULL
           AND to_regprocedure('oauth_auth.allow_subject(text,text,text)') IS NOT NULL

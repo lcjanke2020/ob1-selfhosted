@@ -161,6 +161,7 @@ sudo -u postgres psql -d openbrain -c "CREATE EXTENSION IF NOT EXISTS vector;"
 #   db/14-native-token-principals.sql
 #   db/15-embedding-index.sql
 #   db/16-thought-metadata-revisions.sql
+#   db/17-forget-thoughts.sql
 #   db/03-grants-assertion.sql  # always last
 ```
 
@@ -258,6 +259,15 @@ admits the `metadata` change kind in thought revision history for the
 maintenance-only
 [metadata reclassifier](../../../docs/metadata-degradation-monitoring.md#reclassifying-legacy-and-stub-thoughts).
 It rewrites no rows; the final grants assertion requires it.
+
+Version 1.31.0 adds `db/17-forget-thoughts.sql` (superuser), the schema behind
+`forget_thought` / `restore_thought`
+([Forgetting and restoring thoughts](../../../docs/spaces.md#forgetting-and-restoring-thoughts)).
+It rewrites no rows. Stop MCP before applying it: the replaced fingerprint index
+no longer matches an older server's capture upsert. It redefines objects that
+migrations 06, 10, 15, and 16 create, so it runs after them and must be re-run
+whenever one of them is; the final grants assertion and the 1.31.0 boot probe
+refuse the catalog otherwise.
 
 Server 1.25.0 adds the `openbrain_auth_rollup` login. On a fresh cluster, create
 it from the exact definition in `db/00-roles.sh`; on an existing split install,
